@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>zaalis IDE</title>
+    <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
+    <link rel="stylesheet" href="base.css">
+    <link rel="stylesheet" href="app.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<!-- ===== AUTH OVERLAY (login / register) ===== -->
+<div id="auth-overlay">
+    <div class="auth-card">
+        <div class="auth-logo">
+            <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+            <span>zaalis IDE</span>
+        </div>
+        <div class="auth-error" id="auth-error"></div>
+
+        <!-- Login -->
+        <form id="login-form" class="auth-form" autocomplete="off">
+            <h2>Connexion</h2>
+            <input type="email" id="login-email" placeholder="Adresse email" autocomplete="username" required>
+            <input type="password" id="login-password" placeholder="Mot de passe" autocomplete="current-password" required>
+            <button type="submit" class="btn btn-primary auth-submit">Se connecter</button>
+            <p class="auth-switch">Pas encore de compte ? <a href="#" id="show-register">Créer un compte</a></p>
+        </form>
+
+        <!-- Register -->
+        <form id="register-form" class="auth-form hidden" autocomplete="off">
+            <h2>Créer un compte</h2>
+            <input type="email" id="reg-email" placeholder="Adresse email" autocomplete="username" required>
+            <input type="password" id="reg-password" placeholder="Mot de passe (6 caractères min.)" autocomplete="new-password" required>
+            <input type="password" id="reg-password2" placeholder="Confirmer le mot de passe" autocomplete="new-password" required>
+            <button type="submit" class="btn btn-primary auth-submit">Créer le compte</button>
+            <p class="auth-switch">Déjà un compte ? <a href="#" id="show-login">Se connecter</a></p>
+        </form>
+    </div>
+</div>
+
+<div id="app">
+
+    <!-- ========== TOP BAR ========== -->
+    <header id="topbar">
+        <div class="topbar-left">
+            <div class="logo">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+                <span>zaalis IDE</span>
+            </div>
+        </div>
+        <div class="topbar-center">
+            <div class="agent-toggle" id="agent-toggle">
+                <div class="toggle-track"><div class="toggle-thumb"></div></div>
+                <span class="toggle-label" data-i18n="agent-mode-label">Mode Agents</span>
+                <span class="toggle-status" id="agent-status">OFF</span>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <select id="lang-select" class="topbar-select" title="Langue">
+                <option value="fr">FR</option>
+                <option value="en">EN</option>
+            </select>
+            <button class="topbar-btn" id="settings-btn" data-i18n-title="settings-title" title="Configuration">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- ========== WORKSPACE ========== -->
+    <div id="workspace">
+
+        <!-- ===== LEFT SIDEBAR ===== -->
+        <aside id="sidebar">
+            <!-- Project Switcher -->
+            <div class="sidebar-project">
+                <button class="project-btn" id="project-btn">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <span class="project-name" id="project-name" data-i18n="no-project">Aucun projet</span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <!-- Project Dropdown -->
+                <div class="project-dropdown" id="project-dropdown">
+                    <button class="dropdown-item" id="open-project-btn">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                        <span data-i18n="open-folder">Ouvrir un dossier</span>
+                    </button>
+                    <div class="dropdown-divider"></div>
+                    <div class="dropdown-label" data-i18n="recent-projects">Projets recents</div>
+                    <div id="recent-projects">
+                        <div class="dropdown-empty" data-i18n="no-recent-projects">Aucun projet recent</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- File Tree -->
+            <div class="sidebar-title"><span data-i18n="files-header">FICHIERS</span></div>
+            <div class="file-tree" id="file-tree"></div>
+
+            <!-- User Profile -->
+            <div class="sidebar-profile" id="sidebar-profile">
+                <div class="profile-avatar" id="profile-avatar">U</div>
+                <span class="profile-name" id="profile-name">Utilisateur</span>
+            </div>
+
+            <!-- Profile Popup -->
+            <div class="profile-popup" id="profile-popup">
+                <div class="profile-popup-header" data-i18n="profile-header">Profil</div>
+                <div class="profile-popup-body">
+                    <button class="profile-avatar-large" id="profile-avatar-large" title="Changer la photo">U</button>
+                    <input type="file" id="profile-photo-input" accept="image/*" hidden>
+                    <div class="form-group">
+                        <label for="profile-pseudo" data-i18n="username">Pseudo</label>
+                        <input type="text" id="profile-pseudo" value="Utilisateur">
+                    </div>
+                    <button class="btn btn-primary btn-sm" id="save-profile" data-i18n="save-profile-btn">Sauvegarder</button>
+                    <div class="profile-account">
+                        <span class="profile-email" id="profile-email"></span>
+                        <button class="btn btn-ghost btn-sm" id="logout-btn">Déconnexion</button>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- ===== EDITOR ===== -->
+        <section id="editor-panel">
+            <div class="tab-bar" id="tab-bar">
+                <div class="tab active" data-file="welcome">
+                    <span class="tab-name" data-i18n="welcome-tab">Bienvenue</span>
+                </div>
+            </div>
+            <div class="editor-area" id="editor-area">
+                <div class="welcome-screen" id="welcome-screen">
+                    <svg class="welcome-icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+                    <h1>zaalis IDE</h1>
+                    <p class="welcome-sub" data-i18n="welcome-sub">Ouvrez un projet pour commencer</p>
+                </div>
+                <div class="code-editor hidden" id="code-editor">
+                    <div class="line-gutter" id="line-gutter"></div>
+                    <textarea id="code-textarea" spellcheck="false"></textarea>
+                </div>
+            </div>
+            <div class="editor-statusbar" id="editor-statusbar">
+                <span id="status-file">--</span>
+                <span id="status-saved"></span>
+            </div>
+        </section>
+
+        <!-- ===== AI PANEL ===== -->
+        <aside id="ai-panel">
+
+            <!-- Vertical Reasoning Slider Bar -->
+            <div id="reasoning-slider-bar" class="locked">
+                <div class="slider-notch" data-level="2">MAX</div>
+                <div class="slider-notch" data-level="1">MED</div>
+                <div class="slider-notch" data-level="0">MIN</div>
+                <div class="slider-track">
+                    <div class="slider-handle"></div>
+                </div>
+                <div class="reasoning-tooltip" data-i18n="incompatible-tooltip">Modele incompatible</div>
+            </div>
+
+            <!-- Panel Header: Tabs -->
+            <div class="ai-panel-header">
+                <div class="ai-panel-tabs">
+                    <button class="ai-tab active" data-tab="chat" data-i18n="tab-chat">Chat</button>
+                    <button class="ai-tab" data-tab="agents" data-i18n="tab-agents">Agents</button>
+                </div>
+                <button class="topbar-btn" id="clear-terminal" data-i18n-title="clear-title" title="Effacer">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                </button>
+            </div>
+
+            <!-- ===== CHAT VIEW ===== -->
+            <div class="ai-view active" id="view-chat">
+                <div class="chat-messages" id="chat-messages">
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="chat-default-msg">Selectionnez un modele et posez votre question.</div></div>
+                </div>
+
+                <!-- Attachments preview (not attached to the input bar) -->
+                <div class="attachments-bar" id="chat-attachments"></div>
+
+                <!-- Model + Sub-model selector -->
+                <div class="model-selector-bar">
+                    <select id="ai-model">
+                        <option value="codex">Codex (OpenAI)</option>
+                        <option value="claude">Claude (Anthropic)</option>
+                        <option value="gemini">Gemini (Google)</option>
+                        <option value="grok">Grok (xAI)</option>
+                        <option value="mistral">Mistral (Le Chat)</option>
+                        <option value="local">Ollama (Local)</option>
+                    </select>
+                    <select id="ai-submodel">
+                        <option value="gpt-4.1">gpt-4.1</option>
+                        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                        <option value="gpt-4.1-nano">gpt-4.1-nano</option>
+                        <option value="gpt-4o">gpt-4o</option>
+                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+                        <option value="o3">o3</option>
+                        <option value="o3-mini">o3-mini</option>
+                        <option value="o4-mini">o4-mini</option>
+                    </select>
+                </div>
+
+                <!-- Permission Mode -->
+                <div class="permission-bar">
+                    <span class="permission-label" data-i18n="perm-label">Mode :</span>
+                    <button class="perm-btn active" data-perm="supervised" data-i18n-title="perm-supervised-title" data-i18n="perm-supervised" title="Chaque modification demande votre accord">Supervise</button>
+                    <button class="perm-btn" data-perm="semi" data-i18n-title="perm-semi-title" data-i18n="perm-semi" title="Code auto, commandes validees">Semi-auto</button>
+                    <button class="perm-btn" data-perm="auto" data-i18n-title="perm-auto-title" data-i18n="perm-auto" title="Controle total, aucune validation">Autonome</button>
+                </div>
+
+                <!-- Chat Input -->
+                <div class="chat-input-area">
+                    <div class="attach-wrap">
+                        <button class="attach-btn" id="chat-attach-btn" title="Joindre un fichier ou une image">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </button>
+                        <div class="attach-menu" id="chat-attach-menu">
+                            <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
+                            <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                        </div>
+                    </div>
+                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Ecrivez votre message..." autocomplete="off"></textarea>
+                    <button class="send-btn" id="send-btn">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+
+                <!-- Chat History -->
+                <div class="chat-history" id="chat-history">
+                    <div class="history-label">
+                        <span data-i18n="history-header">Historique</span>
+                        <button class="new-chat-btn" id="new-chat-btn" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
+                    </div>
+                    <div class="history-list" id="history-list">
+                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ===== AGENTS VIEW ===== -->
+            <div class="ai-view" id="view-agents">
+                <div class="agents-header">
+                    <p class="agents-desc" data-i18n="agents-desc">Configurez et lancez vos agents IA. Minimum 2 actifs pour le mode collaboratif.</p>
+                </div>
+                <div class="agents-list" id="agents-list">
+                    <!-- Codex -->
+                    <div class="agent-card" data-agent="codex">
+                        <input type="checkbox" class="agent-check" data-agent="codex" checked>
+                        <div class="agent-dot codex"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Codex</span>
+                            <select class="agent-role-select" data-agent="codex">
+                                <option value="developer">Developpeur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="codex">
+                            <option value="gpt-4.1">gpt-4.1</option>
+                            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+                            <option value="gpt-4o">gpt-4o</option>
+                            <option value="o3-mini">o3-mini</option>
+                            <option value="o4-mini">o4-mini</option>
+                        </select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Claude -->
+                    <div class="agent-card" data-agent="claude">
+                        <input type="checkbox" class="agent-check" data-agent="claude" checked>
+                        <div class="agent-dot claude"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Claude</span>
+                            <select class="agent-role-select" data-agent="claude">
+                                <option value="reviewer">Reviewer</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="developer">Developpeur</option>
+                                <option value="architect">Architecte</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="claude">
+                            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
+                            <option value="claude-opus-4-20250514">Claude Opus 4</option>
+                            <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
+                        </select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Gemini -->
+                    <div class="agent-card" data-agent="gemini">
+                        <input type="checkbox" class="agent-check" data-agent="gemini" checked>
+                        <div class="agent-dot gemini"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Gemini</span>
+                            <select class="agent-role-select" data-agent="gemini">
+                                <option value="architect">Architecte</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="developer">Developpeur</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="gemini">
+                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                        </select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Grok -->
+                    <div class="agent-card" data-agent="grok">
+                        <input type="checkbox" class="agent-check" data-agent="grok">
+                        <div class="agent-dot grok"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Grok</span>
+                            <select class="agent-role-select" data-agent="grok">
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="developer">Developpeur</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="grok">
+                            <option value="grok-3">Grok 3</option>
+                            <option value="grok-3-mini">Grok 3 Mini</option>
+                            <option value="grok-3-fast">Grok 3 Fast</option>
+                        </select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Le Chat (Mistral) -->
+                    <div class="agent-card" data-agent="mistral">
+                        <input type="checkbox" class="agent-check" data-agent="mistral">
+                        <div class="agent-dot mistral"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Le Chat</span>
+                            <select class="agent-role-select" data-agent="mistral">
+                                <option value="developer">Developpeur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="mistral"></select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Ollama -->
+                    <div class="agent-card" data-agent="local">
+                        <input type="checkbox" class="agent-check" data-agent="local">
+                        <div class="agent-dot local"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Ollama</span>
+                            <select class="agent-role-select" data-agent="local">
+                                <option value="developer">Developpeur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <span class="agent-model-label">Local</span>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                </div>
+
+                <!-- Agents Log -->
+                <div class="agents-log" id="agents-log">
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="agents-log-default">Activez le Mode Agents et envoyez une tache.</div></div>
+                </div>
+
+                <!-- Attachments preview (agents) -->
+                <div class="attachments-bar" id="agents-attachments"></div>
+
+                <!-- Permission Mode (shared with the chat view) -->
+                <div class="permission-bar">
+                    <span class="permission-label" data-i18n="perm-label">Mode :</span>
+                    <button class="perm-btn active" data-perm="supervised" data-i18n-title="perm-supervised-title" data-i18n="perm-supervised" title="Chaque modification demande votre accord">Supervise</button>
+                    <button class="perm-btn" data-perm="semi" data-i18n-title="perm-semi-title" data-i18n="perm-semi" title="Code auto, commandes validees">Semi-auto</button>
+                    <button class="perm-btn" data-perm="auto" data-i18n-title="perm-auto-title" data-i18n="perm-auto" title="Controle total, aucune validation">Autonome</button>
+                </div>
+
+                <!-- Agents Input -->
+                <div class="chat-input-area">
+                    <div class="attach-wrap">
+                        <button class="attach-btn" id="agents-attach-btn" title="Joindre un fichier ou une image">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                        </button>
+                        <div class="attach-menu" id="agents-attach-menu">
+                            <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
+                            <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                        </div>
+                    </div>
+                    <textarea id="agents-input" rows="1" data-i18n-placeholder="agents-input-placeholder" placeholder="Donnez une tache aux agents..." autocomplete="off"></textarea>
+                    <button class="send-btn" id="agents-send-btn">
+                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                    </button>
+                </div>
+
+                <!-- Agents history (separate from the single-chat history) -->
+                <div class="chat-history">
+                    <div class="history-label">
+                        <span data-i18n="history-header">Historique</span>
+                        <button class="new-chat-btn" id="new-chat-btn-agents" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
+                    </div>
+                    <div class="history-list" id="history-list-agents">
+                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
+                    </div>
+                </div>
+            </div>
+
+        </aside>
+    </div>
+</div>
+
+<!-- Shared hidden file picker for attachments -->
+<input type="file" id="attach-input" multiple hidden>
+
+<!-- ========== SETTINGS MODAL ========== -->
+<div class="modal-overlay" id="settings-modal">
+    <div class="modal">
+        <div class="modal-header">
+            <h2 data-i18n="settings-header">Configuration</h2>
+            <button class="modal-close" id="close-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="form-section">
+                <h3 data-i18n="api-keys-section">Cles API</h3>
+                <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
+                <div class="form-group">
+                    <label for="key-openai">OpenAI (Codex)</label>
+                    <input type="password" id="key-openai" placeholder="sk-...">
+                </div>
+                <div class="form-group">
+                    <label for="key-anthropic">Anthropic (Claude)</label>
+                    <input type="password" id="key-anthropic" placeholder="sk-ant-...">
+                </div>
+                <div class="form-group">
+                    <label for="key-google">Google (Gemini)</label>
+                    <input type="password" id="key-google" placeholder="AIza...">
+                </div>
+                <div class="form-group">
+                    <label for="key-grok">xAI (Grok)</label>
+                    <input type="password" id="key-grok" placeholder="xai-...">
+                </div>
+                <div class="form-group">
+                    <label for="key-mistral">Mistral (Le Chat)</label>
+                    <input type="password" id="key-mistral" placeholder="...">
+                </div>
+            </div>
+            <div class="form-section">
+                <h3>Ollama (Local)</h3>
+                <div class="form-group">
+                    <label for="ollama-url" data-i18n="ollama-url-label">URL du serveur</label>
+                    <input type="text" id="ollama-url" value="http://localhost:11434">
+                </div>
+                <div class="form-group">
+                    <label for="ollama-model" data-i18n="ollama-model-label">Modele</label>
+                    <input type="text" id="ollama-model" value="llama3">
+                </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="cancel-btn" data-i18n="cancel-btn">Annuler</button>
+            <button class="btn btn-primary" id="save-btn" data-i18n="save-btn">Enregistrer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== PROJECT OPEN MODAL ========== -->
+<div class="modal-overlay" id="project-modal">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2 data-i18n="open-project-header">Ouvrir un projet</h2>
+            <button class="modal-close" id="close-project-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" data-i18n="open-project-hint">Entrez le chemin absolu vers le dossier de votre projet.</p>
+            <div class="form-group">
+                <label for="project-path-input" data-i18n="folder-path-label">Chemin du dossier</label>
+                <input type="text" id="project-path-input" placeholder="C:\Users\...">
+            </div>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="cancel-project-btn" data-i18n="cancel-project-btn">Annuler</button>
+            <button class="btn btn-primary" id="confirm-project-btn" data-i18n="confirm-project-btn">Ouvrir</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== COMMAND APPROVAL MODAL ========== -->
+<div class="modal-overlay" id="approval-modal">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2 data-i18n="approval-header">Validation requise</h2>
+            <button class="modal-close" id="close-approval">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" id="approval-desc" data-i18n="approval-hint">L'IA souhaite effectuer l'action suivante :</p>
+            <pre class="approval-content" id="approval-content"></pre>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="deny-action" data-i18n="deny-btn">Refuser</button>
+            <button class="btn btn-primary" id="approve-action" data-i18n="approve-btn">Autoriser</button>
+        </div>
+    </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>

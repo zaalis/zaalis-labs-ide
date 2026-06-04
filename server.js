@@ -1,0 +1,700 @@
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { exec, execFile } = require('child_process');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Base directory for static assets and writable data.
+// When packaged into an .exe (pkg), __dirname points inside the read-only
+// snapshot, so we use the folder next to the executable instead.
+const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+
+// ---------------------------------------------------------------------------
+// Local accounts + sessions (no external dependency)
+// ---------------------------------------------------------------------------
+// Accounts and per-user chats are stored as local files under server-data/.
+// Passwords are hashed with scrypt; sessions are signed HttpOnly cookies.
+const DATA_DIR = path.join(APP_DIR, 'server-data');
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const CHATS_DIR = path.join(DATA_DIR, 'chats');
+const SECRET_FILE = path.join(DATA_DIR, 'secret');
+const COOKIE_NAME = 'zaalis_session';
+
+fs.mkdirSync(CHATS_DIR, { recursive: true });
+
+// Persisted signing secret so sessions survive server restarts.
+let SESSION_SECRET;
+try {
+  SESSION_SECRET = fs.readFileSync(SECRET_FILE, 'utf-8');
+} catch {
+  SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(SECRET_FILE, SESSION_SECRET);
+}
+
+function loadUsers() {
+  try {
+    let raw = fs.readFileSync(USERS_FILE, 'utf-8');
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // tolerate a UTF-8 BOM
+    const d = JSON.parse(raw);
+    return Array.isArray(d) ? d : [d];                    // tolerate a single object
+  } catch { return []; }
+}
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+function hashPassword(password, salt) {
+  return crypto.scryptSync(String(password), salt, 64).toString('hex');
+}
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+function makeToken(userId) {
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
+  return userId + '.' + sig;
+}
+function verifyToken(token) {
+  if (!token || !token.includes('.')) return null;
+  const idx = token.lastIndexOf('.');
+  const userId = token.slice(0, idx);
+  const sig = token.slice(idx + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
+  return safeEqual(sig, expected) ? userId : null;
+}
+function parseCookies(req) {
+  const out = {};
+  (req.headers.cookie || '').split(';').forEach((p) => {
+    const i = p.indexOf('=');
+    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+  });
+  return out;
+}
+function setSessionCookie(res, token) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+}
+function currentUser(req) {
+  const userId = verifyToken(parseCookies(req)[COOKIE_NAME]);
+  if (!userId) return null;
+  return loadUsers().find((u) => u.id === userId) || null;
+}
+function chatsFile(userId, kind) {
+  // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
+  const k = kind === 'agents' ? 'agents' : 'chat';
+  return path.join(CHATS_DIR, `${userId}__${k}.json`);
+}
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
+
+// Do not advertise the framework.
+app.disable('x-powered-by');
+
+// Loopback addresses allowed to reach the API. The server also binds to
+// 127.0.0.1 only (see app.listen below); this is defense in depth so that even
+// if it were ever exposed, only the local machine can read/write files, run
+// commands, or reach the endpoints that carry the user's API keys.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+app.use((req, res, next) => {
+  const remote = req.socket.remoteAddress;
+  if (!LOOPBACK.has(remote)) {
+    return res.status(403).json({ error: 'Forbidden: local access only' });
+  }
+
+  // Never serve the accounts/secret/chats store as a static file.
+  if (req.path === '/server-data' || req.path.startsWith('/server-data/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  // Security headers. connect-src 'self' is the important one: even if a script
+  // were injected, it cannot exfiltrate the API keys to an external server.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; '));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  // Never cache the app shell, so updates always load (no stale script.js).
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+app.use(express.json({ limit: '50mb' }));
+// The web interface (index.html, css, js) lives in the interface/ folder.
+app.use(express.static(path.join(APP_DIR, 'interface')));
+
+// ---------------------------------------------------------------------------
+// AUTH API (public)
+// ---------------------------------------------------------------------------
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+app.post('/api/auth/register', (req, res) => {
+  const { email, password } = req.body || {};
+  const emailNorm = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(emailNorm)) return res.status(400).json({ error: 'Adresse email invalide.' });
+  if (String(password || '').length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caracteres minimum).' });
+
+  const users = loadUsers();
+  if (users.some((u) => u.email === emailNorm)) return res.status(409).json({ error: 'Un compte existe deja avec cet email.' });
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const user = {
+    id: crypto.randomUUID(),
+    email: emailNorm,
+    salt,
+    hash: hashPassword(password, salt),
+    createdAt: new Date().toISOString(),
+  };
+  users.push(user);
+  saveUsers(users);
+  setSessionCookie(res, makeToken(user.id));
+  res.json({ email: user.email });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+  const emailNorm = String(email || '').trim().toLowerCase();
+  const user = loadUsers().find((u) => u.email === emailNorm);
+  // Always compute a hash to keep timing similar whether or not the user exists.
+  const candidate = hashPassword(password || '', user ? user.salt : 'x'.repeat(32));
+  if (!user || !safeEqual(candidate, user.hash)) {
+    return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+  }
+  setSessionCookie(res, makeToken(user.id));
+  res.json({ email: user.email });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  // Status check: always 200 so the browser console isn't polluted with a 401.
+  const user = currentUser(req);
+  res.json({ authenticated: !!user, email: user ? user.email : null });
+});
+
+// ---------------------------------------------------------------------------
+// AUTH GUARD — every other /api/* route requires a valid session
+// ---------------------------------------------------------------------------
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) return next();
+  const user = currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+  req.user = user;
+  next();
+});
+
+// ---------------------------------------------------------------------------
+// PER-USER CHATS API (protected)
+// ---------------------------------------------------------------------------
+app.get('/api/chats', (req, res) => {
+  const kind = req.query.kind === 'agents' ? 'agents' : 'chat';
+  let file = chatsFile(req.user.id, kind);
+  // Migration: older versions stored the single chat as "<id>.json".
+  if (kind === 'chat' && !fs.existsSync(file)) {
+    const legacy = path.join(CHATS_DIR, req.user.id + '.json');
+    if (fs.existsSync(legacy)) file = legacy;
+  }
+  try { res.json(JSON.parse(fs.readFileSync(file, 'utf-8'))); }
+  catch { res.json([]); }
+});
+
+app.put('/api/chats', (req, res) => {
+  try {
+    const conversations = (req.body && req.body.conversations) || [];
+    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(conversations, null, 2));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const FILTERED = new Set(['node_modules', '.git', '.env', '.DS_Store', 'server-data']);
+
+function resolveBase(root) {
+  return root ? path.resolve(root) : APP_DIR;
+}
+
+async function fetchJSON(url, options) {
+  // Dynamic import of node-fetch is avoided; use the global fetch available
+  // in Node 18+. For older versions, install node-fetch.
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok) {
+    const errMsg =
+      data.error?.message || data.error?.type || JSON.stringify(data.error) || res.statusText;
+    throw new Error(errMsg);
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// FILE SYSTEM API
+// ---------------------------------------------------------------------------
+
+// GET /api/files?path=...&root=...
+app.get('/api/files', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    const relPath = req.query.path || '';
+    const fullPath = path.resolve(base, relPath);
+
+    // Prevent directory traversal outside the base when no root is given
+    if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+
+    const entries = fs.readdirSync(fullPath, { withFileTypes: true });
+    const items = entries
+      .filter((e) => !FILTERED.has(e.name))
+      .map((e) => ({
+        name: e.name,
+        isDirectory: e.isDirectory(),
+        path: path.join(relPath, e.name).replace(/\\/g, '/'),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    res.json(items);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/file?path=...&root=...
+app.get('/api/file', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    const relPath = req.query.path || '';
+    const fullPath = path.resolve(base, relPath);
+
+    if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const content = fs.readFileSync(fullPath, 'utf-8');
+    res.json({ content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/tree?root=...  -> { files: [relative paths], truncated }
+// Recursive, filtered, bounded listing used to give the AI project context.
+app.get('/api/tree', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    const out = [];
+    const MAX = 600;
+    const walk = (dir, rel, depth) => {
+      if (out.length >= MAX || depth > 7) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      entries.sort((a, b) => (a.isDirectory() === b.isDirectory()) ? a.name.localeCompare(b.name) : (a.isDirectory() ? -1 : 1));
+      for (const e of entries) {
+        if (out.length >= MAX) break;
+        if (FILTERED.has(e.name)) continue;
+        const r = rel ? rel + '/' + e.name : e.name;
+        if (e.isDirectory()) { out.push(r + '/'); walk(path.join(dir, e.name), r, depth + 1); }
+        else out.push(r);
+      }
+    };
+    walk(base, '', 0);
+    res.json({ files: out, truncated: out.length >= MAX });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/file  { root, path, content }
+app.post('/api/file', (req, res) => {
+  try {
+    const { root, path: relPath, content } = req.body;
+    if (!relPath) return res.status(400).json({ error: 'path is required' });
+
+    const base = resolveBase(root);
+    const fullPath = path.resolve(base, relPath);
+
+    if (!root && !fullPath.startsWith(APP_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Ensure parent directory exists
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, 'utf-8');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// EXEC API
+// ---------------------------------------------------------------------------
+
+// POST /api/exec  { command, cwd }
+app.post('/api/exec', (req, res) => {
+  try {
+    const { command, cwd } = req.body;
+    if (!command) return res.status(400).json({ error: 'command is required' });
+
+    const execCwd = cwd || APP_DIR;
+
+    exec(command, { cwd: execCwd, timeout: 30000, maxBuffer: 1024 * 1024 * 5 }, (err, stdout, stderr) => {
+      if (err && !stdout && !stderr) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ stdout: stdout || '', stderr: stderr || '' });
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// FOLDER PICKER — opens the native OS folder dialog (local app)
+// ---------------------------------------------------------------------------
+// POST /api/pick-folder  -> { path } | { cancelled: true }
+app.post('/api/pick-folder', (req, res) => {
+  if (process.platform !== 'win32') {
+    return res.status(501).json({ error: 'Folder picker only available on Windows.' });
+  }
+
+  // Prefer the bundled modern Explorer-style picker (pickfolder.exe).
+  const picker = path.join(APP_DIR, 'pickfolder.exe');
+  if (fs.existsSync(picker)) {
+    execFile(picker, { timeout: 180000, windowsHide: true }, (err, stdout) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const selected = (stdout || '').trim();
+      if (!selected) return res.json({ cancelled: true });
+      res.json({ path: selected });
+    });
+    return;
+  }
+
+  // Fallback (dev): old FolderBrowserDialog via PowerShell.
+  const ps = [
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
+    "$d.Description = 'Choisissez le dossier du projet';",
+    '$d.ShowNewFolderButton = $true;',
+    '$null = $d.ShowDialog();',
+    '[Console]::Out.Write($d.SelectedPath)',
+  ].join(' ');
+  const cmd = `powershell -NoProfile -STA -Command "${ps.replace(/"/g, '\\"')}"`;
+
+  exec(cmd, { timeout: 120000, windowsHide: false }, (err, stdout) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const selected = (stdout || '').trim();
+    if (!selected) return res.json({ cancelled: true });
+    res.json({ path: selected });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AI CHAT API
+// ---------------------------------------------------------------------------
+
+// POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
+// images: [{ mime, data(base64) }]  — sent to vision-capable models only.
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
+    const images = Array.isArray(req.body.images) ? req.body.images : [];
+    if (!model || !message) {
+      return res.status(400).json({ error: 'model and message are required' });
+    }
+
+    const keys = config?.keys || {};
+    const ollamaUrl = config?.ollamaUrl || 'http://localhost:11434';
+    const ollamaModel = config?.ollamaModel || 'llama3';
+
+    let responseText = '';
+
+    // ----- OpenAI (Codex) -----
+    if (model === 'codex') {
+      if (!keys.openai) return res.json({ response: '[OpenAI] Aucune cle API configuree.' });
+
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
+            ]
+          : message,
+      });
+
+      const payload = { model: submodel || 'gpt-4o', messages };
+
+      const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
+      if (isReasoningModel && reasoningLevel !== undefined) {
+        const efforts = ['low', 'low', 'medium', 'high'];
+        payload.reasoning_effort = efforts[reasoningLevel] || 'medium';
+      }
+
+      const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.openai}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      responseText = data.choices?.[0]?.message?.content || '';
+    }
+
+    // ----- Anthropic (Claude) -----
+    else if (model === 'claude') {
+      if (!keys.anthropic) return res.json({ response: '[Claude] Aucune cle API configuree.' });
+
+      const claudeContent = images.length
+        ? [
+            { type: 'text', text: message },
+            ...images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.data } })),
+          ]
+        : message;
+
+      const body = {
+        model: submodel || 'claude-3-5-sonnet',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: claudeContent }],
+      };
+      if (systemPrompt) body.system = systemPrompt;
+
+      const isThinkingModel = submodel && (submodel.includes('3-7') || submodel.includes('4.8'));
+      if (isThinkingModel && reasoningLevel !== undefined && reasoningLevel > 0) {
+        const budgets = [0, 1024, 2048, 4096, 8192];
+        const budget = budgets[reasoningLevel] || 1024;
+        if (budget > 0) {
+          body.max_tokens = 10000; // Increase max tokens when thinking is enabled
+          body.thinking = { type: 'enabled', budget_tokens: budget };
+        }
+      }
+
+      const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': keys.anthropic,
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify(body),
+      });
+
+      responseText = data.content?.map((c) => c.text).join('') || '';
+    }
+
+    // ----- Google Gemini -----
+    else if (model === 'gemini') {
+      if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
+
+      const modelName = submodel || 'gemini-2.5-flash';
+      const userText = systemPrompt ? `${systemPrompt}\n\n${message}` : message;
+
+      const parts = [{ text: userText }];
+      images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
+
+      const payload = {
+        contents: [{ parts }]
+      };
+
+      if (reasoningLevel !== undefined && reasoningLevel > 0) {
+        const budgets = [0, 1024, 2048, 4096];
+        const budget = budgets[reasoningLevel] || 1024;
+        if (budget > 0) {
+          payload.thinkingConfig = { thinkingBudget: budget };
+        }
+      }
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
+      const data = await fetchJSON(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+    }
+
+    // ----- xAI (Grok) -----
+    else if (model === 'grok') {
+      if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
+
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
+            ]
+          : message,
+      });
+
+      const grokPayload = { model: submodel || 'grok-3', messages };
+      // Only reasoning sub-models accept reasoning_effort (low | high).
+      if (submodel && submodel.includes('reasoning') && reasoningLevel > 0) {
+        grokPayload.reasoning_effort = reasoningLevel >= 2 ? 'high' : 'low';
+      }
+
+      const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.grok}`,
+        },
+        body: JSON.stringify(grokPayload),
+      });
+
+      responseText = data.choices?.[0]?.message?.content || '';
+    }
+
+    // ----- Mistral (Le Chat) -----
+    else if (model === 'mistral') {
+      if (!keys.mistral) return res.json({ response: '[Mistral] Aucune cle API configuree.' });
+
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
+            ]
+          : message,
+      });
+
+      const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.mistral}`,
+        },
+        body: JSON.stringify({ model: submodel || 'mistral-large-latest', messages }),
+      });
+
+      responseText = data.choices?.[0]?.message?.content || '';
+    }
+
+    // ----- Ollama (Local) -----
+    else if (model === 'local') {
+      const prompt = systemPrompt ? `${systemPrompt}\n\n${message}` : message;
+
+      const ollamaBody = { model: ollamaModel, prompt, stream: false };
+      if (images.length) ollamaBody.images = images.map((img) => img.data);
+
+      const data = await fetchJSON(`${ollamaUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ollamaBody),
+      });
+
+      responseText = data.response || '';
+    }
+
+    // ----- Unknown model -----
+    else {
+      return res.status(400).json({ error: `Unknown model: ${model}` });
+    }
+
+    res.json({ response: responseText });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CHAT HISTORY API
+// ---------------------------------------------------------------------------
+
+// GET /api/history?project=...
+app.get('/api/history', (req, res) => {
+  try {
+    const project = req.query.project;
+    if (!project) return res.status(400).json({ error: 'project query param is required' });
+
+    const historyPath = path.join(project, '.zaalis', 'history.json');
+
+    if (!fs.existsSync(historyPath)) {
+      return res.json([]);
+    }
+
+    const raw = fs.readFileSync(historyPath, 'utf-8');
+    const data = JSON.parse(raw);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/history  { project, conversations }
+app.post('/api/history', (req, res) => {
+  try {
+    const { project, conversations } = req.body;
+    if (!project) return res.status(400).json({ error: 'project is required' });
+
+    const dirPath = path.join(project, '.zaalis');
+    fs.mkdirSync(dirPath, { recursive: true });
+
+    const historyPath = path.join(dirPath, 'history.json');
+    fs.writeFileSync(historyPath, JSON.stringify(conversations, null, 2), 'utf-8');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// START
+// ---------------------------------------------------------------------------
+// Listen on the default (dual-stack) interface so both http://localhost
+// (IPv6 ::1) and http://127.0.0.1 (IPv4) work. Network exposure is still
+// blocked at the application layer: the loopback guard above returns 403 to
+// any request whose remote address is not a loopback address.
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT} (local access only)`);
+});
