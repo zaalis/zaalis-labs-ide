@@ -81,6 +81,9 @@
                     <span class="project-name" id="project-name" data-i18n="no-project">Aucun projet</span>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
+                <button class="sidebar-toggle" id="sidebar-toggle" title="Afficher / masquer le menu">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><line x1="9" y1="3" x2="9" y2="21"/></svg>
+                </button>
                 <!-- Project Dropdown -->
                 <div class="project-dropdown" id="project-dropdown">
                     <button class="dropdown-item" id="open-project-btn">
@@ -124,6 +127,9 @@
             </div>
         </aside>
 
+        <!-- Resizer: sidebar <-> editor -->
+        <div class="resizer" id="resizer-left"></div>
+
         <!-- ===== EDITOR ===== -->
         <section id="editor-panel">
             <div class="tab-bar" id="tab-bar">
@@ -147,6 +153,9 @@
                 <span id="status-saved"></span>
             </div>
         </section>
+
+        <!-- Resizer: editor <-> AI panel -->
+        <div class="resizer" id="resizer-right"></div>
 
         <!-- ===== AI PANEL ===== -->
         <aside id="ai-panel">
@@ -245,6 +254,9 @@
             <div class="ai-view" id="view-agents">
                 <div class="agents-header">
                     <p class="agents-desc" data-i18n="agents-desc">Configurez et lancez vos agents IA. Minimum 2 actifs pour le mode collaboratif.</p>
+                    <button class="agents-collapse" id="agents-collapse" title="Réduire les modèles">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 15 12 9 18 15"/></svg>
+                    </button>
                 </div>
                 <div class="agents-list" id="agents-list">
                     <!-- Codex -->

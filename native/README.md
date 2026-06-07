@@ -21,7 +21,7 @@ Le dossier `native\dist\` est genere par les scripts de build et contient:
 - `pickfolder.exe`
 - `interface\`
 
-Le dossier `server-data\` est cree automatiquement au premier lancement pour les comptes, secrets de session et historiques locaux. Il ne doit pas etre versionne.
+Le dossier `server-data\` est cree automatiquement au premier lancement pour les comptes, sessions et historiques locaux.
 
 ## Reconstruire
 

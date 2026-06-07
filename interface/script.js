@@ -395,13 +395,15 @@ Format obligatoire:
         const DPR = window.devicePixelRatio || 1;
         const GAP = 13;
         const t0 = performance.now();
-        function resize() {
-            const w = canvas.clientWidth || 300, h = canvas.clientHeight || 72;
-            canvas.width = w * DPR; canvas.height = h * DPR;
-            ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-        }
+        let lastW = 0, lastH = 0;
         function frame(now) {
             const w = canvas.clientWidth || 300, h = canvas.clientHeight || 72;
+            // Keep the drawing buffer in sync with the box (it grows as agents are added).
+            if (w !== lastW || h !== lastH) {
+                canvas.width = w * DPR; canvas.height = h * DPR;
+                ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+                lastW = w; lastH = h;
+            }
             ctx.clearRect(0, 0, w, h);
             const cols = Math.ceil(w / GAP), rows = Math.ceil(h / GAP);
             const t = (now - t0) / 1000;
@@ -421,7 +423,6 @@ Format obligatoire:
             }
             canvas._raf = requestAnimationFrame(frame);
         }
-        resize();
         canvas._raf = requestAnimationFrame(frame);
     }
     function stopWave(canvas) {
@@ -1610,13 +1611,10 @@ npm install
         // Pre-create the unified chat bubble for the final response
         const leadBody = addMsg($('#agents-log'), 'ai', labels[leadAgent.agent], '', true);
         
-        // Initialize the thinking visual + details inside the bubble
+        // Initialize the thinking box — the dot wave fills the whole box, behind the text.
         leadBody.innerHTML = `
-            <div class="team-wave">
+            <details class="thinking-details" open>
                 <canvas class="wave-canvas"></canvas>
-                <span class="team-wave-label">${TRANSLATIONS[lang]['team-thinking-title']}</span>
-            </div>
-            <details class="thinking-details">
                 <summary>${TRANSLATIONS[lang]['team-thinking-title']} (0/${workers.length} ${TRANSLATIONS[lang]['lead-thinking-progress']})</summary>
                 <div class="thinking-content"></div>
             </details>
@@ -1626,7 +1624,6 @@ npm install
         const thinkingContent = leadBody.querySelector('.thinking-content');
         const summary = leadBody.querySelector('summary');
         const leadResponseDiv = leadBody.querySelector('.lead-response');
-        const waveBox = leadBody.querySelector('.team-wave');
         const waveCanvas = leadBody.querySelector('.wave-canvas');
         startWave(waveCanvas);
 
@@ -1720,7 +1717,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
         try {
             const data = await callAI(leadAgent.agent, leadAgent.submodel, leadMessage, leadSystemPrompt, taskImages);
             stopThinking(leadResponseDiv);
-            stopWave(waveCanvas); if (waveBox) waveBox.remove();
+            stopWave(waveCanvas); if (waveCanvas) waveCanvas.remove();
             if (data.error) {
                 leadResponseDiv.textContent = data.error;
                 leadResponseDiv.classList.add('error');
@@ -1731,7 +1728,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             }
         } catch (err) {
             stopThinking(leadResponseDiv);
-            stopWave(waveCanvas); if (waveBox) waveBox.remove();
+            stopWave(waveCanvas); if (waveCanvas) waveCanvas.remove();
             leadResponseDiv.textContent = TRANSLATIONS[lang]['err-conn-lead'] || 'Erreur de connexion.';
             leadResponseDiv.classList.add('error');
         }
@@ -2519,6 +2516,61 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             showAuthOverlay();
         }
     }
+
+    // ==========================================================
+    //  UI: collapse sidebar / resize panels / collapse agent models / bounce
+    // ==========================================================
+    // One toggle (same icon, same place) collapses the sidebar to a thin rail.
+    const sbToggle = $('#sidebar-toggle');
+    if (sbToggle) sbToggle.addEventListener('click', () => {
+        const collapsed = $('#sidebar').classList.toggle('collapsed');
+        $('#app').classList.toggle('sidebar-collapsed', collapsed);
+    });
+
+    // Drag the edges to resize the sidebar and the AI panel.
+    function makeResizer(id, target, side) {
+        const handle = $('#' + id), el = $(target);
+        if (!handle || !el) return;
+        handle.addEventListener('mousedown', e => {
+            e.preventDefault();
+            handle.classList.add('dragging');
+            document.body.style.cursor = 'col-resize';
+            document.body.style.userSelect = 'none';
+            const move = ev => {
+                let w = side === 'left' ? ev.clientX : (window.innerWidth - ev.clientX);
+                w = Math.max(180, Math.min(w, Math.round(window.innerWidth * 0.6)));
+                el.style.width = w + 'px';
+            };
+            const up = () => {
+                handle.classList.remove('dragging');
+                document.body.style.cursor = '';
+                document.body.style.userSelect = '';
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+            };
+            document.addEventListener('mousemove', move);
+            document.addEventListener('mouseup', up);
+        });
+    }
+    makeResizer('resizer-left', '#sidebar', 'left');
+    makeResizer('resizer-right', '#ai-panel', 'right');
+
+    // Collapse / expand the agent model cards (chevron = house roof).
+    const agCollapse = $('#agents-collapse');
+    if (agCollapse) agCollapse.addEventListener('click', () => {
+        const collapsed = $('#agents-list').classList.toggle('collapsed');
+        agCollapse.classList.toggle('collapsed', collapsed);
+    });
+
+    // Discreet bounce on any button click. Capture phase so it still fires for
+    // buttons that call stopPropagation (e.g. the attach "+" button).
+    document.addEventListener('click', e => {
+        const b = e.target.closest('button');
+        if (!b) return;
+        b.classList.remove('bounce');
+        void b.offsetWidth; // restart the animation
+        b.classList.add('bounce');
+    }, true);
 
     // ==========================================================
     //  INIT
