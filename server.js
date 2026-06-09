@@ -2,7 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { exec, execFile } = require('child_process');
+const { exec, execFile, spawn } = require('child_process');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -378,7 +378,7 @@ app.post('/api/exec', (req, res) => {
 
     const execCwd = cwd || APP_DIR;
 
-    exec(command, { cwd: execCwd, timeout: 30000, maxBuffer: 1024 * 1024 * 5 }, (err, stdout, stderr) => {
+    exec(command, { cwd: execCwd, timeout: 30000, maxBuffer: 1024 * 1024 * 5, windowsHide: true }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
       }
@@ -429,6 +429,123 @@ app.post('/api/pick-folder', (req, res) => {
   });
 });
 
+// GET /api/ollama-models?url=...  -> { models: [names] }
+app.get('/api/ollama-models', async (req, res) => {
+  try {
+    const url = (req.query.url || 'http://localhost:11434').replace(/\/+$/, '');
+    const r = await fetch(`${url}/api/tags`);
+    const data = await r.json();
+    const models = (data.models || []).map((m) => m.name).filter(Boolean);
+    res.json({ models });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ollama-delete  { name, url }  -> uninstall a model from Ollama
+app.post('/api/ollama-delete', async (req, res) => {
+  try {
+    const name = req.body && req.body.name;
+    const url = ((req.body && req.body.url) || 'http://localhost:11434').replace(/\/+$/, '');
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const r = await fetch(`${url}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      return res.status(500).json({ error: t || ('HTTP ' + r.status) });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/hf-search?q=...  -> search GGUF models on Hugging Face (proxied)
+app.get('/api/hf-search', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim();
+    const sort = ['downloads', 'likes', 'trendingScore', 'lastModified'].includes(req.query.sort) ? req.query.sort : 'downloads';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 40, 50);
+    const searchParam = q ? `search=${encodeURIComponent(q)}&` : '';
+    const u = `https://huggingface.co/api/models?${searchParam}filter=gguf&sort=${sort}&direction=-1&limit=${limit}&full=true`;
+    const r = await fetch(u, { headers: { 'User-Agent': 'zaalis-ide' } });
+    const data = await r.json();
+    const NOISE = new Set(['gguf', 'text-generation', 'transformers', 'region:us', 'endpoints_compatible', 'autotrain_compatible', 'conversational']);
+    const models = (Array.isArray(data) ? data : []).map((m) => ({
+      id: m.id || m.modelId,
+      downloads: m.downloads || 0,
+      likes: m.likes || 0,
+      pipeline: m.pipeline_tag || '',
+      // a few meaningful tags (languages, base model, size...) without the noise
+      tags: (m.tags || []).filter((t) => !NOISE.has(t) && !t.includes(':') && t.length < 22).slice(0, 5),
+    })).filter((m) => m.id);
+    res.json({ models });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/hf-files?id=<repo>  -> available GGUF quantizations with sizes
+app.get('/api/hf-files', async (req, res) => {
+  try {
+    const id = (req.query.id || '').toString();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const r = await fetch(`https://huggingface.co/api/models/${id}?blobs=true`, { headers: { 'User-Agent': 'zaalis-ide' } });
+    const d = await r.json();
+    const groups = {};
+    for (const s of (d.siblings || [])) {
+      const f = s.rfilename || '';
+      if (!/\.gguf$/i.test(f)) continue;
+      const m = f.match(/(IQ\d[A-Z0-9_]*|Q\d[A-Z0-9_]*K[A-Z0-9_]*|Q\d_\d|Q\d[A-Z0-9_]*|BF16|F16|F32)/i);
+      const quant = (m ? m[1] : 'default').toUpperCase();
+      groups[quant] = (groups[quant] || 0) + (s.size || 0);
+    }
+    let quants = Object.entries(groups).map(([quant, size]) => ({ quant, size })).filter((x) => x.size > 0);
+    // Drop the unlabelled (fp16/full) group when real quantizations exist.
+    if (quants.some((x) => x.quant !== 'DEFAULT')) quants = quants.filter((x) => x.quant !== 'DEFAULT');
+    quants.sort((a, b) => a.size - b.size);
+    res.json({ quants });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ollama-pull?name=...&url=...  -> streams Ollama's pull progress (NDJSON)
+app.get('/api/ollama-pull', async (req, res) => {
+  const name = req.query.name;
+  const url = (req.query.url || 'http://localhost:11434').replace(/\/+$/, '');
+  if (!name) return res.status(400).json({ error: 'name required' });
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-store');
+  // If the client cancels (closes the request), abort the pull to Ollama.
+  const ac = new AbortController();
+  req.on('close', () => ac.abort());
+  try {
+    const r = await fetch(`${url}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, stream: true }),
+      signal: ac.signal,
+    });
+    if (!r.body) { res.end(); return; }
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (err) {
+    if (!ac.signal.aborted) {
+      try { res.write(JSON.stringify({ error: err.message }) + '\n'); } catch {}
+    }
+    try { res.end(); } catch {}
+  }
+});
+
 // ---------------------------------------------------------------------------
 // AI CHAT API
 // ---------------------------------------------------------------------------
@@ -439,6 +556,10 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
     const images = Array.isArray(req.body.images) ? req.body.images : [];
+    // Prior conversation turns (memory). Each: { role: 'user'|'assistant', content: string }
+    const history = Array.isArray(req.body.history)
+      ? req.body.history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      : [];
     if (!model || !message) {
       return res.status(400).json({ error: 'model and message are required' });
     }
@@ -448,6 +569,8 @@ app.post('/api/chat', async (req, res) => {
     const ollamaModel = config?.ollamaModel || 'llama3';
 
     let responseText = '';
+    let thinkingText = '';
+    let usage = null;
 
     // ----- OpenAI (Codex) -----
     if (model === 'codex') {
@@ -455,6 +578,7 @@ app.post('/api/chat', async (req, res) => {
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
         content: images.length
@@ -483,6 +607,7 @@ app.post('/api/chat', async (req, res) => {
       });
 
       responseText = data.choices?.[0]?.message?.content || '';
+      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
     // ----- Anthropic (Claude) -----
@@ -496,10 +621,14 @@ app.post('/api/chat', async (req, res) => {
           ]
         : message;
 
+      const claudeMessages = [];
+      for (const h of history) claudeMessages.push({ role: h.role, content: h.content });
+      claudeMessages.push({ role: 'user', content: claudeContent });
+
       const body = {
         model: submodel || 'claude-3-5-sonnet',
         max_tokens: 4096,
-        messages: [{ role: 'user', content: claudeContent }],
+        messages: claudeMessages,
       };
       if (systemPrompt) body.system = systemPrompt;
 
@@ -523,7 +652,10 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify(body),
       });
 
-      responseText = data.content?.map((c) => c.text).join('') || '';
+      // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
+      responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+      thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
+      if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
     }
 
     // ----- Google Gemini -----
@@ -531,14 +663,16 @@ app.post('/api/chat', async (req, res) => {
       if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
 
       const modelName = submodel || 'gemini-2.5-flash';
-      const userText = systemPrompt ? `${systemPrompt}\n\n${message}` : message;
 
-      const parts = [{ text: userText }];
+      const parts = [{ text: message }];
       images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
 
-      const payload = {
-        contents: [{ parts }]
-      };
+      const contents = [];
+      for (const h of history) contents.push({ role: h.role === 'assistant' ? 'model' : 'user', parts: [{ text: h.content }] });
+      contents.push({ role: 'user', parts });
+
+      const payload = { contents };
+      if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
 
       if (reasoningLevel !== undefined && reasoningLevel > 0) {
         const budgets = [0, 1024, 2048, 4096];
@@ -556,6 +690,7 @@ app.post('/api/chat', async (req, res) => {
       });
 
       responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+      if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
     }
 
     // ----- xAI (Grok) -----
@@ -564,6 +699,7 @@ app.post('/api/chat', async (req, res) => {
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
         content: images.length
@@ -590,6 +726,7 @@ app.post('/api/chat', async (req, res) => {
       });
 
       responseText = data.choices?.[0]?.message?.content || '';
+      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
     // ----- Mistral (Le Chat) -----
@@ -598,6 +735,7 @@ app.post('/api/chat', async (req, res) => {
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
         content: images.length
@@ -618,22 +756,39 @@ app.post('/api/chat', async (req, res) => {
       });
 
       responseText = data.choices?.[0]?.message?.content || '';
+      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
     // ----- Ollama (Local) -----
     else if (model === 'local') {
-      const prompt = systemPrompt ? `${systemPrompt}\n\n${message}` : message;
+      const messages = [];
+      if (systemPrompt) {
+        messages.push({ role: 'system', content: systemPrompt });
+      }
+      for (const h of history) {
+        messages.push({ role: h.role, content: h.content });
+      }
+      messages.push({
+        role: 'user',
+        content: message,
+        ...(images.length ? { images: images.map((img) => img.data) } : {})
+      });
 
-      const ollamaBody = { model: ollamaModel, prompt, stream: false };
-      if (images.length) ollamaBody.images = images.map((img) => img.data);
+      // Use the chosen sub-model if provided, else the configured default model.
+      const olModel = submodel || ollamaModel;
+      const ollamaBody = { model: olModel, messages, stream: false };
 
-      const data = await fetchJSON(`${ollamaUrl}/api/generate`, {
+      const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(ollamaBody),
       });
 
-      responseText = data.response || '';
+      responseText = data.message?.content || '';
+      // deepseek-r1 etc. embed reasoning inside <think>...</think>.
+      const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
+      if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
+      if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
     }
 
     // ----- Unknown model -----
@@ -641,7 +796,7 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: `Unknown model: ${model}` });
     }
 
-    res.json({ response: responseText });
+    res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -689,6 +844,27 @@ app.post('/api/history', (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Auto-start Ollama in the background (only if it isn't already running).
+// We never stop it on exit — if it was already up, we leave it untouched.
+// ---------------------------------------------------------------------------
+async function startOllamaIfNeeded() {
+  if (process.platform !== 'win32') return;
+  try {
+    await fetch('http://localhost:11434/api/tags');
+    return; // already running -> do nothing
+  } catch {}
+  const candidates = [
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
+    'ollama',
+  ];
+  const exe = candidates.find((p) => p === 'ollama' || (p && fs.existsSync(p))) || 'ollama';
+  try {
+    const child = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+  } catch { /* Ollama not installed -> ignore */ }
+}
+
+// ---------------------------------------------------------------------------
 // START
 // ---------------------------------------------------------------------------
 // Listen on the default (dual-stack) interface so both http://localhost
@@ -697,4 +873,5 @@ app.post('/api/history', (req, res) => {
 // any request whose remote address is not a loopback address.
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT} (local access only)`);
+  startOllamaIfNeeded();
 });

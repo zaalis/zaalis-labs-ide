@@ -63,6 +63,14 @@
                 <option value="fr">FR</option>
                 <option value="en">EN</option>
             </select>
+            <button class="topbar-label-btn" id="catalog-btn" title="Installer des modèles Ollama">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+                <span data-i18n="install-models-btn">Installer des modèles</span>
+            </button>
+            <button class="topbar-label-btn" id="help-btn" title="Aide">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span data-i18n="help-btn">Aide</span>
+            </button>
             <button class="topbar-btn" id="settings-btn" data-i18n-title="settings-title" title="Configuration">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
@@ -211,6 +219,12 @@
                         <option value="o3-mini">o3-mini</option>
                         <option value="o4-mini">o4-mini</option>
                     </select>
+                </div>
+
+                <!-- Token / context meter -->
+                <div class="token-meter" id="token-meter" title="Contexte utilisé">
+                    <div class="token-bar"><div class="token-fill" id="token-fill"></div></div>
+                    <span class="token-text" id="token-text">0 / 0</span>
                 </div>
 
                 <!-- Permission Mode -->
@@ -382,7 +396,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <span class="agent-model-label">Local</span>
+                        <select class="agent-model-select" data-agent="local"></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                 </div>
@@ -473,13 +487,25 @@
             </div>
             <div class="form-section">
                 <h3>Ollama (Local)</h3>
+                <p class="form-hint" data-i18n="ollama-hint">Modèles d'IA gratuits tournant en local, sans clé API.</p>
                 <div class="form-group">
                     <label for="ollama-url" data-i18n="ollama-url-label">URL du serveur</label>
                     <input type="text" id="ollama-url" value="http://localhost:11434">
                 </div>
-                <div class="form-group">
-                    <label for="ollama-model" data-i18n="ollama-model-label">Modele</label>
-                    <input type="text" id="ollama-model" value="llama3">
+
+                <div class="ollama-box">
+                    <div class="ollama-box-head">
+                        <span data-i18n="ollama-models-label">Modèles disponibles</span>
+                        <button class="ollama-detect" id="ollama-detect" type="button" data-i18n="ollama-detect">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+                            <span data-i18n="ollama-detect-label">Détecter</span>
+                        </button>
+                    </div>
+                    <div class="ollama-models" id="ollama-models-list"></div>
+                    <div class="ollama-add-row">
+                        <input type="text" id="ollama-model-input" placeholder="ex. qwen2.5-coder:7b" autocomplete="off">
+                        <button class="btn btn-primary btn-sm" id="ollama-model-add" type="button" data-i18n="add-btn">Ajouter</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -529,6 +555,90 @@
     </div>
 </div>
 
+<!-- ========== OLLAMA CATALOG MODAL ========== -->
+<div class="modal-overlay" id="catalog-modal">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h2 data-i18n="catalog-title">Modèles Ollama à installer</h2>
+            <button class="modal-close" id="close-catalog">&times;</button>
+        </div>
+        <div class="modal-body">
+            <!-- One unified search bar for both tabs -->
+            <div class="catalog-search">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                <input type="text" id="catalog-search-input" placeholder="Rechercher un modèle…" autocomplete="off">
+            </div>
+
+            <div class="catalog-tabs">
+                <button class="catalog-tab active" data-cat="curated" type="button" data-i18n="catalog-popular">Populaires</button>
+                <button class="catalog-tab" data-cat="hf" type="button">Hugging Face</button>
+            </div>
+
+            <div class="catalog-pane" id="catalog-pane-curated">
+                <div class="catalog-grid" id="catalog-grid"></div>
+            </div>
+
+            <div class="catalog-pane hidden" id="catalog-pane-hf">
+                <!-- Default view (empty search): two sections -->
+                <div id="hf-default">
+                    <div class="cat-section-title"><span class="cat-section-ico">🔥</span><span data-i18n="hf-trending">Populaires</span></div>
+                    <div class="catalog-grid" id="hf-popular"></div>
+                    <div class="cat-section-title dl"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span data-i18n="hf-downloads">Plus téléchargés</span></div>
+                    <div class="catalog-grid" id="hf-downloads"></div>
+                </div>
+                <!-- Search results -->
+                <div class="catalog-grid hidden" id="hf-grid"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== CONFIRMATION MODAL (clean centered bubble) ========== -->
+<div class="modal-overlay" id="confirm-modal">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2 id="confirm-title">Confirmation</h2>
+        </div>
+        <div class="modal-body">
+            <p class="confirm-msg" id="confirm-msg"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="confirm-no" type="button">Annuler</button>
+            <button class="btn btn-primary" id="confirm-yes" type="button">Confirmer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== QUANTIZATION CHOICE MODAL ========== -->
+<div class="modal-overlay" id="quant-modal">
+    <div class="modal" style="width:480px;max-width:92vw;">
+        <div class="modal-header">
+            <h2 id="quant-title" data-i18n="quant-title">Choisir une version</h2>
+            <button class="modal-close" id="close-quant">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" data-i18n="quant-hint">Plus la version est élevée, meilleure est la qualité — mais plus c'est lourd.</p>
+            <div class="quant-grid" id="quant-grid"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== HELP / DOCUMENTATION MODAL ========== -->
+<div class="modal-overlay" id="help-modal">
+    <div class="modal modal-lg">
+        <div class="modal-header">
+            <h2 data-i18n="help-title">Aide & documentation</h2>
+            <button class="modal-close" id="close-help">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" data-i18n="help-hint">Clique sur une question pour voir la réponse.</p>
+            <div class="help-list" id="help-list"></div>
+        </div>
+    </div>
+</div>
+
+<script src="catalog.js"></script>
+<script src="help.js"></script>
 <script src="script.js"></script>
 </body>
 </html>

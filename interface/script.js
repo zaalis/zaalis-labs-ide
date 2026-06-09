@@ -12,12 +12,15 @@ document.addEventListener('DOMContentLoaded', () => {
         reasoningLevel: 0, // 0 = MIN, 1 = MED, 2 = MAX
         config: {
             ollamaUrl: 'http://localhost:11434',
-            ollamaModel: 'llama3',
+            ollamaModel: 'qwen3:8b',
+            ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
             keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
         },
         profile: { pseudo: 'Utilisateur', photo: '' },
         conversations: [],        // single-chat history
         currentConvId: null,
+        chatHistory: [],          // API memory for the current chat [{role, content}]
+        contextTokens: 0,         // estimated tokens currently in context
         agentConversations: [],   // agents-mode history (separate)
         currentAgentConvId: null,
         attachments: [], // [{ name, ext, isImage, url?, content? }]
@@ -31,8 +34,30 @@ document.addEventListener('DOMContentLoaded', () => {
         gemini: ['gemini-3-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-pro', 'gemini-2.0-flash'],
         grok:   ['grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-4', 'grok-3', 'grok-3-mini', 'grok-3-fast'],
         mistral:['mistral-large-latest', 'mistral-medium-latest', 'magistral-medium-latest', 'codestral-latest', 'pixtral-large-latest'],
-        local:  ['deepseek-r1', 'llama3.3', 'llama3.1', 'mistral', 'qwen2.5-coder', 'phi4']
+        local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b']
     };
+
+    // Context window (tokens) per model — sized for coding use. Some models reach 1M.
+    const CONTEXT_WINDOWS = {
+        codex:  { _default: 272000, 'gpt-4o': 128000, 'gpt-4.5': 128000, 'o1': 200000, 'o3': 200000, 'o4-mini': 200000, 'gpt-5': 400000 },
+        claude: { _default: 200000, 'sonnet-4': 1000000, 'sonnet-4-6': 1000000, '3-7-sonnet': 200000, '3-5-sonnet': 200000 },
+        gemini: { _default: 1000000 },
+        grok:   { _default: 256000 },
+        mistral:{ _default: 128000 },
+        local:  { _default: 32000 }
+    };
+    function contextWindow(model, submodel) {
+        const m = CONTEXT_WINDOWS[model] || {};
+        const s = (submodel || '').toLowerCase();
+        for (const k of Object.keys(m)) { if (k !== '_default' && s.includes(k)) return m[k]; }
+        return m._default || 128000;
+    }
+    function estimateTokens(text) { return Math.ceil(((text || '') + '').length / 4); }
+    function fmtTokens(n) { return n >= 1000 ? (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'k' : String(n); }
+    function fmtDuration(ms) {
+        const s = Math.round(ms / 1000);
+        return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+    }
 
     // Translations Dictionary
     const TRANSLATIONS = {
@@ -269,7 +294,9 @@ document.addEventListener('DOMContentLoaded', () => {
     function initAgentModelDropdowns() {
         $$('.agent-model-select').forEach(sel => {
             const agent = sel.dataset.agent;
-            const subs = SUBMODELS[agent] || [];
+            const subs = agent === 'local'
+                ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
+                : (SUBMODELS[agent] || []);
             sel.innerHTML = '';
             subs.forEach(s => {
                 const opt = document.createElement('option');
@@ -455,7 +482,9 @@ npm install
 \`\`\`
 
 - Use "run" blocks ONLY for commands you actually want executed.
-- The machine runs WINDOWS (shell: cmd.exe). Use Windows commands (dir, type, cd), NOT Unix ones (ls, cat). The project file tree is already provided in the context, so you do not need to list files.`;
+- The machine runs WINDOWS (shell: cmd.exe). Use Windows commands (dir, type, cd), NOT Unix ones (ls, cat). The project file tree is already provided in the context, so you do not need to list files.
+- The project files are only background context. ALWAYS answer the user's actual question first. If they ask who you are, which model/version you are, or anything unrelated to the project, answer that directly and honestly (if you don't know your exact version, just say so) — do not describe the project instead.
+- NEVER repeat, echo, paste or list the project context / file tree in your answer. Use it silently as background knowledge only.`;
         }
         return `Tu es un agent de code integre dans un IDE avec un acces complet en lecture/ecriture au dossier du projet de l'utilisateur. Pour creer ou modifier un fichier sur le disque, ecris son contenu COMPLET final dans un bloc de code dont la ligne d'info contient le chemin du fichier avec ce format EXACT :
 
@@ -477,7 +506,9 @@ npm install
 \`\`\`
 
 - N'utilise les blocs "run" que pour les commandes que tu veux reellement executer.
-- La machine est sous WINDOWS (shell : cmd.exe). Utilise des commandes Windows (dir, type, cd), PAS Unix (ls, cat). L'arborescence du projet est deja fournie dans le contexte, tu n'as pas besoin de lister les fichiers.`;
+- La machine est sous WINDOWS (shell : cmd.exe). Utilise des commandes Windows (dir, type, cd), PAS Unix (ls, cat). L'arborescence du projet est deja fournie dans le contexte, tu n'as pas besoin de lister les fichiers.
+- Les fichiers du projet ne sont qu'un contexte d'arriere-plan. Reponds TOUJOURS d'abord a la vraie question de l'utilisateur. S'il demande qui tu es, quel modele/version tu es, ou autre chose sans rapport avec le projet, reponds-y directement et honnetement (si tu ne connais pas ta version exacte, dis-le simplement) — ne decris pas le projet a la place.
+- Ne repete JAMAIS, ne recopie pas, ne liste pas le contexte du projet / l'arborescence dans ta reponse. Utilise-le silencieusement comme simple connaissance d'arriere-plan.`;
     }
 
     // Parse an AI response into a list of shell commands to run (```run blocks).
@@ -597,14 +628,36 @@ npm install
         modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
     }
 
+    // Pretty short name for the dropdown (full tag stays in the option's value).
+    // ex: "hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M" -> "Qwen2.5-Coder-7B (Q4_K_M)"
+    function prettyModelLabel(full) {
+        if (!full) return '';
+        let s = String(full);
+        // Strip the hf.co/ prefix and the owner part.
+        s = s.replace(/^hf\.co\//i, '');
+        const colon = s.lastIndexOf(':');
+        let quant = '';
+        if (colon > -1) {
+            const tag = s.slice(colon + 1);
+            if (/^(Q\d|IQ\d|BF16|F16|F32)/i.test(tag)) { quant = tag; s = s.slice(0, colon); }
+        }
+        // Drop the owner ("Qwen/..." -> "..."), then strip noisy suffixes.
+        if (s.includes('/')) s = s.split('/').slice(1).join('/');
+        s = s.replace(/-?GGUF$/i, '').replace(/-?Instruct$/i, '');
+        return quant ? `${s} (${quant})` : s;
+    }
     function updateSubmodelDropdown() {
         const model = modelSelect.value;
-        const subs = SUBMODELS[model] || [];
+        // For Ollama, use the user's managed model list (Settings).
+        const subs = model === 'local'
+            ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
+            : (SUBMODELS[model] || []);
         submodelSelect.innerHTML = '';
         subs.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s;
-            opt.textContent = s;
+            opt.textContent = model === 'local' && /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s;
+            opt.title = s;
             submodelSelect.appendChild(opt);
         });
     }
@@ -614,10 +667,12 @@ npm install
         checkReasoningCompatibility();
         updateAttachAvailability();
         applyModelColor();
+        updateTokenMeter();
     });
     submodelSelect.addEventListener('change', () => {
         checkReasoningCompatibility();
         updateAttachAvailability();
+        updateTokenMeter();
     });
 
     // In agents mode the reasoning slider tracks the lead agent, so re-check it
@@ -644,11 +699,442 @@ npm install
         state.config.keys.grok = $('#key-grok').value.trim();
         state.config.keys.mistral = $('#key-mistral').value.trim();
         state.config.ollamaUrl = $('#ollama-url').value.trim();
-        state.config.ollamaModel = $('#ollama-model').value.trim();
+        // Default Ollama model = first of the managed list.
+        state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
         saveState();
         const btn = $('#save-btn');
         btn.textContent = 'OK';
         setTimeout(() => { btn.textContent = 'Enregistrer'; $('#settings-modal').classList.remove('active'); }, 500);
+    });
+
+    // ----- Ollama models manager (Settings) -----
+    function renderOllamaModels() {
+        const box = $('#ollama-models-list');
+        if (!box) return;
+        const list = state.config.ollamaModels || [];
+        box.innerHTML = '';
+        if (!list.length) {
+            box.innerHTML = `<span class="ollama-empty">${state.language === 'en' ? 'No model added yet.' : 'Aucun modèle ajouté.'}</span>`;
+            return;
+        }
+        list.forEach(name => {
+            const chip = document.createElement('div');
+            chip.className = 'ollama-chip';
+            const span = document.createElement('span');
+            span.textContent = name;
+            const rm = document.createElement('button');
+            rm.type = 'button';
+            rm.textContent = '×';
+            rm.title = state.language === 'en' ? 'Remove' : 'Retirer';
+            rm.addEventListener('click', () => removeOllamaModel(name));
+            chip.appendChild(span);
+            chip.appendChild(rm);
+            box.appendChild(chip);
+        });
+    }
+    function addOllamaModel(name) {
+        name = (name || '').trim();
+        if (!name) return;
+        if (!state.config.ollamaModels) state.config.ollamaModels = [];
+        if (state.config.ollamaModels.includes(name)) return;
+        state.config.ollamaModels.push(name);
+        saveState();
+        renderOllamaModels();
+        if (modelSelect.value === 'local') updateSubmodelDropdown();
+        refreshOllamaAgentSelect();
+    }
+    function removeOllamaModel(name) {
+        state.config.ollamaModels = (state.config.ollamaModels || []).filter(m => m !== name);
+        saveState();
+        renderOllamaModels();
+        if (modelSelect.value === 'local') updateSubmodelDropdown();
+        refreshOllamaAgentSelect();
+    }
+    // Keep the Ollama agent's model dropdown in sync with the managed list.
+    function refreshOllamaAgentSelect() {
+        const sel = $('.agent-model-select[data-agent="local"]');
+        if (!sel) return;
+        const prev = sel.value;
+        const list = (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
+        sel.innerHTML = '';
+        list.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s; o.title = s; sel.appendChild(o); });
+        if (list.includes(prev)) sel.value = prev;
+    }
+    const olAdd = $('#ollama-model-add'), olInput = $('#ollama-model-input');
+    if (olAdd) olAdd.addEventListener('click', () => { addOllamaModel(olInput.value); olInput.value = ''; olInput.focus(); });
+    if (olInput) olInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addOllamaModel(olInput.value); olInput.value = ''; } });
+    const olDetect = $('#ollama-detect');
+    if (olDetect) olDetect.addEventListener('click', async () => {
+        const lang = state.language || 'fr';
+        const original = olDetect.innerHTML;
+        olDetect.textContent = lang === 'en' ? 'Detecting…' : 'Détection…';
+        try {
+            const url = encodeURIComponent($('#ollama-url').value.trim() || 'http://localhost:11434');
+            const res = await fetch('/api/ollama-models?url=' + url);
+            const data = await res.json();
+            const found = (data.models || []);
+            if (found.length) { found.forEach(addOllamaModel); olDetect.textContent = (lang === 'en' ? 'Found ' : 'Trouvés : ') + found.length; }
+            else olDetect.textContent = lang === 'en' ? 'No model found' : 'Aucun modèle trouvé';
+        } catch {
+            olDetect.textContent = lang === 'en' ? 'Ollama unreachable' : 'Ollama injoignable';
+        }
+        setTimeout(() => { olDetect.innerHTML = original; }, 2200);
+    });
+
+    // ----- Ollama model catalog (install / uninstall + Hugging Face search) -----
+    let _installedModels = new Set();           // normalized names actually present in Ollama
+    const normName = n => (n && n.includes(':')) ? n : (n + ':latest');
+    function isInstalled(name) {
+        if (_installedModels.has(normName(name))) return true;
+        // HF models: match by prefix (quant suffix may differ).
+        for (const m of _installedModels) { if (m.startsWith(name + ':') || m === name) return true; }
+        return false;
+    }
+    async function refreshInstalled() {
+        try {
+            const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+            const res = await fetch('/api/ollama-models?url=' + url);
+            const data = await res.json();
+            _installedModels = new Set((data.models || []).map(normName));
+        } catch { _installedModels = new Set((state.config.ollamaModels || []).map(normName)); }
+    }
+
+    // Build the action button(s) inside a catalog card based on install state.
+    function setCardActions(card, name) {
+        const lang = state.language || 'fr';
+        const actions = card.querySelector('.cat-actions');
+        actions.innerHTML = '';
+        if (isInstalled(name)) {
+            const un = document.createElement('button');
+            un.className = 'cat-uninstall'; un.type = 'button';
+            un.textContent = lang === 'en' ? 'Uninstall' : 'Désinstaller';
+            un.addEventListener('click', () => uninstallModel(name, card));
+            actions.appendChild(un);
+        } else {
+            const ins = document.createElement('button');
+            ins.className = 'cat-install'; ins.type = 'button';
+            ins.textContent = lang === 'en' ? 'Install' : 'Installer';
+            // HF models -> let the user pick a quantization first (like LM Studio).
+            ins.addEventListener('click', () => card.dataset.hf === '1' ? expandQuants(card) : installModel(name, card));
+            actions.appendChild(ins);
+        }
+    }
+
+    function buildCard(name, label, size, tags, desc, extra, isHf) {
+        const card = document.createElement('div');
+        card.className = 'cat-card';
+        card.dataset.name = name;
+        if (isHf) card.dataset.hf = '1';
+        card.innerHTML = `
+            <div class="cat-top"><span class="cat-name">${label}</span><span class="cat-size">${size || ''}</span></div>
+            ${(tags && tags.length) ? `<div class="cat-tags">${tags.map(t => `<span class="cat-tag ${t}">${t}</span>`).join('')}</div>` : ''}
+            <div class="cat-desc">${desc || ''}</div>
+            ${extra || ''}
+            <div class="cat-actions"></div>
+            <div class="cat-progress" style="display:none"><div class="pbar"><div class="pfill"></div></div><div class="ptext"></div></div>`;
+        setCardActions(card, name);
+        return card;
+    }
+
+    // Open a clean modal to pick a quantization (Q4_K_M, Q6_K, Q8_0...).
+    async function expandQuants(card) {
+        const lang = state.language || 'fr';
+        const repo = (card.dataset.name || '').replace(/^hf\.co\//, '');
+        const grid = $('#quant-grid');
+        $('#quant-title').textContent = (lang === 'en' ? 'Choose a version — ' : 'Choisir une version — ') + repo.split('/').pop();
+        grid.innerHTML = `<div class="catalog-empty">${lang === 'en' ? 'Loading options…' : 'Chargement…'}</div>`;
+        $('#quant-modal').classList.add('active');
+        let quants = [];
+        try {
+            const res = await fetch('/api/hf-files?id=' + encodeURIComponent(repo));
+            const data = await res.json();
+            quants = data.quants || [];
+        } catch {}
+        if (!quants.length) {
+            $('#quant-modal').classList.remove('active');
+            installModel('hf.co/' + repo, card); // no quant detected -> install repo default
+            return;
+        }
+        grid.innerHTML = '';
+        quants.forEach(qd => {
+            const go = qd.size >= 1e9 ? (qd.size / 1e9).toFixed(1) + ' Go' : Math.round(qd.size / 1e6) + ' Mo';
+            const opt = document.createElement('button');
+            opt.className = 'quant-opt'; opt.type = 'button';
+            opt.innerHTML = `<span class="quant-q">${qd.quant}</span><span class="quant-size">${go}</span>`;
+            opt.addEventListener('click', () => {
+                $('#quant-modal').classList.remove('active');
+                installModel('hf.co/' + repo + ':' + qd.quant, card);
+            });
+            grid.appendChild(opt);
+        });
+    }
+
+    // Detect actually-installed Ollama models and use them as the model list.
+    async function syncOllamaModels() {
+        try {
+            const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+            const res = await fetch('/api/ollama-models?url=' + url);
+            if (!res.ok) return;
+            const data = await res.json();
+            const list = data.models || [];
+            if (list.length) {
+                state.config.ollamaModels = list;
+                saveState();
+                if (modelSelect.value === 'local') updateSubmodelDropdown();
+                refreshOllamaAgentSelect();
+            }
+        } catch {}
+    }
+
+    // Curated catalog (filtered by the unified search bar).
+    function renderCatalog() {
+        const grid = $('#catalog-grid');
+        if (!grid) return;
+        const q = ($('#catalog-search-input') ? $('#catalog-search-input').value.trim().toLowerCase() : '');
+        const list = (window.OLLAMA_CATALOG || []).filter(m => {
+            if (!q) return true;
+            return (m.name + ' ' + m.label + ' ' + (m.desc || '') + ' ' + (m.tags || []).join(' ')).toLowerCase().includes(q);
+        });
+        grid.innerHTML = '';
+        if (!list.length) { grid.innerHTML = `<div class="catalog-empty">${state.language === 'en' ? 'No model.' : 'Aucun modèle.'}</div>`; return; }
+        list.forEach(m => grid.appendChild(buildCard(m.name, m.label, m.size, m.tags, m.desc)));
+    }
+
+    // --- Hugging Face helpers ---
+    async function fetchHf(q, sort, limit) {
+        const res = await fetch(`/api/hf-search?q=${encodeURIComponent(q || '')}&sort=${sort}&limit=${limit}`);
+        const data = await res.json();
+        if (data.error) throw new Error(data.error);
+        return data.models || [];
+    }
+    // Estimate the GGUF (Q4) download size from the parameter count in the name.
+    function estimateGgufSize(id) {
+        const s = (id || '').toLowerCase();
+        let params = 0;
+        let m = s.match(/(\d+)\s*x\s*(\d+(?:\.\d+)?)\s*b/); // e.g. 8x7b
+        if (m) params = parseFloat(m[1]) * parseFloat(m[2]);
+        else { m = s.match(/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/); if (m) params = parseFloat(m[1]); }
+        if (!params || params > 2000) return '';
+        const go = params * 0.62; // ~Q4_K_M
+        return '~' + (go >= 10 ? Math.round(go) : go.toFixed(1)) + ' Go';
+    }
+    function renderHfCards(grid, models) {
+        grid.innerHTML = '';
+        if (!models.length) { grid.innerHTML = `<div class="catalog-empty">${state.language === 'en' ? 'No model found.' : 'Aucun modèle trouvé.'}</div>`; return; }
+        models.forEach(m => {
+            const name = 'hf.co/' + m.id;
+            const owner = m.id.split('/')[0];
+            const repo = m.id.split('/').slice(1).join('/') || m.id;
+            const desc = (m.pipeline ? m.pipeline + ' · ' : '') + (state.language === 'en' ? 'by ' : 'par ') + owner;
+            const extra = `<div class="cat-dl">⬇ ${(m.downloads || 0).toLocaleString()} · ♥ ${m.likes || 0}</div>`;
+            grid.appendChild(buildCard(name, repo, estimateGgufSize(m.id), (m.tags || []).slice(0, 4), desc, extra, true));
+        });
+    }
+
+    // Default HF view (empty search): trending + most downloaded sections.
+    async function showHfDefault() {
+        $('#hf-default').classList.remove('hidden');
+        $('#hf-grid').classList.add('hidden');
+        const pop = $('#hf-popular'), dl = $('#hf-downloads');
+        const ld = `<div class="catalog-empty">${state.language === 'en' ? 'Loading…' : 'Chargement…'}</div>`;
+        if (!pop.querySelector('.cat-card')) pop.innerHTML = ld;
+        if (!dl.querySelector('.cat-card')) dl.innerHTML = ld;
+        try {
+            const [trending, downloads] = await Promise.all([fetchHf('', 'trendingScore', 12), fetchHf('', 'downloads', 12)]);
+            renderHfCards(pop, trending);
+            renderHfCards(dl, downloads);
+        } catch (e) {
+            pop.innerHTML = `<div class="catalog-empty">${(state.language === 'en' ? 'Error: ' : 'Erreur : ') + e.message}</div>`;
+            dl.innerHTML = '';
+        }
+    }
+
+    let _hfSeq = 0;
+    async function hfSearch(q) {
+        const grid = $('#hf-grid');
+        if (!grid) return;
+        $('#hf-default').classList.add('hidden');
+        grid.classList.remove('hidden');
+        const seq = ++_hfSeq;
+        if (!grid.querySelector('.cat-card')) {
+            grid.innerHTML = `<div class="catalog-empty">${state.language === 'en' ? 'Searching…' : 'Recherche…'}</div>`;
+        }
+        try {
+            const models = await fetchHf(q, 'downloads', 40);
+            if (seq !== _hfSeq) return;
+            renderHfCards(grid, models);
+        } catch (e) {
+            if (seq !== _hfSeq) return;
+            grid.innerHTML = `<div class="catalog-empty">${(state.language === 'en' ? 'Error: ' : 'Erreur : ') + e.message}</div>`;
+        }
+    }
+
+    // Apply the unified search bar to whichever tab is active.
+    function applyCatalogSearch() {
+        const q = $('#catalog-search-input').value.trim();
+        const hfActive = !$('#catalog-pane-hf').classList.contains('hidden');
+        if (hfActive) { q ? hfSearch(q) : showHfDefault(); }
+        else { renderCatalog(); }
+    }
+
+    async function installModel(name, card) {
+        const lang = state.language || 'fr';
+        const actions = card.querySelector('.cat-actions');
+        const prog = card.querySelector('.cat-progress');
+        const pfill = card.querySelector('.pfill');
+        const ptext = card.querySelector('.ptext');
+        actions.innerHTML = ''; // hide Install while downloading
+        prog.style.display = 'block';
+        pfill.style.width = '0%';
+        ptext.textContent = lang === 'en' ? 'Starting…' : 'Démarrage…';
+
+        // Red Cancel button under the bar.
+        const controller = new AbortController();
+        prog.querySelectorAll('.cat-cancel').forEach(b => b.remove());
+        const cancel = document.createElement('button');
+        cancel.className = 'cat-cancel'; cancel.type = 'button';
+        cancel.textContent = lang === 'en' ? 'Cancel' : 'Annuler';
+        cancel.addEventListener('click', () => controller.abort());
+        prog.appendChild(cancel);
+
+        try {
+            const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+            const res = await fetch(`/api/ollama-pull?name=${encodeURIComponent(name)}&url=${url}`, { signal: controller.signal });
+            if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = '';
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buf += dec.decode(value, { stream: true });
+                const lines = buf.split('\n'); buf = lines.pop();
+                for (const line of lines) {
+                    if (!line.trim()) continue;
+                    let o; try { o = JSON.parse(line); } catch { continue; }
+                    if (o.error) throw new Error(o.error);
+                    if (o.total) {
+                        const pct = Math.round((o.completed || 0) / o.total * 100);
+                        pfill.style.width = pct + '%';
+                        ptext.textContent = `${o.status || ''} ${pct}%`;
+                    } else if (o.status) {
+                        ptext.textContent = o.status;
+                    }
+                }
+            }
+            addOllamaModel(name);
+            _installedModels.add(normName(name));
+            cancel.remove();
+            prog.style.display = 'none';
+            setCardActions(card, name);
+        } catch (e) {
+            cancel.remove();
+            prog.style.display = 'none';
+            pfill.style.width = '0%';
+            if (!(e && e.name === 'AbortError')) {
+                ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
+            }
+            setCardActions(card, name); // back to Install
+        }
+    }
+
+    async function uninstallModel(name, card) {
+        const lang = state.language || 'fr';
+        const ok = await customConfirm(name, {
+            title: lang === 'en' ? 'Uninstall this model?' : 'Désinstaller ce modèle ?',
+            okText: lang === 'en' ? 'Uninstall' : 'Désinstaller',
+            danger: true
+        });
+        if (!ok) return;
+        const un = card.querySelector('.cat-uninstall');
+        if (un) { un.disabled = true; un.textContent = lang === 'en' ? 'Removing…' : 'Suppression…'; }
+        try {
+            // Find the exact installed name (case + quant tag) so /api/delete matches.
+            await refreshInstalled();
+            const targets = new Set();
+            const wanted = name.toLowerCase();
+            for (const m of _installedModels) {
+                const ml = m.toLowerCase();
+                if (ml === wanted || ml === normName(name).toLowerCase()) targets.add(m);
+                // HF model: same repo, any quant tag.
+                else if (wanted.startsWith('hf.co/') && ml.startsWith(wanted.split(':')[0].toLowerCase() + ':')) targets.add(m);
+            }
+            if (!targets.size) targets.add(name); // fallback
+            let lastErr = null;
+            for (const t of targets) {
+                const res = await fetch('/api/ollama-delete', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: t, url: state.config.ollamaUrl || 'http://localhost:11434' })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok || data.error) lastErr = data.error || ('HTTP ' + res.status);
+                else _installedModels.delete(t);
+            }
+            if (lastErr && !targets.size) throw new Error(lastErr);
+            removeOllamaModel(name);
+            // Also drop any HF variant we may have kept in the managed list.
+            (state.config.ollamaModels || []).slice().forEach(m => {
+                if (m.toLowerCase().startsWith(name.toLowerCase().split(':')[0] + ':') || m.toLowerCase() === name.toLowerCase()) removeOllamaModel(m);
+            });
+            setCardActions(card, name);
+        } catch (e) {
+            if (un) { un.disabled = false; un.textContent = (lang === 'en' ? 'Error' : 'Erreur'); setTimeout(() => setCardActions(card, name), 1800); }
+        }
+    }
+
+    // Catalog modal open/close + tabs + unified search.
+    const catalogBtn = $('#catalog-btn');
+    if (catalogBtn) catalogBtn.addEventListener('click', async () => {
+        $('#catalog-modal').classList.add('active');
+        await refreshInstalled();
+        renderCatalog();
+    });
+    const closeCatalog = $('#close-catalog');
+    if (closeCatalog) closeCatalog.addEventListener('click', () => $('#catalog-modal').classList.remove('active'));
+    // Help / docs modal.
+    function renderHelp() {
+        const list = $('#help-list'); if (!list) return;
+        list.innerHTML = '';
+        (window.HELP_TOPICS || []).forEach(t => {
+            const det = document.createElement('details');
+            det.className = 'help-item';
+            det.innerHTML = `<summary>${t.q}</summary><div class="help-answer">${t.a}</div>`;
+            list.appendChild(det);
+        });
+    }
+    const helpBtn = $('#help-btn');
+    if (helpBtn) helpBtn.addEventListener('click', () => { renderHelp(); $('#help-modal').classList.add('active'); });
+    const closeHelp = $('#close-help');
+    if (closeHelp) closeHelp.addEventListener('click', () => $('#help-modal').classList.remove('active'));
+    const helpModal = $('#help-modal');
+    if (helpModal) helpModal.addEventListener('click', e => { if (e.target.id === 'help-modal') helpModal.classList.remove('active'); });
+
+    const closeQuant = $('#close-quant');
+    if (closeQuant) closeQuant.addEventListener('click', () => $('#quant-modal').classList.remove('active'));
+    const quantModal = $('#quant-modal');
+    if (quantModal) quantModal.addEventListener('click', e => { if (e.target.id === 'quant-modal') quantModal.classList.remove('active'); });
+    const catalogModal = $('#catalog-modal');
+    if (catalogModal) catalogModal.addEventListener('click', e => { if (e.target.id === 'catalog-modal') catalogModal.classList.remove('active'); });
+
+    $$('.catalog-tab').forEach(tab => tab.addEventListener('click', () => {
+        $$('.catalog-tab').forEach(t => t.classList.toggle('active', t === tab));
+        const cat = tab.dataset.cat;
+        $('#catalog-pane-curated').classList.toggle('hidden', cat !== 'curated');
+        $('#catalog-pane-hf').classList.toggle('hidden', cat !== 'hf');
+        applyCatalogSearch(); // apply current query to the newly active tab
+    }));
+
+    // One unified search bar drives both tabs (debounced).
+    const catalogSearch = $('#catalog-search-input');
+    let _searchTimer = null;
+    if (catalogSearch) catalogSearch.addEventListener('input', () => {
+        clearTimeout(_searchTimer);
+        const q = catalogSearch.value.trim();
+        if (q.length === 1) return; // wait for 2+ chars (or empty)
+        _searchTimer = setTimeout(applyCatalogSearch, 200);
+    });
+    if (catalogSearch) catalogSearch.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(_searchTimer); applyCatalogSearch(); }
     });
 
     // ==========================================================
@@ -738,10 +1224,71 @@ npm install
     // ==========================================================
     //  FILE TREE
     // ==========================================================
-    const ICON_FILE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
-    const ICON_FOLDER = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
-    const ICON_CHEVRON_R = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"/></svg>';
-    const ICON_CHEVRON_D = '<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    const ICON_FILE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6d8086" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 16h5" stroke-linecap="round"/></svg>';
+    // Centered confirmation bubble (replaces the ugly browser window.confirm).
+    function customConfirm(message, opts) {
+        opts = opts || {};
+        return new Promise(resolve => {
+            const modal = $('#confirm-modal');
+            const lang = state.language || 'fr';
+            $('#confirm-title').textContent = opts.title || (lang === 'en' ? 'Confirm' : 'Confirmation');
+            $('#confirm-msg').textContent = message;
+            const yes = $('#confirm-yes'), no = $('#confirm-no');
+            yes.textContent = opts.okText || (lang === 'en' ? 'Confirm' : 'Confirmer');
+            no.textContent  = opts.cancelText || (lang === 'en' ? 'Cancel' : 'Annuler');
+            yes.classList.toggle('btn-danger', !!opts.danger);
+            const close = (ok) => {
+                modal.classList.remove('active');
+                yes.removeEventListener('click', onYes);
+                no.removeEventListener('click', onNo);
+                modal.removeEventListener('click', onBg);
+                resolve(ok);
+            };
+            const onYes = () => close(true);
+            const onNo  = () => close(false);
+            const onBg  = (e) => { if (e.target.id === 'confirm-modal') close(false); };
+            yes.addEventListener('click', onYes);
+            no.addEventListener('click', onNo);
+            modal.addEventListener('click', onBg);
+            modal.classList.add('active');
+        });
+    }
+
+    // Mapping filename -> known icon (extension or special-name). icon-fichier/<key>.svg
+    const FILE_ICON_MAP = {
+        js:'js', mjs:'mjs', cjs:'cjs', ts:'ts', jsx:'jsx', tsx:'tsx',
+        html:'html', htm:'htm', css:'css', scss:'scss', sass:'sass',
+        json:'json', md:'md', markdown:'markdown',
+        py:'py', pyc:'py', pyw:'py', java:'java', kt:'kt', c:'c', h:'h', cpp:'cpp', cc:'cc', hpp:'hpp',
+        cs:'cs', go:'go', rs:'rs', rb:'rb', php:'php', swift:'swift', sql:'sql',
+        sh:'sh', bat:'bat', ps1:'ps1', yml:'yml', yaml:'yaml', toml:'toml',
+        xml:'xml', vue:'vue', svelte:'svelte', txt:'txt', log:'log', env:'env',
+        svg:'svg', png:'png', jpg:'jpg', jpeg:'jpeg', gif:'gif', webp:'webp', ico:'ico', icns:'ico',
+        pdf:'pdf', zip:'zip', lock:'lock', rar:'zip', '7z':'zip', tar:'zip', gz:'zip'
+    };
+    // Special full-name matching for dotfiles and config files
+    const FILE_NAME_MAP = {
+        '.gitignore':'default', '.gitattributes':'default',
+        'dockerfile':'bat', 'makefile':'bat', 'cmakelists.txt':'toml',
+        'readme.md':'md', 'license':'txt', 'changelog.md':'md'
+    };
+    function fileIconHtml(name) {
+        const lower = (name || '').toLowerCase();
+        let key = 'default';
+        // Check full filename first
+        if (FILE_NAME_MAP[lower]) key = FILE_NAME_MAP[lower];
+        else if (lower === '.env' || lower.endsWith('.env')) key = 'env';
+        else if (lower.endsWith('.lock') || lower === 'package-lock.json') key = 'lock';
+        else {
+            const m = lower.match(/\.([a-z0-9]+)$/);
+            if (m && FILE_ICON_MAP[m[1]]) key = FILE_ICON_MAP[m[1]];
+        }
+        return `<img class="file-icon" src="icon-fichier/${key}.svg" alt="" width="16" height="16">`;
+    }
+    const ICON_FOLDER = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#1a1a1e" stroke="#888" stroke-width="2.5" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+    const ICON_FOLDER_OPEN = '<svg width="16" height="16" viewBox="0 0 24 24" fill="#252528" stroke="#aaa" stroke-width="2.5" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>';
+    const ICON_CHEVRON_R = '<svg width="10" height="10" viewBox="0 0 24 24"><polygon points="8 4 20 12 8 20" fill="#888"/></svg>';
+    const ICON_CHEVRON_D = '<svg width="10" height="10" viewBox="0 0 24 24"><polygon points="4 8 20 8 12 20" fill="#aaa"/></svg>';
 
     async function loadFileTree() {
         if (!state.projectRoot) return;
@@ -786,10 +1333,10 @@ npm install
                     renderTree(sub, wrap, depth + 1);
                     item.after(wrap);
                     expanded = true;
-                    item.innerHTML = `${ICON_CHEVRON_D} ${ICON_FOLDER} <span class="tree-label">${f.name}</span>`;
+                    item.innerHTML = `${ICON_CHEVRON_D} ${ICON_FOLDER_OPEN} <span class="tree-label">${f.name}</span>`;
                 });
             } else {
-                item.innerHTML = `${ICON_FILE} <span class="tree-label">${f.name}</span>`;
+                item.innerHTML = `${fileIconHtml(f.name)} <span class="tree-label">${f.name}</span>`;
                 item.addEventListener('click', e => {
                     e.stopPropagation();
                     $$('.tree-item').forEach(el => el.classList.remove('active'));
@@ -838,6 +1385,12 @@ npm install
             const tab = document.createElement('div');
             tab.className = `tab ${isActive ? 'active' : ''}`;
             tab.dataset.file = filePath;
+
+            // File-type icon (HTML, JS, CSS...) before the name.
+            const ico = document.createElement('span');
+            ico.className = 'tab-icon';
+            ico.innerHTML = fileIconHtml(fileData.name);
+            tab.appendChild(ico);
 
             const nameSpan = document.createElement('span');
             nameSpan.className = 'tab-name';
@@ -1198,6 +1751,9 @@ npm install
         // Start fresh conversations so we don't overwrite saved ones.
         state.currentConvId = null;
         state.currentAgentConvId = null;
+        state.chatHistory = [];
+        state.contextTokens = 0;
+        if (typeof updateTokenMeter === 'function') updateTokenMeter();
         addMsg($('#chat-messages'), 'system', null, TRANSLATIONS[lang]['terminal-cleared']);
         addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['history-cleared']);
         renderHistory();
@@ -1340,7 +1896,7 @@ npm install
     // ==========================================================
     //  CHAT - SINGLE AI
     // ==========================================================
-    async function callAI(model, submodel, message, systemPrompt, images = [], signal = undefined) {
+    async function callAI(model, submodel, message, systemPrompt, images = [], signal = undefined, history = []) {
         const res = await fetch('/api/chat', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -1348,7 +1904,7 @@ npm install
                 model, submodel, message, systemPrompt,
                 config: state.config,
                 reasoningLevel: state.reasoningLevel,
-                images
+                images, history
             }),
             signal
         });
@@ -1357,6 +1913,51 @@ npm install
         } catch {
             return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
         }
+    }
+
+    // Token / context meter.
+    function updateTokenMeter() {
+        const fill = $('#token-fill'), txt = $('#token-text');
+        if (!fill || !txt) return;
+        const win = contextWindow(modelSelect.value, submodelSelect.value);
+        const used = state.contextTokens || 0;
+        const pct = Math.min(100, Math.round((used / win) * 100));
+        fill.style.width = pct + '%';
+        fill.classList.toggle('warn', pct >= 70 && pct < 90);
+        fill.classList.toggle('full', pct >= 90);
+        txt.textContent = `${fmtTokens(used)} / ${fmtTokens(win)} (${pct}%)`;
+    }
+
+    // Auto-compact the context when it nears the model's window (summarize old turns).
+    async function maybeCompact(model, submodel) {
+        const win = contextWindow(model, submodel);
+        if (state.contextTokens < win * 0.75) return;
+        if (state.chatHistory.length <= 4) return;
+        const lang = state.language || 'fr';
+        const keep = 4;
+        const older = state.chatHistory.slice(0, state.chatHistory.length - keep);
+        const recent = state.chatHistory.slice(state.chatHistory.length - keep);
+        const text = older.map(h => `${h.role}: ${h.content}`).join('\n');
+        addMsg($('#chat-messages'), 'system', null, lang === 'en' ? 'Compacting context…' : 'Compactage du contexte…');
+        try {
+            const prompt = (lang === 'en'
+                ? 'Summarize the conversation below concisely, keeping every important fact, decision, file and context. Under 250 words:\n\n'
+                : 'Resume la conversation ci-dessous de maniere concise, en gardant chaque fait, decision, fichier et contexte important. En moins de 250 mots :\n\n') + text;
+            const data = await callAI(model, submodel, prompt, null, [], undefined, []);
+            const summary = (data && data.response) || '';
+            state.chatHistory = [{ role: 'user', content: (lang === 'en' ? '[Earlier context summary]: ' : '[Résumé du contexte précédent] : ') + summary }, ...recent];
+            state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+            updateTokenMeter();
+            addMsg($('#chat-messages'), 'system', null, lang === 'en' ? 'Context compacted.' : 'Contexte compacté.');
+        } catch {}
+    }
+
+    // Collapsible reasoning block (like Codex): "Réflexion durant Xs".
+    function reasoningBlock(thinking, durationMs) {
+        const lang = state.language || 'fr';
+        const label = (lang === 'en' ? 'Reasoned for ' : 'Réflexion durant ') + fmtDuration(durationMs);
+        const chevron = '<svg class="reasoning-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+        return `<details class="reasoning"><summary><span class="reasoning-spark"></span><span class="reasoning-label">${label}</span>${chevron}</summary><div class="reasoning-body md">${renderMarkdown(thinking)}</div></details>`;
     }
 
     // --- Send / Stop button state ---
@@ -1377,25 +1978,46 @@ npm install
 
         const lang = state.language || 'fr';
         const { aiText, names, images } = consumeAttachments();
-        const aiMessage = message + aiText + await projectContext();
+
+        // Compact the running context first if it's getting close to the limit.
+        await maybeCompact(model, submodel);
+
+        // Project tree goes into the SYSTEM prompt (background), only on the first
+        // message — so weak models don't echo it and later questions aren't drowned.
+        const ctx = state.chatHistory.length === 0 ? await projectContext() : '';
+        const sys = codeAgentPrompt() + ctx;
+        const aiMessage = message + aiText;            // user message stays clean
         const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
         addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
         const body = addTypingMsg($('#chat-messages'), modelLabel);
 
+        const history = state.chatHistory.slice(); // prior turns (memory)
+        const t0 = Date.now();
         const controller = new AbortController();
         chatAbort = controller;
         setChatBusy(true);
         try {
-            const data = await callAI(model, submodel, aiMessage, codeAgentPrompt(), images, controller.signal);
+            const data = await callAI(model, submodel, aiMessage, sys, images, controller.signal, history);
             stopThinking(body);
-            if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             if (data.error) {
                 body.textContent = data.error;
                 body.classList.add('error');
             } else {
-                body.innerHTML = formatAIResponse(data.response);
+                const duration = Date.now() - t0;
+                if (isMaxReasoning()) body.classList.add('max-reasoning-text');
+                const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
+                body.innerHTML = reasoning + formatAIResponse(data.response);
 
-                // Check if AI wants to modify a file (simple heuristic)
+                // Update conversation memory + token meter.
+                state.chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: data.response });
+                if (data.usage && data.usage.input != null) {
+                    state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
+                } else {
+                    state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0) + estimateTokens(codeAgentPrompt());
+                }
+                updateTokenMeter();
+
+                // Check if AI wants to modify a file / run a command.
                 await handleAIResponse(data.response, modelLabel);
             }
         } catch (err) {
@@ -1605,7 +2227,8 @@ npm install
         // Attach any selected files/images to the task given to the agents.
         const { aiText, names, images: taskImages } = consumeAttachments();
         const displayTask = task + (names.length ? `\n📎 ${names.join(', ')}` : '');
-        task = task + aiText + await projectContext();
+        task = task + aiText;
+        const projCtx = await projectContext(); // appended to each agent's SYSTEM prompt
         addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', displayTask);
 
         // Pre-create the unified chat bubble for the final response
@@ -1647,7 +2270,7 @@ npm install
 
             const statusText = item.querySelector('.agent-status-text');
 
-            const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}`;
+            const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}${projCtx}`;
             const fullMessage = context
                 ? (lang === 'en' 
                     ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}` 
@@ -1698,7 +2321,7 @@ npm install
         leadBadge.textContent = TRANSLATIONS[lang]['status-working'];
         leadBadge.className = 'agent-badge working';
 
-        const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}`;
+        const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}${projCtx}`;
         const leadMessage = lang === 'fr'
             ? `[Tache utilisateur]: ${task}
 
@@ -1845,6 +2468,15 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
         (conv.messages || []).forEach(m => addMsg(container, m.type, m.label, m.text || ''));
         container.scrollTop = container.scrollHeight;
 
+        // Rebuild the API memory for the chat from its messages.
+        if (kind === 'chat') {
+            state.chatHistory = (conv.messages || [])
+                .filter(m => m.type === 'user' || m.type === 'ai')
+                .map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.text || '' }));
+            state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+            updateTokenMeter();
+        }
+
         $$('.ai-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === cfg.tab));
         $$('.ai-view').forEach(v => v.classList.toggle('active', v.id === 'view-' + cfg.tab));
 
@@ -1894,19 +2526,22 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
+        if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
         renderHistory();
     }
 
     // Delete a saved conversation (after confirmation).
-    function deleteConversation(kind, id) {
+    async function deleteConversation(kind, id) {
         const cfg = HIST[kind];
         const lang = state.language || 'fr';
         const conv = state[cfg.store].find(c => c.id === id);
         const title = conv ? conv.title : '';
-        const msg = lang === 'en'
-            ? `Delete this conversation?\n\n"${title}"`
-            : `Supprimer cette conversation ?\n\n"${title}"`;
-        if (!window.confirm(msg)) return;
+        const ok = await customConfirm(`"${title}"`, {
+            title: lang === 'en' ? 'Delete this conversation?' : 'Supprimer cette conversation ?',
+            okText: lang === 'en' ? 'Delete' : 'Supprimer',
+            danger: true
+        });
+        if (!ok) return;
 
         state[cfg.store] = state[cfg.store].filter(c => c.id !== id);
         if (state[cfg.current] === id) {
@@ -2422,10 +3057,13 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
         // Wipe any in-memory chats so they can't be seen before re-login.
         state.conversations = [];
         state.currentConvId = null;
+        state.chatHistory = [];
+        state.contextTokens = 0;
         state.agentConversations = [];
         state.currentAgentConvId = null;
         $('#chat-messages').innerHTML = '';
         renderHistory();
+        updateTokenMeter();
     }
 
     // Reopen the last project once the user is authenticated.
@@ -2465,6 +3103,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
                 showApp(data.email);
                 await loadUserChats();
                 openSavedProject();
+                syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
             } catch { showAuthError('Erreur de connexion au serveur.'); }
         });
 
@@ -2490,6 +3129,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
                 showApp(data.email);
                 await loadUserChats();
                 openSavedProject();
+                syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
             } catch { showAuthError('Erreur de connexion au serveur.'); }
         });
 
@@ -2509,6 +3149,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
                 showApp(data.email);
                 await loadUserChats();
                 openSavedProject();
+                syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
             } else {
                 showAuthOverlay();
             }
@@ -2582,6 +3223,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     // because /api/files requires a valid session.
     updateSubmodelDropdown();
     applyModelColor();
+    updateTokenMeter();
     initAgentModelDropdowns();
     initReasoningSlider();
     checkReasoningCompatibility();
@@ -2594,7 +3236,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     if (state.config.keys.grok) $('#key-grok').value = state.config.keys.grok;
     if (state.config.keys.mistral) $('#key-mistral').value = state.config.keys.mistral;
     if (state.config.ollamaUrl) $('#ollama-url').value = state.config.ollamaUrl;
-    if (state.config.ollamaModel) $('#ollama-model').value = state.config.ollamaModel;
+    renderOllamaModels();
 
     // Restore language settings and select binding
     const langSelect = $('#lang-select');

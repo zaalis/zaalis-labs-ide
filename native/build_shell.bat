@@ -32,9 +32,9 @@ echo Compiling pickfolder.cpp ...
 cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE pickfolder.cpp /Fe:dist\pickfolder.exe /Fo:dist\pf.obj /link /SUBSYSTEM:CONSOLE ole32.lib shell32.lib uuid.lib user32.lib
 if errorlevel 1 goto :failed
 
-REM --- Copy the interface/ folder next to the exe so the server can serve it ---
+REM --- Copy the interface/ folder (including subfolders) next to the exe ---
 if not exist dist\interface mkdir dist\interface
-copy /Y "..\interface\*" "dist\interface\" >nul
+xcopy "..\interface\*" "dist\interface\" /E /Y /I /Q >nul
 del /Q dist\*.obj >nul 2>&1
 del /Q dist\index.html dist\script.js dist\styles.css >nul 2>&1
 

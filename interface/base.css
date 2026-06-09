@@ -108,7 +108,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .tree-item{display:flex;align-items:center;gap:6px;padding:3px 12px;cursor:pointer;color:var(--text-1);font-size:13px;transition:all .1s;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .tree-item:hover{background:var(--bg-hover);color:var(--text-0);}
 .tree-item.active{background:var(--accent-muted);color:var(--accent-hover);}
-.tree-item svg{flex-shrink:0;width:14px;height:14px;color:var(--text-2);}
+.tree-item svg{flex-shrink:0;width:16px;height:16px;}
 .tree-label{overflow:hidden;text-overflow:ellipsis;}
 
 /* Profile */
@@ -345,3 +345,8 @@ input,select,textarea{font-family:inherit;color:inherit;}
 /* While the AI generates: a round red "stop" button */
 .send-btn.stop{background:var(--red);border-radius:50%;}
 .send-btn.stop:hover{background:#dc2626;}
+
+/* Labeled topbar button (e.g. Installer des modèles) */
+.topbar-label-btn{display:flex;align-items:center;gap:6px;padding:5px 11px;border-radius:var(--radius);background:var(--bg-2);border:1px solid var(--border);color:var(--text-1);font-size:12px;font-weight:500;transition:all .15s;}
+.topbar-label-btn:hover{background:var(--bg-hover);color:var(--text-0);border-color:var(--text-3);}
+.topbar-label-btn svg{color:var(--accent);}
