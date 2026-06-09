@@ -282,6 +282,91 @@ async function hfSearch(q) {
     }
 }
 
+// ==========================================================
+//  AUTO-UPDATE LOGIC
+// ==========================================================
+const CURRENT_VERSION = "v1.0.0"; // Current internal version
+let pendingUpdateUrl = null;
+
+async function checkForUpdates() {
+    try {
+        const res = await fetch('https://api.github.com/repos/zaalis/zaalis-labs-ide/releases/latest');
+        if (!res.ok) return;
+        const release = await res.json();
+        
+        const asset = release.assets.find(a => a.name === 'zaalis-setup.exe');
+        if (asset && release.tag_name !== CURRENT_VERSION) {
+            pendingUpdateUrl = asset.browser_download_url;
+            const btn = document.getElementById('app-update-btn');
+            if (btn) {
+                btn.classList.remove('hidden');
+                btn.onclick = () => {
+                    const releaseNameEl = document.getElementById('update-release-name');
+                    if (releaseNameEl) releaseNameEl.textContent = release.name || release.tag_name;
+                    $('#update-modal').classList.add('active');
+                };
+            }
+        }
+    } catch (err) {
+        console.error("Update check failed:", err);
+    }
+}
+
+// Update modal logic
+const confirmUpdateBtn = document.getElementById('confirm-update-btn');
+if (confirmUpdateBtn) {
+    confirmUpdateBtn.addEventListener('click', async () => {
+        if (!pendingUpdateUrl) return;
+        
+        confirmUpdateBtn.disabled = true;
+        document.getElementById('cancel-update-btn').disabled = true;
+        const statusText = document.getElementById('update-status-text');
+        const progressBar = document.getElementById('update-progress-bar');
+        
+        statusText.textContent = "Téléchargement en cours...";
+        
+        try {
+            // Demande au serveur de télécharger l'installateur
+            const res = await fetch('/api/update/download', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ url: pendingUpdateUrl })
+            });
+            const data = await res.json();
+            
+            if (data.error) throw new Error(data.error);
+            
+            // Polling de la progression
+            const interval = setInterval(async () => {
+                const pRes = await fetch('/api/update/progress');
+                const pData = await pRes.json();
+                
+                if (pData.progress >= 0) {
+                    progressBar.style.width = pData.progress + '%';
+                    statusText.textContent = \`Téléchargement: \${pData.progress}%\`;
+                }
+                
+                if (pData.progress === 100) {
+                    clearInterval(interval);
+                    statusText.textContent = "Installation et redémarrage...";
+                    // Lance l'installation
+                    await fetch('/api/update/install', { method: 'POST' });
+                } else if (pData.progress < 0) {
+                    clearInterval(interval);
+                    statusText.textContent = "Erreur lors du téléchargement.";
+                    confirmUpdateBtn.disabled = false;
+                    document.getElementById('cancel-update-btn').disabled = false;
+                }
+            }, 500);
+            
+        } catch (err) {
+            statusText.textContent = "Erreur: " + err.message;
+            confirmUpdateBtn.disabled = false;
+            document.getElementById('cancel-update-btn').disabled = false;
+        }
+    });
+}
+
 // Apply the unified search bar to whichever tab is active.
 function applyCatalogSearch() {
     const q = $('#catalog-search-input').value.trim();
@@ -429,6 +514,11 @@ if (quantModal) quantModal.addEventListener('click', e => { if (e.target.id === 
 const catalogModal = $('#catalog-modal');
 if (catalogModal) catalogModal.addEventListener('click', e => { if (e.target.id === 'catalog-modal') catalogModal.classList.remove('active'); });
 
+const closeUpdate = $('#close-update');
+if (closeUpdate) closeUpdate.addEventListener('click', () => $('#update-modal').classList.remove('active'));
+const updateModal = $('#update-modal');
+if (updateModal) updateModal.addEventListener('click', e => { if (e.target.id === 'update-modal') updateModal.classList.remove('active'); });
+
 $$('.catalog-tab').forEach(tab => tab.addEventListener('click', () => {
     $$('.catalog-tab').forEach(t => t.classList.toggle('active', t === tab));
     const cat = tab.dataset.cat;
@@ -453,27 +543,59 @@ if (catalogSearch) catalogSearch.addEventListener('keydown', e => {
 // ==========================================================
 //  INIT
 // ==========================================================
-loadState();
-initProfile();
-initRecentProjects();
-// The project is opened only after authentication (see openSavedProject),
-// because /api/files requires a valid session.
-updateSubmodelDropdown();
-applyModelColor();
-updateTokenMeter();
-initAgentModelDropdowns();
-initReasoningSlider();
-checkReasoningCompatibility();
-updateAttachAvailability();
+document.addEventListener('DOMContentLoaded', async () => {
+    loadState();
+    
+    // UI Init
+    renderTabs();
+    renderTree(state.projectRoot);
+    if (state.activeFile) {
+        if (!state.openFiles[state.activeFile]) {
+            state.activeFile = null;
+        } else {
+            textarea.value = state.openFiles[state.activeFile].content || '';
+            updateGutter(textarea.value);
+            renderTabs();
+        }
+    }
+    
+    // Auth Check
+    const isLogged = await checkAuthStatus();
+    if (!isLogged) {
+        window.location.href = 'login.html';
+        return;
+    }
 
-// Restore config inputs
-if (state.config.keys.openai) $('#key-openai').value = state.config.keys.openai;
-if (state.config.keys.anthropic) $('#key-anthropic').value = state.config.keys.anthropic;
-if (state.config.keys.google) $('#key-google').value = state.config.keys.google;
-if (state.config.keys.grok) $('#key-grok').value = state.config.keys.grok;
-if (state.config.keys.mistral) $('#key-mistral').value = state.config.keys.mistral;
-if (state.config.ollamaUrl) $('#ollama-url').value = state.config.ollamaUrl;
-renderOllamaModels();
+    // Tools & Settings Initialization
+    initAgentModelDropdowns();
+    updateLanguage();
+    
+    // Restore chat & config bindings
+    modelSelect.value = state.config.ollamaModel || 'qwen3:8b';
+    $('#ollama-url').value = state.config.ollamaUrl || 'http://localhost:11434';
+    $('#api-openai').value = state.config.keys?.openai || '';
+    $('#api-anthropic').value = state.config.keys?.anthropic || '';
+    $('#api-google').value = state.config.keys?.google || '';
+    $('#api-grok').value = state.config.keys?.grok || '';
+    $('#api-mistral').value = state.config.keys?.mistral || '';
+    $('#profile-pseudo').value = state.profile?.pseudo || 'Utilisateur';
+    $('#profile-photo').value = state.profile?.photo || '';
+    
+    updateProfileUI();
+    renderHistory();
+    
+    // Global Event Listeners
+    $('#save-btn').addEventListener('click', saveSettings);
+    $('#save-profile-btn').addEventListener('click', saveProfile);
+    $('#logout-btn').addEventListener('click', logout);
+    
+    // Polling Ollama models in background
+    setTimeout(refreshOllamaModels, 1000);
+    setInterval(refreshOllamaModels, 30000); // refresh every 30s
+    
+    // Check for app updates on GitHub
+    setTimeout(checkForUpdates, 3000);
+});
 
 // Restore language settings and select binding
 const langSelect = $('#lang-select');

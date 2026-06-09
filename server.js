@@ -776,29 +776,94 @@ app.post('/api/chat', async (req, res) => {
 
       // Use the chosen sub-model if provided, else the configured default model.
       const olModel = submodel || ollamaModel;
-      const ollamaBody = { 
-        model: olModel, 
-        messages, 
-        stream: false, 
-        options: { num_ctx: 32768, num_predict: 8192 } 
+
+      // Estimate total tokens to pick an appropriate num_ctx.
+      // Rough estimate: 1 token ≈ 4 chars.
+      const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
+      const estimatedTokens = Math.ceil(totalChars / 4);
+      // Set num_ctx to fit the prompt + room for the response, capped at 32k.
+      const numCtx = Math.min(32768, Math.max(4096, estimatedTokens + 4096));
+      // num_predict: leave room but don't exceed what the context allows.
+      const numPredict = Math.min(8192, numCtx - estimatedTokens);
+
+      const ollamaBody = {
+        model: olModel,
+        messages,
+        stream: false,
+        options: { num_ctx: numCtx, num_predict: Math.max(512, numPredict) },
+        keep_alive: '10m'
       };
 
-      const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(ollamaBody),
-      });
+      // Abort if Ollama takes longer than 5 minutes.
+      const ollamaAC = new AbortController();
+      const ollamaTimeout = setTimeout(() => ollamaAC.abort(), 300000);
+      try {
+        const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ollamaBody),
+          signal: ollamaAC.signal,
+        });
+        clearTimeout(ollamaTimeout);
 
-      responseText = data.message?.content || '';
-      // deepseek-r1 etc. embed reasoning inside <think>...</think>.
-      const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
-      if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
-      if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
+        responseText = data.message?.content || '';
+
+        // deepseek-r1 etc. embed reasoning inside <think>...</think>.
+        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
+        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
+
+        // Strip system prompt echo — some models regurgitate the instructions.
+        // Detect and remove if the response starts with a large chunk of the system prompt.
+        if (systemPrompt && responseText.length > 0) {
+          const sysNorm = systemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
+          const resNorm = responseText.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
+          if (resNorm.startsWith(sysNorm.slice(0, 80))) {
+            // Find where the echo ends and keep only the original content.
+            const idx = responseText.toLowerCase().indexOf(message.slice(0, 40).toLowerCase());
+            if (idx > 0) {
+              responseText = responseText.slice(idx + message.slice(0, 40).length).trim();
+            } else {
+              // Brute-force: strip up to the first real paragraph that doesn't match the prompt.
+              const lines = responseText.split('\n');
+              let cut = 0;
+              for (let i = 0; i < lines.length && i < 30; i++) {
+                if (systemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
+                else break;
+              }
+              if (cut > 0) responseText = lines.slice(cut).join('\n').trim();
+            }
+          }
+        }
+
+        if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
+      } catch (ollamaErr) {
+        clearTimeout(ollamaTimeout);
+        if (ollamaErr.name === 'AbortError') {
+          throw new Error('Ollama: délai d\'attente dépassé (5 min). Le modèle est peut-être trop lent ou bloqué.');
+        }
+        throw ollamaErr;
+      }
     }
 
     // ----- Unknown model -----
     else {
       return res.status(400).json({ error: `Unknown model: ${model}` });
+    }
+
+    // Final safety net: strip any response that begins with the anti-leak marker
+    // or echoes the system instructions (applies to ALL providers).
+    if (systemPrompt && responseText) {
+      const markers = ['[REGLE ABSOLUE]', '[ABSOLUTE RULE]', 'Tu es un agent de code', 'You are a coding agent', 'Tu es un assistant de code', 'You are a coding assistant'];
+      for (const mk of markers) {
+        if (responseText.startsWith(mk)) {
+          // Find where the actual answer starts (after the echoed prompt).
+          const newlineIdx = responseText.indexOf('\n\n', mk.length);
+          if (newlineIdx > 0) {
+            responseText = responseText.slice(newlineIdx + 2).trim();
+          }
+          break;
+        }
+      }
     }
 
     res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
@@ -843,6 +908,90 @@ app.post('/api/history', (req, res) => {
     const historyPath = path.join(dirPath, 'history.json');
     fs.writeFileSync(historyPath, JSON.stringify(conversations, null, 2), 'utf-8');
     res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Auto-Updater API
+// ---------------------------------------------------------------------------
+const https = require('https');
+let downloadProgress = 0;
+
+app.post('/api/update/download', (req, res) => {
+  const url = req.body.url;
+  if (!url) return res.status(400).json({ error: 'Missing URL' });
+  
+  const dest = path.join(os.tmpdir(), 'zaalis-update.exe');
+  downloadProgress = 0;
+
+  function downloadFile(fileUrl) {
+    https.get(fileUrl, (response) => {
+      if (response.statusCode === 301 || response.statusCode === 302) {
+        return downloadFile(response.headers.location);
+      }
+      if (response.statusCode !== 200) {
+        // Return 500 but we already sent headers if we handled earlier async stuff, wait we haven't sent response yet.
+        downloadProgress = -1;
+        return;
+      }
+      const totalSize = parseInt(response.headers['content-length'] || '0', 10);
+      let downloadedSize = 0;
+      
+      const file = fs.createWriteStream(dest);
+      response.on('data', (chunk) => {
+        downloadedSize += chunk.length;
+        if (totalSize > 0) {
+          downloadProgress = Math.round((downloadedSize / totalSize) * 100);
+        }
+      });
+      response.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        downloadProgress = 100;
+      });
+    }).on('error', (err) => {
+      downloadProgress = -1;
+      fs.unlink(dest, () => {});
+    });
+  }
+
+  downloadFile(url);
+  res.json({ success: true, dest });
+});
+
+app.get('/api/update/progress', (req, res) => {
+  res.json({ progress: downloadProgress });
+});
+
+app.post('/api/update/install', (req, res) => {
+  try {
+    const installerPath = path.join(os.tmpdir(), 'zaalis-update.exe');
+    const batPath = path.join(os.tmpdir(), 'zaalis-update.bat');
+    
+    const batContent = `
+@echo off
+timeout /t 2 /nobreak > NUL
+taskkill /f /im zaalis.exe > NUL 2>&1
+taskkill /f /im zaalis-server.exe > NUL 2>&1
+start /wait "" "${installerPath}" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS
+start "" "%LOCALAPPDATA%\\Programs\\zaalis\\zaalis.exe"
+del "%~f0"
+`;
+    fs.writeFileSync(batPath, batContent.trim());
+
+    const child = spawn('cmd.exe', ['/c', batPath], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+
+    res.json({ success: true });
+    
+    // Shut down the server gracefully to release locks
+    setTimeout(() => process.exit(0), 500);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

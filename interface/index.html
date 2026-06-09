@@ -50,6 +50,11 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
                 <span>zaalis IDE</span>
             </div>
+            <!-- Bouton Update (Masqué par défaut) -->
+            <button class="btn btn-primary btn-sm update-btn hidden" id="app-update-btn">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="update-btn">restart now for update</span>
+            </button>
         </div>
         <div class="topbar-center">
             <div class="agent-toggle" id="agent-toggle">
@@ -633,6 +638,27 @@
         <div class="modal-body">
             <p class="form-hint" data-i18n="help-hint">Clique sur une question pour voir la réponse.</p>
             <div class="help-list" id="help-list"></div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== UPDATE MODAL ========== -->
+<div class="modal-overlay" id="update-modal">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2 data-i18n="update-header">Mise à jour disponible</h2>
+            <button class="modal-close" id="close-update-modal">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" id="update-release-name">zaalis IDE V...</p>
+            <div class="update-progress-container">
+                <div class="update-progress-bar" id="update-progress-bar"></div>
+            </div>
+            <p class="update-status" id="update-status-text" data-i18n="update-ready">Prêt à télécharger</p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="cancel-update-btn" data-i18n="cancel-btn">Annuler</button>
+            <button class="btn btn-primary" id="confirm-update-btn" data-i18n="update-start-btn">Télécharger & Installer</button>
         </div>
     </div>
 </div>
