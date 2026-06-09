@@ -776,7 +776,12 @@ app.post('/api/chat', async (req, res) => {
 
       // Use the chosen sub-model if provided, else the configured default model.
       const olModel = submodel || ollamaModel;
-      const ollamaBody = { model: olModel, messages, stream: false };
+      const ollamaBody = { 
+        model: olModel, 
+        messages, 
+        stream: false, 
+        options: { num_ctx: 32768, num_predict: 8192 } 
+      };
 
       const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
         method: 'POST',
