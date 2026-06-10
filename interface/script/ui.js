@@ -37,20 +37,41 @@ function updateSubmodelDropdown() {
     subs.forEach(s => {
         const opt = document.createElement('option');
         opt.value = s;
-        opt.textContent = model === 'local' && /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s;
+        opt.textContent = model === 'local'
+            ? (/^hf\.co\//i.test(s) ? prettyModelLabel(s) : s)
+            : modelLabel(s);
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
 }
 
 modelSelect.addEventListener('change', () => {
+    state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
+    
+    // Auto-select the newest submodel for the newly chosen provider
+    const model = modelSelect.value;
+    const subs = model === 'local'
+        ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
+        : (SUBMODELS[model] || []);
+    if (subs.length) {
+        submodelSelect.value = subs[0]; // Newest model is first in the list
+    }
+    
+    state.config.aiSubmodel = submodelSelect.value;
+    saveState();
+    
+    createCustomSelect('ai-submodel');
+    
     checkReasoningCompatibility();
     updateAttachAvailability();
     applyModelColor();
     updateTokenMeter();
 });
 submodelSelect.addEventListener('change', () => {
+    state.config.aiSubmodel = submodelSelect.value;
+    saveState();
+    
     checkReasoningCompatibility();
     updateAttachAvailability();
     updateTokenMeter();
@@ -290,6 +311,56 @@ function updateGutter(content) {
 
 const textarea = $('#code-textarea');
 
+// ==========================================================
+//  SYNTAX HIGHLIGHTING (lightweight, local, VS Code-like colors)
+// ==========================================================
+const escHL = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const HL_KEYWORDS = '(?:const|let|var|function|return|if|else|elif|for|while|do|switch|case|break|continue|new|class|extends|super|this|self|import|from|export|default|async|await|try|catch|finally|throw|typeof|instanceof|in|of|void|delete|yield|static|get|set|public|private|protected|def|lambda|pass|with|as|global|nonlocal|raise|except|and|or|not|is|None|True|False|print|fn|pub|use|mut|struct|enum|impl|trait|match|where|package|func|type|interface|map|range|defer|go|select|chan|namespace|using|include|sizeof|template|virtual|override|final|abstract|implements|module|require|then|begin|echo|local|nil|undefined|true|false|null)';
+const HL_MASTER = new RegExp(
+    '(\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|#[^\\n]*|<!--[\\s\\S]*?-->)' +        // 1 comment
+    '|("(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|`(?:\\\\.|[^`\\\\])*`)' +   // 2 string
+    '|(\\b0x[\\da-fA-F]+\\b|\\b\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?\\b)' +          // 3 number
+    '|(\\b' + HL_KEYWORDS + '\\b)' +                                             // 4 keyword
+    '|([A-Za-z_$][\\w$]*)(?=\\s*\\()' +                                          // 5 function call
+    '|(\\b[A-Z][A-Za-z0-9_]*\\b)',                                              // 6 Type / Class
+    'g'
+);
+function highlightCode(code) {
+    let out = '', last = 0, m;
+    HL_MASTER.lastIndex = 0;
+    while ((m = HL_MASTER.exec(code)) !== null) {
+        if (m.index > last) out += escHL(code.slice(last, m.index));
+        const t = m[0];
+        const cls = m[1] ? 'tok-comment' : m[2] ? 'tok-string' : m[3] ? 'tok-number'
+            : m[4] ? 'tok-keyword' : (m[5] !== undefined ? 'tok-func' : 'tok-type');
+        out += '<span class="' + cls + '">' + escHL(t) + '</span>';
+        last = m.index + t.length;
+        if (t.length === 0) HL_MASTER.lastIndex++;
+    }
+    out += escHL(code.slice(last));
+    return out;
+}
+function syncEditorScroll() {
+    const pre = $('#code-highlight');
+    if (pre) { pre.scrollTop = textarea.scrollTop; pre.scrollLeft = textarea.scrollLeft; }
+    const g = $('#line-gutter');
+    if (g) g.scrollTop = textarea.scrollTop;
+}
+let _hlRaf = 0;
+function renderHighlight() {
+    const pre = $('#code-highlight');
+    const code = pre && pre.querySelector('code');
+    if (!code) return;
+    const val = textarea.value;
+    // Skip highlighting very large files so typing never lags.
+    code.innerHTML = val.length > 200000 ? escHL(val) + '\n' : highlightCode(val) + '\n';
+    syncEditorScroll();
+}
+function scheduleHighlight() {
+    if (_hlRaf) cancelAnimationFrame(_hlRaf);
+    _hlRaf = requestAnimationFrame(renderHighlight);
+}
+
 function renderTabs() {
     const tabBar = $('#tab-bar');
     tabBar.innerHTML = '';
@@ -369,6 +440,7 @@ function switchToFile(filePath) {
         textarea.value = fileData.content;
         updateGutter(fileData.content);
     }
+    renderHighlight();
     renderTabs();
 }
 
@@ -421,6 +493,7 @@ async function openFile(filePath, fileName) {
         $('#code-editor').classList.remove('hidden');
         textarea.value = data.content;
         updateGutter(data.content);
+        renderHighlight();
 
         renderTabs();
     } catch (err) {
@@ -435,15 +508,14 @@ textarea.addEventListener('input', () => {
     const fileData = state.openFiles[state.activeFile];
     fileData.content = textarea.value;
     updateGutter(textarea.value);
+    scheduleHighlight();
     if (!fileData.unsaved) {
         fileData.unsaved = true;
         renderTabs();
     }
 });
 
-textarea.addEventListener('scroll', () => {
-    $('#line-gutter').scrollTop = textarea.scrollTop;
-});
+textarea.addEventListener('scroll', syncEditorScroll);
 
 textarea.addEventListener('keydown', e => {
     if (e.key === 'Tab') {
@@ -498,10 +570,137 @@ async function saveCurrentFile() {
 }
 
 // ==========================================================
+//  EDITOR RIGHT-CLICK MENU — ask the selected AI about the code
+// ==========================================================
+const editorCtxMenu = document.createElement('div');
+editorCtxMenu.className = 'ctx-menu';
+editorCtxMenu.id = 'editor-ctx-menu';
+document.body.appendChild(editorCtxMenu);
+
+function closeEditorCtx() { editorCtxMenu.classList.remove('open'); }
+
+function editorCurrentLine() {
+    const v = textarea.value, pos = textarea.selectionStart;
+    const start = v.lastIndexOf('\n', pos - 1) + 1;
+    let end = v.indexOf('\n', pos);
+    if (end === -1) end = v.length;
+    return { text: v.slice(start, end), lineNo: v.slice(0, start).split('\n').length };
+}
+const editorHasSelection = () => textarea.selectionStart !== textarea.selectionEnd;
+
+function switchToChatView() {
+    $$('.ai-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'chat'));
+    $$('.ai-view').forEach(v => v.classList.toggle('active', v.id === 'view-chat'));
+}
+
+function editorCtxAction(scope) {
+    const lang = state.language || 'fr';
+    const file = state.activeFile || '';
+    const ext = (file.split('.').pop() || '').toLowerCase();
+    const v = textarea.value;
+    let snippet, label;
+    if (scope === 'selection') {
+        snippet = v.slice(textarea.selectionStart, textarea.selectionEnd);
+        label = `${file} (${lang === 'en' ? 'selection' : 'sélection'})`;
+    } else if (scope === 'line') {
+        const li = editorCurrentLine();
+        snippet = li.text;
+        label = `${file} (${lang === 'en' ? 'line' : 'ligne'} ${li.lineNo})`;
+    } else {
+        snippet = v;
+        label = file;
+    }
+    switchToChatView();
+
+    if (scope === 'add') {
+        const input = $('#chat-input');
+        input.value = (lang === 'en'
+            ? `Here is \`${file}\` for context:\n\`\`\`${ext}\n${v}\n\`\`\`\n`
+            : `Voici \`${file}\` pour le contexte :\n\`\`\`${ext}\n${v}\n\`\`\`\n`);
+        input.dispatchEvent(new Event('input'));
+        input.focus();
+        return;
+    }
+
+    if (scope === 'explain') {
+        // Explain the selection if there is one, otherwise the current line.
+        let snip, lbl;
+        if (editorHasSelection()) {
+            snip = v.slice(textarea.selectionStart, textarea.selectionEnd);
+            lbl = `${file} (${lang === 'en' ? 'selection' : 'sélection'})`;
+        } else {
+            const li = editorCurrentLine();
+            snip = li.text;
+            lbl = `${file} (${lang === 'en' ? 'line' : 'ligne'} ${li.lineNo})`;
+        }
+        sendChat(lang === 'en'
+            ? `Explain clearly and simply what this code does and what it is for (from \`${lbl}\`). Do not modify anything, just explain.\n\n\`\`\`${ext}\n${snip}\n\`\`\``
+            : `Explique clairement et simplement à quoi sert ce code et ce qu'il fait (extrait de \`${lbl}\`). Ne modifie rien, explique seulement.\n\n\`\`\`${ext}\n${snip}\n\`\`\``);
+        return;
+    }
+
+    const prompt = lang === 'en'
+        ? `Review the following code from \`${label}\`. Find errors, bugs and possible improvements. For now DO NOT modify anything: list the issues you find, then ask me whether you should fix them. After I confirm and you apply a fix, give me a short report of what you changed.\n\n\`\`\`${ext}\n${snippet}\n\`\`\``
+        : `Analyse le code suivant de \`${label}\`. Repère les erreurs, bugs et améliorations possibles. Pour l'instant NE modifie rien : liste les problèmes trouvés, puis demande-moi si tu dois les corriger. Une fois que je confirme et que tu appliques une correction, fais-moi un court rapport de ce que tu as changé.\n\n\`\`\`${ext}\n${snippet}\n\`\`\``;
+    sendChat(prompt);
+}
+
+function openEditorCtx(x, y) {
+    const lang = state.language || 'fr';
+    const sel = editorHasSelection();
+    const spark = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M12 3l1.9 4.8L19 9.6l-4.8 1.9L12 16l-1.9-4.5L5 9.6l5.1-1.8z"/></svg>';
+    let html = `<div class="ctx-label">${lang === 'en' ? 'Ask the AI' : 'Demander à l’IA'}</div>`;
+    html += `<div class="ctx-item" data-scope="file">${spark}<span>${lang === 'en' ? 'Review the whole file' : 'Analyser le fichier'}</span></div>`;
+    if (sel) html += `<div class="ctx-item" data-scope="selection">${spark}<span>${lang === 'en' ? 'Review the selection' : 'Analyser la sélection'}</span></div>`;
+    else html += `<div class="ctx-item" data-scope="line">${spark}<span>${lang === 'en' ? 'Review this line' : 'Analyser la ligne'}</span></div>`;
+    html += `<div class="ctx-sep"></div>`;
+    html += `<div class="ctx-item" data-scope="add">${spark}<span>${lang === 'en' ? 'Add file to chat' : 'Ajouter le fichier au chat'}</span></div>`;
+    html += `<div class="ctx-item" data-scope="explain">${spark}<span>${lang === 'en' ? 'Explain' : 'Explication'}</span></div>`;
+    editorCtxMenu.innerHTML = html;
+    editorCtxMenu.querySelectorAll('.ctx-item').forEach(it => {
+        it.addEventListener('click', () => { const s = it.dataset.scope; closeEditorCtx(); editorCtxAction(s); });
+    });
+    editorCtxMenu.style.left = Math.min(x, window.innerWidth - 230) + 'px';
+    editorCtxMenu.style.top = Math.min(y, window.innerHeight - 220) + 'px';
+    editorCtxMenu.classList.add('open');
+}
+
+textarea.addEventListener('contextmenu', e => {
+    if (!state.activeFile) return;
+    e.preventDefault();
+    openEditorCtx(e.clientX, e.clientY);
+});
+document.addEventListener('click', e => { if (!editorCtxMenu.contains(e.target)) closeEditorCtx(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeEditorCtx(); });
+window.addEventListener('blur', closeEditorCtx);
+
+// ==========================================================
 //  PROFILE
 // ==========================================================
 function initProfile() {
     $('#profile-pseudo').value = state.profile.pseudo;
+    updateProfileUI();
+}
+
+// Persist the profile on the user's ACCOUNT (server-side), so the pseudo and
+// photo are tied to the email and survive restarts / other machines.
+function saveProfileToServer() {
+    fetch('/api/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pseudo: state.profile.pseudo, photo: state.profile.photo || '' })
+    }).catch(() => {});
+}
+
+// Apply the profile returned by the server (login / register / session check).
+function applyServerProfile(profile) {
+    if (profile && typeof profile === 'object') {
+        if (profile.pseudo) state.profile.pseudo = profile.pseudo;
+        state.profile.photo = profile.photo || '';
+        saveState();
+    }
+    const pseudoInput = $('#profile-pseudo');
+    if (pseudoInput) pseudoInput.value = state.profile.pseudo || '';
     updateProfileUI();
 }
 
@@ -538,6 +737,7 @@ $('#profile-photo-input').addEventListener('change', e => {
         state.profile.photo = String(reader.result || '');
         saveState();
         updateProfileUI();
+        saveProfileToServer();
     };
     reader.readAsDataURL(file);
     e.target.value = '';
@@ -548,6 +748,7 @@ $('#save-profile').addEventListener('click', () => {
     saveState();
     updateProfileUI();
     $('#profile-popup').classList.remove('open');
+    saveProfileToServer();
 });
 
 // MODEL SUB-SELECTOR — moved to top (before INIT)
@@ -620,6 +821,7 @@ function setupAuth() {
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || 'Connexion impossible.');
             showApp(data.email);
+            applyServerProfile(data.profile);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -646,6 +848,7 @@ function setupAuth() {
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || 'Création de compte impossible.');
             showApp(data.email);
+            applyServerProfile(data.profile);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -666,6 +869,7 @@ async function checkAuthAndInit() {
         const data = await res.json();
         if (data && data.authenticated) {
             showApp(data.email);
+            applyServerProfile(data.profile);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -733,3 +937,119 @@ document.addEventListener('click', e => {
 }, true);
 
 // ==========================================================
+//  CUSTOM SELECT DROPDOWNS
+// ==========================================================
+function createCustomSelect(selectId) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+
+    select.style.display = 'none';
+
+    // Remove existing wrapper if present (to avoid duplicates on reload)
+    const existing = document.getElementById(`custom-select-${selectId}`);
+    if (existing) existing.remove();
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'custom-select-container';
+    wrapper.id = `custom-select-${selectId}`;
+
+    const trigger = document.createElement('div');
+    trigger.className = 'custom-select-trigger';
+    
+    const triggerText = document.createElement('span');
+    triggerText.className = 'custom-select-trigger-text';
+    trigger.appendChild(triggerText);
+
+    const arrow = document.createElement('div');
+    arrow.className = 'custom-select-arrow';
+    arrow.innerHTML = `<svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 1L5 5L9 1" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    trigger.appendChild(arrow);
+
+    wrapper.appendChild(trigger);
+
+    const optionsContainer = document.createElement('div');
+    optionsContainer.className = 'custom-select-options';
+    wrapper.appendChild(optionsContainer);
+
+    select.parentNode.insertBefore(wrapper, select.nextSibling);
+
+    function updateOptions() {
+        optionsContainer.innerHTML = '';
+        
+        const selectedOption = select.options[select.selectedIndex];
+        triggerText.textContent = selectedOption ? selectedOption.textContent : '';
+
+        // Update color for model select trigger
+        if (selectId === 'ai-model') {
+            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa' };
+            triggerText.style.color = colors[select.value] || 'var(--text-0)';
+        }
+
+        Array.from(select.options).forEach(opt => {
+            const div = document.createElement('div');
+            div.className = 'custom-select-option';
+            if (opt.value === select.value) {
+                div.classList.add('selected');
+            }
+            div.textContent = opt.textContent;
+            div.dataset.value = opt.value;
+            div.title = opt.title || opt.textContent;
+
+            if (selectId === 'ai-model') {
+                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa' };
+                div.style.color = colors[opt.value] || 'inherit';
+                div.style.fontWeight = '600';
+            }
+
+            div.addEventListener('click', (e) => {
+                e.stopPropagation();
+                select.value = opt.value;
+                select.dispatchEvent(new Event('change'));
+                closeAllCustomSelects();
+            });
+
+            optionsContainer.appendChild(div);
+        });
+    }
+
+    trigger.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = wrapper.classList.contains('open');
+        closeAllCustomSelects();
+        if (!isOpen) {
+            wrapper.classList.add('open');
+        }
+    });
+
+    const observer = new MutationObserver(() => {
+        updateOptions();
+    });
+    observer.observe(select, { childList: true, characterData: true, subtree: true });
+
+    select.addEventListener('change', () => {
+        updateOptions();
+    });
+
+    updateOptions();
+}
+
+function closeAllCustomSelects() {
+    document.querySelectorAll('.custom-select-container').forEach(c => {
+        c.classList.remove('open');
+    });
+}
+
+document.addEventListener('click', () => {
+    closeAllCustomSelects();
+});
+
+// Initialize on DOM load or immediately if ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        createCustomSelect('ai-model');
+        createCustomSelect('ai-submodel');
+    });
+} else {
+    createCustomSelect('ai-model');
+    createCustomSelect('ai-submodel');
+}

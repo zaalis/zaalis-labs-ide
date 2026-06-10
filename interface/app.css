@@ -84,6 +84,13 @@
 .form-hint{font-size:12px;color:var(--text-3);margin-bottom:10px;line-height:1.5;}
 .form-group{margin-bottom:10px;}
 .form-group label{display:block;font-size:12px;color:var(--text-1);margin-bottom:3px;font-weight:500;}
+/* API key "saved" indicator — discreet green pill next to the label */
+.key-label-row{display:flex;align-items:center;justify-content:space-between;gap:8px;}
+.key-label-row label{margin-bottom:0;}
+.key-status{display:none;align-items:center;gap:5px;font-size:11px;font-weight:500;color:var(--green);opacity:0;transition:opacity .2s ease;white-space:nowrap;}
+.key-status.set{display:inline-flex;opacity:1;}
+.key-status::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(34,197,94,.15);flex-shrink:0;}
+.key-status .key-last4{color:var(--text-2);font-weight:400;font-family:var(--font-mono);}
 .form-group input{width:100%;background:var(--bg-3);border:1px solid var(--border);padding:7px 10px;border-radius:var(--radius);font-size:13px;font-family:var(--font-mono);outline:none;transition:border-color .15s;}
 .form-group input:focus{border-color:var(--accent);}
 .modal-footer{padding:10px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px;}
@@ -484,6 +491,8 @@ details.reasoning .reasoning-body{margin-top:6px;padding:6px 0 2px;color:var(--t
 .confirm-msg{font-size:13px;color:var(--text-1);line-height:1.5;white-space:pre-wrap;word-break:break-word;}
 .btn-danger{background:var(--red);color:#fff;}
 .btn-danger:hover{background:#dc2626;}
+.btn-warning{background:#e8830c;color:#fff;}
+.btn-warning:hover{background:#cf7300;}
 
 /* ========== UPDATE MODAL & BUTTON ========== */
 .update-btn {
@@ -491,21 +500,102 @@ details.reasoning .reasoning-body{margin-top:6px;padding:6px 0 2px;color:var(--t
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    background-color: var(--primary);
+    background: var(--accent);
     color: #fff;
     border: none;
-    border-radius: 4px;
-    padding: 4px 10px;
+    border-radius: 8px;
+    padding: 5px 12px;
     font-size: 11px;
-    font-weight: 500;
+    font-weight: 600;
     cursor: pointer;
-    transition: background-color 0.15s ease;
+    transition: background 0.15s ease;
 }
 .update-btn.hidden {
     display: none;
 }
 .update-btn:hover {
-    background-color: var(--primary-hover);
+    background: var(--accent-hover);
+}
+.update-btn.version-label {
+    background: transparent;
+    color: var(--text-3);
+    border: 0;
+    padding: 0;
+    cursor: default;
+    font-weight: 500;
+}
+.update-btn.version-label:hover {
+    background: transparent;
+}
+.update-btn.version-label svg {
+    display: none;
+}
+
+.update-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 10px 0 14px;
+}
+.update-step {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    color: var(--text-3);
+}
+.update-step-badge {
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-3);
+    color: var(--text-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 12px;
+    font-weight: 700;
+}
+.update-step-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+.update-step-text strong {
+    font-size: 12px;
+    color: var(--text-1);
+}
+.update-step-text span {
+    font-size: 12px;
+    line-height: 1.4;
+}
+.update-step.active .update-step-badge {
+    border-color: var(--accent);
+    color: #fff;
+    background: var(--accent);
+}
+.update-step.done .update-step-badge {
+    border-color: var(--green);
+    background: var(--green);
+    color: #fff;
+}
+.update-step.done .step-number {
+    display: none;
+}
+.update-step .step-check {
+    display: none;
+    color: #fff;
+    font-size: 15px;
+    line-height: 1;
+}
+.update-step.done .step-check {
+    display: block;
+}
+.update-step.done .update-step-text strong,
+.update-step.active .update-step-text strong {
+    color: var(--text-0);
 }
 
 .update-progress-container {
@@ -519,12 +609,46 @@ details.reasoning .reasoning-body{margin-top:6px;padding:6px 0 2px;color:var(--t
 .update-progress-bar {
     height: 100%;
     width: 0%;
-    background-color: var(--primary);
+    background: linear-gradient(90deg, #a855f7, #6366f1, #3b82f6, #6366f1, #a855f7);
+    background-size: 200% 100%;
+    box-shadow: 0 0 8px rgba(99, 102, 241, 0.6);
+    border-radius: 4px;
     transition: width 0.3s ease;
+    animation: update-bar-shimmer 3s linear infinite;
+}
+@keyframes update-bar-shimmer {
+    0%   { background-position: 0% 0; }
+    100% { background-position: -200% 0; }
 }
 .update-status {
     font-size: 12px;
     color: var(--text-2);
-    text-align: right;
+    text-align: left;
     margin: 0;
+    line-height: 1.45;
+    word-break: break-word;
+}
+.update-waiting {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    margin: 18px 0 6px 0;
+    font-size: 13px;
+    color: var(--text-2);
+}
+.update-waiting.hidden {
+    display: none;
+}
+.update-spinner {
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--bg-3);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: update-spin 0.7s linear infinite;
+    flex-shrink: 0;
+}
+@keyframes update-spin {
+    to { transform: rotate(360deg); }
 }

@@ -6,7 +6,10 @@
 ; =====================================================================
 [Setup]
 AppName=zaalis IDE
-AppVersion=1.0
+AppVersion=v1.0.9
+AppVerName=zaalis IDE v1.0.9
+VersionInfoVersion=1.0.9
+VersionInfoProductVersion=1.0.9
 AppPublisher=zaalis
 DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
@@ -20,6 +23,8 @@ UninstallDisplayIcon={app}\zaalis.exe
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+WizardImageFile=wizard-image.bmp
+WizardSmallImageFile=wizard-small.bmp
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -40,4 +45,16 @@ Name: "{group}\zaalis IDE";                    Filename: "{app}\zaalis.exe"; Wor
 Name: "{group}\Desinstaller zaalis IDE";       Filename: "{uninstallexe}"
 
 [Run]
+; Lancement manuel (installation interactive) — case a cocher en fin d'assistant.
+; En mise a jour silencieuse, c'est le script de l'app (bat) qui relance l'IDE.
 Filename: "{app}\zaalis.exe"; Description: "Lancer zaalis IDE"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function InitializeSetup(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /F /T /IM zaalis.exe >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /F /T /IM zaalis-server.exe >NUL 2>NUL', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Result := True;
+end;

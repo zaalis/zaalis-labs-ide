@@ -1,5 +1,6 @@
 const express = require('express');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
@@ -11,17 +12,43 @@ const PORT = process.env.PORT || 3000;
 // When packaged into an .exe (pkg), __dirname points inside the read-only
 // snapshot, so we use the folder next to the executable instead.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+let APP_VERSION = '0.0.0';
+try {
+  APP_VERSION = require('./package.json').version || APP_VERSION;
+} catch {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf-8'));
+    APP_VERSION = pkg.version || APP_VERSION;
+  } catch {}
+}
 
 // ---------------------------------------------------------------------------
 // Local accounts + sessions (no external dependency)
 // ---------------------------------------------------------------------------
 // Accounts and per-user chats are stored as local files under server-data/.
 // Passwords are hashed with scrypt; sessions are signed HttpOnly cookies.
-const DATA_DIR = path.join(APP_DIR, 'server-data');
+// When packaged, the data lives in %LOCALAPPDATA%\zaalis\server-data — a
+// stable per-user location that survives app updates and reinstalls
+// (storing it next to the exe meant losing accounts/chats on every update).
+function resolveDataDir() {
+  if (process.pkg && process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  }
+  return path.join(APP_DIR, 'server-data');
+}
+const DATA_DIR = resolveDataDir();
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
 const COOKIE_NAME = 'zaalis_session';
+
+// One-time migration: copy data from the old location (next to the exe)
+// so existing accounts and chats are kept.
+const LEGACY_DATA_DIR = path.join(APP_DIR, 'server-data');
+if (path.resolve(DATA_DIR) !== path.resolve(LEGACY_DATA_DIR) &&
+    !fs.existsSync(USERS_FILE) && fs.existsSync(path.join(LEGACY_DATA_DIR, 'users.json'))) {
+  try { fs.cpSync(LEGACY_DATA_DIR, DATA_DIR, { recursive: true, force: false }); } catch {}
+}
 
 fs.mkdirSync(CHATS_DIR, { recursive: true });
 
@@ -32,6 +59,47 @@ try {
 } catch {
   SESSION_SECRET = crypto.randomBytes(32).toString('hex');
   fs.writeFileSync(SECRET_FILE, SESSION_SECRET);
+}
+
+// ---------------------------------------------------------------------------
+// API key vault — keys are encrypted at rest (AES-256-GCM) with a key derived
+// from the local install secret, stored per user and never sent back in clear.
+// ---------------------------------------------------------------------------
+const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
+
+function encryptSecret(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', VAULT_KEY, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  return iv.toString('base64') + '.' + enc.toString('base64') + '.' + cipher.getAuthTag().toString('base64');
+}
+function decryptSecret(blob) {
+  try {
+    const [iv, data, tag] = String(blob).split('.').map((s) => Buffer.from(s, 'base64'));
+    const d = crypto.createDecipheriv('aes-256-gcm', VAULT_KEY, iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(data), d.final()]).toString('utf8');
+  } catch { return ''; }
+}
+// Decrypted keys for a user (used server-side only, never returned to a client).
+function userApiKeys(user) {
+  const out = {};
+  for (const p of KEY_PROVIDERS) {
+    const enc = user && user.apiKeys && user.apiKeys[p];
+    if (enc) { const v = decryptSecret(enc); if (v) out[p] = v; }
+  }
+  return out;
+}
+// Masked status, safe to send to the client: { set, last4 } per provider.
+function apiKeysStatus(user) {
+  const st = {};
+  for (const p of KEY_PROVIDERS) {
+    const enc = user && user.apiKeys && user.apiKeys[p];
+    const v = enc ? decryptSecret(enc) : '';
+    st[p] = { set: !!v, last4: v ? v.slice(-4) : '' };
+  }
+  return st;
 }
 
 function loadUsers() {
@@ -132,7 +200,7 @@ app.use((req, res, next) => {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
-  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=()');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(self), camera=()');
   // Never cache the app shell, so updates always load (no stale script.js).
   res.setHeader('Cache-Control', 'no-store');
   next();
@@ -140,7 +208,11 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '50mb' }));
 // The web interface (index.html, css, js) lives in the interface/ folder.
-app.use(express.static(path.join(APP_DIR, 'interface')));
+app.use(express.static(path.join(APP_DIR, 'interface'), {
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  }
+}));
 
 // ---------------------------------------------------------------------------
 // AUTH API (public)
@@ -163,11 +235,15 @@ app.post('/api/auth/register', (req, res) => {
     salt,
     hash: hashPassword(password, salt),
     createdAt: new Date().toISOString(),
+    profile: {
+      pseudo: emailNorm.split('@')[0],
+      photo: ''
+    }
   };
   users.push(user);
   saveUsers(users);
   setSessionCookie(res, makeToken(user.id));
-  res.json({ email: user.email });
+  res.json({ email: user.email, profile: user.profile });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -180,7 +256,7 @@ app.post('/api/auth/login', (req, res) => {
     return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
   }
   setSessionCookie(res, makeToken(user.id));
-  res.json({ email: user.email });
+  res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
 });
 
 app.post('/api/auth/logout', (req, res) => {
@@ -191,18 +267,69 @@ app.post('/api/auth/logout', (req, res) => {
 app.get('/api/auth/me', (req, res) => {
   // Status check: always 200 so the browser console isn't polluted with a 401.
   const user = currentUser(req);
-  res.json({ authenticated: !!user, email: user ? user.email : null });
+  res.json({
+    authenticated: !!user,
+    email: user ? user.email : null,
+    profile: user ? (user.profile || { pseudo: user.email.split('@')[0], photo: '' }) : null
+  });
 });
 
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
 app.use('/api', (req, res, next) => {
-  if (req.path.startsWith('/auth/')) return next();
+  if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
   const user = currentUser(req);
   if (!user) return res.status(401).json({ error: 'Authentification requise.' });
   req.user = user;
   next();
+});
+
+// Update profile
+app.post('/api/profile', (req, res) => {
+  const { pseudo, photo } = req.body || {};
+  const users = loadUsers();
+  const userIdx = users.findIndex((u) => u.id === req.user.id);
+  if (userIdx === -1) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+
+  const currentPseudo = String(pseudo || '').trim();
+  users[userIdx].profile = {
+    pseudo: currentPseudo || req.user.email.split('@')[0],
+    photo: String(photo || '')
+  };
+  saveUsers(users);
+  res.json({ success: true, profile: users[userIdx].profile });
+});
+
+
+// ---------------------------------------------------------------------------
+// API KEYS API (protected) — write-only vault with masked read-back
+// ---------------------------------------------------------------------------
+// GET  /api/keys -> { keys: { openai: { set, last4 }, ... } }   (never the key)
+app.get('/api/keys', (req, res) => {
+  res.json({ keys: apiKeysStatus(req.user) });
+});
+
+// PUT /api/keys  { keys: { openai: 'sk-...', anthropic: null, ... } }
+// Non-empty string = set/replace (encrypted). null = delete. Absent/'' = keep.
+app.put('/api/keys', (req, res) => {
+  try {
+    const incoming = (req.body && req.body.keys) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    for (const p of KEY_PROVIDERS) {
+      if (!(p in incoming)) continue;
+      const v = incoming[p];
+      if (v === null) delete user.apiKeys[p];
+      else if (typeof v === 'string' && v.trim()) user.apiKeys[p] = encryptSecret(v.trim());
+    }
+    saveUsers(users);
+    res.json({ keys: apiKeysStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -564,7 +691,9 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'model and message are required' });
     }
 
-    const keys = config?.keys || {};
+    // API keys come from the encrypted per-user vault. Keys still sent by an
+    // older client (pre-1.0.9 localStorage) are accepted as a fallback only.
+    const keys = { ...(config?.keys || {}), ...userApiKeys(req.user) };
     const ollamaUrl = config?.ollamaUrl || 'http://localhost:11434';
     const ollamaModel = config?.ollamaModel || 'llama3';
 
@@ -589,7 +718,7 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
-      const payload = { model: submodel || 'gpt-4o', messages };
+      const payload = { model: submodel || 'gpt-5.5', messages };
 
       const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
       if (isReasoningModel && reasoningLevel !== undefined) {
@@ -632,7 +761,7 @@ app.post('/api/chat', async (req, res) => {
       };
       if (systemPrompt) body.system = systemPrompt;
 
-      const isThinkingModel = submodel && (submodel.includes('3-7') || submodel.includes('4.8'));
+      const isThinkingModel = submodel && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('fable'));
       if (isThinkingModel && reasoningLevel !== undefined && reasoningLevel > 0) {
         const budgets = [0, 1024, 2048, 4096, 8192];
         const budget = budgets[reasoningLevel] || 1024;
@@ -697,36 +826,66 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'grok') {
       if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
 
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of history) messages.push({ role: h.role, content: h.content });
-      messages.push({
-        role: 'user',
-        content: images.length
-          ? [
-              { type: 'text', text: message },
-              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
-            ]
-          : message,
-      });
+      const isImageModel = submodel && (submodel === 'grok-2-image-gen' || submodel === 'grok-image-gen');
 
-      const grokPayload = { model: submodel || 'grok-3', messages };
-      // Only reasoning sub-models accept reasoning_effort (low | high).
-      if (submodel && submodel.includes('reasoning') && reasoningLevel > 0) {
-        grokPayload.reasoning_effort = reasoningLevel >= 2 ? 'high' : 'low';
+      if (isImageModel) {
+        const grokModelName = submodel === 'grok-2-image-gen' ? 'grok-imagine-image-pro' : 'grok-imagine-image';
+        const grokPayload = {
+          prompt: message,
+          model: grokModelName,
+          n: 1,
+          response_format: 'b64_json'
+        };
+
+        const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${keys.grok}`,
+          },
+          body: JSON.stringify(grokPayload),
+        });
+
+        const b64 = data.data?.[0]?.b64_json;
+        if (b64) {
+          // Use the user's prompt as the image title (sanitized for markdown).
+          const title = String(message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
+          responseText = `![${title}](data:image/png;base64,${b64})`;
+        } else {
+          responseText = "Erreur: Aucune image n'a été générée par l'API.";
+        }
+      } else {
+        const messages = [];
+        if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+        for (const h of history) messages.push({ role: h.role, content: h.content });
+        messages.push({
+          role: 'user',
+          content: images.length
+            ? [
+                { type: 'text', text: message },
+                ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
+              ]
+            : message,
+        });
+
+        const grokPayload = { model: submodel || 'grok-4.3', messages };
+        // Only reasoning sub-models accept reasoning_effort (low | high).
+        if (submodel && submodel.includes('reasoning') && reasoningLevel > 0) {
+          grokPayload.reasoning_effort = reasoningLevel >= 2 ? 'high' : 'low';
+        }
+
+        const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${keys.grok}`,
+          },
+          body: JSON.stringify(grokPayload),
+        });
+
+        responseText = data.choices?.[0]?.message?.content || '';
+        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
       }
-
-      const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${keys.grok}`,
-        },
-        body: JSON.stringify(grokPayload),
-      });
-
-      responseText = data.choices?.[0]?.message?.content || '';
-      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
     // ----- Mistral (Le Chat) -----
@@ -917,84 +1076,133 @@ app.post('/api/history', (req, res) => {
 // Auto-Updater API
 // ---------------------------------------------------------------------------
 const https = require('https');
+
+function parseVersionTag(tag) {
+  const match = String(tag || '').trim().match(/v?(\d+)\.(\d+)\.(\d+)/i);
+  if (!match) return null;
+  return match.slice(1).map(n => parseInt(n, 10));
+}
+
+function compareVersionTags(a, b) {
+  const va = parseVersionTag(a);
+  const vb = parseVersionTag(b);
+  if (!va || !vb) return String(a || '').toLowerCase().localeCompare(String(b || '').toLowerCase());
+  for (let i = 0; i < 3; i++) {
+    if (va[i] !== vb[i]) return va[i] - vb[i];
+  }
+  return 0;
+}
+
+// Proxy endpoint: check GitHub releases server-side (no CSP/CORS issues)
+app.get('/api/check-update', async (req, res) => {
+  try {
+    const ghRes = await fetch('https://api.github.com/repos/zaalis/zaalis-labs-ide/releases/latest', {
+      headers: { 'User-Agent': 'zaalis-ide-updater', Accept: 'application/vnd.github.v3+json' }
+    });
+    if (!ghRes.ok) return res.status(502).json({ error: 'GitHub API error ' + ghRes.status });
+    const release = await ghRes.json();
+    const asset = (release.assets || []).find(a => a.name === 'zaalis-setup.exe');
+    const latestVersion = release.tag_name || null;
+    res.json({
+      tag_name: latestVersion,
+      name: release.name || latestVersion || null,
+      currentVersion: APP_VERSION,
+      updateAvailable: latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false,
+      downloadUrl: asset ? asset.browser_download_url : null
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
 let downloadProgress = 0;
+let downloadedInstallerPath = null;
 
 app.post('/api/update/download', (req, res) => {
-  const url = req.body.url;
-  if (!url) return res.status(400).json({ error: 'Missing URL' });
-  
-  const dest = path.join(os.tmpdir(), 'zaalis-update.exe');
-  downloadProgress = 0;
+  try {
+    const dlUrl = req.body.url;
+    if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
 
-  function downloadFile(fileUrl) {
-    https.get(fileUrl, (response) => {
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        return downloadFile(response.headers.location);
-      }
-      if (response.statusCode !== 200) {
-        // Return 500 but we already sent headers if we handled earlier async stuff, wait we haven't sent response yet.
-        downloadProgress = -1;
-        return;
-      }
-      const totalSize = parseInt(response.headers['content-length'] || '0', 10);
-      let downloadedSize = 0;
-      
-      const file = fs.createWriteStream(dest);
-      response.on('data', (chunk) => {
-        downloadedSize += chunk.length;
-        if (totalSize > 0) {
-          downloadProgress = Math.round((downloadedSize / totalSize) * 100);
+    const downloadsDir = path.join(os.homedir(), 'Downloads');
+    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
+    downloadProgress = 0;
+    downloadedInstallerPath = null;
+    try { fs.unlinkSync(dest); } catch {}
+
+    // Use plain https with manual redirect following (most compatible with pkg).
+    function doDownload(fileUrl, redirects) {
+      if (redirects > 10) { downloadProgress = -1; return; }
+      const mod = fileUrl.startsWith('https') ? https : require('http');
+      mod.get(fileUrl, { headers: { 'User-Agent': 'zaalis-updater' } }, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307) {
+          return doDownload(response.headers.location, redirects + 1);
         }
-      });
-      response.pipe(file);
-      file.on('finish', () => {
-        file.close();
-        downloadProgress = 100;
-      });
-    }).on('error', (err) => {
-      downloadProgress = -1;
-      fs.unlink(dest, () => {});
-    });
-  }
+        if (response.statusCode !== 200) {
+          downloadProgress = -1;
+          return;
+        }
+        const totalSize = parseInt(response.headers['content-length'] || '0', 10);
+        let downloadedSize = 0;
+        const file = fs.createWriteStream(dest);
+        response.on('data', (chunk) => {
+          downloadedSize += chunk.length;
+          if (totalSize > 0) downloadProgress = Math.round((downloadedSize / totalSize) * 100);
+        });
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          downloadedInstallerPath = dest;
+          downloadProgress = 100;
+        });
+      }).on('error', () => { downloadProgress = -1; fs.unlink(dest, () => {}); });
+    }
 
-  downloadFile(url);
-  res.json({ success: true, dest });
+    doDownload(dlUrl, 0);
+    res.json({ success: true, dest });
+  } catch (err) {
+    downloadProgress = -1;
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/update/progress', (req, res) => {
-  res.json({ progress: downloadProgress });
+  res.json({ progress: downloadProgress, dest: downloadedInstallerPath });
 });
 
 app.post('/api/update/install', (req, res) => {
   try {
-    const installerPath = path.join(os.tmpdir(), 'zaalis-update.exe');
-    const batPath = path.join(os.tmpdir(), 'zaalis-update.bat');
-    
-    const batContent = `
-@echo off
-timeout /t 2 /nobreak > NUL
-taskkill /f /im zaalis.exe > NUL 2>&1
-taskkill /f /im zaalis-server.exe > NUL 2>&1
-start /wait "" "${installerPath}" /VERYSILENT /SUPPRESSMSGBOXES /FORCECLOSEAPPLICATIONS
-start "" "%LOCALAPPDATA%\\Programs\\zaalis\\zaalis.exe"
-del "%~f0"
-`;
-    fs.writeFileSync(batPath, batContent.trim());
+    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
+    if (!fs.existsSync(installerPath)) {
+      return res.status(409).json({ error: 'Installer not downloaded yet.' });
+    }
 
-    const child = spawn('cmd.exe', ['/c', batPath], {
+    // Ask Explorer to open the installer. Explorer owns the process, so it is
+    // independent from the IDE/server process tree if the app needs to close.
+    const child = spawn('explorer.exe', [installerPath], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     });
     child.unref();
 
-    res.json({ success: true });
-    
-    // Shut down the server gracefully to release locks
-    setTimeout(() => process.exit(0), 500);
+    res.json({ success: true, installerPath });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
+// Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
+// fichiers avant que l'utilisateur lance l'installateur manuellement.
+app.post('/api/app/close', (req, res) => {
+  res.json({ success: true });
+  setTimeout(() => {
+    try {
+      spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
+        detached: true, stdio: 'ignore', windowsHide: true
+      }).unref();
+    } catch {}
+    process.exit(0);
+  }, 300);
 });
 
 // ---------------------------------------------------------------------------
@@ -1011,9 +1219,17 @@ async function startOllamaIfNeeded() {
     path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
     'ollama',
   ];
-  const exe = candidates.find((p) => p === 'ollama' || (p && fs.existsSync(p))) || 'ollama';
+  // Only try executables that actually exist on disk (skip the bare 'ollama'
+  // fallback unless it's the only candidate, AND it resolves in PATH).
+  const exe = candidates.find((p) => {
+    if (p === 'ollama') return false; // skip bare name; checked below
+    return p && fs.existsSync(p);
+  });
+  if (!exe) return; // Ollama not installed -> silently skip
   try {
     const child = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+    // CRITICAL: listen for 'error' so Node doesn't crash on ENOENT / EACCES.
+    child.on('error', () => { /* Ollama failed to start -> ignore */ });
     child.unref();
   } catch { /* Ollama not installed -> ignore */ }
 }

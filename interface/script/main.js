@@ -5,19 +5,99 @@ $('#close-modal').addEventListener('click', () => $('#settings-modal').classList
 $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
-$('#save-btn').addEventListener('click', () => {
-    state.config.keys.openai = $('#key-openai').value.trim();
-    state.config.keys.anthropic = $('#key-anthropic').value.trim();
-    state.config.keys.google = $('#key-google').value.trim();
-    state.config.keys.grok = $('#key-grok').value.trim();
-    state.config.keys.mistral = $('#key-mistral').value.trim();
+const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+
+function updateApiKeyInputs(status) {
+    const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
+    API_KEY_FIELDS.forEach(provider => {
+        const input = $('#key-' + provider);
+        if (!input) return;
+        const info = status && status[provider];
+        const set = !!(info && info.set);
+        input.value = '';
+        // When a key is already stored, hint that leaving the field empty keeps it.
+        input.placeholder = set
+            ? '••••••••••••'
+            : input.dataset.defaultPlaceholder || input.placeholder;
+
+        // Discreet green "saved" badge next to the label.
+        const badge = $('#key-status-' + provider);
+        if (badge) {
+            badge.classList.toggle('set', set);
+            badge.innerHTML = set
+                ? `${savedLabel}${info.last4 ? ` <span class="key-last4">····${info.last4}</span>` : ''}`
+                : '';
+        }
+    });
+}
+
+async function loadApiKeyStatus() {
+    try {
+        const res = await fetch('/api/keys');
+        if (!res.ok) return;
+        const data = await res.json();
+        updateApiKeyInputs(data.keys || {});
+    } catch {}
+}
+
+async function migrateLegacyApiKeys() {
+    if (!legacyApiKeysForMigration || !Object.keys(legacyApiKeysForMigration).length) return;
+    try {
+        const res = await fetch('/api/keys', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: legacyApiKeysForMigration })
+        });
+        if (res.ok) {
+            legacyApiKeysForMigration = null;
+            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+            saveState();
+            const data = await res.json();
+            updateApiKeyInputs(data.keys || {});
+        }
+    } catch {}
+}
+
+async function refreshSecureSettings() {
+    await migrateLegacyApiKeys();
+    await loadApiKeyStatus();
+}
+
+API_KEY_FIELDS.forEach(provider => {
+    const input = $('#key-' + provider);
+    if (input) input.dataset.defaultPlaceholder = input.placeholder;
+});
+
+$('#save-btn').addEventListener('click', async () => {
+    const keys = {};
+    API_KEY_FIELDS.forEach(provider => {
+        const value = ($('#key-' + provider)?.value || '').trim();
+        if (value) keys[provider] = value;
+    });
     state.config.ollamaUrl = $('#ollama-url').value.trim();
     // Default Ollama model = first of the managed list.
     state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
     saveState();
     const btn = $('#save-btn');
-    btn.textContent = 'OK';
-    setTimeout(() => { btn.textContent = 'Enregistrer'; $('#settings-modal').classList.remove('active'); }, 500);
+    const originalText = btn.textContent;
+    btn.disabled = true;
+    try {
+        if (Object.keys(keys).length) {
+            const res = await fetch('/api/keys', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keys })
+            });
+            if (!res.ok) throw new Error('keys');
+            const data = await res.json();
+            updateApiKeyInputs(data.keys || {});
+        }
+        btn.textContent = 'OK';
+        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
+    } catch {
+        btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
+        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1200);
+    }
 });
 
 // ----- Ollama models manager (Settings) -----
@@ -107,6 +187,7 @@ async function refreshInstalled() {
     try {
         const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
         const res = await fetch('/api/ollama-models?url=' + url);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         _installedModels = new Set((data.models || []).map(normName));
     } catch { _installedModels = new Set((state.config.ollamaModels || []).map(normName)); }
@@ -160,6 +241,7 @@ async function expandQuants(card) {
     let quants = [];
     try {
         const res = await fetch('/api/hf-files?id=' + encodeURIComponent(repo));
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         quants = data.quants || [];
     } catch {}
@@ -216,6 +298,7 @@ function renderCatalog() {
 // --- Hugging Face helpers ---
 async function fetchHf(q, sort, limit) {
     const res = await fetch(`/api/hf-search?q=${encodeURIComponent(q || '')}&sort=${sort}&limit=${limit}`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     if (data.error) throw new Error(data.error);
     return data.models || [];
@@ -285,27 +368,76 @@ async function hfSearch(q) {
 // ==========================================================
 //  AUTO-UPDATE LOGIC
 // ==========================================================
-const CURRENT_VERSION = "v1.0.0"; // Current internal version
 let pendingUpdateUrl = null;
+let downloadedUpdatePath = null;
 
 async function checkForUpdates() {
     try {
-        const res = await fetch('https://api.github.com/repos/zaalis/zaalis-labs-ide/releases/latest');
+        // Use server-side proxy to avoid CSP/CORS issues
+        const res = await fetch('/api/check-update');
         if (!res.ok) return;
-        const release = await res.json();
-        
-        const asset = release.assets.find(a => a.name === 'zaalis-setup.exe');
-        if (asset && release.tag_name !== CURRENT_VERSION) {
-            pendingUpdateUrl = asset.browser_download_url;
-            const btn = document.getElementById('app-update-btn');
+        const data = await res.json();
+
+        const btn = document.getElementById('app-update-btn');
+        if (data.downloadUrl && data.updateAvailable) {
+            pendingUpdateUrl = data.downloadUrl;
             if (btn) {
                 btn.classList.remove('hidden');
+                btn.classList.remove('version-label');
+                btn.disabled = false;
+                const label = btn.querySelector('span');
+                if (label) {
+                    label.dataset.i18n = 'update-btn';
+                    label.textContent = "Mise a jour disponible";
+                }
                 btn.onclick = () => {
                     const releaseNameEl = document.getElementById('update-release-name');
-                    if (releaseNameEl) releaseNameEl.textContent = release.name || release.tag_name;
+                    const progContainer = document.getElementById('update-progress-container');
+                    const waiting = document.getElementById('update-waiting');
+                    const statusText = document.getElementById('update-status-text');
+                    const progressBar = document.getElementById('update-progress-bar');
+                    const stepDownload = document.getElementById('update-step-download');
+                    const stepInstall = document.getElementById('update-step-install');
+                    if (releaseNameEl) releaseNameEl.textContent = data.name || data.tag_name;
+                    if (progContainer) progContainer.classList.remove('hidden');
+                    if (waiting) waiting.classList.add('hidden');
+                    if (statusText) statusText.textContent = "Pret a telecharger";
+                    if (progressBar) progressBar.style.width = '0%';
+                    if (stepDownload) {
+                        stepDownload.classList.add('active');
+                        stepDownload.classList.remove('done');
+                    }
+                    if (stepInstall) {
+                        stepInstall.classList.remove('active', 'done');
+                    }
+                    downloadedUpdatePath = null;
+                    if (confirmUpdateBtn) {
+                        confirmUpdateBtn.disabled = false;
+                        confirmUpdateBtn.textContent = "Telecharger";
+                        confirmUpdateBtn.classList.remove('btn-warning');
+                        confirmUpdateBtn.classList.add('btn-primary');
+                        confirmUpdateBtn.onclick = null;
+                    }
+                    const cancelBtn = document.getElementById('cancel-update-btn');
+                    if (cancelBtn) {
+                        cancelBtn.disabled = false;
+                        cancelBtn.textContent = "Annuler";
+                        cancelBtn.classList.remove('hidden');
+                    }
                     $('#update-modal').classList.add('active');
                 };
             }
+        } else if (btn) {
+            pendingUpdateUrl = null;
+            btn.classList.remove('hidden');
+            btn.classList.add('version-label');
+            btn.disabled = true;
+            const label = btn.querySelector('span');
+            if (label) {
+                label.removeAttribute('data-i18n');
+                label.textContent = data.currentVersion ? `v${String(data.currentVersion).replace(/^v/i, '')}` : 'A jour';
+            }
+            btn.onclick = null;
         }
     } catch (err) {
         console.error("Update check failed:", err);
@@ -317,52 +449,87 @@ const confirmUpdateBtn = document.getElementById('confirm-update-btn');
 if (confirmUpdateBtn) {
     confirmUpdateBtn.addEventListener('click', async () => {
         if (!pendingUpdateUrl) return;
-        
+        if (downloadedUpdatePath) return;
+
         confirmUpdateBtn.disabled = true;
-        document.getElementById('cancel-update-btn').disabled = true;
+        const cancelBtn = document.getElementById('cancel-update-btn');
+        if (cancelBtn) cancelBtn.disabled = true;
         const statusText = document.getElementById('update-status-text');
         const progressBar = document.getElementById('update-progress-bar');
-        
-        statusText.textContent = "Téléchargement en cours...";
-        
+        const progContainer = document.getElementById('update-progress-container');
+        const waiting = document.getElementById('update-waiting');
+        const stepDownload = document.getElementById('update-step-download');
+        const stepInstall = document.getElementById('update-step-install');
+
+        if (progContainer) progContainer.classList.remove('hidden');
+        if (waiting) waiting.classList.add('hidden');
+        if (progressBar) progressBar.style.width = '0%';
+        if (stepDownload) stepDownload.classList.add('active');
+        if (stepInstall) stepInstall.classList.remove('active');
+        statusText.textContent = "Telechargement en cours...";
+
         try {
-            // Demande au serveur de télécharger l'installateur
             const res = await fetch('/api/update/download', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url: pendingUpdateUrl })
             });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
             const data = await res.json();
-            
             if (data.error) throw new Error(data.error);
-            
-            // Polling de la progression
+
             const interval = setInterval(async () => {
-                const pRes = await fetch('/api/update/progress');
-                const pData = await pRes.json();
-                
-                if (pData.progress >= 0) {
-                    progressBar.style.width = pData.progress + '%';
-                    statusText.textContent = \`Téléchargement: \${pData.progress}%\`;
-                }
-                
-                if (pData.progress === 100) {
+                try {
+                    const pRes = await fetch('/api/update/progress');
+                    if (!pRes.ok) return;
+                    const pData = await pRes.json();
+
+                    if (pData.progress >= 0) {
+                        progressBar.style.width = pData.progress + '%';
+                        statusText.textContent = `Telechargement: ${pData.progress}%`;
+                    }
+
+                    if (pData.progress === 100) {
+                        clearInterval(interval);
+                        if (progContainer) progContainer.classList.remove('hidden');
+                        if (waiting) waiting.classList.add('hidden');
+                        progressBar.style.width = '100%';
+                        downloadedUpdatePath = pData.dest || data.dest || "C:\\Users\\boque\\Downloads\\zaalis-update.exe";
+                        if (stepDownload) {
+                            stepDownload.classList.remove('active');
+                            stepDownload.classList.add('done');
+                        }
+                        if (stepInstall) stepInstall.classList.add('active');
+                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis lancez zaalis-update.exe depuis votre dossier Telechargements.";
+                        // Un seul bouton orange "Fermer l'IDE" qui ferme totalement l'app.
+                        if (cancelBtn) cancelBtn.classList.add('hidden');
+                        confirmUpdateBtn.disabled = false;
+                        confirmUpdateBtn.classList.remove('btn-primary');
+                        confirmUpdateBtn.classList.add('btn-warning');
+                        confirmUpdateBtn.textContent = "Fermer l'IDE";
+                        confirmUpdateBtn.onclick = async () => {
+                            confirmUpdateBtn.disabled = true;
+                            confirmUpdateBtn.textContent = "Fermeture...";
+                            try { await fetch('/api/app/close', { method: 'POST' }); } catch {}
+                        };
+                    } else if (pData.progress < 0) {
+                        clearInterval(interval);
+                        statusText.textContent = "Erreur lors du telechargement.";
+                        confirmUpdateBtn.disabled = false;
+                        if (cancelBtn) cancelBtn.disabled = false;
+                    }
+                } catch (err) {
                     clearInterval(interval);
-                    statusText.textContent = "Installation et redémarrage...";
-                    // Lance l'installation
-                    await fetch('/api/update/install', { method: 'POST' });
-                } else if (pData.progress < 0) {
-                    clearInterval(interval);
-                    statusText.textContent = "Erreur lors du téléchargement.";
+                    statusText.textContent = "Erreur: " + err.message;
                     confirmUpdateBtn.disabled = false;
-                    document.getElementById('cancel-update-btn').disabled = false;
+                    if (cancelBtn) cancelBtn.disabled = false;
                 }
             }, 500);
-            
+
         } catch (err) {
             statusText.textContent = "Erreur: " + err.message;
             confirmUpdateBtn.disabled = false;
-            document.getElementById('cancel-update-btn').disabled = false;
+            if (cancelBtn) cancelBtn.disabled = false;
         }
     });
 }
@@ -514,8 +681,10 @@ if (quantModal) quantModal.addEventListener('click', e => { if (e.target.id === 
 const catalogModal = $('#catalog-modal');
 if (catalogModal) catalogModal.addEventListener('click', e => { if (e.target.id === 'catalog-modal') catalogModal.classList.remove('active'); });
 
-const closeUpdate = $('#close-update');
+const closeUpdate = $('#close-update-modal');
 if (closeUpdate) closeUpdate.addEventListener('click', () => $('#update-modal').classList.remove('active'));
+const cancelUpdate = $('#cancel-update-btn');
+if (cancelUpdate) cancelUpdate.addEventListener('click', () => $('#update-modal').classList.remove('active'));
 const updateModal = $('#update-modal');
 if (updateModal) updateModal.addEventListener('click', e => { if (e.target.id === 'update-modal') updateModal.classList.remove('active'); });
 
@@ -548,7 +717,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // UI Init
     renderTabs();
-    renderTree(state.projectRoot);
     if (state.activeFile) {
         if (!state.openFiles[state.activeFile]) {
             state.activeFile = null;
@@ -559,40 +727,54 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
     
-    // Auth Check
-    const isLogged = await checkAuthStatus();
-    if (!isLogged) {
-        window.location.href = 'login.html';
-        return;
-    }
+    // Auth is handled in-page via the overlay in index.html.
+    await checkAuthAndInit();
 
     // Tools & Settings Initialization
-    initAgentModelDropdowns();
-    updateLanguage();
-    
-    // Restore chat & config bindings
-    modelSelect.value = state.config.ollamaModel || 'qwen3:8b';
-    $('#ollama-url').value = state.config.ollamaUrl || 'http://localhost:11434';
-    $('#api-openai').value = state.config.keys?.openai || '';
-    $('#api-anthropic').value = state.config.keys?.anthropic || '';
-    $('#api-google').value = state.config.keys?.google || '';
-    $('#api-grok').value = state.config.keys?.grok || '';
-    $('#api-mistral').value = state.config.keys?.mistral || '';
-    $('#profile-pseudo').value = state.profile?.pseudo || 'Utilisateur';
-    $('#profile-photo').value = state.profile?.photo || '';
-    
-    updateProfileUI();
-    renderHistory();
-    
-    // Global Event Listeners
-    $('#save-btn').addEventListener('click', saveSettings);
-    $('#save-profile-btn').addEventListener('click', saveProfile);
-    $('#logout-btn').addEventListener('click', logout);
-    
+    if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
+    // Curseur d'effort de reflexion : on installe les events maintenant,
+    // la compatibilite est evaluee plus bas une fois le modele restaure.
+    if (typeof initReasoningSlider === 'function') initReasoningSlider();
+    if (typeof updateLanguage === 'function') updateLanguage();
+
+    // Restore Ollama URL in settings modal
+    const _set = (sel, val) => { const el = $(sel); if (el) el.value = val; };
+    if (modelSelect) {
+        modelSelect.value = state.config.aiModel || 'codex';
+        if (!modelSelect.value) modelSelect.value = 'codex';
+        modelSelect.dispatchEvent(new Event('change'));
+        
+        if (state.config.aiSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === state.config.aiSubmodel)) {
+            submodelSelect.value = state.config.aiSubmodel;
+        } else {
+            // Default to newest submodel (first in the list) if saved one not found
+            const subs = SUBMODELS[modelSelect.value] || [];
+            if (subs.length) {
+                submodelSelect.value = subs[0]; // newest = first
+            }
+        }
+        submodelSelect.dispatchEvent(new Event('change'));
+        if (typeof createCustomSelect === 'function') {
+            createCustomSelect('ai-model');
+            createCustomSelect('ai-submodel');
+        }
+    }
+    // Maintenant que le modele est restaure : evaluer la compatibilite de
+    // l'effort de reflexion et la disponibilite des pieces jointes.
+    if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
+    if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
+    _set('#ollama-url', state.config.ollamaUrl || 'http://localhost:11434');
+    _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
+
+    if (typeof updateProfileUI === 'function') updateProfileUI();
+    if (typeof renderHistory === 'function') renderHistory();
+
     // Polling Ollama models in background
-    setTimeout(refreshOllamaModels, 1000);
-    setInterval(refreshOllamaModels, 30000); // refresh every 30s
-    
+    if (typeof syncOllamaModels === 'function') {
+        setTimeout(syncOllamaModels, 1000);
+        setInterval(syncOllamaModels, 30000);
+    }
+
     // Check for app updates on GitHub
     setTimeout(checkForUpdates, 3000);
 });
@@ -613,4 +795,3 @@ renderHistory();
 
 // Gate the app behind authentication.
 setupAuth();
-checkAuthAndInit();

@@ -33,6 +33,7 @@ cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE pickfolder.cpp /Fe:dist\pic
 if errorlevel 1 goto :failed
 
 REM --- Copy the interface/ folder (including subfolders) next to the exe ---
+if exist dist\interface rmdir /S /Q dist\interface
 if not exist dist\interface mkdir dist\interface
 xcopy "..\interface\*" "dist\interface\" /E /Y /I /Q >nul
 del /Q dist\*.obj >nul 2>&1

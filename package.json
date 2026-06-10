@@ -1,6 +1,6 @@
 {
   "name": "connexion-ide",
-  "version": "1.0.0",
+  "version": "1.0.9",
   "description": "This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).",
   "main": "server.js",
   "bin": "server.js",

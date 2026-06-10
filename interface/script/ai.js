@@ -1,12 +1,106 @@
+// ==========================================================
 //  PERMISSION MODE
 // ==========================================================
-$$('.perm-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-        state.permissionMode = btn.dataset.perm;
-        // Keep both permission bars (chat + agents) in sync.
-        $$('.perm-btn').forEach(b => b.classList.toggle('active', b.dataset.perm === btn.dataset.perm));
+const MODE_ICONS = {
+    supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+    semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
+    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+};
+
+function setupModeSelector(btnId, menuId) {
+    const btn = $('#' + btnId);
+    const menu = $('#' + menuId);
+    if (!btn || !menu) return;
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        $$('.mode-dropdown.open').forEach(m => { if (m !== menu) m.classList.remove('open'); });
+        $$('.attach-menu.open').forEach(m => m.classList.remove('open'));
+        menu.classList.toggle('open');
     });
-});
+
+    menu.querySelectorAll('.mode-item').forEach(item => {
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const perm = item.dataset.perm;
+            state.permissionMode = perm;
+            
+            // Sync all selectors (chat + agents)
+            $$('.mode-dropdown').forEach(m => {
+                m.querySelectorAll('.mode-item').forEach(mi => {
+                    mi.classList.toggle('active', mi.dataset.perm === perm);
+                });
+            });
+
+            // Update labels on the buttons
+            const titleEl = item.querySelector('.mode-item-title');
+            const labelText = titleEl.textContent;
+            const itemI18n = titleEl.getAttribute('data-i18n');
+            $$('.mode-select-label').forEach(lbl => {
+                lbl.textContent = labelText;
+                if (itemI18n) {
+                    lbl.setAttribute('data-i18n', itemI18n);
+                } else {
+                    lbl.removeAttribute('data-i18n');
+                }
+            });
+
+            // Toggle orange class and dynamic icons on the mode selector buttons
+            $$('.mode-select-btn').forEach(b => {
+                b.classList.toggle('orange', perm === 'auto');
+                const svgIcon = b.querySelector('svg:not(.chevron)');
+                if (svgIcon && MODE_ICONS[perm]) {
+                    svgIcon.outerHTML = MODE_ICONS[perm];
+                }
+            });
+
+            menu.classList.remove('open');
+        });
+    });
+}
+
+function syncModeSelectorUI() {
+    const perm = state.permissionMode || 'supervised';
+    
+    // Sync active classes
+    $$('.mode-dropdown').forEach(m => {
+        m.querySelectorAll('.mode-item').forEach(mi => {
+            mi.classList.toggle('active', mi.dataset.perm === perm);
+        });
+    });
+
+    // Update labels on the buttons
+    const activeItem = document.querySelector(`.mode-dropdown .mode-item[data-perm="${perm}"]`);
+    if (activeItem) {
+        const titleEl = activeItem.querySelector('.mode-item-title');
+        if (titleEl) {
+            const labelText = titleEl.textContent;
+            const itemI18n = titleEl.getAttribute('data-i18n');
+            $$('.mode-select-label').forEach(lbl => {
+                lbl.textContent = labelText;
+                if (itemI18n) {
+                    lbl.setAttribute('data-i18n', itemI18n);
+                } else {
+                    lbl.removeAttribute('data-i18n');
+                }
+            });
+        }
+    }
+
+    // Toggle orange class and dynamic icons on the mode selector buttons
+    $$('.mode-select-btn').forEach(b => {
+        b.classList.toggle('orange', perm === 'auto');
+        const svgIcon = b.querySelector('svg:not(.chevron)');
+        if (svgIcon && MODE_ICONS[perm]) {
+            svgIcon.outerHTML = MODE_ICONS[perm];
+        }
+    });
+}
+
+// Initialize Mode Selectors
+setupModeSelector('chat-mode-btn', 'chat-mode-menu');
+setupModeSelector('agents-mode-btn', 'agents-mode-menu');
+syncModeSelectorUI();
 
 // Approval modal
 let pendingApproval = null;
@@ -172,6 +266,8 @@ function renderMarkdown(src) {
         s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
         s = s.replace(/__([^_]+)__/g, '<strong>$1</strong>');
         s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>');
+        s = s.replace(/!\[([^\]]*)\]\((data:image\/[a-zA-Z+.-]+;base64,[A-Za-z0-9+/=]+|https?:\/\/[^\s)]+)\)/g, 
+            '<img src="$2" alt="$1" class="generated-image">');
         s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
         return s;
@@ -208,7 +304,66 @@ function renderMarkdown(src) {
     return html;
 }
 
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Reveal `text` word-by-word into `el` (live typing effect), then replace it
+// with the final rendered HTML. Used for the chat reply and the lead synthesis.
+async function streamInto(el, text, finalHTML, signal, scrollEl) {
+    const words = String(text).split(/(\s+)/);
+    // Reveal several words at a time for long answers so it never feels sluggish.
+    const chunk = words.length > 400 ? 4 : (words.length > 150 ? 2 : 1);
+    let acc = '';
+    el.classList.add('md');
+    for (let i = 0; i < words.length; i += chunk) {
+        if (signal && signal.aborted) { acc = text; break; }
+        acc += words.slice(i, i + chunk).join('');
+        el.textContent = acc;
+        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        await sleep(13);
+    }
+    el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
+    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+}
+
+// Single rounded frame holding a generated image (clicking opens the lightbox).
+function imageBubble(url, alt) {
+    const safeAlt = (alt || '').replace(/"/g, '&quot;');
+    return `<div class="image-gen-container"><img src="${url}" alt="${safeAlt}" class="generated-image"></div>`;
+}
+
+// Full-screen image viewer: download (top-left), close (top-right), title (bottom-left).
+function openImageLightbox(url, alt) {
+    const modal = $('#image-lightbox');
+    if (!modal) return;
+    $('#lightbox-img').src = url;
+    $('#lightbox-img').alt = alt || '';
+    const cap = $('#lightbox-caption');
+    cap.textContent = alt || '';
+    cap.style.display = alt ? 'block' : 'none';
+    const dl = $('#lightbox-download');
+    dl.href = url;
+    dl.download = (alt ? alt.replace(/[^\w\-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) : 'image') + '.png';
+    modal.classList.add('active');
+}
+function closeImageLightbox() { const m = $('#image-lightbox'); if (m) m.classList.remove('active'); }
+if ($('#lightbox-close')) $('#lightbox-close').addEventListener('click', closeImageLightbox);
+if ($('#image-lightbox')) $('#image-lightbox').addEventListener('click', e => { if (e.target.id === 'image-lightbox') closeImageLightbox(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeImageLightbox(); });
+// Click any generated image (chat or reloaded) to open the lightbox.
+document.addEventListener('click', e => {
+    const img = e.target.closest && e.target.closest('.generated-image');
+    if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
+});
+
 function formatAIResponse(text) {
+    const isImageGen = state.config.aiModel === 'grok' && 
+        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+
+    if (isImageGen) {
+        const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
+        if (imgMatch) return imageBubble(imgMatch[2], imgMatch[1] || '');
+    }
+
     const thinkRegex = /<think>([\s\S]*?)<\/think>/i;
     const match = text.match(thinkRegex);
     if (match) {
@@ -270,12 +425,13 @@ function addTypingMsg(container, label) {
 //  CHAT - SINGLE AI
 // ==========================================================
 async function callAI(model, submodel, message, systemPrompt, images = [], signal = undefined, history = []) {
+    const { keys, ...safeConfig } = state.config;
     const res = await fetch('/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             model, submodel, message, systemPrompt,
-            config: state.config,
+            config: safeConfig,
             reasoningLevel: state.reasoningLevel,
             images, history
         }),
@@ -302,11 +458,26 @@ function updateTokenMeter() {
 }
 
 // Auto-compact the context when it nears the model's window (summarize old turns).
+// Local models compact earlier (60 %) because they have smaller windows.
 async function maybeCompact(model, submodel) {
+    return compactContext(model, submodel, { force: false });
+}
+
+// Summarize older turns into a compact recap to free up context space.
+// force = true runs it on demand (the /compact command), even below the threshold.
+async function compactContext(model, submodel, opts = {}) {
+    const force = !!opts.force;
     const win = contextWindow(model, submodel);
-    if (state.contextTokens < win * 0.75) return;
-    if (state.chatHistory.length <= 4) return;
+    const threshold = model === 'local' ? 0.60 : 0.75;
     const lang = state.language || 'fr';
+    if (!force && state.contextTokens < win * threshold) return false;
+    if (state.chatHistory.length <= 4) {
+        if (force) addMsg($('#chat-messages'), 'system', null,
+            lang === 'en' ? 'Nothing to compact yet — the conversation is too short.'
+                          : 'Rien à compacter pour l’instant — la conversation est trop courte.');
+        return false;
+    }
+    const beforeTokens = state.contextTokens;
     const keep = 4;
     const older = state.chatHistory.slice(0, state.chatHistory.length - keep);
     const recent = state.chatHistory.slice(state.chatHistory.length - keep);
@@ -321,8 +492,17 @@ async function maybeCompact(model, submodel) {
         state.chatHistory = [{ role: 'user', content: (lang === 'en' ? '[Earlier context summary]: ' : '[Résumé du contexte précédent] : ') + summary }, ...recent];
         state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
         updateTokenMeter();
-        addMsg($('#chat-messages'), 'system', null, lang === 'en' ? 'Context compacted.' : 'Contexte compacté.');
-    } catch {}
+        const freed = Math.max(0, beforeTokens - state.contextTokens);
+        const freedTxt = freed > 0 ? ` (−${fmtTokens(freed)})` : '';
+        addMsg($('#chat-messages'), 'system', null,
+            (lang === 'en' ? 'Context compacted.' : 'Contexte compacté.') + freedTxt);
+        saveConversation();
+        return true;
+    } catch {
+        addMsg($('#chat-messages'), 'system', null,
+            lang === 'en' ? 'Compaction failed.' : 'Échec du compactage.');
+        return false;
+    }
 }
 
 // Collapsible reasoning block (like Codex): "Réflexion durant Xs".
@@ -352,19 +532,39 @@ async function sendChat(message) {
     const lang = state.language || 'fr';
     const { aiText, names, images } = consumeAttachments();
 
+    const isLocal = model === 'local';
+
     // Compact the running context first if it's getting close to the limit.
     await maybeCompact(model, submodel);
 
     // Project tree goes into the SYSTEM prompt (background), only on the first
     // message — so weak models don't echo it and later questions aren't drowned.
-    const ctx = state.chatHistory.length === 0 ? await projectContext() : '';
-    const sys = codeAgentPrompt() + ctx;
+    const ctx = state.chatHistory.length === 0 ? await projectContext(isLocal) : '';
+    const sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang)) + ctx;
     const aiMessage = message + aiText;            // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
     const body = addTypingMsg($('#chat-messages'), modelLabel);
 
-    const history = state.chatHistory.slice(); // prior turns (memory)
+    // For local models, limit history to avoid overflowing the context window.
+    // Keep only the last N turns so the system prompt + project context fit.
+    let history = state.chatHistory.slice();
+    if (isLocal) {
+        const win = contextWindow(model, submodel);
+        const sysTokens = estimateTokens(sys);
+        const msgTokens = estimateTokens(aiMessage);
+        const budget = Math.max(0, win - sysTokens - msgTokens - 2048); // reserve 2k for response
+        let histTokens = 0;
+        let cutIdx = history.length;
+        for (let i = history.length - 1; i >= 0; i--) {
+            histTokens += estimateTokens(history[i].content);
+            if (histTokens > budget) { cutIdx = i + 1; break; }
+        }
+        if (cutIdx > 0 && cutIdx < history.length) {
+            history = history.slice(cutIdx);
+        }
+    }
+
     const t0 = Date.now();
     const controller = new AbortController();
     chatAbort = controller;
@@ -379,14 +579,30 @@ async function sendChat(message) {
             const duration = Date.now() - t0;
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
-            body.innerHTML = reasoning + formatAIResponse(data.response);
+            const formatted = formatAIResponse(data.response);
+            const isImg = formatted.includes('generated-image');
+            // Generated image = single rectangle (instant); text = streamed word-by-word.
+            body.classList.toggle('has-image', isImg);
+            if (isImg) {
+                body.innerHTML = reasoning + formatted;
+            } else {
+                body.innerHTML = reasoning + '<div class="stream-target"></div>';
+                await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, $('#chat-messages'));
+            }
 
-            // Update conversation memory + token meter.
-            state.chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: data.response });
+            // Update conversation memory + token meter. For images, keep a light
+            // placeholder in memory instead of the heavy base64 data URL.
+            let assistantMemory = data.response;
+            if (isImg) {
+                const am = data.response.match(/!\[([^\]]*)\]/);
+                assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
+            }
+            state.chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: assistantMemory });
             if (data.usage && data.usage.input != null) {
+                // Use actual token counts from the API when available.
                 state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
             } else {
-                state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0) + estimateTokens(codeAgentPrompt());
+                state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0) + estimateTokens(codeAgentPrompt(isLocal));
             }
             updateTokenMeter();
 
@@ -412,11 +628,14 @@ async function sendChat(message) {
 // Handle AI file modifications based on permission mode.
 // Writes EVERY file block the model emits (creating files/folders as needed),
 // not just the currently-open file — this is what makes it behave like a CLI/IDE.
-async function handleAIResponse(response, agentName) {
+async function handleAIResponse(response, agentName, container) {
     const lang = state.language || 'fr';
+    // Route system/terminal messages to the right view so Chat and Agents stay
+    // completely separate (a refusal in Agents must not appear in the Chat).
+    const out = $(container || '#chat-messages');
 
     if (!state.projectRoot) {
-        addMsg($('#chat-messages'), 'system', null,
+        addMsg(out, 'system', null,
             lang === 'en' ? 'Open a project folder first so changes can be written to disk.'
                           : 'Ouvrez d\'abord un dossier de projet pour pouvoir ecrire les modifications sur le disque.');
         return;
@@ -447,7 +666,7 @@ async function handleAIResponse(response, agentName) {
                 codeContent.substring(0, 500) + (codeContent.length > 500 ? '\n...' : '')
             );
             if (!approved) {
-                addMsg($('#chat-messages'), 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusee.');
+                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusee.');
                 continue;
             }
         }
@@ -462,8 +681,9 @@ async function handleAIResponse(response, agentName) {
                     content: codeContent
                 })
             });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
             const result = await res.json();
-            if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
+            if (result.error) throw new Error(result.error);
 
             if (state.openFiles[targetFile]) {
                 state.openFiles[targetFile].content = codeContent;
@@ -472,13 +692,14 @@ async function handleAIResponse(response, agentName) {
             if (state.activeFile === targetFile) {
                 textarea.value = codeContent;
                 updateGutter(codeContent);
+                if (typeof renderHighlight === 'function') renderHighlight();
                 renderTabs();
             }
 
-            addMsg($('#chat-messages'), 'system', null, `${lang === 'en' ? 'File' : 'Fichier'} ${targetFile} ${TRANSLATIONS[lang]['file-modified'] || 'modifie.'}`);
+            addMsg(out, 'system', null, `${lang === 'en' ? 'File' : 'Fichier'} ${targetFile} ${TRANSLATIONS[lang]['file-modified'] || 'modifie.'}`);
             wroteAny = true;
         } catch (err) {
-            addMsg($('#chat-messages'), 'system', null,
+            addMsg(out, 'system', null,
                 `${lang === 'en' ? 'Write error' : 'Erreur ecriture'} ${targetFile}: ${err.message}`);
         }
     }
@@ -495,28 +716,29 @@ async function handleAIResponse(response, agentName) {
                 : `${agentName} veut exécuter une commande`;
             const approved = await requestApproval(desc, cmd);
             if (!approved) {
-                addMsg($('#chat-messages'), 'system', null,
+                addMsg(out, 'system', null,
                     lang === 'en' ? 'Command refused.' : 'Commande refusée.');
                 continue;
             }
         }
-        addMsg($('#chat-messages'), 'system', null, '$ ' + cmd);
+        addMsg(out, 'system', null, '$ ' + cmd);
         try {
             const res = await fetch('/api/exec', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ command: cmd, cwd: state.projectRoot })
             });
-            const out = await res.json();
-            if (!res.ok || out.error) {
-                addMsg($('#chat-messages'), 'system', null,
-                    `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${out.error || ('HTTP ' + res.status)}`);
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const execRes = await res.json();
+            if (execRes.error) {
+                addMsg(out, 'system', null,
+                    `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${execRes.error}`);
             } else {
-                const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
-                addMsg($('#chat-messages'), 'ai', 'Terminal', text || (lang === 'en' ? '(no output)' : '(aucune sortie)'));
+                const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
+                addMsg(out, 'ai', 'Terminal', text || (lang === 'en' ? '(no output)' : '(aucune sortie)'));
             }
         } catch (err) {
-            addMsg($('#chat-messages'), 'system', null,
+            addMsg(out, 'system', null,
                 `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${err.message}`);
         }
     }
@@ -526,7 +748,7 @@ async function handleAIResponse(response, agentName) {
 function autoGrow(el) {
     if (!el) return;
     el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+    el.style.height = Math.min(el.scrollHeight, 120) + 'px';
 }
 function resetInput(el) { if (el) { el.value = ''; el.style.height = 'auto'; } }
 ['#chat-input', '#agents-input'].forEach(sel => {
@@ -534,23 +756,100 @@ function resetInput(el) { if (el) { el.value = ''; el.style.height = 'auto'; } }
     if (t) t.addEventListener('input', () => autoGrow(t));
 });
 
+// ---- Slash commands (/compact, /clear) + Anthropic-style suggestion menu ----
+const SLASH_COMMANDS = [
+    { name: 'compact', fr: 'Compresser le contexte pour libérer de la place', en: 'Compress the context to free up space' },
+    { name: 'clear',   fr: 'Effacer la conversation et le contexte',          en: 'Clear the conversation and the context' }
+];
+
+const slashInput = $('#chat-input');
+const slashMenu = document.createElement('div');
+slashMenu.className = 'slash-menu';
+slashMenu.id = 'slash-menu';
+slashInput.closest('.chat-input-area').appendChild(slashMenu);
+let slashItems = [], slashIndex = 0;
+const slashOpen = () => slashMenu.classList.contains('open');
+
+function renderSlash() {
+    const lang = state.language || 'fr';
+    slashMenu.innerHTML = '';
+    slashItems.forEach((c, i) => {
+        const item = document.createElement('div');
+        item.className = 'slash-item' + (i === slashIndex ? ' active' : '');
+        item.innerHTML = `<span class="slash-name">/${c.name}</span><span class="slash-desc">${lang === 'en' ? c.en : c.fr}</span>`;
+        item.addEventListener('mousedown', e => { e.preventDefault(); slashIndex = i; acceptSlash(); });
+        slashMenu.appendChild(item);
+    });
+}
+function openSlash(prefix) {
+    slashItems = SLASH_COMMANDS.filter(c => c.name.startsWith(prefix));
+    if (!slashItems.length) { closeSlash(); return; }
+    slashIndex = 0;
+    renderSlash();
+    slashMenu.classList.add('open');
+}
+function closeSlash() { slashMenu.classList.remove('open'); slashItems = []; }
+function moveSlash(d) { slashIndex = (slashIndex + d + slashItems.length) % slashItems.length; renderSlash(); }
+function acceptSlash() {
+    const cmd = slashItems[slashIndex];
+    closeSlash();
+    resetInput(slashInput);
+    if (cmd) runSlashCommand(cmd.name);
+}
+function runSlashCommand(name) {
+    const lang = state.language || 'fr';
+    if (name === 'clear') { newConversation('chat'); return; }
+    if (name === 'compact') {
+        if (chatAbort) return;
+        compactContext(modelSelect.value, submodelSelect.value, { force: true });
+        return;
+    }
+    addMsg($('#chat-messages'), 'system', null, (lang === 'en' ? 'Unknown command: /' : 'Commande inconnue : /') + name);
+}
+
+// Decide whether a typed line is a command or a normal message.
+function handleChatSubmit() {
+    if (chatAbort) return;
+    const text = slashInput.value.trim();
+    if (!text) return;
+    closeSlash();
+    if (text.startsWith('/')) {
+        const name = text.slice(1).split(/\s+/)[0].toLowerCase();
+        resetInput(slashInput);
+        runSlashCommand(name);
+        return;
+    }
+    sendChat(text);
+    resetInput(slashInput);
+}
+
+// Show/hide the menu as the user types a "/command" (no space yet).
+slashInput.addEventListener('input', () => {
+    const v = slashInput.value;
+    if (/^\/[a-z]*$/i.test(v)) openSlash(v.slice(1).toLowerCase());
+    else closeSlash();
+});
+// Capture phase so menu navigation wins over the Enter-to-send handler below.
+slashInput.addEventListener('keydown', e => {
+    if (!slashOpen()) return;
+    if (e.key === 'ArrowDown') { e.preventDefault(); e.stopImmediatePropagation(); moveSlash(1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); e.stopImmediatePropagation(); moveSlash(-1); }
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); e.stopImmediatePropagation(); acceptSlash(); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); closeSlash(); }
+}, true);
+document.addEventListener('click', e => { if (!slashMenu.contains(e.target) && e.target !== slashInput) closeSlash(); });
+
 // Chat input — Enter sends, Shift+Enter inserts a new line.
 $('#chat-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        if (!chatAbort && $('#chat-input').value.trim()) {
-            sendChat($('#chat-input').value.trim());
-            resetInput($('#chat-input'));
-        }
+        handleChatSubmit();
     }
 });
 $('#send-btn').addEventListener('click', () => {
     // While the AI is generating, the button is a "stop" circle -> cancel.
     if (chatAbort) { chatAbort.abort(); return; }
-    if ($('#chat-input').value.trim()) {
-        sendChat($('#chat-input').value.trim());
-        resetInput($('#chat-input'));
-    }
+    handleChatSubmit();
 });
 
 // ==========================================================
@@ -601,32 +900,38 @@ async function sendAgentTask(task) {
     const { aiText, names, images: taskImages } = consumeAttachments();
     const displayTask = task + (names.length ? `\n📎 ${names.join(', ')}` : '');
     task = task + aiText;
-    const projCtx = await projectContext(); // appended to each agent's SYSTEM prompt
+    const projCtx = await projectContext(false); // appended to each agent's SYSTEM prompt (full for agents)
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', displayTask);
 
-    // Pre-create the unified chat bubble for the final response
-    const leadBody = addMsg($('#agents-log'), 'ai', labels[leadAgent.agent], '', true);
-    
-    // Initialize the thinking box — the dot wave fills the whole box, behind the text.
-    leadBody.innerHTML = `
-        <details class="thinking-details" open>
-            <canvas class="wave-canvas"></canvas>
-            <summary>${TRANSLATIONS[lang]['team-thinking-title']} (0/${workers.length} ${TRANSLATIONS[lang]['lead-thinking-progress']})</summary>
-            <div class="thinking-content"></div>
-        </details>
-        <div class="lead-response"></div>
-    `;
+    const agentsLog = $('#agents-log');
 
-    const thinkingContent = leadBody.querySelector('.thinking-content');
-    const summary = leadBody.querySelector('summary');
-    const leadResponseDiv = leadBody.querySelector('.lead-response');
-    const waveCanvas = leadBody.querySelector('.wave-canvas');
+    // Thinking indicator = ONE standalone rectangle (no chat bubble around it),
+    // with the wavy-dot animation. It shows only each agent's status
+    // (analysing → done), never their full text — the lead does the summary.
+    const teamBox = document.createElement('div');
+    teamBox.className = 'msg msg-ai';
+    teamBox.innerHTML = `
+        <div class="team-thinking">
+            <canvas class="wave-canvas"></canvas>
+            <div class="team-thinking-body">
+                <div class="team-thinking-head">
+                    <span class="team-thinking-spark"></span>
+                    <span>${TRANSLATIONS[lang]['team-thinking-title']}</span>
+                    <span class="team-progress">0/${workers.length}</span>
+                </div>
+                <div class="team-thinking-list"></div>
+            </div>
+        </div>`;
+    agentsLog.appendChild(teamBox);
+    const teamList = teamBox.querySelector('.team-thinking-list');
+    const teamProgress = teamBox.querySelector('.team-progress');
+    const waveCanvas = teamBox.querySelector('.wave-canvas');
     startWave(waveCanvas);
 
     let context = '';
     let completedCount = 0;
 
-    // Run worker agents sequentially
+    // Run worker agents sequentially — each only contributes to the shared context.
     for (const { agent, role, submodel } of workers) {
         const card = $(`.agent-card[data-agent="${agent}"]`);
         card.classList.add('working');
@@ -634,46 +939,34 @@ async function sendAgentTask(task) {
         badge.textContent = TRANSLATIONS[lang]['status-working'];
         badge.className = 'agent-badge working';
 
-        // Add worker item in details
-        const item = document.createElement('div');
-        item.className = 'agent-thinking-item';
-        item.innerHTML = `<strong>${labels[agent]} (${TRANSLATIONS[lang]['role-' + role] || role})</strong>: <span class="agent-status-text">${lang === 'en' ? 'analyzing...' : 'analyse en cours...'}</span>`;
-        thinkingContent.appendChild(item);
-        $('#agents-log').scrollTop = $('#agents-log').scrollHeight;
+        const roleLabel = TRANSLATIONS[lang]['role-' + role] || role;
+        const line = document.createElement('div');
+        line.className = 'team-agent-line';
+        line.innerHTML = `<span class="team-agent-name">${labels[agent]} · ${roleLabel}</span><span class="team-agent-status">${lang === 'en' ? 'analysing…' : 'analyse en cours…'}</span>`;
+        teamList.appendChild(line);
+        agentsLog.scrollTop = agentsLog.scrollHeight;
+        const statusText = line.querySelector('.team-agent-status');
 
-        const statusText = item.querySelector('.agent-status-text');
-
-        const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}${projCtx}`;
+        const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(agent === 'local')}${projCtx}`;
         const fullMessage = context
-            ? (lang === 'en' 
-                ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}` 
+            ? (lang === 'en'
+                ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}`
                 : `[Contexte des agents precedents]:\n${context}\n\n[Tache utilisateur]: ${task}`)
             : task;
 
         try {
             const data = await callAI(agent, submodel, fullMessage, systemPrompt, taskImages);
             if (data.error) {
-                statusText.textContent = (lang === 'en' ? 'error: ' : 'erreur : ') + data.error;
-                statusText.style.color = 'var(--red)';
+                statusText.textContent = lang === 'en' ? 'error' : 'erreur';
+                statusText.classList.add('err');
             } else {
                 statusText.textContent = TRANSLATIONS[lang]['lead-thinking-done'];
-                statusText.style.color = 'var(--green)';
-                
-                const outDiv = document.createElement('pre');
-                outDiv.style.whiteSpace = 'pre-wrap';
-                outDiv.style.fontFamily = 'var(--font-mono)';
-                outDiv.style.fontSize = '11px';
-                outDiv.style.marginTop = '4px';
-                outDiv.style.color = 'var(--text-1)';
-                outDiv.textContent = data.response;
-                item.appendChild(outDiv);
-
-                context += `\n[${labels[agent]} (${TRANSLATIONS[lang]['role-' + role] || role})]: ${data.response}\n`;
-                await handleAIResponse(data.response, labels[agent]);
+                statusText.classList.add('ok');
+                context += `\n[${labels[agent]} (${roleLabel})]: ${data.response}\n`;
             }
         } catch (err) {
             statusText.textContent = lang === 'en' ? 'connection error' : 'erreur de connexion';
-            statusText.style.color = 'var(--red)';
+            statusText.classList.add('err');
         }
 
         card.classList.remove('working');
@@ -681,12 +974,14 @@ async function sendAgentTask(task) {
         badge.className = 'agent-badge done';
 
         completedCount++;
-        summary.textContent = `${TRANSLATIONS[lang]['team-thinking-title']} (${completedCount}/${workers.length} ${TRANSLATIONS[lang]['lead-thinking-progress']})`;
-        $('#agents-log').scrollTop = $('#agents-log').scrollHeight;
+        teamProgress.textContent = `${completedCount}/${workers.length}`;
+        agentsLog.scrollTop = agentsLog.scrollHeight;
     }
 
-    // Now run the Chef de projet (Lead agent)
-    summary.textContent = `${TRANSLATIONS[lang]['team-thinking-title']} (${TRANSLATIONS[lang]['lead-thinking-done']})`;
+    // Workers done — stop the animation, keep their statuses for a collapsed recap.
+    stopWave(waveCanvas);
+    const recapHTML = teamList.innerHTML;
+    teamBox.remove();
 
     const leadCard = $(`.agent-card[data-agent="${leadAgent.agent}"]`);
     leadCard.classList.add('working');
@@ -694,7 +989,7 @@ async function sendAgentTask(task) {
     leadBadge.textContent = TRANSLATIONS[lang]['status-working'];
     leadBadge.className = 'agent-badge working';
 
-    const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt()}${projCtx}`;
+    const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(leadAgent.agent === 'local')}${projCtx}`;
     const leadMessage = lang === 'fr'
         ? `[Tache utilisateur]: ${task}
 
@@ -709,30 +1004,44 @@ ${context}
 
 As the Project Lead, synthesize their work, make final decisions, and formulate a single, structured, coherent, and complete response for the user.`;
 
-    startThinking(leadResponseDiv);
+    // Lead writes as a NORMAL chat message (its own bubble), streamed word-by-word,
+    // with a collapsed recap of the team's statuses above it.
+    const leadBody = addMsg(agentsLog, 'ai', labels[leadAgent.agent], '', true);
+    const recapChevron = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    leadBody.innerHTML = `
+        <details class="reasoning team-recap">
+            <summary><span class="reasoning-spark"></span><span class="reasoning-label">${TRANSLATIONS[lang]['team-thinking-title']}</span>${recapChevron}</summary>
+            <div class="reasoning-body team-thinking-list">${recapHTML}</div>
+        </details>
+        <div class="stream-target"></div>`;
+    const streamTarget = leadBody.querySelector('.stream-target');
+    startThinking(streamTarget);
+
     try {
         const data = await callAI(leadAgent.agent, leadAgent.submodel, leadMessage, leadSystemPrompt, taskImages);
-        stopThinking(leadResponseDiv);
-        stopWave(waveCanvas); if (waveCanvas) waveCanvas.remove();
+        stopThinking(streamTarget);
         if (data.error) {
-            leadResponseDiv.textContent = data.error;
-            leadResponseDiv.classList.add('error');
+            streamTarget.textContent = data.error;
+            streamTarget.classList.add('error');
         } else {
             const formatted = formatAIResponse(data.response);
-            leadResponseDiv.innerHTML = formatted;
-            await handleAIResponse(data.response, labels[leadAgent.agent]);
+            if (formatted.includes('generated-image')) {
+                streamTarget.innerHTML = formatted;
+            } else {
+                await streamInto(streamTarget, data.response, formatted, null, agentsLog);
+            }
+            await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
         }
     } catch (err) {
-        stopThinking(leadResponseDiv);
-        stopWave(waveCanvas); if (waveCanvas) waveCanvas.remove();
-        leadResponseDiv.textContent = TRANSLATIONS[lang]['err-conn-lead'] || 'Erreur de connexion.';
-        leadResponseDiv.classList.add('error');
+        stopThinking(streamTarget);
+        streamTarget.textContent = TRANSLATIONS[lang]['err-conn-lead'] || 'Erreur de connexion.';
+        streamTarget.classList.add('error');
     }
 
     leadCard.classList.remove('working');
     leadBadge.textContent = TRANSLATIONS[lang]['status-done'];
     leadBadge.className = 'agent-badge done';
-    $('#agents-log').scrollTop = $('#agents-log').scrollHeight;
+    agentsLog.scrollTop = agentsLog.scrollHeight;
 
     // Save this agents session to the (separate) agents history.
     saveConversation('agents');
@@ -777,11 +1086,15 @@ function saveConversation(kind = 'chat') {
     $(cfg.container).querySelectorAll('.msg').forEach(m => {
         const label = m.querySelector('.msg-label');
         const body = m.querySelector('.msg-body');
-        data.push({
+        const img = body && body.querySelector('.generated-image');
+        const entry = {
             label: label ? label.textContent : null,
             text: body ? body.textContent : '',
             type: m.classList.contains('msg-system') ? 'system' : m.classList.contains('msg-user') ? 'user' : 'ai'
-        });
+        };
+        // Persist generated images so they survive a reload of the conversation.
+        if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
+        data.push(entry);
     });
 
     if (data.length <= 1) return; // only the default system message
@@ -838,14 +1151,26 @@ function loadConversation(kind, id) {
 
     const container = $(cfg.container);
     container.innerHTML = '';
-    (conv.messages || []).forEach(m => addMsg(container, m.type, m.label, m.text || ''));
+    (conv.messages || []).forEach(m => {
+        const body = addMsg(container, m.type, m.label, m.text || '');
+        if (m.image && m.image.url) {
+            body.innerHTML = imageBubble(m.image.url, m.image.alt || '');
+            body.classList.add('has-image');
+        }
+    });
     container.scrollTop = container.scrollHeight;
 
-    // Rebuild the API memory for the chat from its messages.
+    // Rebuild the API memory for the chat from its messages. For images we keep
+    // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
         state.chatHistory = (conv.messages || [])
             .filter(m => m.type === 'user' || m.type === 'ai')
-            .map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.text || '' }));
+            .map(m => ({
+                role: m.type === 'user' ? 'user' : 'assistant',
+                content: m.image
+                    ? (m.image.alt ? `[Image générée : ${m.image.alt}]` : '[Image générée]')
+                    : (m.text || '')
+            }));
         state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
         updateTokenMeter();
     }
@@ -1016,19 +1341,30 @@ function consumeAttachments() {
 
 // Build a compact project context (file tree + open file) so the AI can
 // analyse the project directly, without having to run shell commands.
-async function projectContext() {
+// `isLocal` = true produces a trimmed context to save tokens on Ollama.
+async function projectContext(isLocal) {
     if (!state.projectRoot) return '';
     try {
         const res = await fetch(`/api/tree?root=${encodeURIComponent(state.projectRoot)}`);
         if (!res.ok) return '';
         const data = await res.json();
-        const files = data.files || [];
+        let files = data.files || [];
         if (!files.length) return '';
-        let ctx = `\n\n[CONTEXTE DU PROJET — racine: ${state.projectRoot}]\nArborescence des fichiers:\n${files.join('\n')}`;
+
+        // For local models, limit the tree to 120 entries max to save tokens.
+        const maxFiles = isLocal ? 120 : 600;
+        if (files.length > maxFiles) {
+            files = files.slice(0, maxFiles);
+            data.truncated = true;
+        }
+
+        let ctx = `\n\n[CONTEXTE DU PROJET — racine: ${state.projectRoot}]\nArborescence:\n${files.join('\n')}`;
         if (data.truncated) ctx += '\n(liste tronquée)';
         if (state.activeFile && state.openFiles[state.activeFile]) {
             const c = state.openFiles[state.activeFile].content || '';
-            ctx += `\n\n[Fichier actuellement ouvert: ${state.activeFile}]\n\`\`\`\n${c.slice(0, 8000)}\n\`\`\``;
+            // Local models: 3000 chars max; cloud models: 8000.
+            const maxChars = isLocal ? 3000 : 8000;
+            ctx += `\n\n[Fichier ouvert: ${state.activeFile}]\n\`\`\`\n${c.slice(0, maxChars)}\n\`\`\``;
         }
         return ctx;
     } catch { return ''; }
@@ -1061,7 +1397,10 @@ function setupAttachMenu(btnId, menuId) {
 }
 setupAttachMenu('chat-attach-btn', 'chat-attach-menu');
 setupAttachMenu('agents-attach-btn', 'agents-attach-menu');
-document.addEventListener('click', () => $$('.attach-menu.open').forEach(m => m.classList.remove('open')));
+document.addEventListener('click', () => {
+    $$('.attach-menu.open').forEach(m => m.classList.remove('open'));
+    $$('.mode-dropdown.open').forEach(m => m.classList.remove('open'));
+});
 
 const attachInput = $('#attach-input');
 if (attachInput) attachInput.addEventListener('change', e => {
@@ -1188,7 +1527,7 @@ function reasoningContext() {
 
 function isReasoningCompatible(model, submodel) {
     if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('opus-4') || submodel.includes('sonnet-4'))) return true;
+    if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
     if (model === 'gemini') return true;
     if (model === 'local' && submodel.includes('r1')) return true;
     if (model === 'grok' && (submodel.includes('reasoning') || submodel.includes('4.20-0309-reasoning'))) return true;
@@ -1285,57 +1624,37 @@ function initReasoningSlider() {
         }, 2000);
     }
 
-    sliderBar.addEventListener('click', e => {
-        const notch = e.target.closest('.slider-notch');
-        if (!notch) return;
-        if (sliderBar.classList.contains('locked')) {
-            showIncompatibleTooltip();
-            return;
-        }
-        const level = parseInt(notch.dataset.level);
-        state.reasoningLevel = level;
-        updateSliderVisuals();
-    });
-
-    track.addEventListener('click', e => {
-        if (sliderBar.classList.contains('locked')) {
-            showIncompatibleTooltip();
-            return;
-        }
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
-        const totalLevels = modes.length;
-
-        const trackRect = track.getBoundingClientRect();
-        let yPercent = (e.clientY - trackRect.top) / trackRect.height;
-        yPercent = Math.max(0, Math.min(1, yPercent));
-        const percentage = yPercent * 100;
-        
-        let closestLevel = 0;
-        let minDiff = Infinity;
-        
-        for (let i = 0; i < totalLevels; i++) {
-            const targetPercentage = (1 - (i / (totalLevels - 1))) * 100;
-            const diff = Math.abs(percentage - targetPercentage);
-            if (diff < minDiff) {
-                minDiff = diff;
-                closestLevel = i;
-            }
-        }
-        
-        state.reasoningLevel = closestLevel;
-        updateSliderVisuals();
-    });
-
     let isDragging = false;
 
-    handle.addEventListener('mousedown', e => {
+    sliderBar.addEventListener('mousedown', e => {
         if (sliderBar.classList.contains('locked')) {
             showIncompatibleTooltip();
             return;
         }
+        
+        e.preventDefault();
         isDragging = true;
         handle.classList.add('dragging');
+        
+        const notch = e.target.closest('.slider-notch');
+        if (notch) {
+            const level = parseInt(notch.dataset.level);
+            const model = reasoningContext().model;
+            const modes = REASONING_MODES[model] || REASONING_MODES.local;
+            const totalLevels = modes.length;
+            const targetPercentage = (1 - (level / (totalLevels - 1))) * 100;
+            handle.style.top = targetPercentage + '%';
+            
+            sliderBar.querySelectorAll('.slider-notch').forEach(n => {
+                n.classList.toggle('active', parseInt(n.dataset.level) === level);
+            });
+            sliderBar.querySelectorAll('.slider-dot').forEach(d => {
+                d.classList.toggle('active', parseInt(d.dataset.level) === level);
+            });
+        } else {
+            onMouseMove(e);
+        }
+        
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
     });
@@ -1407,3 +1726,98 @@ function initReasoningSlider() {
 }
 
 // ==========================================================
+//  VOICE DICTATION (SPEECH-TO-TEXT)
+// ==========================================================
+function setupVoiceRecognition(btnId, textareaId) {
+    const btn = $('#' + btnId);
+    const textarea = $('#' + textareaId);
+    if (!btn || !textarea) return;
+
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        btn.style.display = 'none';
+        return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    // Track state: 'inactive' | 'starting' | 'active' | 'stopping'
+    let engineState = 'inactive';
+    let baseText = '';
+
+    recognition.onstart = () => {
+        engineState = 'active';
+        btn.classList.add('recording');
+        textarea.classList.add('recording-text');
+        btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
+    };
+
+    recognition.onresult = (event) => {
+        let sessionTranscript = '';
+        for (let i = 0; i < event.results.length; ++i) {
+            sessionTranscript += event.results[i][0].transcript;
+        }
+        sessionTranscript = sessionTranscript.trim();
+        
+        const separator = (baseText && !baseText.endsWith(' ')) ? ' ' : '';
+        const newText = baseText ? `${baseText}${separator}${sessionTranscript}` : sessionTranscript;
+        textarea.value = newText;
+        autoGrow(textarea);
+        textarea.dispatchEvent(new Event('input'));
+    };
+
+    recognition.onerror = (event) => {
+        console.error("Speech recognition error:", event.error);
+        cleanupState();
+    };
+
+    recognition.onend = () => {
+        cleanupState();
+    };
+
+    function cleanupState() {
+        engineState = 'inactive';
+        btn.classList.remove('recording');
+        textarea.classList.remove('recording-text');
+        btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
+    }
+
+    function startRecording() {
+        if (engineState !== 'inactive') return;
+        engineState = 'starting';
+        baseText = textarea.value;
+        recognition.lang = state.language === 'en' ? 'en-US' : 'fr-FR';
+        try {
+            recognition.start();
+        } catch (err) {
+            console.error("Failed to start speech recognition:", err);
+            cleanupState();
+        }
+    }
+
+    function stopRecording() {
+        if (engineState !== 'active' && engineState !== 'starting') return;
+        engineState = 'stopping';
+        try {
+            recognition.stop();
+        } catch (err) {
+            console.error("Failed to stop speech recognition:", err);
+            cleanupState();
+        }
+    }
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (engineState === 'active' || engineState === 'starting') {
+            stopRecording();
+        } else if (engineState === 'inactive') {
+            startRecording();
+        }
+    });
+}
+
+// Initialize Voice Recognition
+setupVoiceRecognition('chat-voice-btn', 'chat-input');
+setupVoiceRecognition('agents-voice-btn', 'agents-input');

@@ -53,7 +53,7 @@
             <!-- Bouton Update (Masqué par défaut) -->
             <button class="btn btn-primary btn-sm update-btn hidden" id="app-update-btn">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-i18n="update-btn">restart now for update</span>
+                <span data-i18n="update-btn">Mise à jour disponible</span>
             </button>
         </div>
         <div class="topbar-center">
@@ -158,7 +158,10 @@
                 </div>
                 <div class="code-editor hidden" id="code-editor">
                     <div class="line-gutter" id="line-gutter"></div>
-                    <textarea id="code-textarea" spellcheck="false"></textarea>
+                    <div class="editor-area">
+                        <pre class="code-highlight" id="code-highlight" aria-hidden="true"><code></code></pre>
+                        <textarea id="code-textarea" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
+                    </div>
                 </div>
             </div>
             <div class="editor-statusbar" id="editor-statusbar">
@@ -232,29 +235,52 @@
                     <span class="token-text" id="token-text">0 / 0</span>
                 </div>
 
-                <!-- Permission Mode -->
-                <div class="permission-bar">
-                    <span class="permission-label" data-i18n="perm-label">Mode :</span>
-                    <button class="perm-btn active" data-perm="supervised" data-i18n-title="perm-supervised-title" data-i18n="perm-supervised" title="Chaque modification demande votre accord">Supervise</button>
-                    <button class="perm-btn" data-perm="semi" data-i18n-title="perm-semi-title" data-i18n="perm-semi" title="Code auto, commandes validees">Semi-auto</button>
-                    <button class="perm-btn" data-perm="auto" data-i18n-title="perm-auto-title" data-i18n="perm-auto" title="Controle total, aucune validation">Autonome</button>
-                </div>
-
                 <!-- Chat Input -->
                 <div class="chat-input-area">
-                    <div class="attach-wrap">
-                        <button class="attach-btn" id="chat-attach-btn" title="Joindre un fichier ou une image">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        </button>
-                        <div class="attach-menu" id="chat-attach-menu">
-                            <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
-                            <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Ecrivez votre message..." autocomplete="off"></textarea>
+                    <div class="chat-input-bottom">
+                        <div class="chat-input-bottom-left">
+                            <div class="attach-wrap">
+                                <button class="attach-btn" id="chat-attach-btn" title="Joindre un fichier ou une image">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                </button>
+                                <div class="attach-menu" id="chat-attach-menu">
+                                    <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
+                                    <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                                </div>
+                            </div>
+                            <!-- Mode Selector -->
+                            <div class="mode-select-wrap">
+                                <button class="mode-select-btn" id="chat-mode-btn" type="button">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                    <span class="mode-select-label" data-i18n="perm-supervised">Supervisé</span>
+                                    <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                                </button>
+                                <div class="mode-dropdown" id="chat-mode-menu">
+                                    <button type="button" class="mode-item active" data-perm="supervised">
+                                        <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
+                                    </button>
+                                    <button type="button" class="mode-item" data-perm="semi">
+                                        <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
+                                    </button>
+                                    <button type="button" class="mode-item" data-perm="auto">
+                                        <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
+                                        <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chat-input-bottom-right">
+                            <button class="voice-btn" id="chat-voice-btn" title="Activer la dictée vocale">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                            </button>
+                            <button class="send-btn" id="send-btn">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                            </button>
                         </div>
                     </div>
-                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Ecrivez votre message..." autocomplete="off"></textarea>
-                    <button class="send-btn" id="send-btn">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                    </button>
                 </div>
 
                 <!-- Chat History -->
@@ -414,29 +440,52 @@
                 <!-- Attachments preview (agents) -->
                 <div class="attachments-bar" id="agents-attachments"></div>
 
-                <!-- Permission Mode (shared with the chat view) -->
-                <div class="permission-bar">
-                    <span class="permission-label" data-i18n="perm-label">Mode :</span>
-                    <button class="perm-btn active" data-perm="supervised" data-i18n-title="perm-supervised-title" data-i18n="perm-supervised" title="Chaque modification demande votre accord">Supervise</button>
-                    <button class="perm-btn" data-perm="semi" data-i18n-title="perm-semi-title" data-i18n="perm-semi" title="Code auto, commandes validees">Semi-auto</button>
-                    <button class="perm-btn" data-perm="auto" data-i18n-title="perm-auto-title" data-i18n="perm-auto" title="Controle total, aucune validation">Autonome</button>
-                </div>
-
                 <!-- Agents Input -->
                 <div class="chat-input-area">
-                    <div class="attach-wrap">
-                        <button class="attach-btn" id="agents-attach-btn" title="Joindre un fichier ou une image">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                        </button>
-                        <div class="attach-menu" id="agents-attach-menu">
-                            <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
-                            <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                    <textarea id="agents-input" rows="1" data-i18n-placeholder="agents-input-placeholder" placeholder="Donnez une tache aux agents..." autocomplete="off"></textarea>
+                    <div class="chat-input-bottom">
+                        <div class="chat-input-bottom-left">
+                            <div class="attach-wrap">
+                                <button class="attach-btn" id="agents-attach-btn" title="Joindre un fichier ou une image">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                                </button>
+                                <div class="attach-menu" id="agents-attach-menu">
+                                    <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
+                                    <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                                </div>
+                            </div>
+                            <!-- Mode Selector -->
+                            <div class="mode-select-wrap">
+                                <button class="mode-select-btn" id="agents-mode-btn" type="button">
+                                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                                    <span class="mode-select-label" data-i18n="perm-supervised">Supervisé</span>
+                                    <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+                                </button>
+                                <div class="mode-dropdown" id="agents-mode-menu">
+                                    <button type="button" class="mode-item active" data-perm="supervised">
+                                        <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
+                                    </button>
+                                    <button type="button" class="mode-item" data-perm="semi">
+                                        <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
+                                    </button>
+                                    <button type="button" class="mode-item" data-perm="auto">
+                                        <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
+                                        <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="chat-input-bottom-right">
+                            <button class="voice-btn" id="agents-voice-btn" title="Activer la dictée vocale">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+                            </button>
+                            <button class="send-btn" id="agents-send-btn">
+                                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+                            </button>
                         </div>
                     </div>
-                    <textarea id="agents-input" rows="1" data-i18n-placeholder="agents-input-placeholder" placeholder="Donnez une tache aux agents..." autocomplete="off"></textarea>
-                    <button class="send-btn" id="agents-send-btn">
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                    </button>
                 </div>
 
                 <!-- Agents history (separate from the single-chat history) -->
@@ -470,23 +519,38 @@
                 <h3 data-i18n="api-keys-section">Cles API</h3>
                 <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
                 <div class="form-group">
-                    <label for="key-openai">OpenAI (Codex)</label>
+                    <div class="key-label-row">
+                        <label for="key-openai">OpenAI (Codex)</label>
+                        <span class="key-status" id="key-status-openai"></span>
+                    </div>
                     <input type="password" id="key-openai" placeholder="sk-...">
                 </div>
                 <div class="form-group">
-                    <label for="key-anthropic">Anthropic (Claude)</label>
+                    <div class="key-label-row">
+                        <label for="key-anthropic">Anthropic (Claude)</label>
+                        <span class="key-status" id="key-status-anthropic"></span>
+                    </div>
                     <input type="password" id="key-anthropic" placeholder="sk-ant-...">
                 </div>
                 <div class="form-group">
-                    <label for="key-google">Google (Gemini)</label>
+                    <div class="key-label-row">
+                        <label for="key-google">Google (Gemini)</label>
+                        <span class="key-status" id="key-status-google"></span>
+                    </div>
                     <input type="password" id="key-google" placeholder="AIza...">
                 </div>
                 <div class="form-group">
-                    <label for="key-grok">xAI (Grok)</label>
+                    <div class="key-label-row">
+                        <label for="key-grok">xAI (Grok)</label>
+                        <span class="key-status" id="key-status-grok"></span>
+                    </div>
                     <input type="password" id="key-grok" placeholder="xai-...">
                 </div>
                 <div class="form-group">
-                    <label for="key-mistral">Mistral (Le Chat)</label>
+                    <div class="key-label-row">
+                        <label for="key-mistral">Mistral (Le Chat)</label>
+                        <span class="key-status" id="key-status-mistral"></span>
+                    </div>
                     <input type="password" id="key-mistral" placeholder="...">
                 </div>
             </div>
@@ -614,6 +678,20 @@
     </div>
 </div>
 
+<!-- ========== IMAGE LIGHTBOX ========== -->
+<div class="modal-overlay" id="image-lightbox">
+    <div class="lightbox">
+        <a class="lightbox-btn lightbox-download" id="lightbox-download" download="image.png" title="Télécharger">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </a>
+        <button class="lightbox-btn lightbox-close" id="lightbox-close" type="button" title="Fermer">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+        <img id="lightbox-img" class="lightbox-img" src="" alt="">
+        <div class="lightbox-caption" id="lightbox-caption"></div>
+    </div>
+</div>
+
 <!-- ========== QUANTIZATION CHOICE MODAL ========== -->
 <div class="modal-overlay" id="quant-modal">
     <div class="modal" style="width:480px;max-width:92vw;">
@@ -650,15 +728,35 @@
             <button class="modal-close" id="close-update-modal">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" id="update-release-name">zaalis IDE V...</p>
-            <div class="update-progress-container">
+            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.9</p>
+            <div class="update-steps">
+                <div class="update-step active" id="update-step-download">
+                    <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">✓</span></div>
+                    <div class="update-step-text">
+                        <strong>Téléchargement</strong>
+                        <span>Téléchargez la nouvelle version dans votre dossier Téléchargements.</span>
+                    </div>
+                </div>
+                <div class="update-step" id="update-step-install">
+                    <div class="update-step-badge"><span class="step-number">2</span></div>
+                    <div class="update-step-text">
+                        <strong>Installation manuelle</strong>
+                        <span>Fermez votre IDE, puis double-cliquez sur zaalis-update.exe.</span>
+                    </div>
+                </div>
+            </div>
+            <div class="update-progress-container" id="update-progress-container">
                 <div class="update-progress-bar" id="update-progress-bar"></div>
+            </div>
+            <div class="update-waiting hidden" id="update-waiting">
+                <span class="update-spinner"></span>
+                <span data-i18n="update-waiting-restart">En attente du redémarrage…</span>
             </div>
             <p class="update-status" id="update-status-text" data-i18n="update-ready">Prêt à télécharger</p>
         </div>
         <div class="modal-footer">
             <button class="btn btn-ghost" id="cancel-update-btn" data-i18n="cancel-btn">Annuler</button>
-            <button class="btn btn-primary" id="confirm-update-btn" data-i18n="update-start-btn">Télécharger & Installer</button>
+            <button class="btn btn-primary" id="confirm-update-btn" data-i18n="update-start-btn">Télécharger</button>
         </div>
     </div>
 </div>

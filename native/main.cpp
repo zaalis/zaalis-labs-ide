@@ -9,6 +9,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <dwmapi.h>
+#include <shlobj.h>
 #include <wrl.h>
 #include "WebView2.h"
 #include <string>
@@ -48,12 +49,31 @@ static std::wstring ExeDir() {
     return (pos == std::wstring::npos) ? L"." : p.substr(0, pos);
 }
 
+// Stable per-user WebView2 profile folder (%LOCALAPPDATA%\zaalis\WebView2).
+// Without an explicit folder, WebView2 stores cookies/localStorage next to the
+// exe, which is wiped on every update — logging the user out each time.
+static std::wstring WebViewDataDir() {
+    std::wstring dir;
+    PWSTR localAppData = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
+        dir = localAppData;
+        CoTaskMemFree(localAppData);
+    } else {
+        dir = ExeDir();
+    }
+    dir += L"\\zaalis\\WebView2";
+    SHCreateDirectoryExW(nullptr, dir.c_str(), nullptr);
+    return dir;
+}
+
 // Launch the Node server inside a Job Object marked KILL_ON_JOB_CLOSE.
 static bool LaunchServer() {
     g_job = CreateJobObjectW(nullptr, nullptr);
     if (g_job) {
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = {};
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE |
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
         SetInformationJobObject(g_job, JobObjectExtendedLimitInformation, &info, sizeof(info));
     }
 
@@ -172,7 +192,8 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
     // 3) Create the WebView2 and navigate to the local app.
-    CreateCoreWebView2EnvironmentWithOptions(nullptr, nullptr, nullptr,
+    std::wstring userDataDir = WebViewDataDir();
+    CreateCoreWebView2EnvironmentWithOptions(nullptr, userDataDir.c_str(), nullptr,
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [hwnd](HRESULT, ICoreWebView2Environment* env) -> HRESULT {
                 if (!env) return S_OK;
