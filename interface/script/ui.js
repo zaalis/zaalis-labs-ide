@@ -45,6 +45,65 @@ function updateSubmodelDropdown() {
     });
 }
 
+// --- Lightweight toast notification (non-blocking, auto-dismiss) ---
+function showToast(title, msg, opts = {}) {
+    let stack = $('#toast-stack');
+    if (!stack) {
+        stack = document.createElement('div');
+        stack.id = 'toast-stack';
+        document.body.appendChild(stack);
+    }
+    const toast = document.createElement('div');
+    toast.className = 'toast';
+    toast.innerHTML = `
+        <span class="toast-icon">${opts.icon || '⚠️'}</span>
+        <div class="toast-body">
+            <div class="toast-title"></div>
+            <div class="toast-msg"></div>
+        </div>
+        <button class="toast-close" aria-label="close">&times;</button>`;
+    toast.querySelector('.toast-title').textContent = title;
+    toast.querySelector('.toast-msg').textContent = msg;
+    stack.appendChild(toast);
+    requestAnimationFrame(() => toast.classList.add('show'));
+    let killed = false;
+    const dismiss = () => {
+        if (killed) return; killed = true;
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 250);
+    };
+    toast.querySelector('.toast-close').addEventListener('click', dismiss);
+    setTimeout(dismiss, opts.duration || 8000);
+}
+
+// Parse the parameter count (in billions) from an Ollama model tag.
+// "qwen3:8b" -> 8, "llama3.1:70b" -> 70, "gemma3:4b" -> 4, "llama3.2" -> null.
+// Version numbers like the "3.2" in "llama3.2" are ignored (no trailing 'b').
+function localModelSizeB(name) {
+    if (!name) return null;
+    const m = String(name).toLowerCase().match(/(\d+(?:\.\d+)?)\s*b(?![a-z0-9])/);
+    return m ? parseFloat(m[1]) : null;
+}
+
+// Warn (once per model per session) that a small Ollama model may misbehave —
+// e.g. fail to emit read/file blocks, hallucinate, or ignore instructions.
+const warnedSmallModels = new Set();
+function maybeWarnSmallLocalModel() {
+    if (modelSelect.value !== 'local') return;
+    const sub = submodelSelect.value;
+    if (!sub || warnedSmallModels.has(sub)) return;
+    const size = localModelSizeB(sub);
+    const SMALL = 14; // below ~14B these local models become unreliable here
+    if (size !== null && size >= SMALL) return; // big enough -> no warning
+    warnedSmallModels.add(sub);
+    const lang = state.language || 'fr';
+    const pretty = (typeof prettyModelLabel === 'function' && /^hf\.co\//i.test(sub)) ? prettyModelLabel(sub) : sub;
+    const title = TRANSLATIONS[lang]['ollama-small-title'] || 'Modèle local léger';
+    const tmpl = TRANSLATIONS[lang]['ollama-small-msg'] ||
+        'Le modèle « {model} » est petit. Il peut halluciner, ignorer des consignes (lecture/écriture de fichiers) ou bugger. Pour des résultats fiables, préférez un modèle ≥ 14B.';
+    showToast(title, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
+}
+
 modelSelect.addEventListener('change', () => {
     state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
@@ -67,14 +126,16 @@ modelSelect.addEventListener('change', () => {
     updateAttachAvailability();
     applyModelColor();
     updateTokenMeter();
+    maybeWarnSmallLocalModel();
 });
 submodelSelect.addEventListener('change', () => {
     state.config.aiSubmodel = submodelSelect.value;
     saveState();
-    
+
     checkReasoningCompatibility();
     updateAttachAvailability();
     updateTokenMeter();
+    maybeWarnSmallLocalModel();
 });
 
 // In agents mode the reasoning slider tracks the lead agent, so re-check it
@@ -162,8 +223,23 @@ function initRecentProjects() {
 }
 
 async function openProject(rootPath, isNew) {
+    const switchingProject = state.projectRoot && state.projectRoot !== rootPath;
+
     state.projectRoot = rootPath;
     if (isNew) addRecentProject(rootPath);
+
+    // Switching to a DIFFERENT project must drop the previous project's open
+    // tabs/editor and force the AI context (project tree) to be re-injected on
+    // the next message — otherwise the assistant keeps reasoning about the old
+    // project. We mark the context dirty via lastContextRoot (read in sendChat).
+    if (switchingProject) {
+        state.openFiles = {};
+        state.activeFile = null;
+        if (typeof textarea !== 'undefined' && textarea) textarea.value = '';
+        if (typeof renderTabs === 'function') renderTabs();
+    }
+    state.lastContextRoot = null; // re-inject project context for this root
+
     saveState();
     $('#project-name').textContent = rootPath.split(/[\\/]/).pop();
     await loadFileTree();
@@ -240,8 +316,10 @@ const ICON_CHEVRON_R = '<svg width="10" height="10" viewBox="0 0 24 24"><polygon
 const ICON_CHEVRON_D = '<svg width="10" height="10" viewBox="0 0 24 24"><polygon points="4 8 20 8 12 20" fill="#aaa"/></svg>';
 
 async function loadFileTree() {
-    if (!state.projectRoot) return;
     const fileTree = $('#file-tree');
+    // No project selected => the explorer must be completely empty (no leftover
+    // files/folders from a previously-open project).
+    if (!state.projectRoot) { if (fileTree) fileTree.innerHTML = ''; return; }
     fileTree.innerHTML = '';
     const files = await fetchFiles('');
     renderTree(files, fileTree, 0);

@@ -162,7 +162,7 @@ if (olDetect) olDetect.addEventListener('click', async () => {
     const original = olDetect.innerHTML;
     olDetect.textContent = lang === 'en' ? 'Detecting…' : 'Détection…';
     try {
-        const url = encodeURIComponent($('#ollama-url').value.trim() || 'http://localhost:11434');
+        const url = encodeURIComponent($('#ollama-url').value.trim() || 'http://127.0.0.1:11434');
         const res = await fetch('/api/ollama-models?url=' + url);
         const data = await res.json();
         const found = (data.models || []);
@@ -185,7 +185,7 @@ function isInstalled(name) {
 }
 async function refreshInstalled() {
     try {
-        const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+        const url = encodeURIComponent(state.config.ollamaUrl || 'http://127.0.0.1:11434');
         const res = await fetch('/api/ollama-models?url=' + url);
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
@@ -267,7 +267,7 @@ async function expandQuants(card) {
 // Detect actually-installed Ollama models and use them as the model list.
 async function syncOllamaModels() {
     try {
-        const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+        const url = encodeURIComponent(state.config.ollamaUrl || 'http://127.0.0.1:11434');
         const res = await fetch('/api/ollama-models?url=' + url);
         if (!res.ok) return;
         const data = await res.json();
@@ -563,7 +563,7 @@ async function installModel(name, card) {
     prog.appendChild(cancel);
 
     try {
-        const url = encodeURIComponent(state.config.ollamaUrl || 'http://localhost:11434');
+        const url = encodeURIComponent(state.config.ollamaUrl || 'http://127.0.0.1:11434');
         const res = await fetch(`/api/ollama-pull?name=${encodeURIComponent(name)}&url=${url}`, { signal: controller.signal });
         if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
         const reader = res.body.getReader();
@@ -629,7 +629,7 @@ async function uninstallModel(name, card) {
         for (const t of targets) {
             const res = await fetch('/api/ollama-delete', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ name: t, url: state.config.ollamaUrl || 'http://localhost:11434' })
+                body: JSON.stringify({ name: t, url: state.config.ollamaUrl || 'http://127.0.0.1:11434' })
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok || data.error) lastErr = data.error || ('HTTP ' + res.status);
@@ -763,7 +763,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // l'effort de reflexion et la disponibilite des pieces jointes.
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
-    _set('#ollama-url', state.config.ollamaUrl || 'http://localhost:11434');
+    _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();

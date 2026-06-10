@@ -317,7 +317,7 @@ async function streamInto(el, text, finalHTML, signal, scrollEl) {
     for (let i = 0; i < words.length; i += chunk) {
         if (signal && signal.aborted) { acc = text; break; }
         acc += words.slice(i, i + chunk).join('');
-        el.textContent = acc;
+        el.innerHTML = renderMarkdown(acc);
         if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
         await sleep(13);
     }
@@ -537,9 +537,14 @@ async function sendChat(message) {
     // Compact the running context first if it's getting close to the limit.
     await maybeCompact(model, submodel);
 
-    // Project tree goes into the SYSTEM prompt (background), only on the first
-    // message — so weak models don't echo it and later questions aren't drowned.
-    const ctx = state.chatHistory.length === 0 ? await projectContext(isLocal) : '';
+    // Project tree goes into the SYSTEM prompt (background), on the first message
+    // OR whenever the project changed since the last injection — so switching
+    // project "à chaud" actually updates the assistant's context instead of
+    // keeping the old tree. Weak models still don't get it on every turn.
+    const projectChanged = state.lastContextRoot !== state.projectRoot;
+    const needCtx = state.chatHistory.length === 0 || projectChanged;
+    const ctx = needCtx ? await projectContext(isLocal) : '';
+    if (state.projectRoot) state.lastContextRoot = state.projectRoot;
     const sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang)) + ctx;
     const aiMessage = message + aiText;            // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
@@ -608,6 +613,8 @@ async function sendChat(message) {
 
             // Check if AI wants to modify a file / run a command.
             await handleAIResponse(data.response, modelLabel);
+            // Check if AI asked to read project files, then let it analyze them.
+            await resolveReadRequests(data.response, model, submodel, isLocal, lang);
         }
     } catch (err) {
         stopThinking(body);
@@ -741,6 +748,70 @@ async function handleAIResponse(response, agentName, container) {
             addMsg(out, 'system', null,
                 `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${err.message}`);
         }
+    }
+}
+
+// If the assistant asked to read project files (```read blocks), fetch their
+// contents and feed them back so it can analyze them — then let it answer.
+// Bounded: max files, max chars per file, and max read rounds (anti-loop).
+async function resolveReadRequests(response, model, submodel, isLocal, lang, depth = 0) {
+    if (depth >= 3) return;                 // hard cap on read rounds
+    if (!state.projectRoot) return;
+    const requested = extractReadBlocks(response);
+    if (!requested.length) return;
+
+    const maxFiles = isLocal ? 5 : 10;
+    const maxChars = isLocal ? 4000 : 12000;
+    const picked = requested.slice(0, maxFiles);
+    const out = $('#chat-messages');
+
+    let ctx = lang === 'en' ? 'Contents of the requested files:\n' : 'Contenu des fichiers demandés :\n';
+    for (const p of picked) {
+        try {
+            const res = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=${encodeURIComponent(p)}`);
+            const d = await res.json().catch(() => ({}));
+            if (!res.ok || d.error) { ctx += `\n# ${p}\n(${(d && d.error) || ('HTTP ' + res.status)})\n`; continue; }
+            const full = d.content || '';
+            ctx += `\n# ${p}\n\`\`\`\n${full.slice(0, maxChars)}${full.length > maxChars ? '\n... (tronqué)' : ''}\n\`\`\`\n`;
+        } catch { ctx += `\n# ${p}\n(${lang === 'en' ? 'read failed' : 'lecture impossible'})\n`; }
+    }
+
+    addMsg(out, 'system', null, (lang === 'en' ? 'Read: ' : 'Lecture : ') + picked.join(', '));
+
+    // Re-query the model with the file contents so it produces the analysis.
+    const sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang));
+    const followUp = (lang === 'en'
+        ? 'Here is the content you requested. Analyze it and answer the user now (do not request these same files again).\n\n'
+        : 'Voici le contenu que tu as demandé. Analyse-le et réponds maintenant à l\'utilisateur (ne redemande pas ces mêmes fichiers).\n\n') + ctx;
+
+    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const body = addTypingMsg(out, modelLabel);
+    const controller = new AbortController();
+    chatAbort = controller;
+    setChatBusy(true);
+    try {
+        const data = await callAI(model, submodel, followUp, sys, [], controller.signal, state.chatHistory.slice());
+        stopThinking(body);
+        if (data.error) { body.textContent = data.error; body.classList.add('error'); return; }
+        const reasoning = data.thinking ? reasoningBlock(data.thinking, 0) : '';
+        const formatted = formatAIResponse(data.response);
+        body.innerHTML = reasoning + '<div class="stream-target"></div>';
+        await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, out);
+        // Keep conversation memory lean: record that files were read, not the dump.
+        state.chatHistory.push(
+            { role: 'user', content: `[${lang === 'en' ? 'Read files' : 'Lecture fichiers'}: ${picked.join(', ')}]` },
+            { role: 'assistant', content: data.response }
+        );
+        updateTokenMeter();
+        await handleAIResponse(data.response, modelLabel);
+        await resolveReadRequests(data.response, model, submodel, isLocal, lang, depth + 1);
+    } catch (err) {
+        stopThinking(body);
+        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur.'; body.classList.add('error'); }
+    } finally {
+        chatAbort = null;
+        setChatBusy(false);
+        saveConversation();
     }
 }
 
@@ -1528,9 +1599,11 @@ function reasoningContext() {
 function isReasoningCompatible(model, submodel) {
     if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
     if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
-    if (model === 'gemini') return true;
+    // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
+    if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
     if (model === 'local' && submodel.includes('r1')) return true;
-    if (model === 'grok' && (submodel.includes('reasoning') || submodel.includes('4.20-0309-reasoning'))) return true;
+    // Grok 4.x reasoning models reason natively and reject reasoning_effort,
+    // so there is no controllable budget to expose — keep the slider locked.
     if (model === 'mistral' && submodel.includes('magistral')) return true; // Magistral = reasoning model
     return false;
 }

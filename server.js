@@ -498,6 +498,10 @@ app.post('/api/file', (req, res) => {
 // ---------------------------------------------------------------------------
 
 // POST /api/exec  { command, cwd }
+// Use execFile with cmd.exe instead of exec() to reliably hide the console
+// window on Windows. exec() spawns an intermediate cmd.exe shell that can
+// flash a visible window even with windowsHide:true, especially from a
+// pkg-packaged .exe. execFile + explicit cmd.exe avoids the extra shell.
 app.post('/api/exec', (req, res) => {
   try {
     const { command, cwd } = req.body;
@@ -505,7 +509,12 @@ app.post('/api/exec', (req, res) => {
 
     const execCwd = cwd || APP_DIR;
 
-    exec(command, { cwd: execCwd, timeout: 30000, maxBuffer: 1024 * 1024 * 5, windowsHide: true }, (err, stdout, stderr) => {
+    execFile('cmd.exe', ['/c', command], {
+      cwd: execCwd,
+      timeout: 30000,
+      maxBuffer: 1024 * 1024 * 5,
+      windowsHide: true
+    }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
       }
@@ -546,9 +555,11 @@ app.post('/api/pick-folder', (req, res) => {
     '$null = $d.ShowDialog();',
     '[Console]::Out.Write($d.SelectedPath)',
   ].join(' ');
-  const cmd = `powershell -NoProfile -STA -Command "${ps.replace(/"/g, '\\"')}"`;
+  // Use execFile to launch PowerShell directly (no intermediate cmd.exe shell)
+  // with windowsHide:true so no console window flashes.
+  const psArgs = ['-NoProfile', '-STA', '-Command', ps];
 
-  exec(cmd, { timeout: 120000, windowsHide: false }, (err, stdout) => {
+  execFile('powershell.exe', psArgs, { timeout: 120000, windowsHide: true }, (err, stdout) => {
     if (err) return res.status(500).json({ error: err.message });
     const selected = (stdout || '').trim();
     if (!selected) return res.json({ cancelled: true });
@@ -559,7 +570,7 @@ app.post('/api/pick-folder', (req, res) => {
 // GET /api/ollama-models?url=...  -> { models: [names] }
 app.get('/api/ollama-models', async (req, res) => {
   try {
-    const url = (req.query.url || 'http://localhost:11434').replace(/\/+$/, '');
+    const url = (req.query.url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
     const r = await fetch(`${url}/api/tags`);
     const data = await r.json();
     const models = (data.models || []).map((m) => m.name).filter(Boolean);
@@ -573,7 +584,7 @@ app.get('/api/ollama-models', async (req, res) => {
 app.post('/api/ollama-delete', async (req, res) => {
   try {
     const name = req.body && req.body.name;
-    const url = ((req.body && req.body.url) || 'http://localhost:11434').replace(/\/+$/, '');
+    const url = ((req.body && req.body.url) || 'http://127.0.0.1:11434').replace(/\/+$/, '');
     if (!name) return res.status(400).json({ error: 'name required' });
     const r = await fetch(`${url}/api/delete`, {
       method: 'DELETE',
@@ -643,7 +654,7 @@ app.get('/api/hf-files', async (req, res) => {
 // GET /api/ollama-pull?name=...&url=...  -> streams Ollama's pull progress (NDJSON)
 app.get('/api/ollama-pull', async (req, res) => {
   const name = req.query.name;
-  const url = (req.query.url || 'http://localhost:11434').replace(/\/+$/, '');
+  const url = (req.query.url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
   if (!name) return res.status(400).json({ error: 'name required' });
   res.setHeader('Content-Type', 'application/x-ndjson');
   res.setHeader('Cache-Control', 'no-store');
@@ -694,7 +705,7 @@ app.post('/api/chat', async (req, res) => {
     // API keys come from the encrypted per-user vault. Keys still sent by an
     // older client (pre-1.0.9 localStorage) are accepted as a fallback only.
     const keys = { ...(config?.keys || {}), ...userApiKeys(req.user) };
-    const ollamaUrl = config?.ollamaUrl || 'http://localhost:11434';
+    const ollamaUrl = config?.ollamaUrl || 'http://127.0.0.1:11434';
     const ollamaModel = config?.ollamaModel || 'llama3';
 
     let responseText = '';
@@ -803,11 +814,16 @@ app.post('/api/chat', async (req, res) => {
       const payload = { contents };
       if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
 
-      if (reasoningLevel !== undefined && reasoningLevel > 0) {
+      // Native thinking is supported by Gemini 2.5 / 3.x. The thinkingConfig
+      // MUST be nested inside generationConfig — placing it at the payload root
+      // makes the Gemini REST API reject the request (400 INVALID_ARGUMENT),
+      // which this server then surfaces as a 500.
+      const geminiSupportsThinking = /(^|[^a-z])(2\.5|3)/.test(modelName) || modelName.includes('thinking');
+      if (reasoningLevel !== undefined && reasoningLevel > 0 && geminiSupportsThinking) {
         const budgets = [0, 1024, 2048, 4096];
         const budget = budgets[reasoningLevel] || 1024;
         if (budget > 0) {
-          payload.thinkingConfig = { thinkingBudget: budget };
+          payload.generationConfig = { ...(payload.generationConfig || {}), thinkingConfig: { thinkingBudget: budget } };
         }
       }
 
@@ -868,11 +884,11 @@ app.post('/api/chat', async (req, res) => {
             : message,
         });
 
+        // The grok-4.x reasoning models reason natively and REJECT the
+        // reasoning_effort parameter ("does not support parameter reasoningEffort").
+        // Only the small grok-3-mini-style models accept it, and none are in our
+        // catalog, so we never send it.
         const grokPayload = { model: submodel || 'grok-4.3', messages };
-        // Only reasoning sub-models accept reasoning_effort (low | high).
-        if (submodel && submodel.includes('reasoning') && reasoningLevel > 0) {
-          grokPayload.reasoning_effort = reasoningLevel >= 2 ? 'high' : 'low';
-        }
 
         const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
           method: 'POST',
@@ -1212,7 +1228,7 @@ app.post('/api/app/close', (req, res) => {
 async function startOllamaIfNeeded() {
   if (process.platform !== 'win32') return;
   try {
-    await fetch('http://localhost:11434/api/tags');
+    await fetch('http://127.0.0.1:11434/api/tags');
     return; // already running -> do nothing
   } catch {}
   const candidates = [
@@ -1227,7 +1243,14 @@ async function startOllamaIfNeeded() {
   });
   if (!exe) return; // Ollama not installed -> silently skip
   try {
-    const child = spawn(exe, ['serve'], { detached: true, stdio: 'ignore', windowsHide: true });
+    const child = spawn(exe, ['serve'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      // CREATE_NO_WINDOW (0x08000000) prevents any console window from
+      // flashing when Ollama starts in the background.
+      ...(process.platform === 'win32' ? { shell: false } : {})
+    });
     // CRITICAL: listen for 'error' so Node doesn't crash on ENOENT / EACCES.
     child.on('error', () => { /* Ollama failed to start -> ignore */ });
     child.unref();
