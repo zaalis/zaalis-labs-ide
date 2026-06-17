@@ -156,14 +156,44 @@ function removeOllamaModel(name) {
     refreshOllamaAgentSelect();
 }
 // Keep the Ollama agent's model dropdown in sync with the managed list.
-function refreshOllamaAgentSelect() {
-    const sel = $('.agent-model-select[data-agent="local"]');
+function setAgentModelOptions(sel, list, labeler, emptyLabel) {
     if (!sel) return;
     const prev = sel.value;
-    const list = (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
     sel.innerHTML = '';
-    list.forEach(s => { const o = document.createElement('option'); o.value = s; o.textContent = /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s; o.title = s; sel.appendChild(o); });
+    if (!list.length) {
+        const o = document.createElement('option');
+        o.value = '';
+        o.textContent = emptyLabel;
+        o.disabled = true;
+        o.selected = true;
+        sel.appendChild(o);
+        return;
+    }
+    list.forEach(s => {
+        const o = document.createElement('option');
+        o.value = s;
+        o.textContent = labeler(s);
+        o.title = s;
+        sel.appendChild(o);
+    });
     if (list.includes(prev)) sel.value = prev;
+}
+function refreshOllamaAgentSelect() {
+    const list = (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
+    setAgentModelOptions(
+        $('.agent-model-select[data-agent="local"]'),
+        list,
+        s => /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s,
+        state.language === 'en' ? 'No Ollama model' : 'Aucun modele Ollama'
+    );
+}
+function refreshGgufAgentSelect() {
+    setAgentModelOptions(
+        $('.agent-model-select[data-agent="gguf"]'),
+        state.config.ggufModels || [],
+        s => String(s || '').replace(/\.gguf$/i, ''),
+        (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr']['gguf-agent-empty']) || 'Aucun modele GGUF installe'
+    );
 }
 const olAdd = $('#ollama-model-add'), olInput = $('#ollama-model-input');
 if (olAdd) olAdd.addEventListener('click', () => { addOllamaModel(olInput.value); olInput.value = ''; olInput.focus(); });
@@ -397,6 +427,7 @@ async function loadGgufModels() {
             autoOpt.textContent = state.language === 'en' ? `Auto (${v})` : `Auto (${v})`;
         }
         renderGgufModels();
+        refreshGgufAgentSelect();
         if (modelSelect.value === 'gguf') {
             updateSubmodelDropdown();
             if (typeof createCustomSelect === 'function') createCustomSelect('ai-submodel');

@@ -125,6 +125,9 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .profile-avatar-large{width:48px;height:48px;border-radius:50%;background:var(--bg-3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600;color:var(--text-1);margin:0 auto 4px;overflow:hidden;cursor:pointer;padding:0;transition:border-color .15s,box-shadow .15s;position:relative;}
 .profile-avatar-large:hover{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-muted);}
 .profile-avatar-large img{width:100%;height:100%;object-fit:cover;}
+.profile-remove-photo{align-self:center;font-size:11px;color:var(--text-3);padding:3px 8px;border-radius:999px;transition:background .15s,color .15s;}
+.profile-remove-photo:hover{background:rgba(239,68,68,.12);color:var(--red);}
+.profile-remove-photo.hidden{display:none;}
 
 /* ---- Editor ---- */
 #editor-panel{flex:1;display:flex;flex-direction:column;min-width:200px;overflow:hidden;background:var(--bg-0);}
@@ -420,6 +423,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .custom-select-container {
     position: relative;
     flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
 }
@@ -435,7 +439,14 @@ input,select,textarea{font-family:inherit;color:inherit;}
     cursor: pointer;
     user-select: none;
     height: 28px;
+    min-width: 0;
     transition: border-color .15s ease, background-color .15s ease;
+}
+.custom-select-trigger-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 .custom-select-trigger:hover {
     background: var(--bg-hover);
@@ -510,6 +521,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .agent-card[data-agent="grok"] .agent-name{color:#9ca3af;}
 .agent-card[data-agent="mistral"] .agent-name{background:linear-gradient(90deg,#facc15,#f97316);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
 .agent-card[data-agent="local"] .agent-name{color:#fafafa;}
+.agent-card[data-agent="gguf"] .agent-name{color:#34d399;}
 .agent-card[data-agent="gemini"] .agent-name{background:linear-gradient(90deg,#4285f4,#a855f7);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
 
 /* Permission Bar */

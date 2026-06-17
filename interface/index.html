@@ -127,6 +127,7 @@
                 <div class="profile-popup-body">
                     <button class="profile-avatar-large" id="profile-avatar-large" title="Changer la photo">U</button>
                     <input type="file" id="profile-photo-input" accept="image/*" hidden>
+                    <button class="profile-remove-photo hidden" id="remove-profile-photo" type="button" data-i18n="remove-photo-btn">Supprimer la photo</button>
                     <div class="form-group">
                         <label for="profile-pseudo" data-i18n="username">Pseudo</label>
                         <input type="text" id="profile-pseudo" value="Utilisateur">
@@ -429,6 +430,24 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="local"></select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- GGUF -->
+                    <div class="agent-card" data-agent="gguf">
+                        <input type="checkbox" class="agent-check" data-agent="gguf">
+                        <div class="agent-dot gguf"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">GGUF</span>
+                            <select class="agent-role-select" data-agent="gguf">
+                                <option value="developer">Developpeur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="gguf"></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                 </div>

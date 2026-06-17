@@ -182,6 +182,7 @@ const TRANSLATIONS = {
         'profile-header': 'Profil',
         'username': 'Pseudo',
         'photo-url': 'Photo (URL)',
+        'remove-photo-btn': 'Supprimer la photo',
         'save-profile-btn': 'Sauvegarder',
         'welcome-sub': 'Ouvrez un projet pour commencer',
         'welcome-tab': 'Bienvenue',
@@ -272,6 +273,7 @@ const TRANSLATIONS = {
         'mode-agents-active': 'Mode Agents active.',
         'mode-agents-inactive': 'Mode Agents desactive.',
         'active-agents': 'agents prets.',
+        'gguf-agent-empty': 'Aucun modele GGUF installe',
         'terminal-cleared': 'Terminal efface.',
         'history-cleared': 'Historique efface.',
         'team-thinking-title': "Reflexion de l'equipe",
@@ -298,6 +300,7 @@ const TRANSLATIONS = {
         'profile-header': 'Profile',
         'username': 'Username',
         'photo-url': 'Photo (URL)',
+        'remove-photo-btn': 'Remove photo',
         'save-profile-btn': 'Save',
         'welcome-sub': 'Open a project to begin',
         'welcome-tab': 'Welcome',
@@ -388,6 +391,7 @@ const TRANSLATIONS = {
         'mode-agents-active': 'Agent Mode active.',
         'mode-agents-inactive': 'Agent Mode inactive.',
         'active-agents': 'agents ready.',
+        'gguf-agent-empty': 'No GGUF model installed',
         'terminal-cleared': 'Terminal cleared.',
         'history-cleared': 'History cleared.',
         'team-thinking-title': 'Team thinking',
@@ -460,14 +464,27 @@ function initAgentModelDropdowns() {
         const agent = sel.dataset.agent;
         const subs = agent === 'local'
             ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
-            : (SUBMODELS[agent] || []);
+            : agent === 'gguf'
+                ? (state.config.ggufModels || [])
+                : (SUBMODELS[agent] || []);
         sel.innerHTML = '';
+        if (agent === 'gguf' && !subs.length) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr']['gguf-agent-empty']) || 'Aucun modele GGUF installe';
+            opt.disabled = true;
+            opt.selected = true;
+            sel.appendChild(opt);
+            return;
+        }
         subs.forEach(s => {
             const opt = document.createElement('option');
             opt.value = s;
             opt.textContent = agent === 'local'
                 ? (/^hf\.co\//i.test(s) ? prettyModelLabel(s) : s)
-                : modelLabel(s);
+                : agent === 'gguf'
+                    ? s.replace(/\.gguf$/i, '')
+                    : modelLabel(s);
             opt.title = s;
             sel.appendChild(opt);
         });

@@ -791,6 +791,7 @@ function updateProfileUI() {
     const name = state.profile.pseudo || TRANSLATIONS[lang]['default-username'];
     const letter = name ? name.charAt(0).toUpperCase() : 'U';
     $('#profile-name').textContent = name;
+    const removePhoto = $('#remove-profile-photo');
 
     if (state.profile.photo) {
         $('#profile-avatar').innerHTML = `<img src="${state.profile.photo}" alt="">`;
@@ -799,6 +800,7 @@ function updateProfileUI() {
         $('#profile-avatar').textContent = letter;
         $('#profile-avatar-large').textContent = letter;
     }
+    if (removePhoto) removePhoto.classList.toggle('hidden', !state.profile.photo);
 }
 
 $('#sidebar-profile').addEventListener('click', e => {
@@ -823,6 +825,16 @@ $('#profile-photo-input').addEventListener('change', e => {
     };
     reader.readAsDataURL(file);
     e.target.value = '';
+});
+
+const removeProfilePhoto = $('#remove-profile-photo');
+if (removeProfilePhoto) removeProfilePhoto.addEventListener('click', () => {
+    state.profile.photo = '';
+    const photoInput = $('#profile-photo-input');
+    if (photoInput) photoInput.value = '';
+    saveState();
+    updateProfileUI();
+    saveProfileToServer();
 });
 
 $('#save-profile').addEventListener('click', () => {
@@ -983,15 +995,24 @@ function makeResizer(id, target, side) {
     handle.addEventListener('mousedown', e => {
         e.preventDefault();
         handle.classList.add('dragging');
+        el.classList.add('resizing-panel');
         document.body.style.cursor = 'col-resize';
         document.body.style.userSelect = 'none';
+        let raf = 0;
+        let nextWidth = el.getBoundingClientRect().width;
+        const applyWidth = () => {
+            el.style.width = nextWidth + 'px';
+            raf = 0;
+        };
         const move = ev => {
             let w = side === 'left' ? ev.clientX : (window.innerWidth - ev.clientX);
-            w = Math.max(180, Math.min(w, Math.round(window.innerWidth * 0.6)));
-            el.style.width = w + 'px';
+            nextWidth = Math.max(180, Math.min(w, Math.round(window.innerWidth * 0.6)));
+            if (!raf) raf = requestAnimationFrame(applyWidth);
         };
         const up = () => {
+            if (raf) { cancelAnimationFrame(raf); applyWidth(); }
             handle.classList.remove('dragging');
+            el.classList.remove('resizing-panel');
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
             document.removeEventListener('mousemove', move);
@@ -1164,9 +1185,10 @@ function createCustomSelect(selectId) {
 
         // Update color for model select trigger
         if (selectId === 'ai-model') {
-            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa' };
+            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
             triggerText.style.color = colors[select.value] || 'var(--text-0)';
         }
+        trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
 
         Array.from(select.options).forEach(opt => {
             const div = document.createElement('div');
@@ -1179,7 +1201,7 @@ function createCustomSelect(selectId) {
             div.title = opt.title || opt.textContent;
 
             if (selectId === 'ai-model') {
-                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa' };
+                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
                 div.style.color = colors[opt.value] || 'inherit';
                 div.style.fontWeight = '600';
             }

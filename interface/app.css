@@ -55,11 +55,12 @@
 .agent-dot.grok{background:#9ca3af;}
 .agent-dot.mistral{background:#f59e0b;}
 .agent-dot.local{background:var(--green);}
+.agent-dot.gguf{background:#34d399;}
 
 @keyframes pulse-dot{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(.7);}}
 .agent-info{flex:1;display:flex;flex-direction:column;gap:1px;min-width:0;}
 .agent-name{font-size:12px;font-weight:600;color:var(--text-0);}
-.agent-role-select,.agent-model-select{background:var(--bg-3);border:1px solid var(--border-subtle);padding:2px 4px;border-radius:4px;font-size:10px;color:var(--text-2);outline:none;cursor:pointer;max-width:110px;}
+.agent-role-select,.agent-model-select{background:var(--bg-3);border:1px solid var(--border-subtle);padding:2px 4px;border-radius:4px;font-size:10px;color:var(--text-2);outline:none;cursor:pointer;max-width:110px;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
 .agent-role-select:focus,.agent-model-select:focus{border-color:var(--accent);}
 .agent-model-label{font-size:10px;color:var(--text-3);padding:2px 6px;background:var(--bg-3);border-radius:4px;}
 .agent-badge{font-size:10px;font-weight:600;padding:2px 8px;border-radius:10px;letter-spacing:.3px;flex-shrink:0;white-space:nowrap;}
@@ -327,8 +328,10 @@
 /* ===================== RESIZE / COLLAPSE / ANIMATIONS ===================== */
 
 /* Draggable resizers between panels */
-.resizer{width:5px;flex-shrink:0;cursor:col-resize;background:transparent;transition:background .15s;z-index:6;}
-.resizer:hover,.resizer.dragging{background:var(--accent);}
+.resizer{width:12px;margin:0 -3.5px;flex-shrink:0;cursor:col-resize;background:transparent;z-index:6;position:relative;}
+.resizer::before{content:'';position:absolute;top:0;bottom:0;left:50%;width:1px;transform:translateX(-50%);background:var(--accent);opacity:0;transition:opacity .15s,width .15s;}
+.resizer:hover::before,.resizer.dragging::before{opacity:.9;width:2px;}
+.resizing-panel{transition:none!important;}
 
 /* Collapsible left sidebar — collapses to a thin rail keeping the toggle (ChatGPT-style) */
 #sidebar{transition:width .28s cubic-bezier(.4,0,.2,1), min-width .28s cubic-bezier(.4,0,.2,1);}

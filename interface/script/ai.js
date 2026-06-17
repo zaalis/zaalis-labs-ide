@@ -971,6 +971,7 @@ async function sendAgentTask(task) {
         return;
     }
 
+    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama', gguf: 'GGUF' };
     const activeAgents = [];
     $$('.agent-check:checked').forEach(cb => {
         const agent = cb.dataset.agent;
@@ -981,12 +982,19 @@ async function sendAgentTask(task) {
         activeAgents.push({ agent, role, submodel });
     });
 
+    const missingModels = activeAgents.filter(a => !a.submodel);
+    if (missingModels.length) {
+        addMsg($('#agents-log'), 'system', null,
+            lang === 'en'
+                ? `${missingModels.map(a => labels[a.agent] || a.agent).join(', ')} has no installed model selected.`
+                : `${missingModels.map(a => labels[a.agent] || a.agent).join(', ')} n'a aucun modele installe selectionne.`);
+        return;
+    }
+
     if (activeAgents.length < 2) {
         addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required'] || 'Minimum 2 agents requis.');
         return;
     }
-
-    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama' };
 
     // Identify lead agent
     const leadIdx = activeAgents.findIndex(a => a.role === 'lead');
@@ -1057,7 +1065,8 @@ async function sendAgentTask(task) {
         followScroll(agentsLog);
         const statusText = line.querySelector('.team-agent-status');
 
-        const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(agent === 'local')}${projCtx}`;
+        const isLocalAgent = agent === 'local' || agent === 'gguf';
+        const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(isLocalAgent, modelIdentity(agent, submodel, lang))}${projCtx}`;
         const fullMessage = context
             ? (lang === 'en'
                 ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}`
@@ -1099,7 +1108,8 @@ async function sendAgentTask(task) {
     leadBadge.textContent = TRANSLATIONS[lang]['status-working'];
     leadBadge.className = 'agent-badge working';
 
-    const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(leadAgent.agent === 'local')}${projCtx}`;
+    const leadIsLocal = leadAgent.agent === 'local' || leadAgent.agent === 'gguf';
+    const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(leadIsLocal, modelIdentity(leadAgent.agent, leadAgent.submodel, lang))}${projCtx}`;
     const leadMessage = lang === 'fr'
         ? `[Tache utilisateur]: ${task}
 
@@ -1529,6 +1539,7 @@ function isVisionCompatible(model, submodel) {
         case 'grok':  return s.includes('grok-4');  // xAI: Grok 4 has vision, Grok 3 does not
         case 'mistral': return s.includes('pixtral'); // Mistral: only Pixtral models have vision
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
+        case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default: return false;
     }
 }
@@ -1603,6 +1614,11 @@ const REASONING_MODES = {
         { label: 'MAX', budget: 2048 },
         { label: 'MED', budget: 1024 },
         { label: 'OFF', budget: 0 }
+    ],
+    gguf: [
+        { label: 'MAX', budget: 2048 },
+        { label: 'MED', budget: 1024 },
+        { label: 'OFF', budget: 0 }
     ]
 };
 
@@ -1640,7 +1656,7 @@ function isReasoningCompatible(model, submodel) {
     if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
     // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
     if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
-    if (model === 'local' && submodel.includes('r1')) return true;
+    if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
     // Grok 4.x reasoning models reason natively and reject reasoning_effort,
     // so there is no controllable budget to expose — keep the slider locked.
     if (model === 'mistral' && submodel.includes('magistral')) return true; // Magistral = reasoning model
