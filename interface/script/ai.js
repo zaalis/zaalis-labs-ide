@@ -329,9 +329,11 @@ function renderMarkdown(src) {
     html = html.replace(new RegExp(`${NUL}CODE(\\d+)${NUL}`, 'g'), (m, i) => {
         const b = codeBlocks[+i];
         const pre = `<pre class="code-block"><code>${escapeHTML(b.code)}</code></pre>`;
-        // A code block that names a file (a change the agent wrote to disk) is
-        // shown collapsed — one card per file — so the chat stays readable.
-        return b.path ? fileCard(b.path, pre) : pre;
+        // Fold ONLY a real code file: it must name a file (path=) AND be more
+        // than a couple of lines. A one/two-line snippet — or any block without
+        // a path — stays inline, so only full files in the summary collapse.
+        const lineCount = b.code.split('\n').length;
+        return (b.path && lineCount > 2) ? fileCard(b.path, pre) : pre;
     });
 
     return html;
