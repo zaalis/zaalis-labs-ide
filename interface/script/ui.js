@@ -1009,10 +1009,108 @@ if (agCollapse) agCollapse.addEventListener('click', () => {
 document.addEventListener('click', e => {
     const b = e.target.closest('button');
     if (!b) return;
+    // The "jump to bottom" pill has its own translate-based bounce; the generic
+    // scale bounce would override its translateY centering and make it jump.
+    if (b.classList.contains('scroll-bottom-btn')) return;
     b.classList.remove('bounce');
     void b.offsetWidth; // restart the animation
     b.classList.add('bounce');
 }, true);
+
+// ==========================================================
+//  SMART AUTO-SCROLL ("stick to bottom" + jump-to-bottom pill)
+// ==========================================================
+// While the AI streams, the message list should follow the text — but ONLY if
+// the user is already at the bottom. The moment they scroll up to re-read, the
+// view stops auto-following and a little down-arrow pill appears; clicking it
+// gives a tiny bounce, smooth-scrolls to the bottom and re-engages following.
+// Works identically for the Chat view and the Agents view.
+const _scrollCtrls = new Map();
+const PIN_THRESHOLD = 64; // px from the bottom that still counts as "at bottom"
+
+function _pinCtrl(container) { return _scrollCtrls.get(container); }
+
+function updatePinButton(container) {
+    const c = _scrollCtrls.get(container);
+    if (!c) return;
+    const overflow = container.scrollHeight - container.clientHeight;
+    // Show only when the user has scrolled up AND there is something to go down to.
+    c.btn.classList.toggle('show', !c.pinned && overflow > 40);
+}
+
+function onContainerScroll(container) {
+    const c = _scrollCtrls.get(container);
+    if (!c || c.autoScrolling) return; // ignore our own programmatic scrolling
+    const dist = container.scrollHeight - container.scrollTop - container.clientHeight;
+    c.pinned = dist <= PIN_THRESHOLD;
+    updatePinButton(container);
+}
+
+// Follow the bottom only if currently pinned (used by every streaming/append site).
+function followScroll(container) {
+    const c = _scrollCtrls.get(container);
+    if (!c) { if (container) container.scrollTop = container.scrollHeight; return; }
+    if (c.pinned) container.scrollTop = container.scrollHeight;
+    updatePinButton(container);
+}
+
+// Force the view back to the bottom and re-pin (user sent a message / clicked the pill).
+function forceScrollBottom(container, smooth) {
+    const c = _scrollCtrls.get(container);
+    if (!c) { if (container) container.scrollTop = container.scrollHeight; return; }
+    c.pinned = true;
+    c.autoScrolling = true;
+    clearTimeout(c.autoTimer);
+    if (smooth) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        // Guard against the smooth-scroll's intermediate scroll events un-pinning us.
+        c.autoTimer = setTimeout(() => { c.autoScrolling = false; c.pinned = true; updatePinButton(container); }, 460);
+    } else {
+        container.scrollTop = container.scrollHeight;
+        c.autoScrolling = false;
+        updatePinButton(container);
+    }
+}
+
+function initScrollPins() {
+    ['#chat-messages', '#agents-log'].forEach(sel => {
+        const container = document.querySelector(sel);
+        if (!container || _scrollCtrls.has(container)) return;
+
+        // Wrap the scroller so the pill can be absolutely positioned over its bottom.
+        const wrap = document.createElement('div');
+        wrap.className = 'scroll-pin-wrap';
+        container.parentNode.insertBefore(wrap, container);
+        wrap.appendChild(container);
+
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'scroll-bottom-btn';
+        btn.setAttribute('aria-label', 'Aller en bas');
+        btn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
+        wrap.appendChild(btn);
+
+        const c = { container, btn, pinned: true, autoScrolling: false, autoTimer: 0 };
+        _scrollCtrls.set(container, c);
+
+        container.addEventListener('scroll', () => onContainerScroll(container), { passive: true });
+        // Scrolling up with the wheel un-pins immediately, even mid-stream.
+        container.addEventListener('wheel', e => {
+            if (e.deltaY < 0 && !c.autoScrolling) { c.pinned = false; updatePinButton(container); }
+        }, { passive: true });
+
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            btn.classList.remove('pin-bounce');
+            void btn.offsetWidth; // restart the bounce animation
+            btn.classList.add('pin-bounce');
+            forceScrollBottom(container, true);
+        });
+    });
+}
+
+// Scripts are deferred, so the DOM is parsed by now.
+initScrollPins();
 
 // ==========================================================
 //  CUSTOM SELECT DROPDOWNS

@@ -370,10 +370,22 @@ async function fetchJSON(url, options) {
   // Dynamic import of node-fetch is avoided; use the global fetch available
   // in Node 18+. For older versions, install node-fetch.
   const res = await fetch(url, options);
-  const data = await res.json();
+  // Read the body as text first: a non-JSON error (empty body, OOM, an HTML 500,
+  // an Ollama plain-text error) then surfaces the REAL message instead of
+  // throwing on res.json() and bubbling up as a generic "connection error".
+  const raw = await res.text();
+  let data;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300) || res.statusText}`);
+    throw new Error('Réponse non-JSON reçue du serveur distant.');
+  }
   if (!res.ok) {
     const errMsg =
-      data.error?.message || data.error?.type || JSON.stringify(data.error) || res.statusText;
+      data.error?.message || data.error?.type ||
+      (typeof data.error === 'string' ? data.error : '') ||
+      (data.error ? JSON.stringify(data.error) : '') || res.statusText;
     throw new Error(errMsg);
   }
   return data;
@@ -956,10 +968,16 @@ app.post('/api/chat', async (req, res) => {
       // Rough estimate: 1 token ≈ 4 chars.
       const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
       const estimatedTokens = Math.ceil(totalChars / 4);
-      // Set num_ctx to fit the prompt + room for the response, capped at 32k.
-      const numCtx = Math.min(32768, Math.max(4096, estimatedTokens + 4096));
+      // Pick num_ctx from fixed BUCKETS rather than a value that changes on every
+      // message. Ollama keeps the model loaded (keep_alive) only while the
+      // options stay identical — a num_ctx that varies each turn forces it to
+      // evict and reload the model on every request (long freezes / apparent
+      // hangs). Buckets keep it stable across turns while still growing for big
+      // prompts, which is the single biggest reliability win for local models.
+      const needed = estimatedTokens + 2048; // reserve room for the answer
+      const numCtx = [8192, 16384, 32768].find((b) => b >= needed) || 32768;
       // num_predict: leave room but don't exceed what the context allows.
-      const numPredict = Math.min(8192, numCtx - estimatedTokens);
+      const numPredict = Math.min(8192, Math.max(512, numCtx - estimatedTokens));
 
       const ollamaBody = {
         model: olModel,
@@ -1016,7 +1034,14 @@ app.post('/api/chat', async (req, res) => {
         if (ollamaErr.name === 'AbortError') {
           throw new Error('Ollama: délai d\'attente dépassé (5 min). Le modèle est peut-être trop lent ou bloqué.');
         }
-        throw ollamaErr;
+        const msg = String((ollamaErr && ollamaErr.message) || ollamaErr);
+        if (/ECONNREFUSED|fetch failed|ENOTFOUND|ECONNRESET|network|socket hang/i.test(msg)) {
+          throw new Error("Ollama est introuvable ou arrêté. Vérifie qu'Ollama tourne (l'app tente de le démarrer automatiquement au lancement).");
+        }
+        if (/not found|try pulling|no such model/i.test(msg)) {
+          throw new Error(`Modèle « ${olModel} » introuvable dans Ollama. Installe-le d'abord depuis le catalogue de modèles.`);
+        }
+        throw new Error('Ollama: ' + msg);
       }
     }
 

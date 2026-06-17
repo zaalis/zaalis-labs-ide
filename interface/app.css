@@ -369,6 +369,18 @@ details.reasoning .reasoning-chevron{transition:transform .2s ease;color:var(--t
 details.reasoning[open] .reasoning-chevron{transform:rotate(180deg);}
 details.reasoning .reasoning-body{margin-top:6px;padding:6px 0 2px;color:var(--text-2);font-size:12px;line-height:1.5;border-top:1px solid var(--border-subtle);}
 
+/* Collapsed "file card" — a written/modified file, folded one per file */
+details.file-card{margin:8px 0;border:1px solid var(--border);border-radius:6px;background:var(--bg-0);overflow:hidden;}
+details.file-card>summary{display:flex;align-items:center;gap:8px;cursor:pointer;list-style:none;padding:8px 11px;color:var(--text-1);font-size:12px;font-family:var(--font-mono);user-select:none;outline:none;}
+details.file-card>summary::-webkit-details-marker{display:none;}
+details.file-card>summary:hover{background:var(--bg-1);}
+details.file-card .file-card-icon{color:var(--text-3);flex-shrink:0;}
+details.file-card .file-card-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+details.file-card .file-card-chevron{transition:transform .2s ease;color:var(--text-3);flex-shrink:0;}
+details.file-card[open] .file-card-chevron{transform:rotate(180deg);}
+details.file-card .file-card-body{border-top:1px solid var(--border);}
+details.file-card .file-card-body pre.code-block{margin:0;border:none;border-radius:0;background:var(--bg-0);}
+
 /* ===================== OLLAMA MODELS MANAGER ===================== */
 .ollama-box{background:var(--bg-1);border:1px solid var(--border-subtle);border-radius:8px;padding:12px;margin-top:4px;}
 .ollama-box-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}

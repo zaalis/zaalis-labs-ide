@@ -238,6 +238,31 @@ function escapeHTML(str) {
         .replace(/'/g, '&#039;');
 }
 
+// Detect a file path on a code-fence info line (```js path=src/app.js).
+// Mirrors the detection in extractFileBlocks so a collapsed card is shown for
+// exactly the blocks that get written to disk. Returns the path or null.
+function fenceFilePath(info) {
+    info = (info || '').trim();
+    if (!info) return null;
+    // "run" / "read" blocks are commands / file requests, not files to write.
+    if (/(^|\s)(run|read)(\s|$)/i.test(info)) return null;
+    const pm = info.match(/(?:path|file|filename)\s*[:=]\s*["'`]?([^\s"'`]+)/i);
+    if (pm) return pm[1].replace(/^\.?\//, '');
+    // A bare token on the info line that looks like a path (slash or extension).
+    for (const tok of info.split(/[\s:]+/).filter(Boolean)) {
+        if (/[\/\\]/.test(tok) || /\.[A-Za-z0-9]+$/.test(tok)) return tok.replace(/^\.?\//, '');
+    }
+    return null;
+}
+
+// Wrap a written file's code in a collapsed, expandable card (one per file),
+// so the chat stays readable and the user opens just the files they want.
+function fileCard(path, innerHTML) {
+    const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    return `<details class="file-card"><summary>${icon}<span class="file-card-name">${escapeHTML(path)}</span>${chevron}</summary><div class="file-card-body">${innerHTML}</div></details>`;
+}
+
 // Minimal, safe Markdown -> HTML renderer (no dependency).
 // Everything is HTML-escaped before any transform, so AI output cannot
 // inject markup; only a known set of formatting tags is produced.
@@ -246,9 +271,11 @@ function renderMarkdown(src) {
     const NUL = '';
 
     // 1) Extract fenced code blocks so their content is left untouched.
+    //    Capture the FULL info line (not just the language) so a file path on it
+    //    (```js path=src/app.js) can be detected and rendered as a folded card.
     const codeBlocks = [];
-    src = src.replace(/```(\w*)\r?\n?([\s\S]*?)```/g, (m, lang, code) => {
-        codeBlocks.push(code.replace(/\n$/, ''));
+    src = src.replace(/```([^\n]*)\r?\n([\s\S]*?)```/g, (m, info, code) => {
+        codeBlocks.push({ code: code.replace(/\n$/, ''), path: fenceFilePath(info) });
         return `${NUL}CODE${codeBlocks.length - 1}${NUL}`;
     });
 
@@ -299,7 +326,13 @@ function renderMarkdown(src) {
 
     // 5) Restore code.
     html = html.replace(new RegExp(`${NUL}IC(\\d+)${NUL}`, 'g'), (m, i) => `<code>${inlineCode[+i]}</code>`);
-    html = html.replace(new RegExp(`${NUL}CODE(\\d+)${NUL}`, 'g'), (m, i) => `<pre class="code-block"><code>${escapeHTML(codeBlocks[+i])}</code></pre>`);
+    html = html.replace(new RegExp(`${NUL}CODE(\\d+)${NUL}`, 'g'), (m, i) => {
+        const b = codeBlocks[+i];
+        const pre = `<pre class="code-block"><code>${escapeHTML(b.code)}</code></pre>`;
+        // A code block that names a file (a change the agent wrote to disk) is
+        // shown collapsed — one card per file — so the chat stays readable.
+        return b.path ? fileCard(b.path, pre) : pre;
+    });
 
     return html;
 }
@@ -318,11 +351,11 @@ async function streamInto(el, text, finalHTML, signal, scrollEl) {
         if (signal && signal.aborted) { acc = text; break; }
         acc += words.slice(i, i + chunk).join('');
         el.innerHTML = renderMarkdown(acc);
-        if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        if (scrollEl) followScroll(scrollEl);
         await sleep(13);
     }
     el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
-    if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+    if (scrollEl) followScroll(scrollEl);
 }
 
 // Single rounded frame holding a generated image (clicking opens the lightbox).
@@ -403,7 +436,10 @@ function addMsg(container, type, label, text, isHTML = false) {
         body.textContent = text;
     }
     container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    // A message the user just sent always snaps to the bottom and re-engages
+    // following; everything else only follows if the user is already there.
+    if (type === 'user') forceScrollBottom(container, false);
+    else followScroll(container);
     return body;
 }
 
@@ -417,7 +453,7 @@ function addTypingMsg(container, label) {
     const body = div.querySelector('.msg-body');
     startThinking(body);
     container.appendChild(div);
-    container.scrollTop = container.scrollHeight;
+    followScroll(container);
     return body;
 }
 
@@ -994,6 +1030,7 @@ async function sendAgentTask(task) {
             </div>
         </div>`;
     agentsLog.appendChild(teamBox);
+    followScroll(agentsLog);
     const teamList = teamBox.querySelector('.team-thinking-list');
     const teamProgress = teamBox.querySelector('.team-progress');
     const waveCanvas = teamBox.querySelector('.wave-canvas');
@@ -1015,7 +1052,7 @@ async function sendAgentTask(task) {
         line.className = 'team-agent-line';
         line.innerHTML = `<span class="team-agent-name">${labels[agent]} · ${roleLabel}</span><span class="team-agent-status">${lang === 'en' ? 'analysing…' : 'analyse en cours…'}</span>`;
         teamList.appendChild(line);
-        agentsLog.scrollTop = agentsLog.scrollHeight;
+        followScroll(agentsLog);
         const statusText = line.querySelector('.team-agent-status');
 
         const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(agent === 'local')}${projCtx}`;
@@ -1046,7 +1083,7 @@ async function sendAgentTask(task) {
 
         completedCount++;
         teamProgress.textContent = `${completedCount}/${workers.length}`;
-        agentsLog.scrollTop = agentsLog.scrollHeight;
+        followScroll(agentsLog);
     }
 
     // Workers done — stop the animation, keep their statuses for a collapsed recap.
@@ -1112,7 +1149,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     leadCard.classList.remove('working');
     leadBadge.textContent = TRANSLATIONS[lang]['status-done'];
     leadBadge.className = 'agent-badge done';
-    agentsLog.scrollTop = agentsLog.scrollHeight;
+    followScroll(agentsLog);
 
     // Save this agents session to the (separate) agents history.
     saveConversation('agents');
@@ -1229,7 +1266,7 @@ function loadConversation(kind, id) {
             body.classList.add('has-image');
         }
     });
-    container.scrollTop = container.scrollHeight;
+    forceScrollBottom(container, false);
 
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.

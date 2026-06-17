@@ -6,10 +6,10 @@
 ; =====================================================================
 [Setup]
 AppName=zaalis IDE
-AppVersion=v1.0.9
-AppVerName=zaalis IDE v1.0.9
-VersionInfoVersion=1.0.9
-VersionInfoProductVersion=1.0.9
+AppVersion=v1.0.10
+AppVerName=zaalis IDE v1.0.10
+VersionInfoVersion=1.0.10
+VersionInfoProductVersion=1.0.10
 AppPublisher=zaalis
 DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
