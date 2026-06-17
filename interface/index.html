@@ -68,7 +68,7 @@
                 <option value="fr">FR</option>
                 <option value="en">EN</option>
             </select>
-            <button class="topbar-label-btn" id="catalog-btn" title="Installer des modèles Ollama">
+            <button class="topbar-label-btn" id="catalog-btn" data-i18n-title="install-models-title" title="Installer des modèles locaux">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
                 <span data-i18n="install-models-btn">Installer des modèles</span>
             </button>
@@ -216,6 +216,7 @@
                         <option value="grok">Grok (xAI)</option>
                         <option value="mistral">Mistral (Le Chat)</option>
                         <option value="local">Ollama (Local)</option>
+                        <option value="gguf">GGUF (Local)</option>
                     </select>
                     <select id="ai-submodel">
                         <option value="gpt-4.1">gpt-4.1</option>
@@ -509,73 +510,89 @@
 
 <!-- ========== SETTINGS MODAL ========== -->
 <div class="modal-overlay" id="settings-modal">
-    <div class="modal">
+    <div class="modal modal-settings">
         <div class="modal-header">
             <h2 data-i18n="settings-header">Configuration</h2>
             <button class="modal-close" id="close-modal">&times;</button>
         </div>
         <div class="modal-body">
-            <div class="form-section">
-                <h3 data-i18n="api-keys-section">Cles API</h3>
-                <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
-                <div class="form-group">
-                    <div class="key-label-row">
-                        <label for="key-openai">OpenAI (Codex)</label>
-                        <span class="key-status" id="key-status-openai"></span>
+            <div class="settings-stack">
+                <section class="settings-card">
+                    <h3 data-i18n="settings-general-title">General</h3>
+                    <div class="form-group">
+                        <label for="settings-lang-select" data-i18n="settings-language-label">Langue</label>
+                        <select id="settings-lang-select">
+                            <option value="fr">Francais</option>
+                            <option value="en">English</option>
+                        </select>
                     </div>
-                    <input type="password" id="key-openai" placeholder="sk-...">
-                </div>
-                <div class="form-group">
-                    <div class="key-label-row">
-                        <label for="key-anthropic">Anthropic (Claude)</label>
-                        <span class="key-status" id="key-status-anthropic"></span>
-                    </div>
-                    <input type="password" id="key-anthropic" placeholder="sk-ant-...">
-                </div>
-                <div class="form-group">
-                    <div class="key-label-row">
-                        <label for="key-google">Google (Gemini)</label>
-                        <span class="key-status" id="key-status-google"></span>
-                    </div>
-                    <input type="password" id="key-google" placeholder="AIza...">
-                </div>
-                <div class="form-group">
-                    <div class="key-label-row">
-                        <label for="key-grok">xAI (Grok)</label>
-                        <span class="key-status" id="key-status-grok"></span>
-                    </div>
-                    <input type="password" id="key-grok" placeholder="xai-...">
-                </div>
-                <div class="form-group">
-                    <div class="key-label-row">
-                        <label for="key-mistral">Mistral (Le Chat)</label>
-                        <span class="key-status" id="key-status-mistral"></span>
-                    </div>
-                    <input type="password" id="key-mistral" placeholder="...">
-                </div>
-            </div>
-            <div class="form-section">
-                <h3>Ollama (Local)</h3>
-                <p class="form-hint" data-i18n="ollama-hint">Modèles d'IA gratuits tournant en local, sans clé API.</p>
-                <div class="form-group">
-                    <label for="ollama-url" data-i18n="ollama-url-label">URL du serveur</label>
-                    <input type="text" id="ollama-url" value="http://127.0.0.1:11434">
-                </div>
+                </section>
 
-                <div class="ollama-box">
-                    <div class="ollama-box-head">
-                        <span data-i18n="ollama-models-label">Modèles disponibles</span>
-                        <button class="ollama-detect" id="ollama-detect" type="button" data-i18n="ollama-detect">
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-                            <span data-i18n="ollama-detect-label">Détecter</span>
-                        </button>
+                <section class="settings-card">
+                    <h3 data-i18n="api-keys-section">Cles API</h3>
+                    <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-openai">OpenAI (Codex)</label>
+                            <span class="key-status" id="key-status-openai"></span>
+                        </div>
+                        <input type="password" id="key-openai" placeholder="sk-...">
                     </div>
-                    <div class="ollama-models" id="ollama-models-list"></div>
-                    <div class="ollama-add-row">
-                        <input type="text" id="ollama-model-input" placeholder="ex. qwen2.5-coder:7b" autocomplete="off">
-                        <button class="btn btn-primary btn-sm" id="ollama-model-add" type="button" data-i18n="add-btn">Ajouter</button>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-anthropic">Anthropic (Claude)</label>
+                            <span class="key-status" id="key-status-anthropic"></span>
+                        </div>
+                        <input type="password" id="key-anthropic" placeholder="sk-ant-...">
                     </div>
-                </div>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-google">Google (Gemini)</label>
+                            <span class="key-status" id="key-status-google"></span>
+                        </div>
+                        <input type="password" id="key-google" placeholder="AIza...">
+                    </div>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-grok">xAI (Grok)</label>
+                            <span class="key-status" id="key-status-grok"></span>
+                        </div>
+                        <input type="password" id="key-grok" placeholder="xai-...">
+                    </div>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-mistral">Mistral (Le Chat)</label>
+                            <span class="key-status" id="key-status-mistral"></span>
+                        </div>
+                        <input type="password" id="key-mistral" placeholder="...">
+                    </div>
+                </section>
+
+                <section class="settings-card">
+                    <h3 data-i18n="settings-performance-title">Performance</h3>
+                    <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option detectee sur cette machine.</p>
+                    <div class="settings-status-row">
+                        <span data-i18n="settings-detected-label">Detecte</span>
+                        <strong id="gguf-detected-variant">-</strong>
+                    </div>
+                    <div class="form-group">
+                        <label for="gguf-variant-select" data-i18n="settings-gguf-engine-label">Moteur GGUF</label>
+                        <select id="gguf-variant-select">
+                            <option value="" data-i18n="settings-gguf-auto">Auto</option>
+                            <option value="cuda">CUDA (NVIDIA)</option>
+                            <option value="vulkan">Vulkan (AMD / Intel)</option>
+                            <option value="cpu">CPU</option>
+                        </select>
+                    </div>
+                    <input type="hidden" id="ollama-url" value="http://127.0.0.1:11434">
+                    <div class="ollama-box settings-installed-box">
+                        <div class="ollama-box-head">
+                            <span data-i18n="gguf-installed-label">Modèles installés</span>
+                            <span class="ollama-detect" id="gguf-engine-status" style="cursor:default">-</span>
+                        </div>
+                        <div class="ollama-models" id="gguf-models-list"></div>
+                    </div>
+                </section>
             </div>
         </div>
         <div class="modal-footer">
@@ -624,14 +641,19 @@
     </div>
 </div>
 
-<!-- ========== OLLAMA CATALOG MODAL ========== -->
+<!-- ========== LOCAL MODEL CATALOG MODAL ========== -->
 <div class="modal-overlay" id="catalog-modal">
     <div class="modal modal-lg">
         <div class="modal-header">
-            <h2 data-i18n="catalog-title">Modèles Ollama à installer</h2>
+            <h2 id="catalog-title" data-i18n="catalog-title">Modèles GGUF locaux à installer</h2>
             <button class="modal-close" id="close-catalog">&times;</button>
         </div>
         <div class="modal-body">
+            <div class="catalog-targets">
+                <button class="catalog-target active" data-target="gguf" type="button" data-i18n="catalog-target-gguf">GGUF local</button>
+                <button class="catalog-target" data-target="ollama" type="button">Ollama</button>
+            </div>
+
             <!-- One unified search bar for both tabs -->
             <div class="catalog-search">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>

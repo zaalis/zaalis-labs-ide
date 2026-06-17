@@ -62,3 +62,22 @@ window.OLLAMA_CATALOG = [
   { name: 'nomic-embed-text',    label: 'Nomic Embed Text',    size: '0.3 Go', tags: ['embed', 'light'], desc: 'Embeddings de texte (RAG).' },
   { name: 'mxbai-embed-large',   label: 'MxBai Embed Large',   size: '0.7 Go', tags: ['embed'], desc: 'Embeddings de qualité.' }
 ];
+
+/* =====================================================================
+   Catalogue GGUF local. Ces cartes installent des fichiers .gguf depuis
+   Hugging Face dans le moteur local integre (llama.cpp).
+   ===================================================================== */
+window.GGUF_CATALOG = [
+  { repo: 'bartowski/Qwen2.5-Coder-7B-Instruct-GGUF', label: 'Qwen2.5 Coder 7B', size: '~4.7 Go', tags: ['code'], desc: 'Excellent modele de code local, bon equilibre vitesse/qualite.' },
+  { repo: 'bartowski/Qwen2.5-Coder-14B-Instruct-GGUF', label: 'Qwen2.5 Coder 14B', size: '~9 Go', tags: ['code', 'heavy'], desc: 'Plus puissant pour coder, GPU conseille.' },
+  { repo: 'bartowski/Qwen2.5-Coder-32B-Instruct-GGUF', label: 'Qwen2.5 Coder 32B', size: '~20 Go', tags: ['code', 'heavy'], desc: 'Tres fort en code, demande une grosse machine.' },
+  { repo: 'bartowski/Qwen3-8B-GGUF', label: 'Qwen 3 8B', size: '~5.2 Go', tags: ['general', 'reasoning'], desc: 'Generaliste solide avec raisonnement.' },
+  { repo: 'bartowski/Qwen3-14B-GGUF', label: 'Qwen 3 14B', size: '~9.3 Go', tags: ['general', 'reasoning'], desc: 'Qualite superieure, GPU conseille.' },
+  { repo: 'bartowski/DeepSeek-R1-Distill-Qwen-7B-GGUF', label: 'DeepSeek R1 7B', size: '~4.7 Go', tags: ['reasoning'], desc: 'Raisonnement local compact.' },
+  { repo: 'bartowski/DeepSeek-R1-Distill-Qwen-14B-GGUF', label: 'DeepSeek R1 14B', size: '~9 Go', tags: ['reasoning'], desc: 'Raisonnement plus avance.' },
+  { repo: 'bartowski/Llama-3.1-8B-Instruct-GGUF', label: 'Llama 3.1 8B', size: '~4.9 Go', tags: ['general'], desc: 'Modele generaliste Meta tres populaire.' },
+  { repo: 'bartowski/Mistral-7B-Instruct-v0.3-GGUF', label: 'Mistral 7B Instruct', size: '~4.1 Go', tags: ['general'], desc: 'Rapide, stable et polyvalent.' },
+  { repo: 'bartowski/gemma-2-9b-it-GGUF', label: 'Gemma 2 9B', size: '~5.6 Go', tags: ['general'], desc: 'Bon generaliste local signe Google.' },
+  { repo: 'bartowski/Phi-3.5-mini-instruct-GGUF', label: 'Phi 3.5 Mini', size: '~2.2 Go', tags: ['light'], desc: 'Petit modele efficace pour PC modestes.' },
+  { repo: 'bartowski/SmolLM2-1.7B-Instruct-GGUF', label: 'SmolLM2 1.7B', size: '~1.1 Go', tags: ['light'], desc: 'Tres leger pour tester le moteur local.' }
+];

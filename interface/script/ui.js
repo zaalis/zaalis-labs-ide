@@ -4,7 +4,7 @@ const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
 // Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa' };
+const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
 function applyModelColor() {
     modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
 }
@@ -27,19 +27,25 @@ function prettyModelLabel(full) {
     s = s.replace(/-?GGUF$/i, '').replace(/-?Instruct$/i, '');
     return quant ? `${s} (${quant})` : s;
 }
+// Submodel list per provider. Ollama + GGUF use the user's installed models.
+function submodelsFor(model) {
+    if (model === 'local') return (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
+    if (model === 'gguf') return state.config.ggufModels || [];
+    return SUBMODELS[model] || [];
+}
+function submodelLabelFor(model, s) {
+    if (model === 'gguf') return s.replace(/\.gguf$/i, '');
+    if (model === 'local') return /^hf\.co\//i.test(s) ? prettyModelLabel(s) : s;
+    return modelLabel(s);
+}
 function updateSubmodelDropdown() {
     const model = modelSelect.value;
-    // For Ollama, use the user's managed model list (Settings).
-    const subs = model === 'local'
-        ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
-        : (SUBMODELS[model] || []);
+    const subs = submodelsFor(model);
     submodelSelect.innerHTML = '';
     subs.forEach(s => {
         const opt = document.createElement('option');
         opt.value = s;
-        opt.textContent = model === 'local'
-            ? (/^hf\.co\//i.test(s) ? prettyModelLabel(s) : s)
-            : modelLabel(s);
+        opt.textContent = submodelLabelFor(model, s);
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
@@ -89,7 +95,7 @@ function localModelSizeB(name) {
 // e.g. fail to emit read/file blocks, hallucinate, or ignore instructions.
 const warnedSmallModels = new Set();
 function maybeWarnSmallLocalModel() {
-    if (modelSelect.value !== 'local') return;
+    if (modelSelect.value !== 'local' && modelSelect.value !== 'gguf') return;
     const sub = submodelSelect.value;
     if (!sub || warnedSmallModels.has(sub)) return;
     const size = localModelSizeB(sub);
@@ -110,9 +116,7 @@ modelSelect.addEventListener('change', () => {
     
     // Auto-select the newest submodel for the newly chosen provider
     const model = modelSelect.value;
-    const subs = model === 'local'
-        ? (state.config.ollamaModels && state.config.ollamaModels.length ? state.config.ollamaModels : SUBMODELS.local)
-        : (SUBMODELS[model] || []);
+    const subs = submodelsFor(model);
     if (subs.length) {
         submodelSelect.value = subs[0]; // Newest model is first in the list
     }
@@ -903,6 +907,7 @@ function setupAuth() {
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
+            if (typeof loadGgufModels === 'function') loadGgufModels();
         } catch { showAuthError('Erreur de connexion au serveur.'); }
     });
 
@@ -930,6 +935,7 @@ function setupAuth() {
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
+            if (typeof loadGgufModels === 'function') loadGgufModels();
         } catch { showAuthError('Erreur de connexion au serveur.'); }
     });
 
@@ -951,6 +957,7 @@ async function checkAuthAndInit() {
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
+            if (typeof loadGgufModels === 'function') loadGgufModels();
         } else {
             showAuthOverlay();
         }

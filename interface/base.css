@@ -503,6 +503,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 #ai-model option[value="grok"]{color:#9ca3af;}
 #ai-model option[value="mistral"]{color:#f59e0b;}
 #ai-model option[value="local"]{color:#fafafa;}
+#ai-model option[value="gguf"]{color:#34d399;}
 /* Agent names match their AI color */
 .agent-card[data-agent="codex"] .agent-name{color:#3b82f6;}
 .agent-card[data-agent="claude"] .agent-name{color:#f97316;}

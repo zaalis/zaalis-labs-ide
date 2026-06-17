@@ -13,6 +13,9 @@ const state = {
         ollamaUrl: 'http://127.0.0.1:11434',
         ollamaModel: 'qwen3:8b',
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
+        ggufModels: [],        // installed local GGUF files (llama.cpp engine)
+        ggufVariant: '',       // '' = auto-detect (cuda / vulkan / cpu)
+        catalogTarget: 'gguf',
         keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
     },
     profile: { pseudo: 'Utilisateur', photo: '' },
@@ -36,7 +39,8 @@ const SUBMODELS = {
     gemini: ['gemini-3.5-flash', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
     grok:   ['grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-2-image-gen', 'grok-image-gen'],
     mistral:['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest'],
-    local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b']
+    local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
+    gguf:   []   // populated from installed .gguf files via /api/gguf-models
 };
 
 // Human-friendly display names (dots, not dashes). Falls back to the raw id.
@@ -58,23 +62,27 @@ const MODEL_LABELS = {
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
 // Maker names per provider, used to tell the model its own identity.
-const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', local: 'Ollama' };
+const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', local: 'Ollama', gguf: 'llama.cpp' };
 
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
 function modelIdentity(model, submodel, lang) {
-    const isLocal = model === 'local';
+    const isLocal = model === 'local' || model === 'gguf';
     const label = isLocal
         ? (typeof prettyModelLabel === 'function' ? prettyModelLabel(submodel) : submodel) || submodel
         : modelLabel(submodel);
     const provider = PROVIDER_NAMES[model] || '';
+    // How the local model is being run, for an honest identity line.
+    const runner = model === 'gguf'
+        ? (lang === 'en' ? 'the built-in local engine (llama.cpp)' : 'le moteur local intégré (llama.cpp)')
+        : (lang === 'en' ? 'Ollama' : 'Ollama');
     if (lang === 'en') {
         return isLocal
-            ? `\n\n[IDENTITY] You are the local model "${label}" running through Ollama inside zaalis IDE. If the user asks which model you are, answer honestly: "${label}" (local model, via Ollama). Never claim to be a different model.`
+            ? `\n\n[IDENTITY] You are the local model "${label}" running through ${runner} inside zaalis IDE. If the user asks which model you are, answer honestly: "${label}" (local model). Never claim to be a different model.`
             : `\n\n[IDENTITY] You are "${label}", a model made by ${provider}, accessed through its official API inside zaalis IDE. If the user asks which model or version you are, answer honestly and directly: "${label}" by ${provider}. Never claim to be a different model or a different maker.`;
     }
     return isLocal
-        ? `\n\n[IDENTITÉ] Tu es le modèle local « ${label} » exécuté via Ollama dans l'IDE zaalis. Si l'utilisateur demande quel modèle tu es, réponds honnêtement : « ${label} » (modèle local, via Ollama). Ne prétends jamais être un autre modèle.`
+        ? `\n\n[IDENTITÉ] Tu es le modèle local « ${label} » exécuté via ${runner} dans l'IDE zaalis. Si l'utilisateur demande quel modèle tu es, réponds honnêtement : « ${label} » (modèle local). Ne prétends jamais être un autre modèle.`
         : `\n\n[IDENTITÉ] Tu es « ${label} », un modèle conçu par ${provider}, utilisé via son API officielle dans l'IDE zaalis. Si l'utilisateur demande quel modèle ou quelle version tu es, réponds honnêtement et directement : « ${label} » de ${provider}. Ne prétends jamais être un autre modèle ni un autre éditeur.`;
 }
 
@@ -131,6 +139,9 @@ const CONTEXT_WINDOWS = {
     },
     local: {
         _default: 8000
+    },
+    gguf: {
+        _default: 8192   // matches the engine's --ctx-size
     }
 };
 function contextWindow(model, submodel) {
@@ -190,16 +201,40 @@ const TRANSLATIONS = {
         'history-header': 'Historique',
         'history-empty': 'Aucune conversation',
         'new-chat-btn': 'Nouveau',
+        'install-models-btn': 'Installer des modeles',
+        'install-models-title': 'Installer des modeles locaux',
         'attach-image': 'Image',
         'attach-file': 'Fichier',
         'agents-desc': 'Configurez et lancez vos agents IA. Minimum 2 actifs pour le mode collaboratif.',
         'agents-log-default': 'Activez le Mode Agents et envoyez une tache.',
         'agents-input-placeholder': 'Donnez une tache aux agents...',
         'settings-header': 'Configuration',
+        'settings-general-title': 'General',
+        'settings-language-label': 'Langue',
         'api-keys-section': 'Cles API',
         'api-keys-hint': 'Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.',
+        'settings-performance-title': 'Performance',
+        'settings-performance-hint': 'Choisissez le moteur local GGUF. Auto utilise la meilleure option detectee sur cette machine.',
+        'settings-detected-label': 'Detecte',
+        'settings-gguf-engine-label': 'Moteur GGUF',
+        'settings-gguf-auto': 'Auto',
+        'ollama-hint': "Modeles d'IA gratuits tournant en local, sans cle API.",
         'ollama-url-label': 'URL du serveur',
         'ollama-model-label': 'Modele',
+        'ollama-models-label': 'Modeles disponibles',
+        'ollama-detect-label': 'Detecter',
+        'add-btn': 'Ajouter',
+        'install-btn': 'Installer',
+        'gguf-section-title': 'GGUF (local, sans Ollama)',
+        'gguf-hint': 'Telechargez un modele GGUF depuis Hugging Face et utilisez-le directement via le moteur local integre (llama.cpp). Aucune cle, aucun Ollama, 100% hors-ligne.',
+        'gguf-installed-label': 'Modeles installes',
+        'gguf-repo-placeholder': 'ex. bartowski/Qwen2.5-Coder-7B-Instruct-GGUF',
+        'gguf-file-placeholder': 'fichier.gguf (ou URL complete)',
+        'catalog-title': 'Modeles GGUF locaux a installer',
+        'catalog-target-gguf': 'GGUF local',
+        'catalog-popular': 'Populaires',
+        'hf-trending': 'Populaires',
+        'hf-downloads': 'Plus telecharges',
         'cancel-btn': 'Annuler',
         'save-btn': 'Enregistrer',
         'open-project-header': 'Ouvrir un projet',
@@ -281,16 +316,40 @@ const TRANSLATIONS = {
         'history-header': 'History',
         'history-empty': 'No conversation',
         'new-chat-btn': 'New',
+        'install-models-btn': 'Install models',
+        'install-models-title': 'Install local models',
         'attach-image': 'Image',
         'attach-file': 'File',
         'agents-desc': 'Configure and launch your AI agents. Minimum 2 active for collaborative mode.',
         'agents-log-default': 'Activate Agent Mode and send a task.',
         'agents-input-placeholder': 'Give a task to the agents...',
         'settings-header': 'Settings',
+        'settings-general-title': 'General',
+        'settings-language-label': 'Language',
         'api-keys-section': 'API Keys',
         'api-keys-hint': 'Each cloud model requires its own API key. Ollama works without key.',
+        'settings-performance-title': 'Performance',
+        'settings-performance-hint': 'Choose the local GGUF engine. Auto uses the best option detected on this machine.',
+        'settings-detected-label': 'Detected',
+        'settings-gguf-engine-label': 'GGUF engine',
+        'settings-gguf-auto': 'Auto',
+        'ollama-hint': 'Free local AI models running on your machine, without API keys.',
         'ollama-url-label': 'Server URL',
         'ollama-model-label': 'Model',
+        'ollama-models-label': 'Available models',
+        'ollama-detect-label': 'Detect',
+        'add-btn': 'Add',
+        'install-btn': 'Install',
+        'gguf-section-title': 'GGUF (local, no Ollama)',
+        'gguf-hint': 'Download a GGUF model from Hugging Face and run it directly through the built-in local engine (llama.cpp). No key, no Ollama, 100% offline.',
+        'gguf-installed-label': 'Installed models',
+        'gguf-repo-placeholder': 'ex. bartowski/Qwen2.5-Coder-7B-Instruct-GGUF',
+        'gguf-file-placeholder': 'file.gguf (or full URL)',
+        'catalog-title': 'Local GGUF models to install',
+        'catalog-target-gguf': 'Local GGUF',
+        'catalog-popular': 'Popular',
+        'hf-trending': 'Popular',
+        'hf-downloads': 'Most downloaded',
         'cancel-btn': 'Cancel',
         'save-btn': 'Save',
         'open-project-header': 'Open a Project',

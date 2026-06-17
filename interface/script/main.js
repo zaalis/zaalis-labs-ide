@@ -1,6 +1,13 @@
 //  SETTINGS MODAL
 // ==========================================================
-$('#settings-btn').addEventListener('click', () => $('#settings-modal').classList.add('active'));
+$('#settings-btn').addEventListener('click', () => {
+    const settingsLang = $('#settings-lang-select');
+    if (settingsLang) settingsLang.value = state.language || 'fr';
+    const variantSelect = $('#gguf-variant-select');
+    if (variantSelect) variantSelect.value = state.config.ggufVariant || '';
+    if (typeof loadGgufModels === 'function') loadGgufModels();
+    $('#settings-modal').classList.add('active');
+});
 $('#close-modal').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
@@ -74,7 +81,12 @@ $('#save-btn').addEventListener('click', async () => {
         const value = ($('#key-' + provider)?.value || '').trim();
         if (value) keys[provider] = value;
     });
-    state.config.ollamaUrl = $('#ollama-url').value.trim();
+    const settingsLang = $('#settings-lang-select');
+    if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
+    const variantSelect = $('#gguf-variant-select');
+    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
+    const ollamaUrlInput = $('#ollama-url');
+    state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
     state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
     saveState();
@@ -176,6 +188,8 @@ if (olDetect) olDetect.addEventListener('click', async () => {
 
 // ----- Ollama model catalog (install / uninstall + Hugging Face search) -----
 let _installedModels = new Set();           // normalized names actually present in Ollama
+let _installedGgufModels = new Set();       // installed *.gguf file names
+let catalogInstallTarget = 'gguf';          // 'gguf' by default; Ollama stays available
 const normName = n => (n && n.includes(':')) ? n : (n + ':latest');
 function isInstalled(name) {
     if (_installedModels.has(normName(name))) return true;
@@ -192,33 +206,67 @@ async function refreshInstalled() {
         _installedModels = new Set((data.models || []).map(normName));
     } catch { _installedModels = new Set((state.config.ollamaModels || []).map(normName)); }
 }
+function ggufFileName(fileOrPath) {
+    return String(fileOrPath || '').split(/[\\/]/).pop();
+}
+function isGgufInstalled(file) {
+    const base = ggufFileName(file).toLowerCase();
+    if (!base) return false;
+    for (const m of _installedGgufModels) {
+        if (m.toLowerCase() === base) return true;
+    }
+    return false;
+}
+async function refreshGgufInstalled() {
+    await loadGgufModels();
+    _installedGgufModels = new Set(state.config.ggufModels || []);
+}
+async function refreshCatalogInstalled() {
+    if (catalogInstallTarget === 'gguf') await refreshGgufInstalled();
+    else await refreshInstalled();
+}
+function cardTarget(card) {
+    return card?.dataset?.target || catalogInstallTarget || 'gguf';
+}
 
 // Build the action button(s) inside a catalog card based on install state.
 function setCardActions(card, name) {
     const lang = state.language || 'fr';
     const actions = card.querySelector('.cat-actions');
+    const target = cardTarget(card);
+    const ggufFile = card.dataset.ggufFile || '';
+    const installed = target === 'gguf' ? (ggufFile && isGgufInstalled(ggufFile)) : isInstalled(name);
     actions.innerHTML = '';
-    if (isInstalled(name)) {
+    if (installed) {
         const un = document.createElement('button');
         un.className = 'cat-uninstall'; un.type = 'button';
         un.textContent = lang === 'en' ? 'Uninstall' : 'Désinstaller';
-        un.addEventListener('click', () => uninstallModel(name, card));
+        un.addEventListener('click', () => target === 'gguf' ? uninstallGgufModel(ggufFile, card) : uninstallModel(name, card));
         actions.appendChild(un);
     } else {
         const ins = document.createElement('button');
         ins.className = 'cat-install'; ins.type = 'button';
         ins.textContent = lang === 'en' ? 'Install' : 'Installer';
-        // HF models -> let the user pick a quantization first (like LM Studio).
-        ins.addEventListener('click', () => card.dataset.hf === '1' ? expandQuants(card) : installModel(name, card));
+        ins.addEventListener('click', () => {
+            if (target === 'gguf') {
+                card.dataset.ggufFile ? installGgufFromCatalog(card.dataset.ggufRepo, card.dataset.ggufFile, card) : expandQuants(card);
+            } else {
+                // HF models -> let the user pick a quantization first (like LM Studio).
+                card.dataset.hf === '1' ? expandQuants(card) : installModel(name, card);
+            }
+        });
         actions.appendChild(ins);
     }
 }
 
-function buildCard(name, label, size, tags, desc, extra, isHf) {
+function buildCard(name, label, size, tags, desc, extra, isHf, opts = {}) {
     const card = document.createElement('div');
     card.className = 'cat-card';
     card.dataset.name = name;
     if (isHf) card.dataset.hf = '1';
+    card.dataset.target = opts.target || catalogInstallTarget;
+    if (opts.ggufRepo) card.dataset.ggufRepo = opts.ggufRepo;
+    if (opts.ggufFile) card.dataset.ggufFile = opts.ggufFile;
     card.innerHTML = `
         <div class="cat-top"><span class="cat-name">${label}</span><span class="cat-size">${size || ''}</span></div>
         ${(tags && tags.length) ? `<div class="cat-tags">${tags.map(t => `<span class="cat-tag ${t}">${t}</span>`).join('')}</div>` : ''}
@@ -233,7 +281,8 @@ function buildCard(name, label, size, tags, desc, extra, isHf) {
 // Open a clean modal to pick a quantization (Q4_K_M, Q6_K, Q8_0...).
 async function expandQuants(card) {
     const lang = state.language || 'fr';
-    const repo = (card.dataset.name || '').replace(/^hf\.co\//, '');
+    const target = cardTarget(card);
+    const repo = (card.dataset.ggufRepo || card.dataset.name || '').replace(/^hf\.co\//, '');
     const grid = $('#quant-grid');
     $('#quant-title').textContent = (lang === 'en' ? 'Choose a version — ' : 'Choisir une version — ') + repo.split('/').pop();
     grid.innerHTML = `<div class="catalog-empty">${lang === 'en' ? 'Loading options…' : 'Chargement…'}</div>`;
@@ -247,7 +296,13 @@ async function expandQuants(card) {
     } catch {}
     if (!quants.length) {
         $('#quant-modal').classList.remove('active');
-        installModel('hf.co/' + repo, card); // no quant detected -> install repo default
+        if (target === 'gguf') {
+            showToast(lang === 'en' ? 'No GGUF file' : 'Aucun fichier GGUF',
+                lang === 'en' ? 'No downloadable GGUF file was found for this model.' : 'Aucun fichier GGUF telechargeable trouve pour ce modele.',
+                { icon: '!' });
+        } else {
+            installModel('hf.co/' + repo, card); // no quant detected -> install repo default
+        }
         return;
     }
     grid.innerHTML = '';
@@ -258,7 +313,17 @@ async function expandQuants(card) {
         opt.innerHTML = `<span class="quant-q">${qd.quant}</span><span class="quant-size">${go}</span>`;
         opt.addEventListener('click', () => {
             $('#quant-modal').classList.remove('active');
-            installModel('hf.co/' + repo + ':' + qd.quant, card);
+            if (target === 'gguf') {
+                if (!qd.file) {
+                    showToast(lang === 'en' ? 'Missing file' : 'Fichier manquant',
+                        lang === 'en' ? 'No GGUF file was returned for this quantization.' : 'Aucun fichier GGUF retourne pour cette quantization.',
+                        { icon: '!' });
+                    return;
+                }
+                installGgufFromCatalog(repo, qd.file, card);
+            } else {
+                installModel('hf.co/' + repo + ':' + qd.quant, card);
+            }
         });
         grid.appendChild(opt);
     });
@@ -281,18 +346,163 @@ async function syncOllamaModels() {
     } catch {}
 }
 
+// ----- GGUF models manager (local llama.cpp engine — no Ollama) -----
+function renderGgufModels() {
+    const box = $('#gguf-models-list');
+    if (!box) return;
+    const list = state.config.ggufModels || [];
+    box.innerHTML = '';
+    if (!list.length) {
+        box.innerHTML = `<span class="ollama-empty">${state.language === 'en' ? 'No GGUF model installed yet.' : 'Aucun modèle GGUF installé.'}</span>`;
+        return;
+    }
+    list.forEach(name => {
+        const chip = document.createElement('div');
+        chip.className = 'ollama-chip';
+        const span = document.createElement('span');
+        span.textContent = name.replace(/\.gguf$/i, '');
+        span.title = name;
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.textContent = '×';
+        rm.title = state.language === 'en' ? 'Delete' : 'Supprimer';
+        rm.addEventListener('click', () => deleteGguf(name));
+        chip.appendChild(span);
+        chip.appendChild(rm);
+        box.appendChild(chip);
+    });
+}
+
+// Fetch installed GGUF models + engine status from the server.
+async function loadGgufModels() {
+    try {
+        const res = await fetch('/api/gguf-models');
+        if (!res.ok) return;
+        const data = await res.json();
+        state.config.ggufModels = (data.models || []).map(m => m.name);
+        saveState();
+        const st = $('#gguf-engine-status');
+        if (st) {
+            const v = (data.variant || 'cpu').toUpperCase();
+            const selected = state.config.ggufVariant ? state.config.ggufVariant.toUpperCase() : v;
+            st.textContent = (state.language === 'en' ? 'Engine: ' : 'Moteur : ') + selected + (data.running ? ' • ON' : '');
+        }
+        const detected = $('#gguf-detected-variant');
+        if (detected) detected.textContent = (data.variant || 'cpu').toUpperCase();
+        const autoOpt = $('#gguf-variant-select option[value=""]');
+        if (autoOpt) {
+            const v = (data.variant || 'cpu').toUpperCase();
+            autoOpt.textContent = state.language === 'en' ? `Auto (${v})` : `Auto (${v})`;
+        }
+        renderGgufModels();
+        if (modelSelect.value === 'gguf') {
+            updateSubmodelDropdown();
+            if (typeof createCustomSelect === 'function') createCustomSelect('ai-submodel');
+        }
+    } catch {}
+}
+
+async function deleteGguf(name) {
+    try {
+        await fetch('/api/gguf-delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+    } catch {}
+    await loadGgufModels();
+}
+
+// Download a GGUF from a HF repo+file (or a direct URL), streaming progress.
+let _ggufPulling = false;
+async function installGguf() {
+    if (_ggufPulling) return;
+    const lang = state.language || 'fr';
+    const repo = ($('#gguf-repo-input').value || '').trim();
+    const fileOrUrl = ($('#gguf-file-input').value || '').trim();
+    let qs = '';
+    if (/^https?:\/\//i.test(repo)) qs = 'url=' + encodeURIComponent(repo);
+    else if (/^https?:\/\//i.test(fileOrUrl)) qs = 'url=' + encodeURIComponent(fileOrUrl);
+    else if (repo && fileOrUrl) qs = 'repo=' + encodeURIComponent(repo) + '&file=' + encodeURIComponent(fileOrUrl);
+    else {
+        showToast(lang === 'en' ? 'Missing info' : 'Info manquante',
+            lang === 'en' ? 'Enter a HF repo + a .gguf file, or a full URL.' : 'Entre un repo HF + un fichier .gguf, ou une URL complète.',
+            { icon: 'ℹ️' });
+        return;
+    }
+
+    const prog = $('#gguf-progress'), fill = $('#gguf-pfill'), text = $('#gguf-ptext');
+    if (prog) prog.style.display = 'block';
+    if (fill) fill.style.width = '0%';
+    if (text) text.textContent = lang === 'en' ? 'Starting…' : 'Démarrage…';
+    _ggufPulling = true;
+    try {
+        const res = await fetch('/api/gguf-pull?' + qs);
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '';
+        const mb = n => (n / 1e6).toFixed(0);
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n');
+            buf = lines.pop();
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                let o; try { o = JSON.parse(line); } catch { continue; }
+                if (o.status === 'downloading' && o.total) {
+                    const pct = Math.round(o.completed / o.total * 100);
+                    if (fill) fill.style.width = pct + '%';
+                    if (text) text.textContent = `${pct}% (${mb(o.completed)} / ${mb(o.total)} Mo)`;
+                } else if (o.status === 'success') {
+                    if (fill) fill.style.width = '100%';
+                    if (text) text.textContent = lang === 'en' ? 'Installed ✓' : 'Installé ✓';
+                } else if (o.status === 'error') {
+                    if (text) text.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + (o.error || '');
+                }
+            }
+        }
+        $('#gguf-repo-input').value = '';
+        $('#gguf-file-input').value = '';
+        await loadGgufModels();
+    } catch (e) {
+        if (text) text.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + (e.message || e);
+    } finally {
+        _ggufPulling = false;
+        setTimeout(() => { if (prog) prog.style.display = 'none'; }, 2500);
+    }
+}
+
+const ggAdd = $('#gguf-model-add');
+if (ggAdd) ggAdd.addEventListener('click', installGguf);
+['#gguf-repo-input', '#gguf-file-input'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); installGguf(); } });
+});
+
 // Curated catalog (filtered by the unified search bar).
 function renderCatalog() {
     const grid = $('#catalog-grid');
     if (!grid) return;
     const q = ($('#catalog-search-input') ? $('#catalog-search-input').value.trim().toLowerCase() : '');
-    const list = (window.OLLAMA_CATALOG || []).filter(m => {
+    const source = catalogInstallTarget === 'gguf' ? (window.GGUF_CATALOG || []) : (window.OLLAMA_CATALOG || []);
+    const list = source.filter(m => {
         if (!q) return true;
-        return (m.name + ' ' + m.label + ' ' + (m.desc || '') + ' ' + (m.tags || []).join(' ')).toLowerCase().includes(q);
+        return ((m.name || m.repo || '') + ' ' + m.label + ' ' + (m.desc || '') + ' ' + (m.tags || []).join(' ')).toLowerCase().includes(q);
     });
     grid.innerHTML = '';
     if (!list.length) { grid.innerHTML = `<div class="catalog-empty">${state.language === 'en' ? 'No model.' : 'Aucun modèle.'}</div>`; return; }
-    list.forEach(m => grid.appendChild(buildCard(m.name, m.label, m.size, m.tags, m.desc)));
+    list.forEach(m => {
+        if (catalogInstallTarget === 'gguf') {
+            grid.appendChild(buildCard('hf.co/' + m.repo, m.label, m.size, m.tags, m.desc, '', true, {
+                target: 'gguf',
+                ggufRepo: m.repo,
+                ggufFile: m.file || '',
+            }));
+        } else {
+            grid.appendChild(buildCard(m.name, m.label, m.size, m.tags, m.desc, '', false, { target: 'ollama' }));
+        }
+    });
 }
 
 // --- Hugging Face helpers ---
@@ -323,7 +533,10 @@ function renderHfCards(grid, models) {
         const repo = m.id.split('/').slice(1).join('/') || m.id;
         const desc = (m.pipeline ? m.pipeline + ' · ' : '') + (state.language === 'en' ? 'by ' : 'par ') + owner;
         const extra = `<div class="cat-dl">⬇ ${(m.downloads || 0).toLocaleString()} · ♥ ${m.likes || 0}</div>`;
-        grid.appendChild(buildCard(name, repo, estimateGgufSize(m.id), (m.tags || []).slice(0, 4), desc, extra, true));
+        grid.appendChild(buildCard(name, repo, estimateGgufSize(m.id), (m.tags || []).slice(0, 4), desc, extra, true, {
+            target: catalogInstallTarget,
+            ggufRepo: m.id,
+        }));
     });
 }
 
@@ -333,8 +546,8 @@ async function showHfDefault() {
     $('#hf-grid').classList.add('hidden');
     const pop = $('#hf-popular'), dl = $('#hf-downloads');
     const ld = `<div class="catalog-empty">${state.language === 'en' ? 'Loading…' : 'Chargement…'}</div>`;
-    if (!pop.querySelector('.cat-card')) pop.innerHTML = ld;
-    if (!dl.querySelector('.cat-card')) dl.innerHTML = ld;
+    pop.innerHTML = ld;
+    dl.innerHTML = ld;
     try {
         const [trending, downloads] = await Promise.all([fetchHf('', 'trendingScore', 12), fetchHf('', 'downloads', 12)]);
         renderHfCards(pop, trending);
@@ -542,6 +755,93 @@ function applyCatalogSearch() {
     else { renderCatalog(); }
 }
 
+async function installGgufFromCatalog(repo, file, card) {
+    const lang = state.language || 'fr';
+    const actions = card.querySelector('.cat-actions');
+    const prog = card.querySelector('.cat-progress');
+    const pfill = card.querySelector('.pfill');
+    const ptext = card.querySelector('.ptext');
+    actions.innerHTML = '';
+    prog.style.display = 'block';
+    pfill.style.width = '0%';
+    ptext.textContent = lang === 'en' ? 'Starting...' : 'Demarrage...';
+
+    const controller = new AbortController();
+    prog.querySelectorAll('.cat-cancel').forEach(b => b.remove());
+    const cancel = document.createElement('button');
+    cancel.className = 'cat-cancel'; cancel.type = 'button';
+    cancel.textContent = lang === 'en' ? 'Cancel' : 'Annuler';
+    cancel.addEventListener('click', () => controller.abort());
+    prog.appendChild(cancel);
+
+    try {
+        const qs = 'repo=' + encodeURIComponent(repo) + '&file=' + encodeURIComponent(file);
+        const res = await fetch('/api/gguf-pull?' + qs, { signal: controller.signal });
+        if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '', installedName = '';
+        const mb = n => (n / 1e6).toFixed(0);
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                let o; try { o = JSON.parse(line); } catch { continue; }
+                if (o.status === 'downloading' && o.total) {
+                    const pct = Math.round((o.completed || 0) / o.total * 100);
+                    pfill.style.width = pct + '%';
+                    ptext.textContent = `${pct}% (${mb(o.completed || 0)} / ${mb(o.total)} Mo)`;
+                } else if (o.status === 'success') {
+                    installedName = o.name || ggufFileName(file);
+                    pfill.style.width = '100%';
+                    ptext.textContent = lang === 'en' ? 'Installed' : 'Installe';
+                } else if (o.status === 'error') {
+                    throw new Error(o.error || 'download failed');
+                }
+            }
+        }
+        cancel.remove();
+        prog.style.display = 'none';
+        card.dataset.ggufFile = installedName || ggufFileName(file);
+        await refreshGgufInstalled();
+        setCardActions(card, card.dataset.name);
+        if (modelSelect.value === 'gguf') updateSubmodelDropdown();
+    } catch (e) {
+        cancel.remove();
+        prog.style.display = 'none';
+        pfill.style.width = '0%';
+        if (!(e && e.name === 'AbortError')) {
+            ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
+        }
+        setCardActions(card, card.dataset.name);
+    }
+}
+
+async function uninstallGgufModel(file, card) {
+    const lang = state.language || 'fr';
+    const ok = await customConfirm(ggufFileName(file), {
+        title: lang === 'en' ? 'Delete this GGUF model?' : 'Supprimer ce modele GGUF ?',
+        okText: lang === 'en' ? 'Delete' : 'Supprimer',
+        danger: true
+    });
+    if (!ok) return;
+    const un = card.querySelector('.cat-uninstall');
+    if (un) { un.disabled = true; un.textContent = lang === 'en' ? 'Deleting...' : 'Suppression...'; }
+    try {
+        await fetch('/api/gguf-delete', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name: ggufFileName(file) })
+        });
+        await refreshGgufInstalled();
+        setCardActions(card, card.dataset.name);
+    } catch {
+        if (un) { un.disabled = false; un.textContent = lang === 'en' ? 'Error' : 'Erreur'; setTimeout(() => setCardActions(card, card.dataset.name), 1600); }
+    }
+}
+
 async function installModel(name, card) {
     const lang = state.language || 'fr';
     const actions = card.querySelector('.cat-actions');
@@ -648,10 +948,23 @@ async function uninstallModel(name, card) {
 }
 
 // Catalog modal open/close + tabs + unified search.
+function updateCatalogChrome() {
+    const lang = state.language || 'fr';
+    const title = $('#catalog-title');
+    if (title) {
+        title.textContent = catalogInstallTarget === 'gguf'
+            ? (lang === 'en' ? 'Local GGUF models to install' : 'Modeles GGUF locaux a installer')
+            : (lang === 'en' ? 'Ollama models to install' : 'Modeles Ollama a installer');
+    }
+    $$('.catalog-target').forEach(btn => btn.classList.toggle('active', btn.dataset.target === catalogInstallTarget));
+}
+
 const catalogBtn = $('#catalog-btn');
 if (catalogBtn) catalogBtn.addEventListener('click', async () => {
     $('#catalog-modal').classList.add('active');
-    await refreshInstalled();
+    catalogInstallTarget = state.config.catalogTarget || 'gguf';
+    updateCatalogChrome();
+    await refreshCatalogInstalled();
     renderCatalog();
 });
 const closeCatalog = $('#close-catalog');
@@ -680,6 +993,18 @@ const quantModal = $('#quant-modal');
 if (quantModal) quantModal.addEventListener('click', e => { if (e.target.id === 'quant-modal') quantModal.classList.remove('active'); });
 const catalogModal = $('#catalog-modal');
 if (catalogModal) catalogModal.addEventListener('click', e => { if (e.target.id === 'catalog-modal') catalogModal.classList.remove('active'); });
+
+$$('.catalog-target').forEach(btn => btn.addEventListener('click', async () => {
+    catalogInstallTarget = btn.dataset.target || 'gguf';
+    state.config.catalogTarget = catalogInstallTarget;
+    saveState();
+    updateCatalogChrome();
+    await refreshCatalogInstalled();
+    $$('.catalog-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === 'curated'));
+    $('#catalog-pane-curated').classList.remove('hidden');
+    $('#catalog-pane-hf').classList.add('hidden');
+    applyCatalogSearch();
+}));
 
 const closeUpdate = $('#close-update-modal');
 if (closeUpdate) closeUpdate.addEventListener('click', () => $('#update-modal').classList.remove('active'));
@@ -764,6 +1089,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
+    _set('#settings-lang-select', state.language || 'fr');
+    _set('#gguf-variant-select', state.config.ggufVariant || '');
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
@@ -780,14 +1107,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 });
 
 // Restore language settings and select binding
+function setLanguage(lang) {
+    state.language = lang || 'fr';
+    saveState();
+    const topLang = $('#lang-select');
+    const settingsLang = $('#settings-lang-select');
+    if (topLang) topLang.value = state.language;
+    if (settingsLang) settingsLang.value = state.language;
+    updateLanguage();
+    if (typeof updateCatalogChrome === 'function') updateCatalogChrome();
+    if (typeof loadGgufModels === 'function') loadGgufModels();
+}
 const langSelect = $('#lang-select');
 if (langSelect) {
     langSelect.value = state.language || 'fr';
     langSelect.addEventListener('change', () => {
-        state.language = langSelect.value;
-        saveState();
-        updateLanguage();
+        setLanguage(langSelect.value);
     });
+}
+const settingsLangSelect = $('#settings-lang-select');
+if (settingsLangSelect) {
+    settingsLangSelect.value = state.language || 'fr';
+    settingsLangSelect.addEventListener('change', () => setLanguage(settingsLangSelect.value));
 }
 updateLanguage();
 

@@ -506,7 +506,7 @@ async function maybeCompact(model, submodel) {
 async function compactContext(model, submodel, opts = {}) {
     const force = !!opts.force;
     const win = contextWindow(model, submodel);
-    const threshold = model === 'local' ? 0.60 : 0.75;
+    const threshold = (model === 'local' || model === 'gguf') ? 0.60 : 0.75;
     const lang = state.language || 'fr';
     if (!force && state.contextTokens < win * threshold) return false;
     if (state.chatHistory.length <= 4) {
@@ -570,7 +570,7 @@ async function sendChat(message) {
     const lang = state.language || 'fr';
     const { aiText, names, images } = consumeAttachments();
 
-    const isLocal = model === 'local';
+    const isLocal = model === 'local' || model === 'gguf';
 
     // Compact the running context first if it's getting close to the limit.
     await maybeCompact(model, submodel);

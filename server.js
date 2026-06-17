@@ -651,9 +651,21 @@ app.get('/api/hf-files', async (req, res) => {
       if (!/\.gguf$/i.test(f)) continue;
       const m = f.match(/(IQ\d[A-Z0-9_]*|Q\d[A-Z0-9_]*K[A-Z0-9_]*|Q\d_\d|Q\d[A-Z0-9_]*|BF16|F16|F32)/i);
       const quant = (m ? m[1] : 'default').toUpperCase();
-      groups[quant] = (groups[quant] || 0) + (s.size || 0);
+      if (!groups[quant]) groups[quant] = { size: 0, files: [], file: '' };
+      const size = s.size || 0;
+      groups[quant].size += size;
+      groups[quant].files.push({ file: f, size });
+      if (!groups[quant].file || size > (groups[quant]._bestSize || 0)) {
+        groups[quant].file = f;
+        groups[quant]._bestSize = size;
+      }
     }
-    let quants = Object.entries(groups).map(([quant, size]) => ({ quant, size })).filter((x) => x.size > 0);
+    let quants = Object.entries(groups).map(([quant, info]) => ({
+      quant,
+      size: info.size,
+      file: info.file,
+      files: info.files,
+    })).filter((x) => x.size > 0);
     // Drop the unlabelled (fp16/full) group when real quantizations exist.
     if (quants.some((x) => x.quant !== 'DEFAULT')) quants = quants.filter((x) => x.quant !== 'DEFAULT');
     quants.sort((a, b) => a.size - b.size);
@@ -692,6 +704,267 @@ app.get('/api/ollama-pull', async (req, res) => {
     if (!ac.signal.aborted) {
       try { res.write(JSON.stringify({ error: err.message }) + '\n'); } catch {}
     }
+    try { res.end(); } catch {}
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LOCAL GGUF ENGINE (llama.cpp) — run GGUF models directly, NO Ollama needed.
+// We download the official llama.cpp `llama-server.exe` build that matches the
+// machine (CUDA / Vulkan / CPU) into %LOCALAPPDATA%\zaalis\engine, spawn it as a
+// child process, and proxy chat to its OpenAI-compatible /v1/chat/completions.
+// This is exactly how LM Studio / Jan work, but fully self-contained.
+// ---------------------------------------------------------------------------
+const MODELS_DIR = path.join(DATA_DIR, 'models');   // installed *.gguf files
+const ENGINE_DIR = path.join(DATA_DIR, 'engine');   // extracted llama.cpp builds
+const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
+const ENGINE_PORT = 8091;
+
+function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
+ensureDir(MODELS_DIR);
+
+// Detect the fastest engine variant available on this machine.
+let _gpuVariant = null;
+function detectEngineVariant() {
+  if (_gpuVariant) return _gpuVariant;
+  if (process.platform !== 'win32') { _gpuVariant = 'cpu'; return _gpuVariant; }
+  let names = '';
+  try {
+    names = execSyncSafe('powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name -join \';\'"');
+  } catch {}
+  if (!names) { try { names = execSyncSafe('wmic path win32_VideoController get name'); } catch {} }
+  names = (names || '').toLowerCase();
+  if (/nvidia|geforce|rtx|quadro|tesla/.test(names)) _gpuVariant = 'cuda';
+  else if (/amd|radeon|intel|arc|iris/.test(names)) _gpuVariant = 'vulkan';
+  else _gpuVariant = 'cpu';
+  return _gpuVariant;
+}
+function execSyncSafe(cmd) {
+  const { execSync } = require('child_process');
+  return execSync(cmd, { timeout: 9000, windowsHide: true }).toString();
+}
+
+function engineAssetUrls(variant) {
+  const base = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
+  if (variant === 'cuda') return [
+    base + `llama-${LLAMA_TAG}-bin-win-cuda-12.4-x64.zip`,
+    base + `cudart-llama-bin-win-cuda-12.4-x64.zip`,   // CUDA runtime DLLs
+  ];
+  if (variant === 'vulkan') return [base + `llama-${LLAMA_TAG}-bin-win-vulkan-x64.zip`];
+  return [base + `llama-${LLAMA_TAG}-bin-win-cpu-x64.zip`];
+}
+
+function findExeRecursive(dir, name) {
+  let found = null;
+  const walk = (d) => {
+    if (found) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk(fp);
+      else if (e.name.toLowerCase() === name) { found = fp; return; }
+    }
+  };
+  walk(dir);
+  return found;
+}
+
+// Stream a URL to a file; calls onProgress(received, total). Abortable.
+async function downloadTo(url, dest, onProgress, signal) {
+  const res = await fetch(url, { redirect: 'follow', signal });
+  if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
+  const total = Number(res.headers.get('content-length')) || 0;
+  ensureDir(path.dirname(dest));
+  const out = fs.createWriteStream(dest);
+  let received = 0;
+  const reader = res.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.length;
+      if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
+      if (onProgress) onProgress(received, total);
+    }
+  } finally {
+    await new Promise((r) => out.end(r));
+  }
+}
+
+// Extract a .zip. Tricky on Windows:
+//  - the SYSTEM tar (C:\Windows\System32\tar.exe = bsdtar) reads zip, but a bare
+//    "tar" may resolve to Git's GNU tar (no zip support), so we call it by full
+//    path. bsdtar also reads "C:\path" as host:path, so we cd into the folder
+//    and pass a relative name (no colon).
+//  - if that fails, fall back to PowerShell's Expand-Archive (always present).
+function extractZip(zipPath, destDir) {
+  ensureDir(destDir);
+  const { execSync } = require('child_process');
+  const sysTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+  if (fs.existsSync(sysTar)) {
+    try {
+      execSync(`"${sysTar}" -xf "${path.basename(zipPath)}" -C .`, {
+        cwd: path.dirname(zipPath), timeout: 180000, windowsHide: true,
+      });
+      return;
+    } catch { /* fall through to PowerShell */ }
+  }
+  const q = (s) => s.replace(/'/g, "''");
+  const ps = `Expand-Archive -LiteralPath '${q(zipPath)}' -DestinationPath '${q(destDir)}' -Force`;
+  execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${ps}"`, { timeout: 300000, windowsHide: true });
+}
+
+// Ensure the engine binary for `variant` exists; returns the llama-server.exe path.
+// Downloads + extracts on first use, reporting progress via onLog({stage, pct}).
+const engineExePaths = {};
+async function ensureEngineBinary(variant, onLog) {
+  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return engineExePaths[variant];
+  const vdir = path.join(ENGINE_DIR, variant);
+  let exe = findExeRecursive(vdir, 'llama-server.exe');
+  if (exe) { engineExePaths[variant] = exe; return exe; }
+  ensureDir(vdir);
+  const urls = engineAssetUrls(variant);
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const zip = path.join(vdir, path.basename(url));
+    if (onLog) onLog({ stage: 'engine', pct: 0, part: i + 1, parts: urls.length });
+    await downloadTo(url, zip, (rec, tot) => {
+      if (onLog && tot) onLog({ stage: 'engine', pct: Math.round((rec / tot) * 100), part: i + 1, parts: urls.length });
+    });
+    if (onLog) onLog({ stage: 'extract', pct: 100, part: i + 1, parts: urls.length });
+    extractZip(zip, vdir);
+    try { fs.unlinkSync(zip); } catch {}
+  }
+  exe = findExeRecursive(vdir, 'llama-server.exe');
+  if (!exe) throw new Error('llama-server.exe introuvable après extraction.');
+  engineExePaths[variant] = exe;
+  return exe;
+}
+
+// --- Engine process lifecycle (one model loaded at a time, swapped on demand) ---
+let engineProc = null, engineModelFile = null, engineVariant = null, engineStarting = null;
+
+function stopEngine() {
+  return new Promise((resolve) => {
+    if (!engineProc) return resolve();
+    const p = engineProc; engineProc = null; engineModelFile = null;
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    try { p.once('exit', fin); p.kill(); setTimeout(fin, 2000); } catch { fin(); }
+  });
+}
+
+async function waitForHealth(port, timeoutMs) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`);
+      if (r.ok) { const j = await r.json().catch(() => ({})); if (!j.status || j.status === 'ok') return; }
+    } catch {}
+    if (Date.now() - t0 > timeoutMs) throw new Error("Le moteur GGUF n'a pas démarré à temps (modèle trop lourd ?).");
+    await new Promise((r) => setTimeout(r, 600));
+  }
+}
+
+// Make sure the engine is running and serving `modelFile`. Swaps model if needed.
+async function ensureEngine(modelFile, preferredVariant) {
+  const modelPath = path.join(MODELS_DIR, modelFile);
+  if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
+  if (engineProc && engineModelFile === modelFile) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile) return; }
+  engineStarting = (async () => {
+    await stopEngine();
+    let variant = preferredVariant || detectEngineVariant();
+    let exe;
+    try { exe = await ensureEngineBinary(variant); }
+    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
+    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', '8192'];
+    if (variant !== 'cpu') args.push('-ngl', '999'); // offload all layers to the GPU
+    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+    proc.on('error', () => {});
+    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
+    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
+    await waitForHealth(ENGINE_PORT, 180000);
+  })();
+  try { await engineStarting; } finally { engineStarting = null; }
+}
+
+// GET /api/gguf-models -> installed models + engine status
+app.get('/api/gguf-models', (req, res) => {
+  try {
+    ensureDir(MODELS_DIR);
+    const files = fs.readdirSync(MODELS_DIR).filter((f) => f.toLowerCase().endsWith('.gguf'));
+    const models = files.map((f) => {
+      let size = 0; try { size = fs.statSync(path.join(MODELS_DIR, f)).size; } catch {}
+      return { name: f, size };
+    });
+    res.json({ models, variant: detectEngineVariant(), running: !!engineProc, current: engineModelFile });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gguf-engine -> which variant this machine will use + whether installed
+app.get('/api/gguf-engine', (req, res) => {
+  const variant = detectEngineVariant();
+  res.json({
+    variant,
+    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), 'llama-server.exe'),
+    running: !!engineProc, current: engineModelFile,
+  });
+});
+
+// POST /api/gguf-delete { name }
+app.post('/api/gguf-delete', async (req, res) => {
+  try {
+    const name = path.basename(String((req.body && req.body.name) || ''));
+    if (!name.toLowerCase().endsWith('.gguf')) return res.status(400).json({ error: 'Nom invalide.' });
+    if (engineModelFile === name) await stopEngine();
+    fs.unlinkSync(path.join(MODELS_DIR, name));
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress
+app.get('/api/gguf-pull', async (req, res) => {
+  const repo = String(req.query.repo || '').trim();
+  const file = String(req.query.file || '').trim();
+  let url = String(req.query.url || '').trim();
+  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
+  if (!url) return res.status(400).json({ error: 'url, ou repo+file requis' });
+  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
+  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
+  const dest = path.join(MODELS_DIR, base);
+  const tmp = dest + '.part';
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  const ac = new AbortController();
+  req.on('close', () => ac.abort());
+  try {
+    ensureDir(MODELS_DIR);
+    let last = 0;
+    await downloadTo(url, tmp, (rec, tot) => {
+      const now = Date.now();
+      if (now - last > 200 || rec === tot) { last = now; try { res.write(JSON.stringify({ status: 'downloading', completed: rec, total: tot }) + '\n'); } catch {} }
+    }, ac.signal);
+    fs.renameSync(tmp, dest);
+    res.write(JSON.stringify({ status: 'success', name: base }) + '\n');
+    res.end();
+  } catch (e) {
+    try { fs.unlinkSync(tmp); } catch {}
+    if (!ac.signal.aborted) { try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {} }
+    try { res.end(); } catch {}
+  }
+});
+
+// GET /api/gguf-engine-pull?variant=cpu|cuda|vulkan -> download the engine, NDJSON progress
+app.get('/api/gguf-engine-pull', async (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  try {
+    const variant = String(req.query.variant || detectEngineVariant());
+    await ensureEngineBinary(variant, (p) => { try { res.write(JSON.stringify({ status: p.stage, pct: p.pct, part: p.part, parts: p.parts }) + '\n'); } catch {} });
+    res.write(JSON.stringify({ status: 'success', variant }) + '\n');
+    res.end();
+  } catch (e) {
+    try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {}
     try { res.end(); } catch {}
   }
 });
@@ -1045,6 +1318,42 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+    // ----- GGUF (local, llama.cpp engine — no Ollama) -----
+    else if (model === 'gguf') {
+      const ggufFile = submodel;
+      if (!ggufFile) throw new Error('Aucun modèle GGUF sélectionné.');
+      try {
+        await ensureEngine(ggufFile, config?.ggufVariant);
+      } catch (e) {
+        throw new Error('Moteur GGUF : ' + (e.message || e));
+      }
+
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
+      messages.push({ role: 'user', content: message });
+
+      const ggufAC = new AbortController();
+      const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
+      try {
+        const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 }),
+          signal: ggufAC.signal,
+        });
+        clearTimeout(ggufTimeout);
+        responseText = data.choices?.[0]?.message?.content || '';
+        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
+        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
+        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+      } catch (ggufErr) {
+        clearTimeout(ggufTimeout);
+        if (ggufErr.name === 'AbortError') throw new Error('Moteur GGUF : délai dépassé (5 min). Modèle trop lent ?');
+        throw new Error('Moteur GGUF : ' + (ggufErr.message || ggufErr));
+      }
+    }
+
     // ----- Unknown model -----
     else {
       return res.status(400).json({ error: `Unknown model: ${model}` });
@@ -1237,6 +1546,7 @@ app.post('/api/update/install', (req, res) => {
 app.post('/api/app/close', (req, res) => {
   res.json({ success: true });
   setTimeout(() => {
+    try { if (engineProc) engineProc.kill(); } catch {}
     try {
       spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
         detached: true, stdio: 'ignore', windowsHide: true
@@ -1245,6 +1555,9 @@ app.post('/api/app/close', (req, res) => {
     process.exit(0);
   }, 300);
 });
+
+// Don't leave the GGUF engine running after the server dies.
+process.on('exit', () => { try { if (engineProc) engineProc.kill(); } catch {} });
 
 // ---------------------------------------------------------------------------
 // Auto-start Ollama in the background (only if it isn't already running).
