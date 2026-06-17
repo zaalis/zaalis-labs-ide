@@ -1,36 +1,36 @@
 # zaalis labs IDE
 
-IDE local de zaalis labs avec interface web, serveur Node.js local et application native Windows via WebView2.
+Local IDE by zaalis labs with a web interface, local Node.js server, and native Windows application powered by WebView2.
 
-## Lancer avec l'installateur Windows
+## Launch with the Windows installer
 
-Telechargez puis lancez:
+Download and run:
 
 [zaalis-setup.exe](https://github.com/zaalis/zaalis-labs-ide/raw/main/native/installer/zaalis-setup.exe)
 
-L'installateur ajoute l'application dans Windows et cree les raccourcis de lancement.
+The installer adds the application to Windows and creates launch shortcuts.
 
-## Lancer manuellement
+## Launch manually
 
-Prerequis: Node.js.
+Prerequisite: Node.js.
 
 ```bash
 npm install
 npm start
 ```
 
-Ouvrez ensuite:
+Then open:
 
 ```text
 http://localhost:3000
 ```
 
-## Reconstruire l'application Windows
+## Rebuild the Windows application
 
-Prerequis:
+Prerequisites:
 
 - Node.js
-- Visual Studio avec la charge C++ Desktop
+- Visual Studio with the Desktop C++ workload
 - Inno Setup 6
 
 ```bat
@@ -39,7 +39,7 @@ native\build_shell.bat
 native\build_installer.bat
 ```
 
-L'installateur genere se trouve ici:
+The generated installer can be found here:
 
 ```text
 native\installer\zaalis-setup.exe
