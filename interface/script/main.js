@@ -116,7 +116,7 @@ $('#save-btn').addEventListener('click', async () => {
 function renderOllamaModels() {
     const box = $('#ollama-models-list');
     if (!box) return;
-    const list = state.config.ollamaModels || [];
+    const list = _installedModels.size ? Array.from(_installedModels).sort() : (state.config.ollamaModels || []);
     box.innerHTML = '';
     if (!list.length) {
         box.innerHTML = `<span class="ollama-empty">${state.language === 'en' ? 'No model added yet.' : 'Aucun modèle ajouté.'}</span>`;
@@ -274,6 +274,8 @@ function buildCard(name, label, size, tags, desc, extra, isHf, opts = {}) {
         ${extra || ''}
         <div class="cat-actions"></div>
         <div class="cat-progress" style="display:none"><div class="pbar"><div class="pfill"></div></div><div class="ptext"></div></div>`;
+    const nameEl = card.querySelector('.cat-name');
+    if (nameEl) nameEl.title = label || name;
     setCardActions(card, name);
     return card;
 }
@@ -403,13 +405,19 @@ async function loadGgufModels() {
 }
 
 async function deleteGguf(name) {
+    const lang = state.language || 'fr';
     try {
-        await fetch('/api/gguf-delete', {
+        const res = await fetch('/api/gguf-delete', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name })
         });
-    } catch {}
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+    } catch (e) {
+        showToast(lang === 'en' ? 'Delete failed' : 'Suppression impossible', e.message || String(e), { icon: '!' });
+    }
     await loadGgufModels();
+    if (!$('#catalog-pane-installed')?.classList.contains('hidden')) renderInstalledCatalog();
 }
 
 // Download a GGUF from a HF repo+file (or a direct URL), streaming progress.
@@ -502,6 +510,44 @@ function renderCatalog() {
         } else {
             grid.appendChild(buildCard(m.name, m.label, m.size, m.tags, m.desc, '', false, { target: 'ollama' }));
         }
+    });
+}
+
+function renderInstalledCatalog() {
+    const grid = $('#installed-grid');
+    if (!grid) return;
+    const lang = state.language || 'fr';
+    const q = ($('#catalog-search-input') ? $('#catalog-search-input').value.trim().toLowerCase() : '');
+    grid.innerHTML = '';
+    if (catalogInstallTarget === 'gguf') {
+        const source = state.config.ggufModels || [];
+        const list = source.filter(file => {
+            if (!q) return true;
+            return String(file || '').replace(/\.gguf$/i, '').toLowerCase().includes(q);
+        });
+        if (!list.length) {
+            grid.innerHTML = `<div class="catalog-empty">${q ? (lang === 'en' ? 'No installed GGUF model matches.' : 'Aucun modele GGUF installe ne correspond.') : (lang === 'en' ? 'No GGUF model installed.' : 'Aucun modele GGUF installe.')}</div>`;
+            return;
+        }
+        list.forEach(file => {
+            const label = file.replace(/\.gguf$/i, '');
+            grid.appendChild(buildCard('gguf://' + file, label, '', ['local'], lang === 'en' ? 'Installed local GGUF model.' : 'Modele GGUF local installe.', '', false, {
+                target: 'gguf',
+                ggufRepo: '',
+                ggufFile: file,
+            }));
+        });
+        return;
+    }
+
+    const source = _installedModels.size ? Array.from(_installedModels).sort() : (state.config.ollamaModels || []);
+    const list = source.filter(name => !q || String(name || '').toLowerCase().includes(q));
+    if (!list.length) {
+        grid.innerHTML = `<div class="catalog-empty">${q ? (lang === 'en' ? 'No installed Ollama model matches.' : 'Aucun modele Ollama installe ne correspond.') : (lang === 'en' ? 'No Ollama model installed.' : 'Aucun modele Ollama installe.')}</div>`;
+        return;
+    }
+    list.forEach(name => {
+        grid.appendChild(buildCard(name, name, '', ['local'], lang === 'en' ? 'Installed Ollama model.' : 'Modele Ollama installe.', '', false, { target: 'ollama' }));
     });
 }
 
@@ -751,7 +797,9 @@ if (confirmUpdateBtn) {
 function applyCatalogSearch() {
     const q = $('#catalog-search-input').value.trim();
     const hfActive = !$('#catalog-pane-hf').classList.contains('hidden');
-    if (hfActive) { q ? hfSearch(q) : showHfDefault(); }
+    const installedActive = !$('#catalog-pane-installed').classList.contains('hidden');
+    if (installedActive) renderInstalledCatalog();
+    else if (hfActive) { q ? hfSearch(q) : showHfDefault(); }
     else { renderCatalog(); }
 }
 
@@ -831,12 +879,16 @@ async function uninstallGgufModel(file, card) {
     const un = card.querySelector('.cat-uninstall');
     if (un) { un.disabled = true; un.textContent = lang === 'en' ? 'Deleting...' : 'Suppression...'; }
     try {
-        await fetch('/api/gguf-delete', {
+        const res = await fetch('/api/gguf-delete', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ name: ggufFileName(file) })
         });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
         await refreshGgufInstalled();
+        renderGgufModels();
         setCardActions(card, card.dataset.name);
+        if (!$('#catalog-pane-installed')?.classList.contains('hidden')) renderInstalledCatalog();
     } catch {
         if (un) { un.disabled = false; un.textContent = lang === 'en' ? 'Error' : 'Erreur'; setTimeout(() => setCardActions(card, card.dataset.name), 1600); }
     }
@@ -935,13 +987,23 @@ async function uninstallModel(name, card) {
             if (!res.ok || data.error) lastErr = data.error || ('HTTP ' + res.status);
             else _installedModels.delete(t);
         }
-        if (lastErr && !targets.size) throw new Error(lastErr);
-        removeOllamaModel(name);
-        // Also drop any HF variant we may have kept in the managed list.
-        (state.config.ollamaModels || []).slice().forEach(m => {
-            if (m.toLowerCase().startsWith(name.toLowerCase().split(':')[0] + ':') || m.toLowerCase() === name.toLowerCase()) removeOllamaModel(m);
+        await refreshInstalled();
+        const installedLower = new Set(Array.from(_installedModels).map(m => m.toLowerCase()));
+        const remaining = Array.from(targets).filter(t => installedLower.has(t.toLowerCase()) || installedLower.has(normName(t).toLowerCase()));
+        if (lastErr && remaining.length) throw new Error(lastErr);
+        const targetLower = new Set(Array.from(targets).map(t => t.toLowerCase()));
+        const base = name.toLowerCase().split(':')[0];
+        state.config.ollamaModels = (state.config.ollamaModels || []).filter(m => {
+            const ml = m.toLowerCase();
+            const nl = normName(m).toLowerCase();
+            return !targetLower.has(ml) && !targetLower.has(nl) && ml !== name.toLowerCase() && !ml.startsWith(base + ':');
         });
+        saveState();
+        renderOllamaModels();
+        if (modelSelect.value === 'local') updateSubmodelDropdown();
+        refreshOllamaAgentSelect();
         setCardActions(card, name);
+        if (!$('#catalog-pane-installed')?.classList.contains('hidden')) renderInstalledCatalog();
     } catch (e) {
         if (un) { un.disabled = false; un.textContent = (lang === 'en' ? 'Error' : 'Erreur'); setTimeout(() => setCardActions(card, name), 1800); }
     }
@@ -965,6 +1027,7 @@ if (catalogBtn) catalogBtn.addEventListener('click', async () => {
     catalogInstallTarget = state.config.catalogTarget || 'gguf';
     updateCatalogChrome();
     await refreshCatalogInstalled();
+    if (!$('#catalog-pane-installed')?.classList.contains('hidden')) renderInstalledCatalog();
     renderCatalog();
 });
 const closeCatalog = $('#close-catalog');
@@ -1003,6 +1066,7 @@ $$('.catalog-target').forEach(btn => btn.addEventListener('click', async () => {
     $$('.catalog-tab').forEach(t => t.classList.toggle('active', t.dataset.cat === 'curated'));
     $('#catalog-pane-curated').classList.remove('hidden');
     $('#catalog-pane-hf').classList.add('hidden');
+    $('#catalog-pane-installed').classList.add('hidden');
     applyCatalogSearch();
 }));
 
@@ -1013,11 +1077,13 @@ if (cancelUpdate) cancelUpdate.addEventListener('click', () => $('#update-modal'
 const updateModal = $('#update-modal');
 if (updateModal) updateModal.addEventListener('click', e => { if (e.target.id === 'update-modal') updateModal.classList.remove('active'); });
 
-$$('.catalog-tab').forEach(tab => tab.addEventListener('click', () => {
+$$('.catalog-tab').forEach(tab => tab.addEventListener('click', async () => {
     $$('.catalog-tab').forEach(t => t.classList.toggle('active', t === tab));
     const cat = tab.dataset.cat;
     $('#catalog-pane-curated').classList.toggle('hidden', cat !== 'curated');
     $('#catalog-pane-hf').classList.toggle('hidden', cat !== 'hf');
+    $('#catalog-pane-installed').classList.toggle('hidden', cat !== 'installed');
+    if (cat === 'installed') await refreshCatalogInstalled();
     applyCatalogSearch(); // apply current query to the newly active tab
 }));
 

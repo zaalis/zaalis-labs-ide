@@ -396,7 +396,8 @@ details.file-card .file-card-body pre.code-block{margin:0;border:none;border-rad
 .ollama-detect{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:var(--text-2);background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius);padding:4px 9px;transition:all .15s;}
 .ollama-detect:hover{border-color:var(--accent);color:var(--text-0);}
 .ollama-models{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:4px;}
-.ollama-chip{display:inline-flex;align-items:center;gap:6px;background:var(--bg-3);border:1px solid var(--border);border-radius:14px;padding:3px 6px 3px 11px;font-size:12px;font-family:var(--font-mono);color:var(--text-1);}
+.ollama-chip{display:inline-flex;align-items:center;gap:6px;max-width:100%;background:var(--bg-3);border:1px solid var(--border);border-radius:14px;padding:3px 6px 3px 11px;font-size:12px;font-family:var(--font-mono);color:var(--text-1);}
+.ollama-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .ollama-chip button{width:16px;height:16px;display:flex;align-items:center;justify-content:center;border-radius:50%;color:var(--text-3);font-size:13px;line-height:1;}
 .ollama-chip button:hover{background:var(--red);color:#fff;}
 .ollama-empty{font-size:11px;color:var(--text-3);font-style:italic;}
@@ -422,7 +423,7 @@ details.file-card .file-card-body pre.code-block{margin:0;border:none;border-rad
 .cat-card{background:var(--bg-1);border:1px solid var(--border-subtle);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:6px;}
 .cat-card:hover{border-color:var(--border);}
 .cat-top{display:flex;align-items:baseline;justify-content:space-between;gap:8px;}
-.cat-name{font-size:13px;font-weight:600;color:var(--text-0);}
+.cat-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:600;color:var(--text-0);}
 .cat-size{font-size:10px;color:var(--text-3);font-family:var(--font-mono);white-space:nowrap;}
 .cat-desc{font-size:11px;color:var(--text-2);line-height:1.4;flex:1;}
 .cat-tags{display:flex;flex-wrap:wrap;gap:4px;}
@@ -438,8 +439,8 @@ details.file-card .file-card-body pre.code-block{margin:0;border:none;border-rad
 .cat-progress .ptext{font-size:10px;color:var(--text-3);margin-top:3px;font-family:var(--font-mono);}
 
 /* ===================== CATALOG TABS + HF + UNINSTALL ===================== */
-.catalog-tabs{display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--border-subtle);}
-.catalog-tab{padding:7px 14px;font-size:12px;font-weight:600;color:var(--text-3);border-bottom:2px solid transparent;margin-bottom:-1px;transition:all .15s;}
+.catalog-tabs{display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--border-subtle);overflow-x:auto;}
+.catalog-tab{padding:7px 14px;font-size:12px;font-weight:600;color:var(--text-3);border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;transition:all .15s;}
 .catalog-tab:hover{color:var(--text-1);}
 .catalog-tab.active{color:var(--text-0);border-bottom-color:var(--accent);}
 .catalog-pane.hidden{display:none;}

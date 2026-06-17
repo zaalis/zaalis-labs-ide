@@ -663,6 +663,7 @@
             <div class="catalog-tabs">
                 <button class="catalog-tab active" data-cat="curated" type="button" data-i18n="catalog-popular">Populaires</button>
                 <button class="catalog-tab" data-cat="hf" type="button">Hugging Face</button>
+                <button class="catalog-tab" data-cat="installed" type="button" data-i18n="catalog-installed">Modèles installés</button>
             </div>
 
             <div class="catalog-pane" id="catalog-pane-curated">
@@ -679,6 +680,10 @@
                 </div>
                 <!-- Search results -->
                 <div class="catalog-grid hidden" id="hf-grid"></div>
+            </div>
+
+            <div class="catalog-pane hidden" id="catalog-pane-installed">
+                <div class="catalog-grid" id="installed-grid"></div>
             </div>
         </div>
     </div>
@@ -750,7 +755,7 @@
             <button class="modal-close" id="close-update-modal">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.9</p>
+            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.11</p>
             <div class="update-steps">
                 <div class="update-step active" id="update-step-download">
                     <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">✓</span></div>
