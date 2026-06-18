@@ -40,6 +40,14 @@ window.HELP_TOPICS = [
     a: "Ils règlent la liberté de l'IA sur ton projet. Supervisé : chaque modification/commande demande ton accord. Semi-auto : les fichiers sont écrits automatiquement, les commandes demandent validation. Autonome : l'IA agit sans rien demander (plus rapide, mais à utiliser en confiance)."
   },
   {
+    q: "C'est quoi le GGUF (modèle local sans Ollama) ?",
+    a: "GGUF est un format de fichier qui contient un modèle d'IA prêt à tourner sur ton ordinateur. zaalis embarque son propre moteur (llama.cpp) : tu télécharges un seul fichier .gguf et il tourne directement, SANS avoir besoin d'installer Ollama. C'est totalement séparé d'Ollama — deux moteurs indépendants : « Ollama » pour les modèles Ollama, « GGUF » pour les fichiers .gguf locaux. Avantage : léger, privé, gratuit, et tu choisis exactement le fichier et sa quantization (Q4, Q6, Q8…)."
+  },
+  {
+    q: "C'est quoi CUDA, Vulkan et CPU (accélération GPU) ?",
+    a: "Ce sont les trois façons dont le moteur GGUF peut calculer. CUDA : accélération sur carte graphique NVIDIA (le plus rapide si tu as un GPU NVIDIA). Vulkan : accélération GPU universelle (AMD, Intel, NVIDIA) quand CUDA n'est pas disponible. CPU : tout est calculé par le processeur — ça marche partout mais c'est le plus lent. zaalis détecte automatiquement le meilleur moteur pour ta machine ; tu peux aussi le forcer dans les réglages. En clair : un GPU (CUDA/Vulkan) rend les réponses bien plus rapides qu'en CPU seul."
+  },
+  {
     q: "Comment installer un modèle local ?",
     a: "Clique « Installer des modèles » → onglet Populaires (curé) ou Hugging Face (recherche). Choisis un modèle, clique Installer (et la version/quant pour Hugging Face). Il se télécharge puis apparaît dans le sélecteur Ollama. Ollama se lance tout seul au démarrage de zaalis."
   }

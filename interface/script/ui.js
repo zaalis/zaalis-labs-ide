@@ -245,7 +245,11 @@ async function openProject(rootPath, isNew) {
     state.lastContextRoot = null; // re-inject project context for this root
 
     saveState();
-    $('#project-name').textContent = rootPath.split(/[\\/]/).pop();
+    const nameEl = $('#project-name');
+    // Retire le data-i18n : sinon updateLanguage() (changement de langue) réécrit
+    // l'étiquette à « Aucun projet » alors qu'un projet est bien ouvert.
+    nameEl.removeAttribute('data-i18n');
+    nameEl.textContent = rootPath.split(/[\\/]/).pop();
     await loadFileTree();
     initRecentProjects();
 }

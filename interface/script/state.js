@@ -900,7 +900,11 @@ function loadState() {
                 Object.assign(state.config, safeConfig);
             }
             if (s.profile) Object.assign(state.profile, s.profile);
-            if (s.projectRoot) state.projectRoot = s.projectRoot;
+            // NOTE: on NE restaure PAS le projet au lancement. Un démarrage propre
+            // doit afficher « Aucun projet » avec un explorateur VIDE. L'ancien
+            // projet reste accessible via « projets récents » (zaalis-recent).
+            // (Avant : restaurer projectRoot rechargeait les fichiers de l'ancien
+            //  projet alors que l'étiquette affichait « Aucun projet ».)
             // Conversations are stored server-side per account (see /api/chats),
             // not in localStorage, to avoid leaking chats between accounts.
             if (s.language) state.language = s.language;
