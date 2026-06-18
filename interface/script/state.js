@@ -16,6 +16,22 @@ const state = {
         ggufModels: [],        // installed local GGUF files (llama.cpp engine)
         ggufVariant: '',       // '' = auto-detect (cuda / vulkan / cpu)
         catalogTarget: 'gguf',
+        // ----- Appearance -----
+        theme: 'dark',         // 'dark' | 'light'
+        density: 'normal',     // 'normal' | 'compact'
+        fontSize: 'normal',    // 'small' | 'normal' | 'large'
+        // ----- Default models -----
+        defaultAgentModel: 'codex',     // agents lead model preselected
+        defaultReasoning: 0,            // 0 = MIN, 1 = MED, 2 = MAX
+        // ----- Project -----
+        defaultProjectFolder: '',       // starting folder for the picker
+        reopenLastProject: false,       // reopen last project automatically on launch
+        // ----- Updates -----
+        autoCheckUpdates: true,         // check for updates at startup
+        updateChannel: 'stable',        // 'stable' | 'beta'
+        // ----- Advanced hardware (GGUF engine) -----
+        ggufCtx: 8192,                  // default context size for the local engine
+        ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
         keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
     },
     profile: { pseudo: 'Utilisateur', photo: '' },
@@ -227,6 +243,74 @@ const TRANSLATIONS = {
         'settings-gguf-engine-label': 'Moteur GGUF',
         'settings-gguf-engine-hint': 'Auto selectionne CUDA, Vulkan ou CPU selon le poste.',
         'settings-gguf-auto': 'Auto',
+        'settings-gguf-ctx-label': 'Contexte GGUF par défaut',
+        'settings-gguf-ctx-hint': 'Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.',
+        'settings-gguf-ngl-label': 'Limite VRAM (couches GPU)',
+        'settings-gguf-ngl-hint': "Nombre de couches déchargées sur le GPU. « Tout » = vitesse max ; baisser pour économiser la VRAM.",
+        'settings-gguf-ngl-all': 'Tout (auto)',
+        'settings-gguf-ngl-none': 'Aucune (CPU)',
+        'settings-appearance-title': 'Apparence',
+        'settings-appearance-hint': 'Personnalisez le thème, la densité et la taille du texte de ZS IDE.',
+        'settings-theme-label': 'Thème',
+        'settings-theme-hint': "Mode sombre ou clair de l'interface.",
+        'settings-theme-dark': 'Sombre',
+        'settings-theme-light': 'Clair',
+        'settings-density-label': 'Densité',
+        'settings-density-hint': "Compacte réduit les espacements pour afficher plus de contenu.",
+        'settings-density-normal': 'Normale',
+        'settings-density-compact': 'Compacte',
+        'settings-fontsize-label': 'Taille de police',
+        'settings-fontsize-hint': "Taille du texte dans toute l'application.",
+        'settings-fontsize-small': 'Petite',
+        'settings-fontsize-normal': 'Normale',
+        'settings-fontsize-large': 'Grande',
+        'settings-models-title': 'Modèles par défaut',
+        'settings-models-hint': "Choix présélectionnés à l'ouverture de l'application.",
+        'settings-default-chat-label': 'Modèle chat par défaut',
+        'settings-default-chat-hint': 'Modèle sélectionné par défaut dans le chat.',
+        'settings-default-agent-label': 'Modèle agents par défaut',
+        'settings-default-agent-hint': 'Modèle chef de projet présélectionné en mode Agents.',
+        'settings-default-reasoning-label': 'Effort de raisonnement par défaut',
+        'settings-default-reasoning-hint': 'Niveau de réflexion appliqué au démarrage (modèles compatibles).',
+        'settings-reasoning-min': 'Minimal',
+        'settings-reasoning-med': 'Moyen',
+        'settings-reasoning-max': 'Maximal',
+        'settings-project-title': 'Projet',
+        'settings-project-hint': "Comportement par défaut à l'ouverture des projets.",
+        'settings-default-folder-label': 'Dossier par défaut',
+        'settings-default-folder-hint': 'Dossier proposé en premier dans le sélecteur de projet.',
+        'settings-browse-btn': 'Parcourir',
+        'settings-reopen-label': 'Rouvrir le dernier projet',
+        'settings-reopen-hint': "Rouvre automatiquement le dernier projet au lancement de l'application.",
+        'settings-privacy-title': 'Confidentialité',
+        'settings-privacy-hint': 'Effacez vos données stockées localement. Ces actions sont irréversibles.',
+        'settings-clear-history-label': "Supprimer l'historique local",
+        'settings-clear-history-hint': 'Efface toutes les conversations (chat et agents).',
+        'settings-clear-keys-label': 'Supprimer les clés API',
+        'settings-clear-keys-hint': 'Retire toutes les clés API enregistrées sur ce compte.',
+        'settings-reset-label': 'Réinitialisation complète',
+        'settings-reset-hint': "Remet à zéro tous les réglages locaux, l'historique et les préférences.",
+        'settings-delete-btn': 'Supprimer',
+        'settings-reset-btn': 'Tout réinitialiser',
+        'settings-updates-title': 'Mises à jour',
+        'settings-updates-hint': 'Gérez la vérification et le canal des mises à jour.',
+        'settings-autoupdate-label': 'Vérifier au démarrage',
+        'settings-autoupdate-hint': 'Recherche automatiquement une nouvelle version au lancement.',
+        'settings-channel-label': 'Canal',
+        'settings-channel-hint': 'Stable = versions finales. Bêta = nouveautés en avant-première.',
+        'settings-channel-stable': 'Stable',
+        'settings-channel-beta': 'Bêta',
+        'settings-check-now-label': 'Vérifier maintenant',
+        'settings-check-now-hint': 'Lance une recherche de mise à jour immédiate.',
+        'settings-check-now-btn': 'Vérifier',
+        'settings-backup-title': 'Sauvegarde',
+        'settings-backup-hint': 'Exportez ou importez votre configuration. Les clés API ne sont jamais incluses.',
+        'settings-export-label': 'Exporter la configuration',
+        'settings-export-hint': 'Télécharge un fichier .json de vos réglages (sans les clés API).',
+        'settings-export-btn': 'Exporter',
+        'settings-import-label': 'Importer la configuration',
+        'settings-import-hint': 'Restaure vos réglages depuis un fichier .json exporté.',
+        'settings-import-btn': 'Importer',
         'ollama-hint': "Modeles d'IA gratuits tournant en local, sans cle API.",
         'ollama-url-label': 'URL du serveur',
         'ollama-model-label': 'Modele',
@@ -353,6 +437,74 @@ const TRANSLATIONS = {
         'settings-gguf-engine-label': 'GGUF engine',
         'settings-gguf-engine-hint': 'Auto selects CUDA, Vulkan, or CPU for this machine.',
         'settings-gguf-auto': 'Auto',
+        'settings-gguf-ctx-label': 'Default GGUF context',
+        'settings-gguf-ctx-hint': 'Context window size of the local engine (tokens). Larger = more memory used.',
+        'settings-gguf-ngl-label': 'VRAM limit (GPU layers)',
+        'settings-gguf-ngl-hint': 'Number of layers offloaded to the GPU. "All" = max speed; lower it to save VRAM.',
+        'settings-gguf-ngl-all': 'All (auto)',
+        'settings-gguf-ngl-none': 'None (CPU)',
+        'settings-appearance-title': 'Appearance',
+        'settings-appearance-hint': 'Customize the theme, density and text size of ZS IDE.',
+        'settings-theme-label': 'Theme',
+        'settings-theme-hint': 'Dark or light interface mode.',
+        'settings-theme-dark': 'Dark',
+        'settings-theme-light': 'Light',
+        'settings-density-label': 'Density',
+        'settings-density-hint': 'Compact reduces spacing to show more content.',
+        'settings-density-normal': 'Normal',
+        'settings-density-compact': 'Compact',
+        'settings-fontsize-label': 'Font size',
+        'settings-fontsize-hint': 'Text size across the whole app.',
+        'settings-fontsize-small': 'Small',
+        'settings-fontsize-normal': 'Normal',
+        'settings-fontsize-large': 'Large',
+        'settings-models-title': 'Default models',
+        'settings-models-hint': 'Preselected choices when the app starts.',
+        'settings-default-chat-label': 'Default chat model',
+        'settings-default-chat-hint': 'Model selected by default in chat.',
+        'settings-default-agent-label': 'Default agents model',
+        'settings-default-agent-hint': 'Lead model preselected in Agents mode.',
+        'settings-default-reasoning-label': 'Default reasoning effort',
+        'settings-default-reasoning-hint': 'Thinking level applied at startup (compatible models).',
+        'settings-reasoning-min': 'Minimal',
+        'settings-reasoning-med': 'Medium',
+        'settings-reasoning-max': 'Maximal',
+        'settings-project-title': 'Project',
+        'settings-project-hint': 'Default behavior when opening projects.',
+        'settings-default-folder-label': 'Default folder',
+        'settings-default-folder-hint': 'Folder shown first in the project picker.',
+        'settings-browse-btn': 'Browse',
+        'settings-reopen-label': 'Reopen last project',
+        'settings-reopen-hint': 'Automatically reopen the last project when the app launches.',
+        'settings-privacy-title': 'Privacy',
+        'settings-privacy-hint': 'Erase your locally stored data. These actions are irreversible.',
+        'settings-clear-history-label': 'Delete local history',
+        'settings-clear-history-hint': 'Erases all conversations (chat and agents).',
+        'settings-clear-keys-label': 'Delete API keys',
+        'settings-clear-keys-hint': 'Removes all API keys stored on this account.',
+        'settings-reset-label': 'Full reset',
+        'settings-reset-hint': 'Resets all local settings, history and preferences.',
+        'settings-delete-btn': 'Delete',
+        'settings-reset-btn': 'Reset everything',
+        'settings-updates-title': 'Updates',
+        'settings-updates-hint': 'Manage update checking and channel.',
+        'settings-autoupdate-label': 'Check at startup',
+        'settings-autoupdate-hint': 'Automatically look for a new version at launch.',
+        'settings-channel-label': 'Channel',
+        'settings-channel-hint': 'Stable = final releases. Beta = early features.',
+        'settings-channel-stable': 'Stable',
+        'settings-channel-beta': 'Beta',
+        'settings-check-now-label': 'Check now',
+        'settings-check-now-hint': 'Run an immediate update check.',
+        'settings-check-now-btn': 'Check',
+        'settings-backup-title': 'Backup',
+        'settings-backup-hint': 'Export or import your configuration. API keys are never included.',
+        'settings-export-label': 'Export configuration',
+        'settings-export-hint': 'Downloads a .json file of your settings (without API keys).',
+        'settings-export-btn': 'Export',
+        'settings-import-label': 'Import configuration',
+        'settings-import-hint': 'Restores your settings from an exported .json file.',
+        'settings-import-btn': 'Import',
         'ollama-hint': 'Free local AI models running on your machine, without API keys.',
         'ollama-url-label': 'Server URL',
         'ollama-model-label': 'Model',
@@ -916,11 +1068,18 @@ function loadState() {
                 Object.assign(state.config, safeConfig);
             }
             if (s.profile) Object.assign(state.profile, s.profile);
-            // NOTE: on NE restaure PAS le projet au lancement. Un démarrage propre
-            // doit afficher « Aucun projet » avec un explorateur VIDE. L'ancien
-            // projet reste accessible via « projets récents » (zaalis-recent).
-            // (Avant : restaurer projectRoot rechargeait les fichiers de l'ancien
-            //  projet alors que l'étiquette affichait « Aucun projet ».)
+            // Par défaut on NE restaure PAS le projet au lancement : démarrage
+            // propre = « Aucun projet » + explorateur vide. On ne le restaure que
+            // si l'utilisateur a activé « Rouvrir le dernier projet » (Paramètres
+            // → Projet). L'ancien projet reste sinon accessible via les projets
+            // récents (zaalis-recent).
+            if (s.projectRoot && state.config.reopenLastProject) {
+                state.projectRoot = s.projectRoot;
+            } else if (s.projectRoot) {
+                // Mémorise le chemin sans l'ouvrir, pour que le toggle puisse le
+                // rouvrir plus tard et pour rester dans les projets récents.
+                state.lastProjectRoot = s.projectRoot;
+            }
             // Conversations are stored server-side per account (see /api/chats),
             // not in localStorage, to avoid leaking chats between accounts.
             if (s.language) state.language = s.language;

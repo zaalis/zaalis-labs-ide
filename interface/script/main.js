@@ -3,7 +3,13 @@
 const SETTINGS_SECTION_TITLES = {
     general: 'settings-general-title',
     api: 'settings-api-keys-title',
-    hardware: 'settings-hardware-title'
+    appearance: 'settings-appearance-title',
+    models: 'settings-models-title',
+    hardware: 'settings-hardware-title',
+    project: 'settings-project-title',
+    privacy: 'settings-privacy-title',
+    updates: 'settings-updates-title',
+    backup: 'settings-backup-title'
 };
 
 function setSettingsSection(section) {
@@ -26,12 +32,71 @@ $$('.settings-nav-item').forEach(btn => {
     btn.addEventListener('click', () => setSettingsSection(btn.dataset.settingsSection));
 });
 
+// Small toast helper (title-less) on top of showToast().
+function toast(msg, opts) {
+    if (typeof showToast === 'function') showToast('', msg, Object.assign({ icon: '✓', duration: 4000 }, opts || {}));
+}
+
+// ----- Appearance: apply theme / density / font size to the whole app -----
+function applyAppearance() {
+    const c = state.config;
+    document.body.classList.toggle('theme-light', c.theme === 'light');
+    document.body.classList.toggle('density-compact', c.density === 'compact');
+    document.body.classList.remove('font-small', 'font-large');
+    if (c.fontSize === 'small') document.body.classList.add('font-small');
+    else if (c.fontSize === 'large') document.body.classList.add('font-large');
+}
+
+// IDs of the settings <select> elements that should render as rounded custom
+// dropdowns (opening downward).
+const SETTINGS_SELECT_IDS = [
+    'settings-lang-select', 'gguf-variant-select', 'gguf-ctx-select', 'gguf-ngl-select',
+    'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
+    'settings-default-chat-select', 'settings-default-agent-select',
+    'settings-default-reasoning-select', 'settings-channel-select'
+];
+let _settingsSelectsReady = false;
+function initSettingsCustomSelects() {
+    if (_settingsSelectsReady) return;
+    if (typeof createCustomSelect !== 'function') return;
+    SETTINGS_SELECT_IDS.forEach(id => { if ($('#' + id)) createCustomSelect(id, { dropDown: true }); });
+    _settingsSelectsReady = true;
+}
+
+// Push the current config values into the settings controls, then refresh the
+// custom dropdown displays.
+function populateSettingsControls() {
+    const c = state.config;
+    const setVal = (id, val) => {
+        const el = $('#' + id);
+        if (!el) return;
+        el.value = (val === undefined || val === null) ? '' : String(val);
+        el.dispatchEvent(new Event('change')); // refresh custom-select display
+    };
+    setVal('settings-lang-select', state.language || 'fr');
+    setVal('gguf-variant-select', c.ggufVariant || '');
+    setVal('gguf-ctx-select', c.ggufCtx || 8192);
+    setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
+    setVal('settings-theme-select', c.theme || 'dark');
+    setVal('settings-density-select', c.density || 'normal');
+    setVal('settings-fontsize-select', c.fontSize || 'normal');
+    setVal('settings-default-chat-select', c.aiModel || 'codex');
+    setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
+    setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
+    setVal('settings-channel-select', c.updateChannel || 'stable');
+    const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
+    const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
+    const autoUp = $('#settings-autoupdate-toggle'); if (autoUp) autoUp.checked = c.autoCheckUpdates !== false;
+}
+
 $('#settings-btn').addEventListener('click', () => {
-    const settingsLang = $('#settings-lang-select');
-    if (settingsLang) settingsLang.value = state.language || 'fr';
-    const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) variantSelect.value = state.config.ggufVariant || '';
     if (typeof loadGgufModels === 'function') loadGgufModels();
+    initSettingsCustomSelects();
+    populateSettingsControls();
+    // Refresh the API-key "Enregistrée ····1234" badges from the server every
+    // time the panel opens, so they persist across restarts (the keys are stored
+    // server-side; the badge state isn't in localStorage).
+    if (typeof refreshSecureSettings === 'function') refreshSecureSettings();
     setSettingsSection('general');
     $('#settings-modal').classList.add('active');
 });
@@ -116,6 +181,29 @@ $('#save-btn').addEventListener('click', async () => {
     state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
     state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
+
+    // ----- Appearance -----
+    const c = state.config;
+    const getVal = id => $('#' + id)?.value;
+    c.theme = getVal('settings-theme-select') || 'dark';
+    c.density = getVal('settings-density-select') || 'normal';
+    c.fontSize = getVal('settings-fontsize-select') || 'normal';
+    applyAppearance();
+    // ----- Default models -----
+    const defChat = getVal('settings-default-chat-select');
+    if (defChat) c.aiModel = defChat;
+    c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
+    c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
+    // ----- Hardware advanced -----
+    c.ggufCtx = parseInt(getVal('gguf-ctx-select') || '8192', 10) || 8192;
+    const nglVal = getVal('gguf-ngl-select');
+    c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
+    // ----- Project -----
+    c.defaultProjectFolder = ($('#settings-default-folder')?.value || '').trim();
+    c.reopenLastProject = !!$('#settings-reopen-toggle')?.checked;
+    // ----- Updates -----
+    c.autoCheckUpdates = !!$('#settings-autoupdate-toggle')?.checked;
+    c.updateChannel = getVal('settings-channel-select') || 'stable';
     saveState();
     const btn = $('#save-btn');
     const originalText = btn.textContent;
@@ -138,6 +226,158 @@ $('#save-btn').addEventListener('click', async () => {
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1200);
     }
 });
+
+// ----- Live preview: theme/density/font apply instantly when changed -----
+// Listeners are attached directly to each <select> (custom-select dispatches a
+// non-bubbling 'change' event, so document-level delegation would miss it).
+[
+    ['settings-theme-select', 'theme'],
+    ['settings-density-select', 'density'],
+    ['settings-fontsize-select', 'fontSize']
+].forEach(([id, key]) => {
+    const el = $('#' + id);
+    if (el) el.addEventListener('change', () => { state.config[key] = el.value; applyAppearance(); });
+});
+
+// ----- Project: default folder picker -----
+const pickFolderBtn = $('#settings-pick-folder-btn');
+if (pickFolderBtn) pickFolderBtn.addEventListener('click', async () => {
+    try {
+        const res = await fetch('/api/pick-folder', { method: 'POST' });
+        const data = await res.json();
+        if (data && data.path) {
+            const inp = $('#settings-default-folder');
+            if (inp) inp.value = data.path;
+        }
+    } catch {}
+});
+
+// ----- Privacy: delete history / keys / full reset -----
+async function clearLocalHistory() {
+    try {
+        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'chat', conversations: [] }) });
+        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'agents', conversations: [] }) });
+    } catch {}
+    state.conversations = []; state.currentConvId = null; state.chatHistory = [];
+    state.agentConversations = []; state.currentAgentConvId = null; state.contextTokens = 0;
+    const cm = $('#chat-messages'); if (cm) cm.innerHTML = '';
+    if (typeof renderHistory === 'function') renderHistory();
+    if (typeof updateTokenMeter === 'function') updateTokenMeter();
+}
+
+const clearHistBtn = $('#settings-clear-history-btn');
+if (clearHistBtn) clearHistBtn.addEventListener('click', async () => {
+    const ok = await customConfirm(
+        state.language === 'en' ? 'Delete ALL local conversations? This cannot be undone.' : 'Supprimer TOUTES les conversations locales ? Action irréversible.',
+        { danger: true, okText: state.language === 'en' ? 'Delete' : 'Supprimer' });
+    if (!ok) return;
+    await clearLocalHistory();
+    toast(state.language === 'en' ? 'History deleted.' : 'Historique supprimé.');
+});
+
+const clearKeysBtn = $('#settings-clear-keys-btn');
+if (clearKeysBtn) clearKeysBtn.addEventListener('click', async () => {
+    const ok = await customConfirm(
+        state.language === 'en' ? 'Remove all saved API keys?' : 'Supprimer toutes les clés API enregistrées ?',
+        { danger: true, okText: state.language === 'en' ? 'Delete' : 'Supprimer' });
+    if (!ok) return;
+    try {
+        const nulls = {}; API_KEY_FIELDS.forEach(p => nulls[p] = null);
+        const res = await fetch('/api/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: nulls }) });
+        if (res.ok) { const data = await res.json(); updateApiKeyInputs(data.keys || {}); }
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        toast(state.language === 'en' ? 'API keys deleted.' : 'Clés API supprimées.');
+    } catch {}
+});
+
+const resetBtn = $('#settings-reset-btn');
+if (resetBtn) resetBtn.addEventListener('click', async () => {
+    const ok = await customConfirm(
+        state.language === 'en' ? 'Full reset: erase all local settings, history and preferences on this device?' : 'Réinitialisation complète : effacer tous les réglages locaux, l\'historique et les préférences sur cet appareil ?',
+        { danger: true, okText: state.language === 'en' ? 'Reset' : 'Réinitialiser' });
+    if (!ok) return;
+    await clearLocalHistory();
+    try {
+        const nulls = {}; API_KEY_FIELDS.forEach(p => nulls[p] = null);
+        await fetch('/api/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: nulls }) });
+    } catch {}
+    try {
+        localStorage.removeItem('zaalis-state');
+        localStorage.removeItem('zaalis-recent');
+    } catch {}
+    location.reload();
+});
+
+// ----- Updates: check now -----
+const checkNowBtn = $('#settings-check-now-btn');
+if (checkNowBtn) checkNowBtn.addEventListener('click', async () => {
+    const en = state.language === 'en';
+    const orig = TRANSLATIONS[state.language || 'fr']['settings-check-now-btn'] || (en ? 'Check' : 'Vérifier');
+    checkNowBtn.disabled = true;
+    checkNowBtn.textContent = en ? 'Checking…' : 'Recherche…';
+    let result = en ? 'Up to date ✓' : 'Système à jour ✓';
+    try {
+        const res = await fetch('/api/check-update');
+        const data = res.ok ? await res.json() : {};
+        if (data && data.updateAvailable && data.downloadUrl) {
+            result = en ? 'Update available' : 'Mise à jour dispo';
+        }
+        // Also refresh the topbar update badge.
+        try { await checkForUpdates(); } catch {}
+    } catch {
+        result = en ? 'Check failed' : 'Échec de la vérif';
+    }
+    // Show the result inside the button, then revert to "Vérifier".
+    checkNowBtn.textContent = result;
+    setTimeout(() => { checkNowBtn.textContent = orig; checkNowBtn.disabled = false; }, 2500);
+});
+
+// ----- Backup: export / import config (NEVER includes API keys) -----
+const exportBtn = $('#settings-export-btn');
+if (exportBtn) exportBtn.addEventListener('click', () => {
+    const { keys, ...safeConfig } = state.config;
+    const payload = {
+        _type: 'zaalis-config', _version: 1,
+        config: safeConfig,
+        language: state.language,
+        profile: { pseudo: state.profile?.pseudo || '' }
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'zaalis-config.json';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(state.language === 'en' ? 'Configuration exported.' : 'Configuration exportée.');
+});
+
+const importBtn = $('#settings-import-btn');
+const importFile = $('#settings-import-file');
+if (importBtn && importFile) {
+    importBtn.addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', async () => {
+        const file = importFile.files && importFile.files[0];
+        importFile.value = '';
+        if (!file) return;
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            if (!data || data._type !== 'zaalis-config' || !data.config) throw new Error('format');
+            // Never import API keys; keep the current (secure) ones untouched.
+            const { keys, ...incoming } = data.config;
+            Object.assign(state.config, incoming);
+            if (data.language) state.language = data.language;
+            if (data.profile && data.profile.pseudo) state.profile.pseudo = data.profile.pseudo;
+            saveState();
+            applyAppearance();
+            if (typeof setLanguage === 'function') setLanguage(state.language);
+            populateSettingsControls();
+            toast(state.language === 'en' ? 'Configuration imported.' : 'Configuration importée.');
+        } catch {
+            toast(state.language === 'en' ? 'Invalid configuration file.' : 'Fichier de configuration invalide.');
+        }
+    });
+}
 
 // ----- Ollama models manager (Settings) -----
 function renderOllamaModels() {
@@ -1163,7 +1403,12 @@ if (catalogSearch) catalogSearch.addEventListener('keydown', e => {
 // ==========================================================
 document.addEventListener('DOMContentLoaded', async () => {
     loadState();
-    
+
+    // Apply saved appearance (theme / density / font) before anything renders.
+    if (typeof applyAppearance === 'function') applyAppearance();
+    // Restore the default reasoning effort preference.
+    if (typeof state.config.defaultReasoning === 'number') state.reasoningLevel = state.config.defaultReasoning;
+
     // UI Init
     renderTabs();
     if (state.activeFile) {
@@ -1181,6 +1426,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
+    // Make sure the preferred default agent is enabled in Agents mode.
+    if (state.config.defaultAgentModel) {
+        const defAgent = document.querySelector(`.agent-check[data-agent="${state.config.defaultAgentModel}"]`);
+        if (defAgent) defAgent.checked = true;
+    }
     // Curseur d'effort de reflexion : on installe les events maintenant,
     // la compatibilite est evaluee plus bas une fois le modele restaure.
     if (typeof initReasoningSlider === 'function') initReasoningSlider();
@@ -1226,8 +1476,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         setInterval(syncOllamaModels, 30000);
     }
 
-    // Check for app updates on GitHub
-    setTimeout(checkForUpdates, 3000);
+    // Check for app updates on GitHub (only if the user kept auto-check on).
+    if (state.config.autoCheckUpdates !== false) setTimeout(checkForUpdates, 3000);
 });
 
 // Restore language settings and select binding

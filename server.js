@@ -867,20 +867,34 @@ async function waitForHealth(port, timeoutMs) {
   }
 }
 
+// Track the engine options the running process was started with, so a change in
+// context size / GPU layers forces a restart even when the model is unchanged.
+let engineOpts = '';
+
 // Make sure the engine is running and serving `modelFile`. Swaps model if needed.
-async function ensureEngine(modelFile, preferredVariant) {
+// `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
+async function ensureEngine(modelFile, preferredVariant, opts) {
+  opts = opts || {};
   const modelPath = path.join(MODELS_DIR, modelFile);
   if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
-  if (engineProc && engineModelFile === modelFile) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile) return; }
+  // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
+  let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
+  ctx = Math.max(512, Math.min(131072, ctx));
+  const nglRaw = opts.gpuLayers;
+  const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
+  const optsKey = `${ctx}|${ngl}`;
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return; }
   engineStarting = (async () => {
     await stopEngine();
     let variant = preferredVariant || detectEngineVariant();
     let exe;
     try { exe = await ensureEngineBinary(variant); }
     catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
-    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', '8192'];
-    if (variant !== 'cpu') args.push('-ngl', '999'); // offload all layers to the GPU
+    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
+    if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
+    engineOpts = optsKey;
     const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
     proc.on('error', () => {});
     engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
@@ -1323,7 +1337,7 @@ app.post('/api/chat', async (req, res) => {
       const ggufFile = submodel;
       if (!ggufFile) throw new Error('Aucun modèle GGUF sélectionné.');
       try {
-        await ensureEngine(ggufFile, config?.ggufVariant);
+        await ensureEngine(ggufFile, config?.ggufVariant, { ctx: config?.ggufCtx, gpuLayers: config?.ggufGpuLayers });
       } catch (e) {
         throw new Error('Moteur GGUF : ' + (e.message || e));
       }

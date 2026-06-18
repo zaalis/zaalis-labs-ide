@@ -542,9 +542,33 @@
                 <span data-i18n="settings-api-keys-title">Cles API</span>
             </button>
             <div class="settings-nav-label" data-i18n="settings-zside-category">ZS IDE</div>
+            <button class="settings-nav-item" type="button" data-settings-section="appearance">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
+                <span data-i18n="settings-appearance-title">Apparence</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="models">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                <span data-i18n="settings-models-title">Modèles par défaut</span>
+            </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
                 <span data-i18n="settings-hardware-title">Hardware</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="project">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                <span data-i18n="settings-project-title">Projet</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="privacy">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+                <span data-i18n="settings-privacy-title">Confidentialité</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="updates">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
+                <span data-i18n="settings-updates-title">Mises à jour</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="backup">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                <span data-i18n="settings-backup-title">Sauvegarde</span>
             </button>
         </aside>
         <div class="settings-main">
@@ -631,12 +655,224 @@
                             <option value="cpu">CPU</option>
                         </select>
                     </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="gguf-ctx-select" data-i18n="settings-gguf-ctx-label">Contexte GGUF par défaut</label>
+                            <p data-i18n="settings-gguf-ctx-hint">Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.</p>
+                        </div>
+                        <select id="gguf-ctx-select">
+                            <option value="2048">2K</option>
+                            <option value="4096">4K</option>
+                            <option value="8192">8K</option>
+                            <option value="16384">16K</option>
+                            <option value="32768">32K</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="gguf-ngl-select" data-i18n="settings-gguf-ngl-label">Limite VRAM (couches GPU)</label>
+                            <p data-i18n="settings-gguf-ngl-hint">Nombre de couches déchargées sur le GPU. « Tout » = vitesse max ; baisser pour économiser la VRAM.</p>
+                        </div>
+                        <select id="gguf-ngl-select">
+                            <option value="" data-i18n="settings-gguf-ngl-all">Tout (auto)</option>
+                            <option value="0" data-i18n="settings-gguf-ngl-none">Aucune (CPU)</option>
+                            <option value="10">10</option>
+                            <option value="20">20</option>
+                            <option value="35">35</option>
+                            <option value="50">50</option>
+                        </select>
+                    </div>
                     <input type="hidden" id="ollama-url" value="http://127.0.0.1:11434">
                     <div class="ollama-box settings-installed-box">
                         <div class="ollama-box-head">
                             <span data-i18n="gguf-installed-label">Modèles installés</span>
                         </div>
                         <div class="ollama-models" id="gguf-models-list"></div>
+                    </div>
+                </section>
+
+                <!-- ===== APPEARANCE ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="appearance">
+                    <h3 data-i18n="settings-appearance-title">Apparence</h3>
+                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de ZS IDE.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-theme-select" data-i18n="settings-theme-label">Thème</label>
+                            <p data-i18n="settings-theme-hint">Mode sombre ou clair de l'interface.</p>
+                        </div>
+                        <select id="settings-theme-select">
+                            <option value="dark" data-i18n="settings-theme-dark">Sombre</option>
+                            <option value="light" data-i18n="settings-theme-light">Clair</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-density-select" data-i18n="settings-density-label">Densité</label>
+                            <p data-i18n="settings-density-hint">Compacte réduit les espacements pour afficher plus de contenu.</p>
+                        </div>
+                        <select id="settings-density-select">
+                            <option value="normal" data-i18n="settings-density-normal">Normale</option>
+                            <option value="compact" data-i18n="settings-density-compact">Compacte</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-fontsize-select" data-i18n="settings-fontsize-label">Taille de police</label>
+                            <p data-i18n="settings-fontsize-hint">Taille du texte dans toute l'application.</p>
+                        </div>
+                        <select id="settings-fontsize-select">
+                            <option value="small" data-i18n="settings-fontsize-small">Petite</option>
+                            <option value="normal" data-i18n="settings-fontsize-normal">Normale</option>
+                            <option value="large" data-i18n="settings-fontsize-large">Grande</option>
+                        </select>
+                    </div>
+                </section>
+
+                <!-- ===== DEFAULT MODELS ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="models">
+                    <h3 data-i18n="settings-models-title">Modèles par défaut</h3>
+                    <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">Modèle chat par défaut</label>
+                            <p data-i18n="settings-default-chat-hint">Modèle sélectionné par défaut dans le chat.</p>
+                        </div>
+                        <select id="settings-default-chat-select">
+                            <option value="codex">Codex (OpenAI)</option>
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="gemini">Gemini (Google)</option>
+                            <option value="grok">Grok (xAI)</option>
+                            <option value="mistral">Mistral</option>
+                            <option value="local">Ollama (local)</option>
+                            <option value="gguf">GGUF (local)</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-default-agent-select" data-i18n="settings-default-agent-label">Modèle agents par défaut</label>
+                            <p data-i18n="settings-default-agent-hint">Modèle chef de projet présélectionné en mode Agents.</p>
+                        </div>
+                        <select id="settings-default-agent-select">
+                            <option value="codex">Codex (OpenAI)</option>
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="gemini">Gemini (Google)</option>
+                            <option value="grok">Grok (xAI)</option>
+                            <option value="mistral">Mistral</option>
+                            <option value="local">Ollama (local)</option>
+                            <option value="gguf">GGUF (local)</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-default-reasoning-select" data-i18n="settings-default-reasoning-label">Effort de raisonnement par défaut</label>
+                            <p data-i18n="settings-default-reasoning-hint">Niveau de réflexion appliqué au démarrage (modèles compatibles).</p>
+                        </div>
+                        <select id="settings-default-reasoning-select">
+                            <option value="0" data-i18n="settings-reasoning-min">Minimal</option>
+                            <option value="1" data-i18n="settings-reasoning-med">Moyen</option>
+                            <option value="2" data-i18n="settings-reasoning-max">Maximal</option>
+                        </select>
+                    </div>
+                </section>
+
+                <!-- ===== PROJECT ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="project">
+                    <h3 data-i18n="settings-project-title">Projet</h3>
+                    <p class="form-hint" data-i18n="settings-project-hint">Comportement par défaut à l'ouverture des projets.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-default-folder" data-i18n="settings-default-folder-label">Dossier par défaut</label>
+                            <p data-i18n="settings-default-folder-hint">Dossier proposé en premier dans le sélecteur de projet.</p>
+                        </div>
+                        <div class="settings-folder-pick">
+                            <input type="text" id="settings-default-folder" placeholder="C:\\…">
+                            <button type="button" class="btn btn-ghost" id="settings-pick-folder-btn" data-i18n="settings-browse-btn">Parcourir</button>
+                        </div>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-reopen-toggle" data-i18n="settings-reopen-label">Rouvrir le dernier projet</label>
+                            <p data-i18n="settings-reopen-hint">Rouvre automatiquement le dernier projet au lancement de l'application.</p>
+                        </div>
+                        <label class="zs-switch"><input type="checkbox" id="settings-reopen-toggle"><span class="zs-slider"></span></label>
+                    </div>
+                </section>
+
+                <!-- ===== PRIVACY ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="privacy">
+                    <h3 data-i18n="settings-privacy-title">Confidentialité</h3>
+                    <p class="form-hint" data-i18n="settings-privacy-hint">Effacez vos données stockées localement. Ces actions sont irréversibles.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-clear-history-label">Supprimer l'historique local</label>
+                            <p data-i18n="settings-clear-history-hint">Efface toutes les conversations (chat et agents).</p>
+                        </div>
+                        <button type="button" class="btn btn-danger" id="settings-clear-history-btn" data-i18n="settings-delete-btn">Supprimer</button>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-clear-keys-label">Supprimer les clés API</label>
+                            <p data-i18n="settings-clear-keys-hint">Retire toutes les clés API enregistrées sur ce compte.</p>
+                        </div>
+                        <button type="button" class="btn btn-danger" id="settings-clear-keys-btn" data-i18n="settings-delete-btn">Supprimer</button>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-reset-label">Réinitialisation complète</label>
+                            <p data-i18n="settings-reset-hint">Remet à zéro tous les réglages locaux, l'historique et les préférences.</p>
+                        </div>
+                        <button type="button" class="btn btn-danger" id="settings-reset-btn" data-i18n="settings-reset-btn">Tout réinitialiser</button>
+                    </div>
+                </section>
+
+                <!-- ===== UPDATES ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="updates">
+                    <h3 data-i18n="settings-updates-title">Mises à jour</h3>
+                    <p class="form-hint" data-i18n="settings-updates-hint">Gérez la vérification et le canal des mises à jour.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-autoupdate-toggle" data-i18n="settings-autoupdate-label">Vérifier au démarrage</label>
+                            <p data-i18n="settings-autoupdate-hint">Recherche automatiquement une nouvelle version au lancement.</p>
+                        </div>
+                        <label class="zs-switch"><input type="checkbox" id="settings-autoupdate-toggle"><span class="zs-slider"></span></label>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-channel-select" data-i18n="settings-channel-label">Canal</label>
+                            <p data-i18n="settings-channel-hint">Stable = versions finales. Bêta = nouveautés en avant-première.</p>
+                        </div>
+                        <select id="settings-channel-select">
+                            <option value="stable" data-i18n="settings-channel-stable">Stable</option>
+                            <option value="beta" data-i18n="settings-channel-beta">Bêta</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-check-now-label">Vérifier maintenant</label>
+                            <p data-i18n="settings-check-now-hint">Lance une recherche de mise à jour immédiate.</p>
+                        </div>
+                        <button type="button" class="btn btn-ghost" id="settings-check-now-btn" data-i18n="settings-check-now-btn">Vérifier</button>
+                    </div>
+                </section>
+
+                <!-- ===== BACKUP ===== -->
+                <section class="settings-card settings-pane" data-settings-pane="backup">
+                    <h3 data-i18n="settings-backup-title">Sauvegarde</h3>
+                    <p class="form-hint" data-i18n="settings-backup-hint">Exportez ou importez votre configuration. Les clés API ne sont jamais incluses.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-export-label">Exporter la configuration</label>
+                            <p data-i18n="settings-export-hint">Télécharge un fichier .json de vos réglages (sans les clés API).</p>
+                        </div>
+                        <button type="button" class="btn btn-ghost" id="settings-export-btn" data-i18n="settings-export-btn">Exporter</button>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label data-i18n="settings-import-label">Importer la configuration</label>
+                            <p data-i18n="settings-import-hint">Restaure vos réglages depuis un fichier .json exporté.</p>
+                        </div>
+                        <button type="button" class="btn btn-ghost" id="settings-import-btn" data-i18n="settings-import-btn">Importer</button>
+                        <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none">
                     </div>
                 </section>
             </div>

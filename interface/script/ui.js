@@ -158,6 +158,10 @@ const projectDropdown = $('#project-dropdown');
 
 $('#project-btn').addEventListener('click', e => {
     e.stopPropagation();
+    const willOpen = !projectDropdown.classList.contains('open');
+    // Always re-render the recent list from localStorage when opening, so the
+    // history shows up even when no project was auto-reopened at startup.
+    if (willOpen) initRecentProjects();
     projectDropdown.classList.toggle('open');
 });
 
@@ -1147,7 +1151,8 @@ initScrollPins();
 // ==========================================================
 //  CUSTOM SELECT DROPDOWNS
 // ==========================================================
-function createCustomSelect(selectId) {
+function createCustomSelect(selectId, opts) {
+    opts = opts || {};
     const select = document.getElementById(selectId);
     if (!select) return;
 
@@ -1158,7 +1163,7 @@ function createCustomSelect(selectId) {
     if (existing) existing.remove();
 
     const wrapper = document.createElement('div');
-    wrapper.className = 'custom-select-container';
+    wrapper.className = 'custom-select-container' + (opts.dropDown ? ' drop-down' : '');
     wrapper.id = `custom-select-${selectId}`;
 
     const trigger = document.createElement('div');

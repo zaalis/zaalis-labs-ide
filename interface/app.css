@@ -755,3 +755,71 @@ details.file-card .file-card-body pre.code-block{margin:0;border:none;border-rad
     padding: 0 2px;
 }
 .toast-close:hover { color: var(--text-0); }
+
+/* =============================================
+   Settings — new sections (appearance, models, project,
+   privacy, updates, backup) + shared controls
+   ============================================= */
+/* Make every settings row laid out as label | control (all panes) */
+.settings-card .form-group.settings-row-group{display:flex;align-items:center;justify-content:space-between;gap:18px;}
+.settings-card .form-group.settings-row-group select{width:auto;min-width:170px;}
+.settings-card .form-group.settings-row-group > .btn{flex-shrink:0;align-self:center;}
+
+/* Folder picker (Project section) */
+.settings-folder-pick{display:flex;align-items:center;gap:8px;min-width:0;flex:1;max-width:340px;}
+.settings-folder-pick input{flex:1;min-width:0;font-family:var(--font-mono);background:var(--bg-1);border:1px solid var(--border);color:#f4f4f5;border-radius:8px;padding:7px 10px;font-size:12px;}
+.settings-folder-pick .btn{flex-shrink:0;white-space:nowrap;}
+
+/* iOS-style toggle switch */
+.zs-switch{position:relative;display:inline-block;width:42px;height:24px;flex-shrink:0;}
+.zs-switch input{opacity:0;width:0;height:0;}
+.zs-slider{position:absolute;inset:0;cursor:pointer;background:var(--bg-hover);border:1px solid var(--border);border-radius:24px;transition:background .18s,border-color .18s;}
+.zs-slider::before{content:"";position:absolute;height:18px;width:18px;left:2px;top:2px;background:#d4d4d8;border-radius:50%;transition:transform .18s,background .18s;}
+.zs-switch input:checked + .zs-slider{background:var(--accent);border-color:var(--accent);}
+.zs-switch input:checked + .zs-slider::before{transform:translateX(18px);background:#fff;}
+
+/* Custom select that opens DOWNWARD (settings live near the top) */
+.custom-select-container.drop-down .custom-select-options{top:34px;bottom:auto;}
+.settings-card .custom-select-container{flex:none;width:auto;min-width:180px;}
+.settings-card .custom-select-trigger{height:34px;border-radius:10px;font-size:13px;background:var(--bg-hover);}
+
+/* =============================================
+   Appearance — density + font size (body classes)
+   ============================================= */
+body.density-compact .settings-card .form-group{padding:10px 14px;}
+body.density-compact .tree-item{padding-top:1px;padding-bottom:1px;}
+body.density-compact .chat-message{margin-bottom:8px;}
+/* Font size: most UI text uses fixed px, so changing body font-size alone is not
+   visible. WebView2 is Chromium, so `zoom` reliably rescales every element. */
+body.font-small{zoom:0.9;}
+body.font-large{zoom:1.12;}
+
+/* =============================================
+   Light theme — overrides the dark CSS variables
+   ============================================= */
+body.theme-light{
+    --bg-0:#f4f4f6;
+    --bg-1:#ffffff;
+    --bg-2:#f7f7f9;
+    --bg-3:#eeeef1;
+    --bg-hover:#e4e4e8;
+    --border:#d8d8de;
+    --border-subtle:#e6e6ea;
+    --text-0:#18181b;
+    --text-1:#3f3f46;
+    --text-2:#6b6b74;
+    --text-3:#9a9aa2;
+    --accent:#5b5fe0;
+    --accent-hover:#4a4fd0;
+    --accent-muted:rgba(91,95,224,0.12);
+}
+body.theme-light .settings-card h3,
+body.theme-light .settings-card .form-group label,
+body.theme-light .settings-main-header h2,
+body.theme-light .settings-sidebar-title{color:#1c1c20;}
+body.theme-light .settings-card .form-hint,
+body.theme-light .settings-row-copy p,
+body.theme-light .settings-nav-item{color:#46464d;}
+body.theme-light .settings-nav-item.active{color:#fff;}
+body.theme-light .settings-card .form-group select,
+body.theme-light .settings-card .custom-select-trigger{background:#ffffff;color:#1c1c20;}
