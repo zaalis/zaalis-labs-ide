@@ -1,11 +1,38 @@
 //  SETTINGS MODAL
 // ==========================================================
+const SETTINGS_SECTION_TITLES = {
+    general: 'settings-general-title',
+    api: 'settings-api-keys-title',
+    hardware: 'settings-hardware-title'
+};
+
+function setSettingsSection(section) {
+    const key = SETTINGS_SECTION_TITLES[section] ? section : 'general';
+    $$('.settings-nav-item').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.settingsSection === key);
+    });
+    $$('.settings-pane').forEach(pane => {
+        pane.classList.toggle('active', pane.dataset.settingsPane === key);
+    });
+    const title = $('#settings-active-title');
+    if (title) {
+        const i18nKey = SETTINGS_SECTION_TITLES[key];
+        title.dataset.i18n = i18nKey;
+        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
+    }
+}
+
+$$('.settings-nav-item').forEach(btn => {
+    btn.addEventListener('click', () => setSettingsSection(btn.dataset.settingsSection));
+});
+
 $('#settings-btn').addEventListener('click', () => {
     const settingsLang = $('#settings-lang-select');
     if (settingsLang) settingsLang.value = state.language || 'fr';
     const variantSelect = $('#gguf-variant-select');
     if (variantSelect) variantSelect.value = state.config.ggufVariant || '';
     if (typeof loadGgufModels === 'function') loadGgufModels();
+    setSettingsSection('general');
     $('#settings-modal').classList.add('active');
 });
 $('#close-modal').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
