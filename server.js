@@ -366,6 +366,11 @@ function resolveBase(root) {
   return root ? path.resolve(root) : APP_DIR;
 }
 
+function isInsideBase(base, target) {
+  const rel = path.relative(base, target);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 async function fetchJSON(url, options) {
   // Dynamic import of node-fetch is avoided; use the global fetch available
   // in Node 18+. For older versions, install node-fetch.
@@ -402,6 +407,10 @@ app.get('/api/files', (req, res) => {
     const relPath = req.query.path || '';
     const fullPath = path.resolve(base, relPath);
 
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
     // Prevent directory traversal outside the base when no root is given
     if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
       return res.status(403).json({ error: 'Access denied' });
@@ -437,6 +446,10 @@ app.get('/api/file', (req, res) => {
     const base = resolveBase(req.query.root);
     const relPath = req.query.path || '';
     const fullPath = path.resolve(base, relPath);
+
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
 
     if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
       return res.status(403).json({ error: 'Access denied' });
@@ -491,6 +504,10 @@ app.post('/api/file', (req, res) => {
 
     const base = resolveBase(root);
     const fullPath = path.resolve(base, relPath);
+
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
 
     if (!root && !fullPath.startsWith(APP_DIR)) {
       return res.status(403).json({ error: 'Access denied' });

@@ -432,6 +432,17 @@ details.file-card[open] .file-card-chevron{transform:rotate(180deg);}
 details.file-card .file-card-body{border-top:1px solid var(--border);}
 details.file-card .file-card-body pre.code-block{margin:0;border:none;border-radius:0;background:var(--bg-0);}
 
+/* ---- Diff card (```edit blocks rendered as red/green changes) ---- */
+details.file-card.diff-card .diff-badge{font-size:10px;font-weight:700;letter-spacing:.04em;color:#fff;background:var(--accent);border-radius:4px;padding:1px 6px;margin-left:auto;flex-shrink:0;}
+details.file-card.diff-card .file-card-name{flex:0 1 auto;}
+.diff-body{font-family:var(--font-mono);font-size:12px;line-height:1.5;padding:6px 0;overflow-x:auto;}
+.diff-line{padding:0 11px;white-space:pre;}
+.diff-line.add{background:rgba(34,197,94,.14);color:#86efac;}
+.diff-line.del{background:rgba(239,68,68,.14);color:#fca5a5;}
+body.theme-light .diff-line.add{color:#15803d;}
+body.theme-light .diff-line.del{color:#b91c1c;}
+.diff-sep{height:6px;}
+
 /* ===================== OLLAMA MODELS MANAGER ===================== */
 .ollama-box{background:var(--bg-1);border:1px solid var(--border-subtle);border-radius:8px;padding:12px;margin-top:4px;}
 .ollama-box-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;}

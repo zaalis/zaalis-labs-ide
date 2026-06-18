@@ -275,7 +275,15 @@ function renderMarkdown(src) {
     //    (```js path=src/app.js) can be detected and rendered as a folded card.
     const codeBlocks = [];
     src = src.replace(/```([^\n]*)\r?\n([\s\S]*?)```/g, (m, info, code) => {
-        codeBlocks.push({ code: code.replace(/\n$/, ''), path: fenceFilePath(info) });
+        const infoTrim = (info || '').trim();
+        // An ```edit block renders as a red/green diff card, not raw markers.
+        let editHunks = null, editPath = null;
+        if (/(^|\s)edit(\s|$)/i.test(infoTrim.toLowerCase())) {
+            const pm = infoTrim.match(/(?:path|file|filename)\s*[:=]\s*["'`]?([^\s"'`]+)/i);
+            editPath = pm ? pm[1].replace(/^\.?\//, '') : (infoTrim.split(/[\s:]+/).find(t => t.toLowerCase() !== 'edit' && (/[\/\\]/.test(t) || /\.[A-Za-z0-9]+$/.test(t))) || null);
+            if (editPath && typeof parseSearchReplace === 'function') editHunks = parseSearchReplace(code);
+        }
+        codeBlocks.push({ code: code.replace(/\n$/, ''), path: fenceFilePath(info), editPath, editHunks });
         return `${NUL}CODE${codeBlocks.length - 1}${NUL}`;
     });
 
@@ -328,6 +336,10 @@ function renderMarkdown(src) {
     html = html.replace(new RegExp(`${NUL}IC(\\d+)${NUL}`, 'g'), (m, i) => `<code>${inlineCode[+i]}</code>`);
     html = html.replace(new RegExp(`${NUL}CODE(\\d+)${NUL}`, 'g'), (m, i) => {
         const b = codeBlocks[+i];
+        // Edit block -> diff card (red/green), so the user never sees raw markers.
+        if (b.editPath && b.editHunks && b.editHunks.length) {
+            return diffCardHTML(b.editPath, b.editHunks);
+        }
         const pre = `<pre class="code-block"><code>${escapeHTML(b.code)}</code></pre>`;
         // Fold ONLY a real code file: it must name a file (path=) AND be more
         // than a couple of lines. A one/two-line snippet — or any block without
@@ -565,12 +577,12 @@ function setChatBusy(on) {
 async function sendChat(message) {
     const model = modelSelect.value;
     const submodel = submodelSelect.value;
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
 
     const lang = state.language || 'fr';
     const { aiText, names, images } = consumeAttachments();
 
     const isLocal = model === 'local' || model === 'gguf';
+    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
 
     // Compact the running context first if it's getting close to the limit.
     await maybeCompact(model, submodel);
@@ -650,7 +662,11 @@ async function sendChat(message) {
             updateTokenMeter();
 
             // Check if AI wants to modify a file / run a command.
-            await handleAIResponse(data.response, modelLabel);
+            const applied = await handleAIResponse(data.response, modelLabel);
+            // If diff edits failed to apply, feed the errors back so it self-corrects.
+            if (applied && applied.editErrors && applied.editErrors.length) {
+                await resolveEditRetries(applied.editErrors, model, submodel, isLocal, lang);
+            }
             // Check if AI asked to read project files, then let it analyze them.
             await resolveReadRequests(data.response, model, submodel, isLocal, lang);
         }
@@ -673,6 +689,173 @@ async function sendChat(message) {
 // Handle AI file modifications based on permission mode.
 // Writes EVERY file block the model emits (creating files/folders as needed),
 // not just the currently-open file — this is what makes it behave like a CLI/IDE.
+// ==========================================================
+//  DIFF-BASED FILE EDITS (Claude-Code-style Edit tool)
+// ==========================================================
+// Curly quotes -> straight, so a SEARCH typed with straight quotes still matches
+// a file that uses typographic quotes (mirrors Claude Code's normalizeQuotes).
+function normalizeQuotesEdit(s) {
+    return String(s)
+        .replace(/[‘’]/g, "'")
+        .replace(/[“”]/g, '"');
+}
+// Strip trailing whitespace per line (Claude Code does this on new_string,
+// except for markdown where two trailing spaces are a hard line break).
+function stripTrailingWS(s) {
+    return String(s).split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n');
+}
+function countOccurrences(hay, needle) {
+    if (!needle) return 0;
+    let n = 0, i = 0;
+    while ((i = hay.indexOf(needle, i)) !== -1) { n++; i += needle.length; }
+    return n;
+}
+
+// Apply one SEARCH/REPLACE hunk to `content`. Returns { ok, content, error }.
+// Robustness ladder: exact match -> trailing-whitespace-insensitive -> quote
+// normalized. Enforces uniqueness like Claude Code (ambiguous = error).
+function applyOneHunk(content, search, replace, isMarkdown) {
+    const newText = isMarkdown ? replace : stripTrailingWS(replace);
+
+    // Insertion into empty file / append when SEARCH is empty.
+    if (search === '') {
+        return { ok: true, content: content ? content + '\n' + newText : newText };
+    }
+
+    // 1) exact
+    let count = countOccurrences(content, search);
+    if (count === 1) return { ok: true, content: content.replace(search, () => newText) };
+    if (count > 1) return { ok: false, error: `le texte SEARCH apparaît ${count} fois (ajoute des lignes de contexte pour le rendre unique)` };
+
+    // 2) trailing-whitespace-insensitive match (line by line)
+    const looseSearch = stripTrailingWS(search);
+    const looseContent = stripTrailingWS(content);
+    count = countOccurrences(looseContent, looseSearch);
+    if (count === 1) {
+        // Find the matching span in the ORIGINAL content by walking lines.
+        const idx = looseContent.indexOf(looseSearch);
+        const before = looseContent.slice(0, idx);
+        const startLine = before.split('\n').length - 1;
+        const origLines = content.split('\n');
+        const searchLineCount = looseSearch.split('\n').length;
+        const actual = origLines.slice(startLine, startLine + searchLineCount).join('\n');
+        if (countOccurrences(content, actual) === 1) {
+            return { ok: true, content: content.replace(actual, () => newText) };
+        }
+    }
+
+    // 3) quote-normalized match
+    const nContent = normalizeQuotesEdit(content);
+    const nSearch = normalizeQuotesEdit(search);
+    count = countOccurrences(nContent, nSearch);
+    if (count === 1) {
+        const idx = nContent.indexOf(nSearch);
+        const actual = content.substr(idx, search.length);
+        if (countOccurrences(content, actual) === 1) {
+            return { ok: true, content: content.replace(actual, () => newText) };
+        }
+    }
+    if (count > 1) return { ok: false, error: `le texte SEARCH apparaît ${count} fois (rends-le unique)` };
+
+    return { ok: false, error: 'le texte SEARCH est introuvable dans le fichier (copie-le EXACTEMENT, indentation comprise)' };
+}
+
+// Build a compact red/green diff (HTML) from a list of applied hunks.
+function diffCardHTML(path, hunks) {
+    const rows = [];
+    for (const h of hunks) {
+        (h.search ? h.search.split('\n') : []).forEach(l => rows.push(`<div class="diff-line del">- ${escapeHTML(l)}</div>`));
+        (h.replace ? h.replace.split('\n') : []).forEach(l => rows.push(`<div class="diff-line add">+ ${escapeHTML(l)}</div>`));
+        rows.push('<div class="diff-sep"></div>');
+    }
+    if (rows.length && rows[rows.length - 1] === '<div class="diff-sep"></div>') rows.pop();
+    const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    return `<details class="file-card diff-card" open><summary>${icon}<span class="file-card-name">${escapeHTML(path)}</span><span class="diff-badge">diff</span>${chevron}</summary><div class="file-card-body diff-body">${rows.join('')}</div></details>`;
+}
+
+// Apply every ```edit block. Returns { wroteAny, errors:[{path,error}] }.
+async function applyEditBlocks(editBlocks, agentName, out, lang) {
+    let wroteAny = false;
+    const errors = [];
+    for (const { path: targetFile, hunks } of editBlocks) {
+        const isMarkdown = /\.(md|mdx)$/i.test(targetFile);
+        // Load current content (from the open editor if available, else from disk).
+        let current = null;
+        if (state.openFiles[targetFile] && typeof state.openFiles[targetFile].content === 'string') {
+            current = state.openFiles[targetFile].content;
+        } else {
+            try {
+                const res = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=${encodeURIComponent(targetFile)}`);
+                const d = await res.json().catch(() => ({}));
+                if (res.ok && !d.error) current = d.content || '';
+            } catch {}
+        }
+        if (current === null) {
+            errors.push({ path: targetFile, error: lang === 'en' ? 'file not found (use a write block to create it, or read it first)' : "fichier introuvable (utilise un bloc d'écriture pour le créer, ou lis-le d'abord)" });
+            continue;
+        }
+
+        // Apply hunks sequentially; stop this file on first failure.
+        let working = current;
+        const applied = [];
+        let failed = null;
+        for (const h of hunks) {
+            const r = applyOneHunk(working, h.search, h.replace, isMarkdown);
+            if (!r.ok) { failed = r.error; break; }
+            working = r.content;
+            applied.push(h);
+        }
+        if (failed) {
+            errors.push({ path: targetFile, error: failed });
+            addMsg(out, 'system', null, `${lang === 'en' ? 'Edit failed' : 'Édition échouée'} — ${targetFile}: ${failed}`);
+            continue;
+        }
+        if (working === current) {
+            continue; // no-op edit
+        }
+
+        // Permission gate (same model as full-file writes).
+        if (state.permissionMode === 'supervised') {
+            const desc = lang === 'en' ? `${agentName} wants to edit ${targetFile}` : `${agentName} veut modifier ${targetFile}`;
+            const preview = applied.map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n');
+            const approved = await requestApproval(desc, preview.slice(0, 500));
+            if (!approved) {
+                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusee.');
+                continue;
+            }
+        }
+
+        try {
+            const res = await fetch('/api/file', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ root: state.projectRoot, path: targetFile, content: working })
+            });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const result = await res.json();
+            if (result.error) throw new Error(result.error);
+
+            if (state.openFiles[targetFile]) {
+                state.openFiles[targetFile].content = working;
+                state.openFiles[targetFile].unsaved = false;
+            }
+            if (state.activeFile === targetFile) {
+                textarea.value = working;
+                updateGutter(working);
+                if (typeof renderHighlight === 'function') renderHighlight();
+                renderTabs();
+            }
+            // Show the diff card.
+            addMsg(out, 'system', null, diffCardHTML(targetFile, applied), true);
+            wroteAny = true;
+        } catch (err) {
+            errors.push({ path: targetFile, error: err.message });
+            addMsg(out, 'system', null, `${lang === 'en' ? 'Write error' : 'Erreur ecriture'} ${targetFile}: ${err.message}`);
+        }
+    }
+    return { wroteAny, errors };
+}
+
 async function handleAIResponse(response, agentName, container) {
     const lang = state.language || 'fr';
     // Route system/terminal messages to the right view so Chat and Agents stay
@@ -683,14 +866,15 @@ async function handleAIResponse(response, agentName, container) {
         addMsg(out, 'system', null,
             lang === 'en' ? 'Open a project folder first so changes can be written to disk.'
                           : 'Ouvrez d\'abord un dossier de projet pour pouvoir ecrire les modifications sur le disque.');
-        return;
+        return { editErrors: [] };
     }
 
+    const editBlocks = extractEditBlocks(response);
     let blocks = extractFileBlocks(response);
     const commands = extractRunBlocks(response);
 
     // Fallback (legacy): prose names a file + a code block exists + a file is open.
-    if (blocks.length === 0) {
+    if (blocks.length === 0 && editBlocks.length === 0) {
         const fileMatch = response.match(/(?:fichier|file|ecrire dans|modifier|sauvegarder)\s+[`"]?([^\s`"]+\.\w+)[`"]?/i);
         const codeMatch = response.match(/```[^\n]*\n([\s\S]*?)```/);
         if (fileMatch && codeMatch && state.activeFile) {
@@ -698,9 +882,16 @@ async function handleAIResponse(response, agentName, container) {
         }
     }
 
-    if (blocks.length === 0 && commands.length === 0) return;
+    if (blocks.length === 0 && editBlocks.length === 0 && commands.length === 0) return { editErrors: [] };
 
+    // Diff-based edits first (cheaper / preferred path).
+    let editErrors = [];
     let wroteAny = false;
+    if (editBlocks.length) {
+        const er = await applyEditBlocks(editBlocks, agentName, out, lang);
+        editErrors = er.errors;
+        if (er.wroteAny) wroteAny = true;
+    }
     for (const { path: targetFile, content: codeContent } of blocks) {
         if (state.permissionMode === 'supervised') {
             const desc = lang === 'en'
@@ -787,6 +978,69 @@ async function handleAIResponse(response, agentName, container) {
                 `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${err.message}`);
         }
     }
+
+    return { editErrors };
+}
+
+// When an ```edit block failed to apply (SEARCH not found / not unique), feed the
+// exact errors back to the model so it can correct and retry — the agentic loop
+// that makes editing feel like Claude Code. Bounded to avoid infinite retries.
+async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, depth = 0, opts = {}) {
+    if (!editErrors || !editErrors.length || depth >= 2) return;
+    if (!state.projectRoot) return;
+    const out = $(opts.container || '#chat-messages');
+    const retryHistory = Array.isArray(opts.history) ? opts.history : state.chatHistory.slice();
+    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex]?.text || model).split(' ')[0];
+    const persistToChat = opts.persistToChat !== false;
+
+    // Re-send the files involved so the model can copy the exact text.
+    let ctx = '';
+    const seen = new Set();
+    for (const e of editErrors) {
+        if (seen.has(e.path)) continue;
+        seen.add(e.path);
+        try {
+            const res = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=${encodeURIComponent(e.path)}`);
+            const d = await res.json().catch(() => ({}));
+            const full = (res.ok && !d.error) ? (d.content || '') : '';
+            const max = isLocal ? 4000 : 12000;
+            ctx += `\n# ${e.path} (${lang === 'en' ? 'error' : 'erreur'}: ${e.error})\n\`\`\`\n${full.slice(0, max)}${full.length > max ? '\n... (tronqué)' : ''}\n\`\`\`\n`;
+        } catch {}
+    }
+
+    const followUp = (lang === 'en'
+        ? 'Some edits did not apply. Here is the CURRENT content of each file — copy the SEARCH text EXACTLY from it (indentation included) and resend corrected ```edit blocks. Do not rewrite the whole file.\n'
+        : "Certaines éditions n'ont pas pu être appliquées. Voici le contenu ACTUEL de chaque fichier — copie le texte SEARCH EXACTEMENT depuis celui-ci (indentation comprise) et renvoie des blocs ```edit corrigés. Ne réécris pas tout le fichier.\n") + ctx;
+
+    addMsg(out, 'system', null, (lang === 'en' ? 'Retrying edits…' : 'Nouvelle tentative d\'édition…'));
+    const sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang));
+    const body = addTypingMsg(out, modelLabel);
+    const controller = new AbortController();
+    chatAbort = controller;
+    setChatBusy(true);
+    try {
+        const data = await callAI(model, submodel, followUp, sys, [], controller.signal, retryHistory);
+        stopThinking(body);
+        if (data.error) { body.textContent = data.error; body.classList.add('error'); return; }
+        const formatted = formatAIResponse(data.response);
+        body.innerHTML = '<div class="stream-target"></div>';
+        await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, out);
+        if (persistToChat) state.chatHistory.push(
+            { role: 'user', content: `[${lang === 'en' ? 'Edit retry' : 'Réessai édition'}]` },
+            { role: 'assistant', content: data.response }
+        );
+        const applied = await handleAIResponse(data.response, modelLabel, opts.container);
+        if (applied && applied.editErrors && applied.editErrors.length) {
+            await resolveEditRetries(applied.editErrors, model, submodel, isLocal, lang, depth + 1, opts);
+        }
+        if (opts.saveKind) saveConversation(opts.saveKind);
+    } catch (err) {
+        stopThinking(body);
+        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur.'; body.classList.add('error'); }
+    } finally {
+        chatAbort = null;
+        setChatBusy(false);
+    }
 }
 
 // If the assistant asked to read project files (```read blocks), fetch their
@@ -841,7 +1095,10 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
             { role: 'assistant', content: data.response }
         );
         updateTokenMeter();
-        await handleAIResponse(data.response, modelLabel);
+        const applied = await handleAIResponse(data.response, modelLabel);
+        if (applied && applied.editErrors && applied.editErrors.length) {
+            await resolveEditRetries(applied.editErrors, model, submodel, isLocal, lang);
+        }
         await resolveReadRequests(data.response, model, submodel, isLocal, lang, depth + 1);
     } catch (err) {
         stopThinking(body);
@@ -1150,7 +1407,19 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             } else {
                 await streamInto(streamTarget, data.response, formatted, null, agentsLog);
             }
-            await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
+            const applied = await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
+            if (applied && applied.editErrors && applied.editErrors.length) {
+                await resolveEditRetries(applied.editErrors, leadAgent.agent, leadAgent.submodel, leadIsLocal, lang, 0, {
+                    container: '#agents-log',
+                    history: [
+                        { role: 'user', content: leadMessage },
+                        { role: 'assistant', content: data.response }
+                    ],
+                    modelLabel: labels[leadAgent.agent],
+                    persistToChat: false,
+                    saveKind: 'agents'
+                });
+            }
         }
     } catch (err) {
         stopThinking(streamTarget);
