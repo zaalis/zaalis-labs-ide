@@ -39,9 +39,12 @@ xcopy "..\interface\*" "dist\interface\" /E /Y /I /Q >nul
 del /Q dist\*.obj >nul 2>&1
 del /Q dist\index.html dist\script.js dist\styles.css >nul 2>&1
 
+REM --- Copy cloudflared (phone remote-control tunnel) next to the exe ---
+if exist cloudflared.exe copy /Y cloudflared.exe dist\cloudflared.exe >nul
+
 echo.
 echo Done. The ready-to-run app is in native\dist\
-echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + interface\ )
+echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ )
 goto :eof
 
 :novs

@@ -6,10 +6,10 @@
 ; =====================================================================
 [Setup]
 AppName=zaalis IDE
-AppVersion=v1.0.11
-AppVerName=zaalis IDE v1.0.11
-VersionInfoVersion=1.0.11
-VersionInfoProductVersion=1.0.11
+AppVersion=v1.0.13
+AppVerName=zaalis IDE v1.0.13
+VersionInfoVersion=1.0.13
+VersionInfoProductVersion=1.0.13
 AppPublisher=zaalis
 DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
@@ -35,6 +35,7 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 Source: "dist\zaalis.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\zaalis-server.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\pickfolder.exe";    DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\cloudflared.exe";   DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\interface\*";       DestDir: "{app}\interface"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

@@ -17,6 +17,12 @@ native/installer/
 !native/installer/
 !native/installer/zaalis-setup.exe
 native/packages/*.zip
+# Third-party tunnel binary (vendored locally; already bundled in the installer)
+native/cloudflared.exe
+
+# Local tooling / unrelated checkouts (never ship in the product repo)
+.claude/
+claude-code-main/
 
 # Logs and caches
 *.log

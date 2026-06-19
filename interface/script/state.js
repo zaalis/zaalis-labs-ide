@@ -7,6 +7,7 @@ const state = {
     openFiles: {}, // { [filePath]: { name, content, unsaved } }
     activeFile: null, // filePath or null
     reasoningLevel: 0, // 0 = MIN, 1 = MED, 2 = MAX
+    responseStyle: 'normal', // 'normal' | 'fast' | 'deep'  (/fast, /deep)
     config: {
         aiModel: 'codex',
         aiSubmodel: 'gpt-5.5',
@@ -183,6 +184,49 @@ function fmtTokens(n) {
 function fmtDuration(ms) {
     const s = Math.round(ms / 1000);
     return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
+}
+
+// ==========================================================
+//  PERMISSION MODES (Claude-Code-style)
+// ==========================================================
+// supervised : ask before every write/edit/run         (UI selector)
+// semi       : write/edit auto, ask before run          (UI selector)
+// auto       : everything auto, ask only for dangerous  (UI selector)
+// plan       : read/search only, NEVER write or run     (/plan, /permissions)
+// read-only  : read/search only, NEVER write or run     (/permissions)
+// bypass     : everything, no confirmation at all        (/permissions, danger)
+const PERMISSION_MODES = ['read-only', 'plan', 'supervised', 'semi', 'auto', 'bypass'];
+const PERMISSION_LABELS = {
+    'read-only': { fr: 'Lecture seule', en: 'Read-only' },
+    plan:        { fr: 'Plan',          en: 'Plan' },
+    supervised:  { fr: 'Supervisé',     en: 'Supervised' },
+    semi:        { fr: 'Semi-auto',     en: 'Semi-auto' },
+    auto:        { fr: 'Autonome',      en: 'Autonomous' },
+    bypass:      { fr: 'Bypass',        en: 'Bypass' }
+};
+function permissionLabel(mode, lang) {
+    const m = PERMISSION_LABELS[mode] || PERMISSION_LABELS.supervised;
+    return (lang === 'en') ? m.en : m.fr;
+}
+// read-only + plan forbid any file write or command execution.
+function isReadOnlyMode() {
+    return state.permissionMode === 'plan' || state.permissionMode === 'read-only';
+}
+
+// Destructive command detection (mirrors Claude Code's safe-guards). Used to
+// force a confirmation even in auto mode, and to block in plan/read-only.
+function isDangerousCommand(cmd) {
+    const c = String(cmd || '');
+    const pats = [
+        /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-rf?\b/i,        // rm -rf / rm -fr
+        /\brmdir\s+\/s/i, /\bdel\s+\/[sq]/i,            // rmdir /s , del /s|/q
+        /\bformat\s+[a-z]:/i, /\bmkfs\b/i, /\bdiskpart\b/i,
+        /remove-item\b[\s\S]*-recurse/i, /-recurse\b[\s\S]*remove-item/i,
+        /\bgit\s+reset\s+--hard/i, /\bgit\s+clean\s+-[a-z]*f/i,
+        /\bgit\s+checkout\s+--\s/i, /\bgit\s+push\b[\s\S]*--force/i,
+        /--force-with-lease/i, /\bnpm\s+publish\b/i, /\bshutdown\b/i
+    ];
+    return pats.some((re) => re.test(c));
 }
 
 // Translations Dictionary
@@ -1235,6 +1279,19 @@ function addRecentProject(path) {
     recent.unshift(path);
     if (recent.length > 8) recent = recent.slice(0, 8);
     localStorage.setItem('zaalis-recent', JSON.stringify(recent));
+    syncRecentProjects(recent);
+}
+
+// Mirror the recent-projects list to the account so the mobile remote shows the
+// same folders. Best-effort: silent on failure (offline / not signed in).
+function syncRecentProjects(list) {
+    try {
+        fetch('/api/recent-projects', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ projects: list || getRecentProjects() })
+        }).catch(() => {});
+    } catch {}
 }
 
 // ==========================================================

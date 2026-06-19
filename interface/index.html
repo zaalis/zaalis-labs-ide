@@ -76,6 +76,10 @@
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1.25 2.1-2 2.5-.5.27-1 .8-1 1.5"/><circle cx="11.5" cy="16.5" r="1.1" fill="currentColor" stroke="none"/></svg>
                 <span data-i18n="help-btn">Aide</span>
             </button>
+            <button class="topbar-btn remote-btn" id="remote-btn" title="Remote control (téléphone)">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
+                <span class="remote-dot" id="remote-dot"></span>
+            </button>
             <button class="topbar-btn" id="settings-btn" data-i18n-title="settings-title" title="Configuration">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
             </button>
@@ -1038,7 +1042,7 @@
             <button class="modal-close" id="close-update-modal">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.11</p>
+            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.12</p>
             <div class="update-steps">
                 <div class="update-step active" id="update-step-download">
                     <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">✓</span></div>
@@ -1071,11 +1075,52 @@
     </div>
 </div>
 
+<!-- ========== REMOTE CONTROL MODAL ========== -->
+<div class="modal-overlay" id="remote-modal">
+    <div class="modal modal-sm">
+        <div class="modal-header">
+            <h2>Remote control</h2>
+            <button class="modal-close" id="close-remote">&times;</button>
+        </div>
+        <div class="modal-body remote-body">
+            <p class="form-hint" id="remote-intro">Contrôlez cet ordinateur depuis votre téléphone. Un QR code crée un lien sécurisé (tunnel chiffré) vers ce PC — vous gardez la puissance des modèles locaux, où que vous soyez.</p>
+
+            <!-- idle: explanation + generate -->
+            <div id="remote-idle">
+                <ul class="remote-points">
+                    <li>Le téléphone n'accède qu'au <b>chat</b> — jamais à vos fichiers ni au terminal.</li>
+                    <li>Le lien reste le même tant que la session est active.</li>
+                    <li>Vous pouvez tout couper depuis ce PC ou depuis le téléphone.</li>
+                </ul>
+            </div>
+
+            <!-- active: QR + url + stop -->
+            <div id="remote-active" class="hidden">
+                <div class="remote-qr"><img id="remote-qr-img" alt="QR code de connexion"></div>
+                <p class="remote-scan-hint">Scannez ce QR code avec l'appareil photo de votre téléphone.</p>
+                <div class="remote-url-row">
+                    <input type="text" id="remote-url" readonly>
+                    <button class="btn btn-ghost btn-sm" id="remote-copy">Copier</button>
+                </div>
+                <div class="remote-status-line"><span class="remote-dot on"></span><span id="remote-status-text">Session active</span></div>
+            </div>
+
+            <p class="remote-error hidden" id="remote-error"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-danger hidden" id="remote-stop-btn">Stopper</button>
+            <button class="btn btn-primary" id="remote-generate-btn">Générer le QR code</button>
+        </div>
+    </div>
+</div>
+
 <script src="catalog.js"></script>
 <script src="help.js"></script>
 <script src="script/state.js" defer></script>
 <script src="script/ui.js" defer></script>
+<script src="script/commands.js" defer></script>
 <script src="script/ai.js" defer></script>
+<script src="script/remote.js" defer></script>
 <script src="script/main.js" defer></script>
 </body>
 </html>

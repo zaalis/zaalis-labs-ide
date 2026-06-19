@@ -834,3 +834,76 @@ body.theme-light .settings-nav-item{color:#46464d;}
 body.theme-light .settings-nav-item.active{color:#fff;}
 body.theme-light .settings-card .form-group select,
 body.theme-light .settings-card .custom-select-trigger{background:#ffffff;color:#1c1c20;}
+
+/* ==========================================================
+   AGENT TOOLS — permission badge, slash-command result cards
+   ========================================================== */
+/* Permission badge in the AI panel header */
+.perm-badge{font-size:10px;font-weight:600;letter-spacing:.3px;padding:2px 8px;border-radius:10px;white-space:nowrap;flex-shrink:0;margin-left:auto;background:var(--bg-3);color:var(--text-2);border:1px solid var(--border-subtle);}
+.perm-badge.perm-supervised{background:var(--accent-muted);color:var(--accent-hover);}
+.perm-badge.perm-semi{background:rgba(99,102,241,.12);color:var(--accent-hover);}
+.perm-badge.perm-auto{background:rgba(245,158,11,.16);color:#f59e0b;}
+.perm-badge.perm-plan,.perm-badge.perm-read-only{background:rgba(34,197,94,.14);color:var(--green);}
+.perm-badge.perm-bypass{background:rgba(239,68,68,.16);color:var(--red);}
+.ai-panel-header #clear-terminal{margin-left:8px;}
+
+/* Tool result cards reuse the file-card shell with a denser body */
+details.file-card.tool-card .tool-card-body{padding:6px 0;max-height:340px;overflow:auto;}
+.tool-card .tool-badge{font-size:10px;font-weight:700;letter-spacing:.04em;color:#fff;background:var(--accent);border-radius:4px;padding:1px 6px;margin-left:auto;flex-shrink:0;}
+.tool-card .tool-more{padding:6px 11px 2px;font-size:10px;color:var(--text-3);font-style:italic;}
+.tool-pre{margin:0;padding:8px 11px;white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);font-size:11.5px;color:var(--text-1);}
+
+/* key/value rows (/context, /status, /cost, /permissions) */
+.kv-list{display:flex;flex-direction:column;}
+.kv-row{display:flex;gap:10px;padding:4px 11px;font-size:12px;border-bottom:1px solid var(--border-subtle);}
+.kv-row:last-child{border-bottom:none;}
+.kv-k{flex:0 0 38%;color:var(--text-3);font-family:var(--font-mono);}
+.kv-v{flex:1;min-width:0;color:var(--text-1);word-break:break-word;}
+
+/* grep / glob rows */
+.grep-row{display:flex;gap:10px;padding:3px 11px;font-family:var(--font-mono);font-size:11.5px;border-bottom:1px solid var(--border-subtle);}
+.grep-row:last-child{border-bottom:none;}
+.grep-loc{flex:0 0 auto;color:var(--accent-hover);white-space:nowrap;}
+.grep-text{flex:1;min-width:0;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.glob-row{padding:3px 11px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-1);border-bottom:1px solid var(--border-subtle);}
+.glob-row:last-child{border-bottom:none;}
+
+/* /help listing */
+.help-cat{padding:8px 11px 3px;font-size:10px;font-weight:700;letter-spacing:.5px;text-transform:uppercase;color:var(--text-3);}
+.help-cmd{display:flex;gap:10px;align-items:baseline;padding:3px 11px;font-size:12px;}
+.help-cmd-name{flex:0 0 42%;color:var(--accent-hover);font-family:var(--font-mono);font-weight:600;overflow:hidden;text-overflow:ellipsis;}
+.help-cmd-name .help-usage{color:var(--text-3);font-weight:400;}
+.help-cmd-desc{flex:1;min-width:0;color:var(--text-2);}
+
+/* /doctor checklist */
+.doc-row{display:flex;gap:8px;align-items:baseline;padding:4px 11px;font-size:12px;border-bottom:1px solid var(--border-subtle);}
+.doc-row:last-child{border-bottom:none;}
+.doc-row .doc-ok{color:var(--green);}
+.doc-row .doc-bad{color:var(--red);}
+.doc-row .doc-warn{color:#f59e0b;}
+.doc-label{flex:0 0 30%;color:var(--text-1);font-weight:600;}
+.doc-detail{flex:1;min-width:0;color:var(--text-3);font-family:var(--font-mono);font-size:11px;word-break:break-word;}
+
+/* git diff inside a tool card */
+.tool-card .diff-status{padding:6px 11px;font-family:var(--font-mono);font-size:11px;color:var(--text-2);white-space:pre-wrap;border-bottom:1px solid var(--border-subtle);}
+.tool-card .diff-body{font-family:var(--font-mono);font-size:11px;line-height:1.5;}
+.diff-line.diff-meta{color:var(--text-3);}
+.diff-line.diff-hunk{color:var(--accent-hover);background:rgba(99,102,241,.08);}
+
+/* ==========================================================
+   REMOTE CONTROL — topbar button + pairing modal
+   ========================================================== */
+.remote-btn{position:relative;}
+.remote-dot{position:absolute;top:5px;right:5px;width:7px;height:7px;border-radius:50%;background:var(--text-3);display:none;border:1.5px solid var(--bg-1,#101013);}
+.remote-dot.on{display:block;background:var(--green);box-shadow:0 0 0 0 rgba(34,197,94,.5);animation:remote-pulse 2.4s infinite;}
+@keyframes remote-pulse{0%{box-shadow:0 0 0 0 rgba(34,197,94,.45);}70%{box-shadow:0 0 0 5px rgba(34,197,94,0);}100%{box-shadow:0 0 0 0 rgba(34,197,94,0);}}
+.remote-points{margin:10px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:6px;}
+.remote-points li{font-size:12px;color:var(--text-2);line-height:1.5;}
+.remote-qr{display:flex;justify-content:center;padding:12px 0 6px;}
+.remote-qr img{width:220px;height:220px;border-radius:8px;background:#fff;padding:8px;}
+.remote-scan-hint{text-align:center;font-size:12px;color:var(--text-2);margin:4px 0 12px;}
+.remote-url-row{display:flex;gap:8px;align-items:center;}
+.remote-url-row input{flex:1;min-width:0;background:var(--bg-0);border:1px solid var(--border);border-radius:6px;padding:8px 10px;color:var(--text-2);font-family:var(--font-mono);font-size:11px;}
+.remote-status-line{display:flex;align-items:center;gap:7px;margin-top:12px;font-size:12px;color:var(--text-2);}
+.remote-status-line .remote-dot{position:static;display:block;width:8px;height:8px;border:none;}
+.remote-error{color:var(--red);font-size:12px;margin-top:10px;}

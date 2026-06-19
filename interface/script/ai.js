@@ -55,6 +55,7 @@ function setupModeSelector(btnId, menuId) {
             });
 
             menu.classList.remove('open');
+            if (typeof updatePermissionBadge === 'function') updatePermissionBadge();
         });
     });
 }
@@ -95,6 +96,7 @@ function syncModeSelectorUI() {
             svgIcon.outerHTML = MODE_ICONS[perm];
         }
     });
+    if (typeof updatePermissionBadge === 'function') updatePermissionBadge();
 }
 
 // Initialize Mode Selectors
@@ -595,7 +597,17 @@ async function sendChat(message) {
     const needCtx = state.chatHistory.length === 0 || projectChanged;
     const ctx = needCtx ? await projectContext(isLocal) : '';
     if (state.projectRoot) state.lastContextRoot = state.projectRoot;
-    const sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang)) + ctx;
+    let sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang)) + ctx;
+    // /fast and /deep tweak the answer style without touching the tool protocol.
+    if (state.responseStyle === 'fast') {
+        sys += lang === 'en'
+            ? '\n\n[STYLE] Be concise: short, direct answers, minimal preamble.'
+            : '\n\n[STYLE] Sois concis : réponses courtes et directes, peu de préambule.';
+    } else if (state.responseStyle === 'deep') {
+        sys += lang === 'en'
+            ? '\n\n[STYLE] Be thorough: consider edge cases, explain trade-offs, and verify with reads/searches when useful.'
+            : '\n\n[STYLE] Sois approfondi : considère les cas limites, explique les compromis, et vérifie via lectures/recherches si utile.';
+    }
     const aiMessage = message + aiText;            // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
@@ -884,6 +896,19 @@ async function handleAIResponse(response, agentName, container) {
 
     if (blocks.length === 0 && editBlocks.length === 0 && commands.length === 0) return { editErrors: [] };
 
+    // PLAN / READ-ONLY modes: the model may have proposed edits or commands, but
+    // we never touch the disk or run anything. Tell the user what was skipped.
+    if (isReadOnlyMode()) {
+        const what = [];
+        if (editBlocks.length || blocks.length) what.push(lang === 'en' ? 'file changes' : 'modifications de fichiers');
+        if (commands.length) what.push(lang === 'en' ? 'commands' : 'commandes');
+        const modeName = permissionLabel(state.permissionMode, lang);
+        addMsg(out, 'system', null, lang === 'en'
+            ? `${modeName} mode — ${what.join(' & ')} were NOT applied (read-only).`
+            : `Mode ${modeName} — ${what.join(' et ')} non appliquées (lecture seule).`);
+        return { editErrors: [] };
+    }
+
     // Diff-based edits first (cheaper / preferred path).
     let editErrors = [];
     let wroteAny = false;
@@ -944,12 +969,17 @@ async function handleAIResponse(response, agentName, container) {
     if (wroteAny) await loadFileTree();
 
     // Run terminal commands the AI requested (```run blocks).
-    // Permission: supervised + semi ask first; auto runs without asking.
+    // Permission: supervised + semi ask first; auto runs without asking — EXCEPT
+    // destructive commands, which always ask (unless mode is bypass).
     for (const cmd of commands) {
-        if (state.permissionMode !== 'auto') {
-            const desc = lang === 'en'
-                ? `${agentName} wants to run a command`
-                : `${agentName} veut exécuter une commande`;
+        const dangerous = isDangerousCommand(cmd);
+        const needAsk = dangerous
+            ? state.permissionMode !== 'bypass'
+            : state.permissionMode !== 'auto' && state.permissionMode !== 'bypass';
+        if (needAsk) {
+            const desc = dangerous
+                ? (lang === 'en' ? `${agentName} wants to run a DANGEROUS command` : `${agentName} veut exécuter une commande DANGEREUSE`)
+                : (lang === 'en' ? `${agentName} wants to run a command` : `${agentName} veut exécuter une commande`);
             const approved = await requestApproval(desc, cmd);
             if (!approved) {
                 addMsg(out, 'system', null,
@@ -1122,12 +1152,9 @@ function resetInput(el) { if (el) { el.value = ''; el.style.height = 'auto'; } }
     if (t) t.addEventListener('input', () => autoGrow(t));
 });
 
-// ---- Slash commands (/compact, /clear) + Anthropic-style suggestion menu ----
-const SLASH_COMMANDS = [
-    { name: 'compact', fr: 'Compresser le contexte pour libérer de la place', en: 'Compress the context to free up space' },
-    { name: 'clear',   fr: 'Effacer la conversation et le contexte',          en: 'Clear the conversation and the context' }
-];
-
+// ---- Slash commands — central registry + handlers live in commands.js
+// (SLASH_COMMANDS and runSlashCommand are defined there). This block only owns
+// the Anthropic-style suggestion menu / input wiring.
 const slashInput = $('#chat-input');
 const slashMenu = document.createElement('div');
 slashMenu.className = 'slash-menu';
@@ -1159,18 +1186,17 @@ function moveSlash(d) { slashIndex = (slashIndex + d + slashItems.length) % slas
 function acceptSlash() {
     const cmd = slashItems[slashIndex];
     closeSlash();
-    resetInput(slashInput);
-    if (cmd) runSlashCommand(cmd.name);
-}
-function runSlashCommand(name) {
-    const lang = state.language || 'fr';
-    if (name === 'clear') { newConversation('chat'); return; }
-    if (name === 'compact') {
-        if (chatAbort) return;
-        compactContext(modelSelect.value, submodelSelect.value, { force: true });
+    if (!cmd) { resetInput(slashInput); return; }
+    // Commands that take arguments: prefill "/name " and keep editing instead of
+    // running immediately, so the user can type the pattern/path/etc.
+    if (cmd.args) {
+        slashInput.value = '/' + cmd.name + ' ';
+        autoGrow(slashInput);
+        slashInput.focus();
         return;
     }
-    addMsg($('#chat-messages'), 'system', null, (lang === 'en' ? 'Unknown command: /' : 'Commande inconnue : /') + name);
+    resetInput(slashInput);
+    runSlashCommand(cmd.name, '');
 }
 
 // Decide whether a typed line is a command or a normal message.
@@ -1180,9 +1206,11 @@ function handleChatSubmit() {
     if (!text) return;
     closeSlash();
     if (text.startsWith('/')) {
-        const name = text.slice(1).split(/\s+/)[0].toLowerCase();
+        const parts = text.slice(1).split(/\s+/);
+        const name = parts[0].toLowerCase();
+        const argStr = text.slice(1 + parts[0].length).trim();
         resetInput(slashInput);
-        runSlashCommand(name);
+        runSlashCommand(name, argStr);
         return;
     }
     sendChat(text);
@@ -1469,6 +1497,14 @@ const HIST = {
     }
 };
 
+// Display name of the open project (last path segment) — used to group
+// conversations by project in the mobile remote view. null when no project.
+function projectLabel() {
+    if (!state.projectRoot) return null;
+    const parts = String(state.projectRoot).replace(/[\\/]+$/, '').split(/[\\/]/);
+    return parts[parts.length - 1] || null;
+}
+
 function saveConversation(kind = 'chat') {
     const cfg = HIST[kind];
     const data = [];
@@ -1489,22 +1525,27 @@ function saveConversation(kind = 'chat') {
     if (data.length <= 1) return; // only the default system message
 
     const title = data.find(d => d.type === 'user')?.text?.substring(0, 40) || 'Conversation';
+    const project = projectLabel();   // tag with the open project (mobile groups by it)
     const listArr = state[cfg.store];
     let curId = state[cfg.current];
 
     if (!curId) {
         curId = Date.now().toString();
         state[cfg.current] = curId;
-        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), messages: data });
+        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, messages: data });
     } else {
         const conv = listArr.find(c => c.id === curId);
-        if (conv) { conv.messages = data; if (!conv.title || conv.title === 'Conversation') conv.title = title; }
-        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), messages: data });
+        if (conv) { conv.messages = data; if (!conv.project && project) conv.project = project; if (!conv.title || conv.title === 'Conversation') conv.title = title; }
+        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, messages: data });
     }
 
     persistChats(kind);
     renderHistory();
 }
+
+// Last server snapshot per kind — drives the live history sync below so we only
+// re-render when conversations actually changed (and ignore our own writes).
+const _chatSnap = { chat: '', agents: '' };
 
 // Save a kind's conversations to the server (debounced, per kind).
 const _persistTimers = {};
@@ -1512,6 +1553,9 @@ function persistChats(kind = 'chat') {
     const cfg = HIST[kind];
     clearTimeout(_persistTimers[kind]);
     _persistTimers[kind] = setTimeout(() => {
+        // Our own write becomes the next expected server state — don't let the
+        // live sync treat it as an external change and re-render needlessly.
+        _chatSnap[kind] = JSON.stringify(state[cfg.store] || []);
         fetch('/api/chats', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
@@ -1525,10 +1569,62 @@ async function loadUserChats() {
     for (const kind of ['chat', 'agents']) {
         try {
             const res = await fetch('/api/chats?kind=' + kind);
-            if (res.ok) state[HIST[kind].store] = await res.json();
+            if (res.ok) {
+                state[HIST[kind].store] = await res.json();
+                _chatSnap[kind] = JSON.stringify(state[HIST[kind].store] || []);
+            }
         } catch {}
     }
     renderHistory();
+    // Push the locally-stored recent projects to the account so the mobile
+    // remote's "Projets" list mirrors what the desktop has opened.
+    if (typeof syncRecentProjects === 'function') {
+        const local = (typeof getRecentProjects === 'function') ? getRecentProjects() : [];
+        if (local.length) syncRecentProjects(local);
+    }
+    startChatSync();
+}
+
+// ----------------------------------------------------------------------------
+// LIVE HISTORY SYNC — reflect conversations created elsewhere (e.g. the phone
+// remote) in the desktop history in (near) real time, without relaunching.
+// ----------------------------------------------------------------------------
+let _chatSyncTimer = null;
+function startChatSync() {
+    if (_chatSyncTimer) return;
+    _chatSyncTimer = setInterval(syncChatsFromServer, 4000);
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) syncChatsFromServer(); });
+}
+
+async function syncChatsFromServer() {
+    if (document.hidden) return;
+    if (chatAbort) return; // never mutate the stores while a request is in flight
+    let changed = false;
+    for (const kind of ['chat', 'agents']) {
+        const cfg = HIST[kind];
+        try {
+            const res = await fetch('/api/chats?kind=' + kind);
+            if (!res.ok) continue;
+            const server = await res.json();
+            const snap = JSON.stringify(Array.isArray(server) ? server : []);
+            if (snap === _chatSnap[kind]) continue; // unchanged since last seen
+            _chatSnap[kind] = snap;
+            state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], state[cfg.current]);
+            changed = true;
+        } catch {}
+    }
+    if (changed) renderHistory();
+}
+
+// Server is the source of truth across devices, but keep the local copy of the
+// conversation currently open (it may hold messages not yet persisted) and any
+// local conversation the server doesn't know about yet (just started here).
+function mergeConversations(local, server, curId) {
+    const localById = new Map(local.map(c => [c.id, c]));
+    const serverIds = new Set(server.map(c => c.id));
+    const merged = server.map(c => (c.id === curId && localById.has(curId)) ? localById.get(curId) : c);
+    local.forEach(c => { if (!serverIds.has(c.id)) merged.push(c); });
+    return merged;
 }
 
 // Restore a saved conversation into its view (chat or agents).

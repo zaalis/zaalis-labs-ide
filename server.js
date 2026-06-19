@@ -4,6 +4,10 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
+// QR generation for the phone remote-control pairing. Guarded so a missing
+// install never prevents the server from booting.
+let QRCode = null;
+try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -280,9 +284,17 @@ app.get('/api/auth/me', (req, res) => {
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
   const user = currentUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentification requise.' });
-  req.user = user;
-  next();
+  if (user) { req.user = user; return next(); }
+  // Phone remote-control session: a signed pairing cookie, restricted to a safe
+  // subset of endpoints (chat only — never files/exec/tunnel-start).
+  const mUser = mobileUser(req);
+  if (mUser) {
+    if (!mobileAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    req.user = mUser;
+    req.isMobile = true;
+    return next();
+  }
+  return res.status(401).json({ error: 'Authentification requise.' });
 });
 
 // Update profile
@@ -351,6 +363,33 @@ app.put('/api/chats', (req, res) => {
   try {
     const conversations = (req.body && req.body.conversations) || [];
     fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(conversations, null, 2));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PER-USER RECENT PROJECTS (protected)
+// ---------------------------------------------------------------------------
+// Mirrored from the desktop so the mobile remote's "Projets" list shows the
+// same folders the user has opened on the PC. Read-only for mobile sessions.
+app.get('/api/recent-projects', (req, res) => {
+  res.json({ projects: Array.isArray(req.user.recentProjects) ? req.user.recentProjects : [] });
+});
+
+app.put('/api/recent-projects', (req, res) => {
+  if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+  try {
+    const list = (req.body && req.body.projects) || [];
+    const clean = Array.isArray(list)
+      ? list.filter((p) => typeof p === 'string' && p.trim()).slice(0, 12)
+      : [];
+    const users = loadUsers();
+    const u = users.find((x) => x.id === req.user.id);
+    if (!u) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    u.recentProjects = clean;
+    saveUsers(users);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -552,6 +591,277 @@ app.post('/api/exec', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// AGENT TOOLS — read-only search & diagnostics (Grep / Glob / GitDiff / Doctor)
+// ---------------------------------------------------------------------------
+// These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
+// are strictly read-only, bounded in output, and path-guarded to the project.
+
+// Detect a CLI tool once (node/npm/git/rg). Cached promise so /doctor and the
+// grep fallback don't re-spawn the same probe repeatedly.
+const _cliCache = new Map();
+function detectCli(name) {
+  if (_cliCache.has(name)) return _cliCache.get(name);
+  const p = new Promise((resolve) => {
+    const done = (err, stdout) => {
+      if (err || !stdout) return resolve({ available: false, version: '' });
+      resolve({ available: true, version: String(stdout).split(/\r?\n/)[0].trim() });
+    };
+    try {
+      if (process.platform === 'win32') {
+        execFile('cmd.exe', ['/c', `${name} --version`], { timeout: 5000, windowsHide: true }, done);
+      } else {
+        execFile(name, ['--version'], { timeout: 5000 }, done);
+      }
+    } catch { resolve({ available: false, version: '' }); }
+  });
+  _cliCache.set(name, p);
+  return p;
+}
+
+function clampInt(v, lo, hi, def) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// Directories never walked by Grep/Glob (heavy / irrelevant). FILTERED already
+// covers node_modules/.git/.env/server-data; add common build output folders.
+const WALK_IGNORE = new Set([...FILTERED, 'dist', 'build', '.next', 'out', '.cache', 'coverage', '.nuxt', '.svelte-kit']);
+
+// Collect relative file paths under base, bounded. Returns { list, truncated }.
+function collectFiles(base, opts) {
+  const max = (opts && opts.max) || 20000;
+  const list = [];
+  let truncated = false;
+  const walk = (dir, rel, depth) => {
+    if (truncated || depth > 12) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (WALK_IGNORE.has(e.name)) continue;
+      const r = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) walk(path.join(dir, e.name), r, depth + 1);
+      else {
+        if (list.length >= max) { truncated = true; return; }
+        list.push(r);
+      }
+    }
+  };
+  walk(base, '', 0);
+  return { list, truncated };
+}
+
+// Convert a glob (**, *, ?) into an anchored, case-insensitive RegExp.
+function globToRe(glob) {
+  const g = String(glob || '**/*').replace(/\\/g, '/').trim();
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*' && g[i + 1] === '*') {
+      if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2; }
+      else { re += '.*'; i += 1; }
+    } else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if ('.+^${}()|[]'.indexOf(c) >= 0) re += '\\' + c;
+    else re += c;
+  }
+  return new RegExp('^' + re + '$', 'i');
+}
+
+// Parse ripgrep "relpath:line:text" output into bounded structured results.
+function parseRgOutput(stdout, max) {
+  const list = [];
+  let truncated = false;
+  const lines = String(stdout || '').split(/\r?\n/);
+  for (const ln of lines) {
+    if (!ln) continue;
+    const m = ln.match(/^(.*?):(\d+):(.*)$/);
+    if (!m) continue;
+    if (list.length >= max) { truncated = true; break; }
+    list.push({ file: m[1].replace(/\\/g, '/'), line: parseInt(m[2], 10), text: m[3].slice(0, 240) });
+  }
+  return { list, truncated };
+}
+
+// Pure-JS grep fallback when ripgrep is not installed. Bounded everywhere.
+// `searchAbs` may be the project root, a sub-directory, or a single file.
+function jsGrep(searchAbs, base, pattern, ignoreCase, glob, max) {
+  let re;
+  try { re = new RegExp(pattern, ignoreCase ? 'i' : ''); }
+  catch { const esc = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); re = new RegExp(esc, ignoreCase ? 'i' : ''); }
+  const globRe = glob ? globToRe(glob) : null;
+
+  // Build the list of target files (abs + project-relative path) for either a
+  // single-file target or a directory walk.
+  const targets = [];
+  let st;
+  try { st = fs.statSync(searchAbs); } catch { return { list: [], truncated: false }; }
+  if (st.isFile()) {
+    targets.push({ abs: searchAbs, rel: path.relative(base, searchAbs).replace(/\\/g, '/') });
+  } else {
+    const prefix = path.relative(base, searchAbs).replace(/\\/g, '/');
+    for (const r of collectFiles(searchAbs, { max: 8000 }).list) {
+      targets.push({ abs: path.join(searchAbs, r), rel: prefix ? prefix + '/' + r : r });
+    }
+  }
+
+  const list = [];
+  let truncated = false, scanned = 0;
+  for (const t of targets) {
+    if (truncated) break;
+    if (globRe && !globRe.test(t.rel)) continue;
+    if (scanned++ > 6000) { truncated = true; break; }
+    let buf;
+    try {
+      const s = fs.statSync(t.abs);
+      if (s.size > 512 * 1024) continue;             // skip large files
+      buf = fs.readFileSync(t.abs);
+    } catch { continue; }
+    if (buf.includes(0)) continue;                   // skip binary
+    const rows = buf.toString('utf-8').split('\n');
+    for (let i = 0; i < rows.length; i++) {
+      if (re.test(rows[i])) {
+        if (list.length >= max) { truncated = true; break; }
+        list.push({ file: t.rel, line: i + 1, text: rows[i].trim().slice(0, 240) });
+      }
+    }
+  }
+  return { list, truncated };
+}
+
+// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults? }
+app.post('/api/grep', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const pat = String(b.pattern || '');
+    if (!pat || pat.length > 1000) return res.status(400).json({ error: 'pattern requis' });
+    const base = resolveBase(b.root);
+    if (!b.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+
+    const rel = String(b.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    let searchAbs = base;
+    if (rel) {
+      searchAbs = path.resolve(base, rel);
+      if (!isInsideBase(base, searchAbs)) return res.status(403).json({ error: 'Access denied' });
+    }
+    const glob = String(b.glob || '').trim();
+    const ic = !!b.ignoreCase;
+    const maxResults = clampInt(b.maxResults, 1, 500, 200);
+
+    const rg = await detectCli('rg');
+    if (rg.available) {
+      const args = ['--line-number', '--no-heading', '--color', 'never', '--max-columns', '300', '--max-count', '30',
+        '-g', '!node_modules', '-g', '!.git', '-g', '!dist', '-g', '!build', '-g', '!.next'];
+      if (ic) args.push('-i');
+      if (glob) args.push('-g', glob);
+      args.push('--regexp', pat, rel || '.');
+      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true }, (err, stdout, stderr) => {
+        if (err && err.code === 1 && !stdout) return res.json({ tool: 'ripgrep', pattern: pat, results: [], count: 0, truncated: false });
+        if (err && err.code !== 1 && !stdout) return res.status(500).json({ error: String(stderr || err.message || 'ripgrep error').slice(0, 300) });
+        const r = parseRgOutput(stdout, maxResults);
+        res.json({ tool: 'ripgrep', pattern: pat, results: r.list, count: r.list.length, truncated: r.truncated });
+      });
+      return;
+    }
+    const r = jsGrep(searchAbs, base, pat, ic, glob, maxResults);
+    res.json({ tool: 'js', pattern: pat, results: r.list, count: r.list.length, truncated: r.truncated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/glob?root=...&pattern=**/*.js&maxResults=...
+app.get('/api/glob', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+    const pattern = String(req.query.pattern || '**/*');
+    const max = clampInt(req.query.maxResults, 1, 2000, 500);
+    let re;
+    try { re = globToRe(pattern); } catch { return res.status(400).json({ error: 'pattern invalide' }); }
+    const all = collectFiles(base, { max: 20000 });
+    const files = [];
+    let truncated = false;
+    for (const f of all.list) {
+      if (re.test(f)) {
+        if (files.length >= max) { truncated = true; break; }
+        files.push(f);
+      }
+    }
+    res.json({ pattern, files, count: files.length, truncated: truncated || all.truncated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gitdiff?root=...  -> { available, repo, branch, status, unstaged, staged }
+app.get('/api/gitdiff', async (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+    const git = await detectCli('git');
+    if (!git.available) return res.json({ available: false, error: 'git introuvable' });
+    const run = (args) => new Promise((resolve) => {
+      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true },
+        (e, so) => resolve(e && !so ? '' : String(so || '')));
+    });
+    const inside = (await run(['rev-parse', '--is-inside-work-tree'])).trim();
+    if (inside !== 'true') return res.json({ available: true, repo: false });
+    const branch = (await run(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const status = await run(['status', '--porcelain=v1']);
+    const unstaged = await run(['diff']);
+    const staged = await run(['diff', '--staged']);
+    const cap = (s) => (s.length > 60000 ? s.slice(0, 60000) + '\n... (tronqué)' : s);
+    res.json({ available: true, repo: true, branch, status: cap(status), unstaged: cap(unstaged), staged: cap(staged) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/version -> { version }
+app.get('/api/version', (req, res) => res.json({ version: APP_VERSION }));
+
+// GET /api/doctor?root=...  -> environment diagnostics (never exposes API keys)
+app.get('/api/doctor', async (req, res) => {
+  try {
+    const base = req.query.root ? resolveBase(req.query.root) : null;
+    const [npm, git, rg] = await Promise.all([detectCli('npm'), detectCli('git'), detectCli('rg')]);
+
+    let ollama = { reachable: false, models: 0 };
+    try {
+      const url = String(req.query.ollama || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 1500);
+      const r = await fetch(`${url}/api/tags`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) { const d = await r.json().catch(() => ({})); ollama = { reachable: true, models: (d.models || []).length }; }
+    } catch {}
+
+    let gguf = { variant: '', installed: false };
+    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), 'llama-server.exe') }; } catch {}
+
+    const installerPaths = [
+      path.join(APP_DIR, 'native', 'installer', 'zaalis-setup.exe'),
+      path.join(process.cwd(), 'native', 'installer', 'zaalis-setup.exe'),
+    ];
+    const installer = installerPaths.some((p) => { try { return fs.existsSync(p); } catch { return false; } });
+
+    let scripts = [];
+    try { const pj = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf-8')); scripts = Object.keys(pj.scripts || {}); } catch {}
+
+    let projectGit = null;
+    if (base && git.available) {
+      projectGit = await new Promise((resolve) => {
+        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true },
+          (e, so) => resolve(e ? null : String(so || '').trim()));
+      });
+    }
+
+    res.json({
+      version: APP_VERSION,
+      node: process.version,
+      npm, git, rg, ollama, gguf, installer,
+      scripts, projectGit,
+      platform: process.platform,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1570,6 +1880,140 @@ app.post('/api/update/install', (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// REMOTE CONTROL — pair a phone to this PC over a Cloudflare quick tunnel
+// ---------------------------------------------------------------------------
+// The desktop user starts it -> we boot `cloudflared`, which opens a public
+// HTTPS URL forwarding to this local server. A signed pairing token in the QR
+// lets the phone authenticate. The mobile session is restricted to chat
+// endpoints only (never files/exec). Stopping (from PC or phone) kills the
+// tunnel and bumps an epoch so every outstanding mobile token is invalid.
+const MOBILE_COOKIE = 'zaalis_mobile';
+let cfProc = null;        // cloudflared child process
+let cfUrl = null;         // https://xxx.trycloudflare.com (null when down)
+let cfStartedAt = 0;
+let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
+let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
+
+function cloudflaredPath() {
+  const candidates = [
+    path.join(APP_DIR, 'cloudflared.exe'),          // next to the packaged app
+    path.join(APP_DIR, 'native', 'cloudflared.exe'), // dev (repo root)
+  ];
+  for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
+  return 'cloudflared'; // last resort: rely on PATH
+}
+
+function makeMobileToken(userId) {
+  const payload = userId + '|' + mobileEpoch;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update('mobile:' + payload).digest('hex');
+  return Buffer.from(payload).toString('base64url') + '.' + sig;
+}
+function verifyMobileToken(token) {
+  if (!token || !token.includes('.')) return null;
+  const idx = token.lastIndexOf('.');
+  const payloadB64 = token.slice(0, idx), sig = token.slice(idx + 1);
+  let payload;
+  try { payload = Buffer.from(payloadB64, 'base64url').toString('utf8'); } catch { return null; }
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update('mobile:' + payload).digest('hex');
+  if (!safeEqual(sig, expected)) return null;
+  const [uid, epoch] = payload.split('|');
+  if (parseInt(epoch, 10) !== mobileEpoch) return null; // revoked by a stop
+  return uid;
+}
+function mobileUser(req) {
+  const uid = verifyMobileToken(parseCookies(req)[MOBILE_COOKIE]);
+  if (!uid) return null;
+  return loadUsers().find((u) => u.id === uid) || null;
+}
+// Endpoints an internet-facing mobile session may call. Everything else
+// (files, exec, grep, glob, gitdiff, tunnel start, profile…) stays desktop-only.
+function mobileAllowed(p) {
+  return /^\/(chat|chats|recent-projects|ollama-models|gguf-models|keys)(\/|$|\?|$)/.test(p)
+      || p === '/remote/stop' || p === '/remote/status';
+}
+
+function stopTunnel() {
+  mobileEpoch++;                       // every paired phone is now logged out
+  if (cfProc) { try { cfProc.kill(); } catch {} }
+  cfProc = null; cfUrl = null; cfStartedAt = 0; cfStarting = null;
+}
+
+function startTunnel() {
+  if (cfUrl) return Promise.resolve(cfUrl);
+  if (cfStarting) return cfStarting;
+  cfStarting = new Promise((resolve, reject) => {
+    let settled = false, proc;
+    try {
+      proc = spawn(cloudflaredPath(),
+        ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
+        { windowsHide: true });
+    } catch (e) { cfStarting = null; return reject(e); }
+    cfProc = proc;
+    const onData = (buf) => {
+      const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+      if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
+    };
+    proc.stdout && proc.stdout.on('data', onData);
+    proc.stderr && proc.stderr.on('data', onData);
+    proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
+    proc.on('exit', () => {
+      if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
+      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+    });
+    setTimeout(() => {
+      if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
+    }, 30000);
+  });
+  return cfStarting;
+}
+
+// POST /api/remote/start (desktop only) -> { url, qr, since }
+app.post('/api/remote/start', async (req, res) => {
+  if (req.isMobile) return res.status(403).json({ error: 'Indisponible en mode mobile.' });
+  if (!QRCode) return res.status(500).json({ error: 'Module QR indisponible (npm install qrcode).' });
+  try {
+    const url = await startTunnel();
+    const token = makeMobileToken(req.user.id);
+    const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;
+    const qr = await QRCode.toDataURL(pairUrl, { margin: 1, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
+    res.json({ url: pairUrl, qr, since: cfStartedAt });
+  } catch (e) {
+    stopTunnel();
+    res.status(500).json({ error: e.message || 'Échec du démarrage du tunnel.' });
+  }
+});
+
+// POST /api/remote/stop (desktop or phone) — kills the tunnel + revokes tokens.
+// Reply FIRST, then tear the tunnel down a moment later, so a phone stopping its
+// own session still receives the confirmation before its link drops.
+app.post('/api/remote/stop', (req, res) => {
+  res.json({ success: true });
+  setTimeout(stopTunnel, 400);
+});
+
+// GET /api/remote/status -> { active, since }
+app.get('/api/remote/status', (req, res) => { res.json({ active: !!cfUrl, since: cfStartedAt }); });
+
+// GET /m — pairing entry + mobile app shell (public; not under the /api gate).
+// With ?t=<token>: validate, drop the mobile cookie, redirect to a clean /m.
+app.get('/m', (req, res) => {
+  const t = req.query.t;
+  if (t) {
+    const uid = verifyMobileToken(String(t));
+    if (uid) {
+      const secure = (req.headers['x-forwarded-proto'] === 'https') ? ' Secure;' : '';
+      res.setHeader('Set-Cookie', `${MOBILE_COOKIE}=${String(t)}; HttpOnly; SameSite=Lax; Path=/;${secure} Max-Age=604800`);
+      return res.redirect('/m');
+    }
+    // invalid/expired -> fall through; the app shows a "not paired" screen
+  }
+  res.sendFile(path.join(APP_DIR, 'interface', 'mobile', 'index.html'));
+});
+
+// Kill the tunnel when the server exits.
+process.on('exit', () => { try { if (cfProc) cfProc.kill(); } catch {} });
 
 // Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
 // Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
