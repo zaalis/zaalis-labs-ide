@@ -423,6 +423,8 @@ const TRANSLATIONS = {
         'err-conn': "Erreur de connexion au serveur.",
         'err-conn-lead': "Erreur de connexion.",
         'recent-project-empty': "Aucun projet recent",
+        'history-no-project': 'Aucun projet',
+        'history-new-here': 'Nouveau chat ici',
         'default-username': 'Utilisateur'
     },
     en: {
@@ -617,6 +619,8 @@ const TRANSLATIONS = {
         'err-conn': 'Error connecting to server.',
         'err-conn-lead': 'Connection error.',
         'recent-project-empty': 'No recent projects',
+        'history-no-project': 'No project',
+        'history-new-here': 'New chat here',
         'default-username': 'User'
     }
 };

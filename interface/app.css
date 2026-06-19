@@ -1,18 +1,33 @@
 /* zaalis IDE - interface (suite) */
 /* Chat History */
-.chat-history{border-top:1px solid var(--border);flex-shrink:0;max-height:120px;overflow-y:auto;background:var(--bg-2);}
+.chat-history{border-top:1px solid var(--border);flex-shrink:0;max-height:232px;overflow-y:auto;background:var(--bg-2);}
 .history-label{display:flex;align-items:center;justify-content:space-between;font-size:10px;font-weight:600;color:var(--text-3);letter-spacing:.5px;padding:6px 10px 2px;text-transform:uppercase;}
 .new-chat-btn{font-size:10px;font-weight:600;color:var(--accent);background:var(--accent-muted);border:1px solid transparent;padding:2px 8px;border-radius:10px;cursor:pointer;letter-spacing:.3px;transition:all .15s;}
 .new-chat-btn:hover{background:var(--accent);color:#fff;}
 .history-list{padding:2px 6px 6px;}
-.history-item{display:flex;align-items:center;gap:6px;padding:4px 6px;border-radius:4px;font-size:12px;color:var(--text-2);transition:all .1s;}
-.history-item:hover{background:var(--bg-hover);color:var(--text-0);}
-.history-item.active{background:var(--accent-muted);color:var(--accent-hover);}
-.history-title{flex:1;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.history-del{flex-shrink:0;display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:4px;color:var(--text-3);cursor:pointer;opacity:0;transition:all .12s;background:transparent;}
-.history-item:hover .history-del{opacity:1;}
-.history-del:hover{background:rgba(239,68,68,.15);color:var(--red);}
 .history-empty{font-size:11px;color:var(--text-3);padding:4px 6px;font-style:italic;}
+
+/* History — project groups (chats grouped by the folder they belong to) */
+.proj-head{display:flex;align-items:center;gap:7px;padding:5px 6px;border-radius:6px;cursor:pointer;transition:background .1s;user-select:none;}
+.proj-head:hover{background:var(--bg-hover);}
+.proj-chev{display:flex;align-items:center;justify-content:center;width:13px;flex-shrink:0;color:var(--text-3);transition:transform .15s ease;}
+.proj-chev.collapsed{transform:rotate(-90deg);}
+.proj-ico{display:flex;align-items:center;color:var(--text-3);flex-shrink:0;}
+.proj-head.open .proj-ico{color:var(--accent-hover);}
+.proj-name{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.proj-count{font-size:10px;font-family:var(--mono,monospace);color:var(--text-3);flex-shrink:0;min-width:14px;text-align:center;}
+.proj-new{flex-shrink:0;display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;border-radius:5px;background:transparent;color:var(--text-3);cursor:pointer;opacity:0;transition:all .12s;}
+.proj-head:hover .proj-new{opacity:1;}
+.proj-new:hover{background:var(--accent-muted);color:var(--accent-hover);}
+
+.conv-child{display:flex;align-items:center;gap:6px;padding:4px 6px 4px 28px;border-radius:5px;font-size:12px;color:var(--text-2);transition:background .1s,color .1s;}
+.conv-child:hover{background:var(--bg-hover);color:var(--text-0);}
+.conv-child.active{background:var(--accent-muted);color:var(--accent-hover);}
+.conv-title{flex:1;min-width:0;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.conv-del{flex-shrink:0;display:flex;align-items:center;justify-content:center;width:20px;height:20px;border:0;border-radius:4px;color:var(--text-3);cursor:pointer;opacity:0;transition:all .12s;background:transparent;}
+.conv-child:hover .conv-del{opacity:1;}
+.conv-del:hover{background:rgba(239,68,68,.15);color:var(--red);}
+.conv-empty{font-size:11px;color:var(--text-3);padding:3px 6px 5px 28px;font-style:italic;}
 
 /* ===== ATTACHMENTS ===== */
 .attachments-bar{display:none;gap:8px;flex-wrap:wrap;padding:8px 10px;border-top:1px solid var(--border-subtle);flex-shrink:0;}

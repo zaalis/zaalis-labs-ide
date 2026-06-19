@@ -1525,18 +1525,24 @@ function saveConversation(kind = 'chat') {
     if (data.length <= 1) return; // only the default system message
 
     const title = data.find(d => d.type === 'user')?.text?.substring(0, 40) || 'Conversation';
-    const project = projectLabel();   // tag with the open project (mobile groups by it)
+    const project = projectLabel();          // folder name (mobile groups by it)
+    const projectPath = state.projectRoot || null;  // full path, lets us re-open it
     const listArr = state[cfg.store];
     let curId = state[cfg.current];
 
     if (!curId) {
         curId = Date.now().toString();
         state[cfg.current] = curId;
-        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, messages: data });
+        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     } else {
         const conv = listArr.find(c => c.id === curId);
-        if (conv) { conv.messages = data; if (!conv.project && project) conv.project = project; if (!conv.title || conv.title === 'Conversation') conv.title = title; }
-        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, messages: data });
+        if (conv) {
+            conv.messages = data;
+            if (!conv.project && project) conv.project = project;
+            if (!conv.projectPath && projectPath) conv.projectPath = projectPath;
+            if (!conv.title || conv.title === 'Conversation') conv.title = title;
+        }
+        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     }
 
     persistChats(kind);
@@ -1633,6 +1639,11 @@ function loadConversation(kind, id) {
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
     state[cfg.current] = id;
+    historyExpanded[kind + '|' + (conv.project || NO_PROJECT_KEY)] = true;
+
+    // Link the chat to its project: re-open the folder it belongs to (or drop the
+    // project for a classic "no project" chat) so the AI keeps the right context.
+    applyConversationProject(conv);
 
     const container = $(cfg.container);
     container.innerHTML = '';
@@ -1666,43 +1677,144 @@ function loadConversation(kind, id) {
     renderHistory();
 }
 
+// ==========================================================
+//  HISTORY — chats grouped by the project they belong to
+// ==========================================================
+const NO_PROJECT_KEY = '\u0000noproject';   // sentinel group for classic chats
+const historyExpanded = {};                  // `${kind}|${groupKey}` -> expanded?
+
+function noProjectLabel() {
+    const lang = state.language || 'fr';
+    return TRANSLATIONS[lang]['history-no-project'] || 'Aucun projet';
+}
+
+// Resolve a project folder NAME back to its full path via the recent list.
+function recentPathByName(name) {
+    if (!name) return null;
+    const recent = (typeof getRecentProjects === 'function') ? getRecentProjects() : [];
+    for (const p of recent) {
+        const seg = String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+        if (seg === name) return p;
+    }
+    return null;
+}
+
+// Switch the open project so a loaded/continued chat matches its folder.
+function applyConversationProject(conv) {
+    if (!conv) return;
+    if (!conv.project) {                       // classic chat -> no project
+        if (state.projectRoot && typeof clearProject === 'function') clearProject();
+        return;
+    }
+    const target = conv.projectPath || recentPathByName(conv.project);
+    if (target && target !== state.projectRoot && typeof openProject === 'function') {
+        openProject(target, false);            // async; the file tree loads in the background
+    }
+}
+
+// Build {key,name,path,convs}[] for a kind: active projects first, recent (empty)
+// folders merged in, and the classic "no project" group pinned last.
+function buildHistoryGroups(kind) {
+    const convs = state[HIST[kind].store] || [];
+    const groups = new Map();
+    const ensure = (key, name, path) => {
+        if (!groups.has(key)) groups.set(key, { key, name, path: path || null, convs: [] });
+        const g = groups.get(key);
+        if (!g.path && path) g.path = path;
+        return g;
+    };
+    convs.forEach(c => {
+        if (c.project) ensure(c.project, c.project, c.projectPath || recentPathByName(c.project)).convs.push(c);
+        else ensure(NO_PROJECT_KEY, noProjectLabel(), null).convs.push(c);
+    });
+    // Recent folders without any chat yet still appear, as empty projects.
+    (typeof getRecentProjects === 'function' ? getRecentProjects() : []).forEach(p => {
+        const name = String(p).replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+        if (name) ensure(name, name, p);
+    });
+    ensure(NO_PROJECT_KEY, noProjectLabel(), null); // always offer the classic group
+
+    const lastId = g => g.convs.length ? Math.max(...g.convs.map(c => parseInt(c.id, 10) || 0)) : -1;
+    const all = [...groups.values()];
+    const noProj = all.find(g => g.key === NO_PROJECT_KEY);
+    const rest = all.filter(g => g.key !== NO_PROJECT_KEY).sort((a, b) => lastId(b) - lastId(a));
+    return noProj ? [...rest, noProj] : rest;
+}
+
+const PH_FOLDER = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+const PH_NOPROJ = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.4a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.2-2.8 3.9"/><circle cx="12" cy="17.4" r=".7" fill="currentColor" stroke="none"/></svg>';
+const PH_CHEVRON = '<svg viewBox="0 0 24 24" width="11" height="11" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const PH_PLUS = '<svg viewBox="0 0 24 24" width="13" height="13" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>';
+const PH_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
+
 function renderHistory() {
     const lang = state.language || 'fr';
     ['chat', 'agents'].forEach(kind => {
         const cfg = HIST[kind];
         const list = $(cfg.list);
         if (!list) return;
-        const convs = state[cfg.store] || [];
         const curId = state[cfg.current];
-        if (convs.length === 0) {
-            list.innerHTML = `<div class="history-empty">${TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation'}</div>`;
-            return;
+        const groups = buildHistoryGroups(kind);
+
+        // Keep at least one group open so the panel never looks empty.
+        if (!groups.some(g => historyExpanded[kind + '|' + g.key]) && groups.length) {
+            historyExpanded[kind + '|' + groups[0].key] = true;
         }
+
         list.innerHTML = '';
-        convs.slice().reverse().forEach(conv => {
-            const item = document.createElement('div');
-            item.className = 'history-item' + (conv.id === curId ? ' active' : '');
-            item.title = conv.date || '';
+        groups.forEach(g => {
+            const isNoProj = g.key === NO_PROJECT_KEY;
+            const eKey = kind + '|' + g.key;
+            const expanded = !!historyExpanded[eKey];
 
-            const titleEl = document.createElement('span');
-            titleEl.className = 'history-title';
-            titleEl.textContent = conv.title;
-            titleEl.addEventListener('click', () => loadConversation(kind, conv.id));
+            const head = document.createElement('div');
+            head.className = 'proj-head' + (expanded ? ' open' : '');
+            head.title = g.path || g.name;
+            head.innerHTML =
+                `<span class="proj-chev${expanded ? '' : ' collapsed'}">${PH_CHEVRON}</span>` +
+                `<span class="proj-ico">${isNoProj ? PH_NOPROJ : PH_FOLDER}</span>` +
+                `<span class="proj-name"></span>` +
+                `<span class="proj-count">${g.convs.length || ''}</span>` +
+                `<button class="proj-new" title="${TRANSLATIONS[lang]['history-new-here'] || 'Nouveau chat ici'}">${PH_PLUS}</button>`;
+            head.querySelector('.proj-name').textContent = g.name;
+            const toggle = () => { historyExpanded[eKey] = !expanded; renderHistory(); };
+            head.querySelector('.proj-chev').addEventListener('click', e => { e.stopPropagation(); toggle(); });
+            head.querySelector('.proj-name').addEventListener('click', toggle);
+            head.querySelector('.proj-ico').addEventListener('click', toggle);
+            head.querySelector('.proj-count').addEventListener('click', toggle);
+            head.querySelector('.proj-new').addEventListener('click', e => { e.stopPropagation(); newConversationInGroup(kind, g); });
+            list.appendChild(head);
 
-            const delBtn = document.createElement('button');
-            delBtn.className = 'history-del';
-            delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-            delBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
-            delBtn.addEventListener('click', e => { e.stopPropagation(); deleteConversation(kind, conv.id); });
-
-            item.appendChild(titleEl);
-            item.appendChild(delBtn);
-            list.appendChild(item);
+            if (!expanded) return;
+            if (!g.convs.length) {
+                const empty = document.createElement('div');
+                empty.className = 'conv-empty';
+                empty.textContent = TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation';
+                list.appendChild(empty);
+                return;
+            }
+            g.convs.slice().sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0)).forEach(conv => {
+                const row = document.createElement('div');
+                row.className = 'conv-child' + (conv.id === curId ? ' active' : '');
+                row.title = conv.date || '';
+                const titleEl = document.createElement('span');
+                titleEl.className = 'conv-title';
+                titleEl.textContent = conv.title;
+                titleEl.addEventListener('click', () => loadConversation(kind, conv.id));
+                const delBtn = document.createElement('button');
+                delBtn.className = 'conv-del';
+                delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
+                delBtn.innerHTML = PH_TRASH;
+                delBtn.addEventListener('click', e => { e.stopPropagation(); deleteConversation(kind, conv.id); });
+                row.appendChild(titleEl);
+                row.appendChild(delBtn);
+                list.appendChild(row);
+            });
         });
     });
 }
 
-// Start a brand-new conversation for the given kind.
+// Start a brand-new conversation for the given kind (in the current context).
 function newConversation(kind = 'chat') {
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
@@ -1710,7 +1822,24 @@ function newConversation(kind = 'chat') {
     $(cfg.container).innerHTML = '';
     addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
     if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
+    // Open the group this chat will be filed under (current project, or classic).
+    historyExpanded[kind + '|' + (state.projectRoot ? projectLabel() : NO_PROJECT_KEY)] = true;
     renderHistory();
+}
+
+// New chat filed under a specific project group: switch the open folder first so
+// the chat is tagged correctly and the AI gets that project's context.
+async function newConversationInGroup(kind, group) {
+    if (group.key === NO_PROJECT_KEY) {
+        if (state.projectRoot && typeof clearProject === 'function') clearProject();
+    } else if (group.path && group.path !== state.projectRoot && typeof openProject === 'function') {
+        await openProject(group.path, false);
+    }
+    if (kind === 'chat') {
+        $$('.ai-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'chat'));
+        $$('.ai-view').forEach(v => v.classList.toggle('active', v.id === 'view-' + 'chat'));
+    }
+    newConversation(kind);
 }
 
 // Delete a saved conversation (after confirmation).

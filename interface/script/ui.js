@@ -258,6 +258,27 @@ async function openProject(rootPath, isNew) {
     initRecentProjects();
 }
 
+// Drop the open project and return to a clean "no project" state — used by the
+// classic "Aucun projet" chat group so the AI answers with no project context.
+function clearProject() {
+    if (!state.projectRoot) return;
+    const lang = state.language || 'fr';
+    state.projectRoot = null;
+    state.openFiles = {};
+    state.activeFile = null;
+    state.lastContextRoot = null;
+    if (typeof textarea !== 'undefined' && textarea) textarea.value = '';
+    if (typeof renderTabs === 'function') renderTabs();
+    const nameEl = $('#project-name');
+    if (nameEl) {
+        nameEl.setAttribute('data-i18n', 'no-project');
+        nameEl.textContent = TRANSLATIONS[lang]['no-project'] || 'Aucun projet';
+    }
+    saveState();
+    loadFileTree();        // empties the explorer (handles null root)
+    initRecentProjects();
+}
+
 // ==========================================================
 //  FILE TREE
 // ==========================================================

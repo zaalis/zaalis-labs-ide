@@ -1491,6 +1491,7 @@ function setLanguage(lang) {
     updateLanguage();
     if (typeof updateCatalogChrome === 'function') updateCatalogChrome();
     if (typeof loadGgufModels === 'function') loadGgufModels();
+    if (typeof renderHistory === 'function') renderHistory(); // refresh "Aucun projet" label
 }
 const langSelect = $('#lang-select');
 if (langSelect) {

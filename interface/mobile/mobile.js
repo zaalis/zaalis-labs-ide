@@ -53,11 +53,22 @@
 
   // ---- helpers ----
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  // Minimal, safe markdown: fenced code + inline code. Everything escaped first.
+  // Minimal, safe markdown: generated images + fenced code + inline code.
+  // Images are pulled out BEFORE escaping so their URL (data: or https with &)
+  // is never mangled by esc().
   function fmt(t) {
+    t = String(t == null ? '' : t);
+    var imgs = [];
+    t = t.replace(/!\[([^\]]*)\]\((data:image\/[^)\s]+|https?:\/\/[^)\s]+)\)/g, function (m, alt, url) {
+      imgs.push({ alt: alt, url: url });
+      return '\u0000IMG' + (imgs.length - 1) + '\u0000';
+    });
     t = esc(t);
     t = t.replace(/```[^\n]*\n([\s\S]*?)```/g, function (m, code) { return '<pre>' + code.replace(/\n$/, '') + '</pre>'; });
     t = t.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+    t = t.replace(/\u0000IMG(\d+)\u0000/g, function (m, i) {
+      var im = imgs[+i]; return '<img class="gen-img" src="' + im.url.replace(/"/g, '&quot;') + '" alt="' + esc(im.alt) + '">';
+    });
     return t;
   }
   function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
@@ -77,13 +88,20 @@
   }
 
   // ---- messages ----
-  function addMsg(type, label, text, isHTML) {
+  // `image` = { url, alt } for a generated image (e.g. produced on the PC and
+  // synced here). Falls back to rendering `text` (which may itself contain a
+  // markdown image, handled by fmt()).
+  function addMsg(type, label, text, image) {
     var m = document.createElement('div');
     m.className = 'msg ' + type;
     var inner = '';
     if (label) inner += '<div class="msg-label"><b>' + esc(label) + '</b></div>';
-    inner += '<div class="bubble">' + (isHTML ? text : fmt(text)) + '</div>';
+    var body = (image && image.url)
+      ? '<img class="gen-img" src="' + esc(image.url) + '" alt="' + esc(image.alt || '') + '">'
+      : fmt(text);
+    inner += '<div class="bubble">' + body + '</div>';
     m.innerHTML = inner;
+    if (image && image.url) { m._img = { url: image.url, alt: image.alt || '' }; m.classList.add('has-img'); }
     messagesEl.appendChild(m);
     scrollBottom();
     return m;
@@ -110,11 +128,17 @@
     var data = [];
     messagesEl.querySelectorAll('.msg').forEach(function (m) {
       var label = m.querySelector('.msg-label'), body = m.querySelector('.bubble');
-      data.push({
+      var img = body && body.querySelector('img');
+      var entry = {
         label: label ? label.textContent : null,
-        text: body ? body.textContent : '',
+        text: img ? '' : (body ? body.textContent : ''),
         type: m.classList.contains('system') ? 'system' : m.classList.contains('user') ? 'user' : 'ai'
-      });
+      };
+      // Keep generated images so re-saving never strips them (DOM, then the
+      // stashed object as a fallback).
+      if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
+      else if (m._img) entry.image = m._img;
+      data.push(entry);
     });
     if (!data.some(function (d) { return d.type === 'user'; })) return;
     var title = (data.find(function (d) { return d.type === 'user'; }) || {}).text;
@@ -139,11 +163,11 @@
     expandedProjects[currentProject] = true;
     messagesEl.innerHTML = '';
     var msgs = conv.messages || [];
-    msgs.forEach(function (m) { addMsg(m.type, m.label, m.text || ''); });
-    messagesEl._sig = msgs.length + '|' + (msgs.length ? (msgs[msgs.length - 1].text || '').slice(0, 40) : '');
+    msgs.forEach(function (m) { addMsg(m.type, m.label, m.text || '', m.image); });
+    messagesEl._sig = sigOf(msgs);
     chatHistory = msgs
       .filter(function (m) { return m.type === 'user' || m.type === 'ai'; })
-      .map(function (m) { return { role: m.type === 'user' ? 'user' : 'assistant', content: m.text || '' }; });
+      .map(function (m) { return { role: m.type === 'user' ? 'user' : 'assistant', content: m.image ? (m.image.alt ? ('[Image: ' + m.image.alt + ']') : '[Image]') : (m.text || '') }; });
     renderConvs(); closeSidebar(); switchTab('chat');
   }
   // New chat filed under a project (the project's pencil, or the active project).
@@ -396,18 +420,24 @@
       }
     } catch (e) {}
   }
+  // Content signature: changes when a message is added or its text/image changes.
+  function sigOf(msgs) {
+    var last = msgs.length ? msgs[msgs.length - 1] : null;
+    var tail = last ? ((last.image && last.image.url) ? ('img:' + last.image.url.slice(0, 40)) : (last.text || '').slice(0, 40)) : '';
+    return msgs.length + '|' + tail;
+  }
   // Re-paint the open conversation's messages only if its content changed, so a
   // chat continued on the PC keeps streaming onto the phone without flicker.
   function refreshOpenConv(conv) {
     var msgs = conv.messages || [];
-    var sig = msgs.length + '|' + (msgs.length ? (msgs[msgs.length - 1].text || '').slice(0, 40) : '');
+    var sig = sigOf(msgs);
     if (messagesEl._sig === sig) return;
     messagesEl._sig = sig;
     messagesEl.innerHTML = '';
-    msgs.forEach(function (m) { addMsg(m.type, m.label, m.text || ''); });
+    msgs.forEach(function (m) { addMsg(m.type, m.label, m.text || '', m.image); });
     chatHistory = msgs
       .filter(function (m) { return m.type === 'user' || m.type === 'ai'; })
-      .map(function (m) { return { role: m.type === 'user' ? 'user' : 'assistant', content: m.text || '' }; });
+      .map(function (m) { return { role: m.type === 'user' ? 'user' : 'assistant', content: m.image ? (m.image.alt ? ('[Image: ' + m.image.alt + ']') : '[Image]') : (m.text || '') }; });
   }
 
   function wire() {

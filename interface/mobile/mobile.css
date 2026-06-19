@@ -64,6 +64,10 @@ button{font-family:inherit;}
 .msg-label b{color:var(--text-2);font-weight:600;}
 .bubble code{font-family:var(--mono);font-size:.9em;background:var(--bg-0);padding:1px 4px;border-radius:4px;}
 .bubble pre{background:var(--bg-0);border:1px solid var(--border-subtle);border-radius:6px;font-family:var(--mono);font-size:11.5px;color:var(--text-2);padding:9px 10px;margin:7px 0 0;line-height:1.6;overflow-x:auto;white-space:pre;}
+/* Generated images (synced from the PC or produced in chat) */
+.bubble .gen-img{display:block;max-width:100%;width:auto;height:auto;border-radius:9px;margin:2px 0;}
+.msg.has-img .bubble{padding:4px;background:var(--bg-2);border:1px solid var(--border-subtle);}
+.msg.user.has-img .bubble{background:var(--accent);}
 .typing-dots{display:inline-flex;gap:4px;}
 .typing-dots i{width:6px;height:6px;border-radius:50%;background:var(--text-3);animation:blink 1.2s infinite;}
 .typing-dots i:nth-child(2){animation-delay:.2s;}
