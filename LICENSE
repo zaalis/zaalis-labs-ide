@@ -1,22 +1,22 @@
-Zaalis Labs IDE License
+zaalis Labs IDE License
 Version 1.0 — 2026
 
 Copyright (c) 2026 Bryan Boquel / zaalis
 All rights reserved.
 
-This license applies to the project known as "Zaalis Labs IDE", including its source code, documentation, design, interface, assets, architecture, ideas expressed in the codebase, and any related files contained in this repository, unless another license is explicitly stated for a specific file.
+This license applies to the project known as "zaalis Labs IDE", including its source code, documentation, design, interface, assets, architecture, ideas expressed in the codebase, and any related files contained in this repository, unless another license is explicitly stated for a specific file.
 
 1. Ownership
 
-Zaalis Labs IDE remains the exclusive property of Bryan Boquel / zaalis.
+zaalis Labs IDE remains the exclusive property of Bryan Boquel / zaalis.
 
-Nothing in this license transfers ownership, intellectual property rights, trademarks, branding rights, patents, trade secrets, or any other rights related to Zaalis Labs IDE to any user, contributor, company, organization, or third party.
+Nothing in this license transfers ownership, intellectual property rights, trademarks, branding rights, patents, trade secrets, or any other rights related to zaalis Labs IDE to any user, contributor, company, organization, or third party.
 
-The names "zaalis", "Zaalis", "Zaalis Labs", and "Zaalis Labs IDE" remain the property of Bryan Boquel / zaalis and may not be used to represent another product, service, company, project, or derivative work without prior written permission.
+The names "zaalis", "zaalis Labs", and "zaalis Labs IDE" remain the property of Bryan Boquel / zaalis and may not be used to represent another product, service, company, project, or derivative work without prior written permission.
 
 2. Permission to Use
 
-Permission is granted to use, run, test, study, and evaluate Zaalis Labs IDE for personal, educational, research, demonstration, or internal development purposes.
+Permission is granted to use, run, test, study, and evaluate zaalis Labs IDE for personal, educational, research, demonstration, or internal development purposes.
 
 Users may clone the repository and run the software locally, provided that this license is kept intact and all ownership notices remain visible.
 
@@ -24,24 +24,24 @@ Users may clone the repository and run the software locally, provided that this 
 
 Users may modify the code for personal, educational, research, testing, or internal development purposes.
 
-Modified versions must clearly state that they are based on Zaalis Labs IDE and must not claim to be the original official version unless approved in writing by Bryan Boquel / zaalis.
+Modified versions must clearly state that they are based on zaalis Labs IDE and must not claim to be the original official version unless approved in writing by Bryan Boquel / zaalis.
 
 4. Restrictions
 
 Without prior written permission from Bryan Boquel / zaalis, you may not:
 
-- Sell, rent, license, sublicense, or commercially exploit Zaalis Labs IDE or any derivative work based on it.
+- Sell, rent, license, sublicense, or commercially exploit zaalis Labs IDE or any derivative work based on it.
 - Redistribute the source code, modified versions, compiled versions, or derivative works as your own product.
 - Remove, hide, or alter copyright notices, ownership notices, license notices, or references to Bryan Boquel / zaalis.
-- Claim ownership of Zaalis Labs IDE, its code, its design, its concept, its architecture, or any derivative work based on it.
+- Claim ownership of zaalis Labs IDE, its code, its design, its concept, its architecture, or any derivative work based on it.
 - Use the project name, branding, logo, visual identity, or related names in a way that suggests official partnership, ownership, endorsement, or affiliation without permission.
-- Use Zaalis Labs IDE for illegal activity, malicious activity, unauthorized access, harmful automation, or any activity intended to damage systems, users, networks, services, or data.
+- Use zaalis Labs IDE for illegal activity, malicious activity, unauthorized access, harmful automation, or any activity intended to damage systems, users, networks, services, or data.
 
 5. Contributions
 
-By submitting code, documentation, suggestions, issues, pull requests, ideas, or any other contribution to this repository, you agree that your contribution may be used, modified, integrated, published, and distributed as part of Zaalis Labs IDE by Bryan Boquel / zaalis.
+By submitting code, documentation, suggestions, issues, pull requests, ideas, or any other contribution to this repository, you agree that your contribution may be used, modified, integrated, published, and distributed as part of zaalis Labs IDE by Bryan Boquel / zaalis.
 
-Unless otherwise agreed in writing, contributions do not give the contributor any ownership over Zaalis Labs IDE.
+Unless otherwise agreed in writing, contributions do not give the contributor any ownership over zaalis Labs IDE.
 
 Contributors remain responsible for ensuring that their contributions do not violate the rights of third parties.
 
@@ -53,13 +53,13 @@ For commercial licensing, partnership, integration, enterprise usage, or redistr
 
 7. No Warranty
 
-Zaalis Labs IDE is provided "as is", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, security, reliability, availability, or non-infringement.
+zaalis Labs IDE is provided "as is", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, security, reliability, availability, or non-infringement.
 
 Bryan Boquel / zaalis does not guarantee that the software will be error-free, secure, uninterrupted, or suitable for any specific purpose.
 
 8. Limitation of Liability
 
-To the maximum extent permitted by applicable law, Bryan Boquel / zaalis shall not be liable for any direct, indirect, incidental, special, consequential, exemplary, or punitive damages arising from the use, inability to use, modification, distribution, or reliance on Zaalis Labs IDE.
+To the maximum extent permitted by applicable law, Bryan Boquel / zaalis shall not be liable for any direct, indirect, incidental, special, consequential, exemplary, or punitive damages arising from the use, inability to use, modification, distribution, or reliance on zaalis Labs IDE.
 
 Users are solely responsible for how they use, modify, deploy, or integrate the software.
 
@@ -67,7 +67,7 @@ Users are solely responsible for how they use, modify, deploy, or integrate the 
 
 Any violation of this license automatically terminates the permissions granted under it.
 
-Upon termination, the user must stop using, copying, modifying, distributing, or commercially exploiting Zaalis Labs IDE and any derivative work based on it.
+Upon termination, the user must stop using, copying, modifying, distributing, or commercially exploiting zaalis Labs IDE and any derivative work based on it.
 
 10. Written Permission
 
