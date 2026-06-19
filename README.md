@@ -44,3 +44,11 @@ The generated installer can be found here:
 ```text
 native\installer\zaalis-setup.exe
 ```
+
+## License and copyright
+
+Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
+
+Zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) file and the [NOTICE](NOTICE) file included in this repository.
+
+No ownership rights are transferred by accessing, cloning, using, modifying, or contributing to this repository.
