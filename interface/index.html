@@ -63,10 +63,10 @@
                     <svg class="ml-chip" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
                     <span class="model-loader-label" id="model-loader-label" data-i18n="loader-empty">Charger un modèle</span>
                     <span class="model-loader-badge hidden" id="model-loader-badge"></span>
-                    <button class="model-loader-eject hidden" id="model-loader-eject" type="button" data-i18n-title="loader-eject" title="Décharger le modèle" aria-label="Décharger">
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 4 5 13 19 13"/><line x1="5" y1="18" x2="19" y2="18"/></svg>
-                    </button>
                     <svg class="ml-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+                <button class="model-loader-eject hidden" id="model-loader-eject" type="button" data-i18n-title="loader-eject" title="Décharger le modèle" aria-label="Décharger">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 4 5 13 19 13"/><line x1="5" y1="18" x2="19" y2="18"/></svg>
                 </button>
 
                 <div class="model-loader-panel" id="model-loader-panel">
@@ -289,11 +289,6 @@
                 <div class="ai-panel-tabs">
                     <button class="ai-tab active" data-tab="chat" data-i18n="tab-chat">Chat</button>
                     <button class="ai-tab" data-tab="agents" data-i18n="tab-agents">Agents</button>
-                </div>
-                <div class="agent-toggle" id="agent-toggle" role="switch" aria-checked="false" tabindex="0">
-                    <span class="toggle-label" data-i18n="agent-mode-label">Mode Agents</span>
-                    <div class="toggle-track"><div class="toggle-thumb"></div></div>
-                    <span class="toggle-status" id="agent-status">OFF</span>
                 </div>
                 <button class="topbar-btn" id="clear-terminal" data-i18n-title="clear-title" title="Effacer">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>

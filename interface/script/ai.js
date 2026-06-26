@@ -150,22 +150,16 @@ $$('.ai-tab').forEach(tab => {
         const lang = state.language || 'fr';
         if (isAgentsTab && !state.agentMode) {
             state.agentMode = true;
-            $('#agent-toggle').classList.add('active');
-            $('#agent-status').textContent = 'ON';
-            
+
             const checked = $$('.agent-check:checked');
             if (checked.length < 2) {
                 addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
                 state.agentMode = false;
-                $('#agent-toggle').classList.remove('active');
-                $('#agent-status').textContent = 'OFF';
             } else {
                 addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || 'Mode Agents active.') + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || 'agents prets.'));
             }
         } else if (!isAgentsTab && state.agentMode) {
             state.agentMode = false;
-            $('#agent-toggle').classList.remove('active');
-            $('#agent-status').textContent = 'OFF';
             addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['mode-agents-inactive'] || 'Mode Agents desactive.');
             $$('.agent-card').forEach(c => {
                 c.classList.remove('working');
@@ -175,40 +169,6 @@ $$('.ai-tab').forEach(tab => {
             });
         }
     });
-});
-
-// ==========================================================
-//  AGENT MODE TOGGLE
-// ==========================================================
-$('#agent-toggle').addEventListener('click', () => {
-    state.agentMode = !state.agentMode;
-    $('#agent-toggle').classList.toggle('active', state.agentMode);
-    $('#agent-status').textContent = state.agentMode ? 'ON' : 'OFF';
-
-    const lang = state.language || 'fr';
-    if (state.agentMode) {
-        const checked = $$('.agent-check:checked');
-        if (checked.length < 2) {
-            addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
-            state.agentMode = false;
-            $('#agent-toggle').classList.remove('active');
-            $('#agent-status').textContent = 'OFF';
-            return;
-        }
-        addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || 'Mode Agents active.') + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || 'agents prets.'));
-        $$('.ai-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'agents'));
-        $$('.ai-view').forEach(v => v.classList.toggle('active', v.id === 'view-agents'));
-    } else {
-        addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['mode-agents-inactive'] || 'Mode Agents desactive.');
-        $$('.ai-tab').forEach(t => t.classList.toggle('active', t.dataset.tab === 'chat'));
-        $$('.ai-view').forEach(v => v.classList.toggle('active', v.id === 'view-chat'));
-        $$('.agent-card').forEach(c => {
-            c.classList.remove('working');
-            const badge = c.querySelector('.agent-badge');
-            badge.textContent = TRANSLATIONS[lang]['status-idle'] || 'Inactif';
-            badge.className = 'agent-badge idle';
-        });
-    }
 });
 
 // ==========================================================
