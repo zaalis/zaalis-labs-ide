@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css">
-    <link rel="stylesheet" href="app.css">
+    <link rel="stylesheet" href="base.css?v=1.0.16">
+    <link rel="stylesheet" href="app.css?v=1.0.16">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -57,10 +57,80 @@
             </button>
         </div>
         <div class="topbar-center">
-            <div class="agent-toggle" id="agent-toggle">
-                <div class="toggle-track"><div class="toggle-thumb"></div></div>
-                <span class="toggle-label" data-i18n="agent-mode-label">Mode Agents</span>
-                <span class="toggle-status" id="agent-status">OFF</span>
+            <!-- ===== LOCAL MODEL LOADER (LM Studio style) ===== -->
+            <div class="model-loader" id="model-loader">
+                <button class="model-loader-btn" id="model-loader-btn" type="button" data-i18n-title="loader-title" title="Charger un modèle local">
+                    <svg class="ml-chip" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
+                    <span class="model-loader-label" id="model-loader-label" data-i18n="loader-empty">Charger un modèle</span>
+                    <span class="model-loader-badge hidden" id="model-loader-badge"></span>
+                    <button class="model-loader-eject hidden" id="model-loader-eject" type="button" data-i18n-title="loader-eject" title="Décharger le modèle" aria-label="Décharger">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 4 5 13 19 13"/><line x1="5" y1="18" x2="19" y2="18"/></svg>
+                    </button>
+                    <svg class="ml-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                </button>
+
+                <div class="model-loader-panel" id="model-loader-panel">
+                    <div class="ml-tabs">
+                        <button class="ml-tab active" type="button" data-ml-tab="select" data-i18n="loader-tab-models">Modèles</button>
+                        <button class="ml-tab" type="button" data-ml-tab="config" data-i18n="loader-tab-config">Configuration</button>
+                    </div>
+
+                    <!-- Pane 1: model list -->
+                    <div class="ml-pane active" data-ml-pane="select">
+                        <div class="ml-list" id="ml-model-list"></div>
+                        <button class="ml-get-models" type="button" id="ml-get-models">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                            <span data-i18n="loader-get-models">Télécharger des modèles</span>
+                        </button>
+                    </div>
+
+                    <!-- Pane 2: configuration -->
+                    <div class="ml-pane" data-ml-pane="config">
+                        <button class="ml-back" type="button" id="ml-config-back">
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+                            <span class="ml-config-name" id="ml-config-name">—</span>
+                        </button>
+
+                        <div class="ml-field">
+                            <div class="ml-field-head">
+                                <span class="ml-field-label" data-i18n="loader-context">Longueur de contexte</span>
+                                <input class="ml-num" id="ml-ctx-num" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="8192">
+                            </div>
+                            <input class="ml-slider" id="ml-ctx-slider" type="range" min="512" max="131072" step="512" value="8192" list="ml-ctx-marks">
+                            <datalist id="ml-ctx-marks">
+                                <option value="2048"></option><option value="4096"></option><option value="8192"></option>
+                                <option value="16384"></option><option value="32768"></option><option value="65536"></option><option value="131072"></option>
+                            </datalist>
+                            <div class="ml-field-marks"><span>512</span><span class="ml-field-hint" id="ml-ctx-hint"></span><span>128K</span></div>
+                        </div>
+
+                        <div class="ml-field-row">
+                            <span class="ml-field-label" data-i18n="loader-gpu">Déchargement GPU</span>
+                            <select id="ml-gpu-select" class="ml-select">
+                                <option value="" data-i18n="loader-gpu-auto">Auto (tout)</option>
+                                <option value="50">50</option>
+                                <option value="35">35</option>
+                                <option value="20">20</option>
+                                <option value="10">10</option>
+                                <option value="0" data-i18n="loader-gpu-cpu">CPU seul</option>
+                            </select>
+                        </div>
+
+                        <div class="ml-field-row">
+                            <span class="ml-field-label" data-i18n="loader-engine">Moteur</span>
+                            <select id="ml-variant-select" class="ml-select">
+                                <option value="" data-i18n="loader-engine-auto">Auto</option>
+                                <option value="cuda">CUDA</option>
+                                <option value="vulkan">Vulkan</option>
+                                <option value="cpu">CPU</option>
+                            </select>
+                        </div>
+
+                        <div class="ml-progress hidden" id="ml-progress"><div class="ml-progress-fill" id="ml-progress-fill"></div></div>
+
+                        <button class="ml-load-btn" type="button" id="ml-load-btn" data-i18n="loader-load">Charger le modèle</button>
+                    </div>
+                </div>
             </div>
         </div>
         <div class="topbar-right">
@@ -107,6 +177,10 @@
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                         <span data-i18n="open-folder">Ouvrir un dossier</span>
                     </button>
+                    <button class="dropdown-item" id="no-project-btn">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.4a2.9 2.9 0 0 1 5.6 1c0 1.9-2.8 2.2-2.8 3.9"/><circle cx="12" cy="17.4" r=".6" fill="currentColor" stroke="none"/></svg>
+                        <span data-i18n="history-no-project">Aucun projet</span>
+                    </button>
                     <div class="dropdown-divider"></div>
                     <div class="dropdown-label" data-i18n="recent-projects">Projets recents</div>
                     <div id="recent-projects">
@@ -115,9 +189,27 @@
                 </div>
             </div>
 
-            <!-- File Tree -->
-            <div class="sidebar-title"><span data-i18n="files-header">FICHIERS</span></div>
-            <div class="file-tree" id="file-tree"></div>
+            <div class="sidebar-stack" id="sidebar-stack">
+                <!-- Project Conversations -->
+                <section class="sidebar-section sidebar-conversations" id="sidebar-conversations-section">
+                    <button class="sidebar-section-head" id="sidebar-conversations-toggle" type="button" aria-expanded="true">
+                        <span data-i18n="conversations-header">CONVERSATIONS</span>
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div class="sidebar-conversations-body" id="sidebar-conversations-body">
+                        <div class="sidebar-conversations-list" id="sidebar-conversations-list"></div>
+                    </div>
+                </section>
+
+                <div class="sidebar-splitter" id="sidebar-splitter" title="Redimensionner conversations / fichiers"></div>
+
+                <!-- File Tree -->
+                <section class="sidebar-section sidebar-files" id="sidebar-files-section">
+                    <div class="sidebar-title"><span data-i18n="files-header">FICHIERS</span></div>
+                    <div class="file-tree" id="file-tree"></div>
+                </section>
+            </div>
+
 
             <!-- User Profile -->
             <div class="sidebar-profile" id="sidebar-profile">
@@ -197,6 +289,11 @@
                 <div class="ai-panel-tabs">
                     <button class="ai-tab active" data-tab="chat" data-i18n="tab-chat">Chat</button>
                     <button class="ai-tab" data-tab="agents" data-i18n="tab-agents">Agents</button>
+                </div>
+                <div class="agent-toggle" id="agent-toggle" role="switch" aria-checked="false" tabindex="0">
+                    <span class="toggle-label" data-i18n="agent-mode-label">Mode Agents</span>
+                    <div class="toggle-track"><div class="toggle-thumb"></div></div>
+                    <span class="toggle-status" id="agent-status">OFF</span>
                 </div>
                 <button class="topbar-btn" id="clear-terminal" data-i18n-title="clear-title" title="Effacer">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -289,13 +386,13 @@
                     </div>
                 </div>
 
-                <!-- Chat History -->
-                <div class="chat-history" id="chat-history">
+                <!-- Project chat history: shown only when a project is open -->
+                <div class="chat-history project-history" id="chat-history">
                     <div class="history-label">
                         <span data-i18n="history-header">Historique</span>
                         <button class="new-chat-btn" id="new-chat-btn" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
                     </div>
-                    <div class="history-list" id="history-list">
+                    <div class="history-list project-history-list" id="history-list">
                         <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
                     </div>
                 </div>
@@ -512,16 +609,17 @@
                     </div>
                 </div>
 
-                <!-- Agents history (separate from the single-chat history) -->
-                <div class="chat-history">
+                <!-- Project agents history: shown only when a project is open -->
+                <div class="chat-history project-history">
                     <div class="history-label">
                         <span data-i18n="history-header">Historique</span>
                         <button class="new-chat-btn" id="new-chat-btn-agents" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
                     </div>
-                    <div class="history-list" id="history-list-agents">
+                    <div class="history-list project-history-list" id="history-list-agents">
                         <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
                     </div>
                 </div>
+
             </div>
 
         </aside>
@@ -661,16 +759,19 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="gguf-ctx-select" data-i18n="settings-gguf-ctx-label">Contexte GGUF par défaut</label>
+                            <label for="gguf-ctx-input" data-i18n="settings-gguf-ctx-label">Contexte GGUF par défaut</label>
                             <p data-i18n="settings-gguf-ctx-hint">Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.</p>
                         </div>
-                        <select id="gguf-ctx-select">
-                            <option value="2048">2K</option>
-                            <option value="4096">4K</option>
-                            <option value="8192">8K</option>
-                            <option value="16384">16K</option>
-                            <option value="32768">32K</option>
-                        </select>
+                        <input class="settings-number-input" id="gguf-ctx-input" type="number" min="512" max="131072" step="1024" value="8192" list="gguf-ctx-presets" inputmode="numeric">
+                        <datalist id="gguf-ctx-presets">
+                            <option value="2048" label="2K"></option>
+                            <option value="4096" label="4K"></option>
+                            <option value="8192" label="8K"></option>
+                            <option value="16384" label="16K"></option>
+                            <option value="32768" label="32K"></option>
+                            <option value="65536" label="64K"></option>
+                            <option value="131072" label="128K"></option>
+                        </datalist>
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
@@ -1079,7 +1180,7 @@
 <div class="modal-overlay" id="remote-modal">
     <div class="modal modal-sm">
         <div class="modal-header">
-            <h2>Remote control</h2>
+            <h2>Controle mobile</h2>
             <button class="modal-close" id="close-remote">&times;</button>
         </div>
         <div class="modal-body remote-body">
@@ -1102,7 +1203,7 @@
                     <input type="text" id="remote-url" readonly>
                     <button class="btn btn-ghost btn-sm" id="remote-copy">Copier</button>
                 </div>
-                <div class="remote-status-line"><span class="remote-dot on"></span><span id="remote-status-text">Session active</span></div>
+                <div class="remote-status-line"><span class="remote-dot on"></span><span id="remote-status-text">Acces mobile actif</span></div>
             </div>
 
             <p class="remote-error hidden" id="remote-error"></p>
@@ -1114,13 +1215,13 @@
     </div>
 </div>
 
-<script src="catalog.js"></script>
-<script src="help.js"></script>
-<script src="script/state.js" defer></script>
-<script src="script/ui.js" defer></script>
-<script src="script/commands.js" defer></script>
-<script src="script/ai.js" defer></script>
-<script src="script/remote.js" defer></script>
-<script src="script/main.js" defer></script>
+<script src="catalog.js?v=1.0.16"></script>
+<script src="help.js?v=1.0.16"></script>
+<script src="script/state.js?v=1.0.16" defer></script>
+<script src="script/ui.js?v=1.0.16" defer></script>
+<script src="script/commands.js?v=1.0.16" defer></script>
+<script src="script/ai.js?v=1.0.16" defer></script>
+<script src="script/remote.js?v=1.0.16" defer></script>
+<script src="script/main.js?v=1.0.16" defer></script>
 </body>
 </html>

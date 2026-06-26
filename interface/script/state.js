@@ -163,6 +163,7 @@ const CONTEXT_WINDOWS = {
 };
 function contextWindow(model, submodel) {
     const m = CONTEXT_WINDOWS[model] || {};
+    if (model === 'gguf') return clampGgufCtx(state.config && state.config.ggufCtx);
     const s = (submodel || '').toLowerCase().trim();
     if (m[s]) return m[s];
     // Sort keys by length descending to match longest exact substring/prefix first (e.g. gpt-5.5 before gpt-5)
@@ -171,6 +172,11 @@ function contextWindow(model, submodel) {
         if (s.includes(k) || k.includes(s)) return m[k];
     }
     return m._default || 128000;
+}
+function clampGgufCtx(value) {
+    const n = parseInt(value, 10);
+    if (!Number.isFinite(n) || n <= 0) return 8192;
+    return Math.max(512, Math.min(131072, n));
 }
 function estimateTokens(text) { return Math.ceil(((text || '') + '').length / 4); }
 function fmtTokens(n) {
@@ -239,6 +245,7 @@ const TRANSLATIONS = {
         'recent-projects': 'Projets recents',
         'no-recent-projects': 'Aucun projet recent',
         'files-header': 'FICHIERS',
+        'conversations-header': 'CONVERSATIONS',
         'profile-header': 'Profil',
         'username': 'Pseudo',
         'photo-url': 'Photo (URL)',
@@ -264,6 +271,19 @@ const TRANSLATIONS = {
         'new-chat-btn': 'Nouveau',
         'install-models-btn': 'Installer des modeles',
         'install-models-title': 'Installer des modeles locaux',
+        'loader-empty': 'Charger un modèle',
+        'loader-title': 'Charger un modèle local',
+        'loader-eject': 'Décharger le modèle',
+        'loader-tab-models': 'Modèles',
+        'loader-tab-config': 'Configuration',
+        'loader-get-models': 'Télécharger des modèles',
+        'loader-context': 'Longueur de contexte',
+        'loader-gpu': 'Déchargement GPU',
+        'loader-gpu-auto': 'Auto (tout)',
+        'loader-gpu-cpu': 'CPU seul',
+        'loader-engine': 'Moteur',
+        'loader-engine-auto': 'Auto',
+        'loader-load': 'Charger le modèle',
         'attach-image': 'Image',
         'attach-file': 'Fichier',
         'agents-desc': 'Configurez et lancez vos agents IA. Minimum 2 actifs pour le mode collaboratif.',
@@ -288,7 +308,7 @@ const TRANSLATIONS = {
         'settings-gguf-engine-hint': 'Auto selectionne CUDA, Vulkan ou CPU selon le poste.',
         'settings-gguf-auto': 'Auto',
         'settings-gguf-ctx-label': 'Contexte GGUF par défaut',
-        'settings-gguf-ctx-hint': 'Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.',
+        'settings-gguf-ctx-hint': 'Taille de la fenetre de contexte du moteur local (512 a 131072 tokens). Plus grand = plus de memoire utilisee.',
         'settings-gguf-ngl-label': 'Limite VRAM (couches GPU)',
         'settings-gguf-ngl-hint': "Nombre de couches déchargées sur le GPU. « Tout » = vitesse max ; baisser pour économiser la VRAM.",
         'settings-gguf-ngl-all': 'Tout (auto)',
@@ -435,6 +455,7 @@ const TRANSLATIONS = {
         'recent-projects': 'Recent Projects',
         'no-recent-projects': 'No recent projects',
         'files-header': 'FILES',
+        'conversations-header': 'CONVERSATIONS',
         'profile-header': 'Profile',
         'username': 'Username',
         'photo-url': 'Photo (URL)',
@@ -460,6 +481,19 @@ const TRANSLATIONS = {
         'new-chat-btn': 'New',
         'install-models-btn': 'Install models',
         'install-models-title': 'Install local models',
+        'loader-empty': 'Load a model',
+        'loader-title': 'Load a local model',
+        'loader-eject': 'Eject model',
+        'loader-tab-models': 'Models',
+        'loader-tab-config': 'Configuration',
+        'loader-get-models': 'Download models',
+        'loader-context': 'Context length',
+        'loader-gpu': 'GPU offload',
+        'loader-gpu-auto': 'Auto (all)',
+        'loader-gpu-cpu': 'CPU only',
+        'loader-engine': 'Engine',
+        'loader-engine-auto': 'Auto',
+        'loader-load': 'Load model',
         'attach-image': 'Image',
         'attach-file': 'File',
         'agents-desc': 'Configure and launch your AI agents. Minimum 2 active for collaborative mode.',
@@ -484,7 +518,7 @@ const TRANSLATIONS = {
         'settings-gguf-engine-hint': 'Auto selects CUDA, Vulkan, or CPU for this machine.',
         'settings-gguf-auto': 'Auto',
         'settings-gguf-ctx-label': 'Default GGUF context',
-        'settings-gguf-ctx-hint': 'Context window size of the local engine (tokens). Larger = more memory used.',
+        'settings-gguf-ctx-hint': 'Local engine context window (512 to 131072 tokens). Larger = more memory used.',
         'settings-gguf-ngl-label': 'VRAM limit (GPU layers)',
         'settings-gguf-ngl-hint': 'Number of layers offloaded to the GPU. "All" = max speed; lower it to save VRAM.',
         'settings-gguf-ngl-all': 'All (auto)',
@@ -1242,6 +1276,7 @@ function loadState() {
                 Object.assign(state.config, safeConfig);
             }
             if (s.profile) Object.assign(state.profile, s.profile);
+            state.config.ggufCtx = clampGgufCtx(state.config.ggufCtx);
             // Par défaut on NE restaure PAS le projet au lancement : démarrage
             // propre = « Aucun projet » + explorateur vide. On ne le restaure que
             // si l'utilisateur a activé « Rouvrir le dernier projet » (Paramètres

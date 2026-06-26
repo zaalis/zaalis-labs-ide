@@ -50,7 +50,7 @@ function applyAppearance() {
 // IDs of the settings <select> elements that should render as rounded custom
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
-    'settings-lang-select', 'gguf-variant-select', 'gguf-ctx-select', 'gguf-ngl-select',
+    'settings-lang-select', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-channel-select'
@@ -75,7 +75,7 @@ function populateSettingsControls() {
     };
     setVal('settings-lang-select', state.language || 'fr');
     setVal('gguf-variant-select', c.ggufVariant || '');
-    setVal('gguf-ctx-select', c.ggufCtx || 8192);
+    setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
     setVal('settings-theme-select', c.theme || 'dark');
     setVal('settings-density-select', c.density || 'normal');
@@ -195,7 +195,7 @@ $('#save-btn').addEventListener('click', async () => {
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
     // ----- Hardware advanced -----
-    c.ggufCtx = parseInt(getVal('gguf-ctx-select') || '8192', 10) || 8192;
+    c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
     c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
     // ----- Project -----
@@ -204,6 +204,7 @@ $('#save-btn').addEventListener('click', async () => {
     // ----- Updates -----
     c.autoCheckUpdates = !!$('#settings-autoupdate-toggle')?.checked;
     c.updateChannel = getVal('settings-channel-select') || 'stable';
+    if (typeof updateTokenMeter === 'function') updateTokenMeter();
     saveState();
     const btn = $('#save-btn');
     const originalText = btn.textContent;
@@ -699,6 +700,8 @@ async function loadGgufModels() {
             updateSubmodelDropdown();
             if (typeof createCustomSelect === 'function') createCustomSelect('ai-submodel');
         }
+        // Keep the topbar model loader in sync with installed models + engine state.
+        if (typeof syncModelLoader === 'function') syncModelLoader(data);
     } catch {}
 }
 
@@ -1476,6 +1479,9 @@ document.addEventListener('DOMContentLoaded', async () => {
         setInterval(syncOllamaModels, 30000);
     }
 
+    // Local model loader (LM Studio style) in the top bar.
+    if (typeof initModelLoader === 'function') initModelLoader();
+
     // Check for app updates on GitHub (only if the user kept auto-check on).
     if (state.config.autoCheckUpdates !== false) setTimeout(checkForUpdates, 3000);
 });
@@ -1508,6 +1514,300 @@ if (settingsLangSelect) {
 updateLanguage();
 
 renderHistory();
+
+// ==========================================================
+//  LOCAL MODEL LOADER (LM Studio style) — top bar
+// ==========================================================
+// Holds the installed GGUF files with their byte sizes (from /api/gguf-models)
+// so the loader list can show "Qwen2.5-Coder-7B · 4.4 GB".
+let _loaderModels = [];      // [{ name, size }]
+let _loaderLoaded = null;    // currently loaded .gguf filename, or null
+let _loaderBusy = false;     // a load request is in flight
+
+function _fmtBytes(n) {
+    if (!n) return '';
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + ' GB';
+    if (n >= 1e6) return Math.round(n / 1e6) + ' MB';
+    return Math.round(n / 1e3) + ' KB';
+}
+// 8192 -> "8K", 131072 -> "128K", 1024 -> "1K"
+function _fmtCtx(n) {
+    n = parseInt(n, 10) || 0;
+    if (n >= 1024 && n % 1024 === 0) return (n / 1024) + 'K';
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
+    return String(n);
+}
+function _ggufPretty(name) { return String(name || '').replace(/\.gguf$/i, ''); }
+
+// Reflect the loaded/empty state on the top-bar button.
+function updateLoaderButton() {
+    const wrap = $('#model-loader');
+    const label = $('#model-loader-label');
+    const badge = $('#model-loader-badge');
+    const eject = $('#model-loader-eject');
+    if (!wrap || !label) return;
+    const lang = state.language || 'fr';
+    if (_loaderLoaded) {
+        wrap.classList.add('loaded');
+        label.textContent = _ggufPretty(_loaderLoaded);
+        if (badge) {
+            badge.textContent = _fmtCtx(state.config.ggufCtx) + (lang === 'en' ? ' ctx' : ' ctx');
+            badge.classList.remove('hidden');
+        }
+        if (eject) eject.classList.remove('hidden');
+    } else {
+        wrap.classList.remove('loaded');
+        label.textContent = (TRANSLATIONS[lang] && TRANSLATIONS[lang]['loader-empty']) || 'Charger un modèle';
+        if (badge) badge.classList.add('hidden');
+        if (eject) eject.classList.add('hidden');
+    }
+}
+
+// Build the model list inside the dropdown.
+function renderModelLoaderList() {
+    const box = $('#ml-model-list');
+    if (!box) return;
+    const lang = state.language || 'fr';
+    box.innerHTML = '';
+    if (!_loaderModels.length) {
+        box.innerHTML = `<div class="ml-empty">${lang === 'en'
+            ? 'No local model installed yet.<br>Download one to get started.'
+            : 'Aucun modèle local installé.<br>Téléchargez-en un pour commencer.'}</div>`;
+        return;
+    }
+    _loaderModels.forEach(m => {
+        const item = document.createElement('button');
+        item.type = 'button';
+        item.className = 'ml-item' + (m.name === _loaderLoaded ? ' current' : '');
+        const meta = _fmtBytes(m.size);
+        item.innerHTML = `
+            <span class="ml-item-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg></span>
+            <span class="ml-item-info">
+                <span class="ml-item-name"></span>
+                ${meta ? `<span class="ml-item-meta">${meta}</span>` : ''}
+            </span>
+            ${m.name === _loaderLoaded ? `<span class="ml-item-tag">${lang === 'en' ? 'LOADED' : 'CHARGÉ'}</span>` : ''}`;
+        item.querySelector('.ml-item-name').textContent = _ggufPretty(m.name);
+        item.title = m.name;
+        item.addEventListener('click', () => openLoaderConfig(m.name));
+        box.appendChild(item);
+    });
+}
+
+// Called by loadGgufModels() with the raw /api/gguf-models payload.
+function syncModelLoader(data) {
+    if (data && Array.isArray(data.models)) _loaderModels = data.models;
+    _loaderLoaded = (data && data.running && data.current) ? data.current : null;
+    renderModelLoaderList();
+    updateLoaderButton();
+}
+
+// Switch to the config pane and prefill controls for `name`.
+function openLoaderConfig(name) {
+    const panel = $('#model-loader');
+    if (!panel) return;
+    panel.dataset.selected = name;
+    const nameEl = $('#ml-config-name');
+    if (nameEl) nameEl.textContent = _ggufPretty(name);
+
+    const ctx = clampGgufCtx(state.config.ggufCtx);
+    const slider = $('#ml-ctx-slider'), num = $('#ml-ctx-num'), hint = $('#ml-ctx-hint');
+    if (slider) slider.value = ctx;
+    if (num) num.value = ctx;
+    if (hint) hint.textContent = _fmtCtx(ctx);
+    const gpu = $('#ml-gpu-select'); if (gpu) gpu.value = state.config.ggufGpuLayers || '';
+    const variant = $('#ml-variant-select'); if (variant) variant.value = state.config.ggufVariant || '';
+
+    // Activate the config tab.
+    $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'config'));
+    $$('.ml-pane').forEach(p => p.classList.toggle('active', p.dataset.mlPane === 'config'));
+    resetLoadButton();
+}
+
+function resetLoadButton() {
+    const btn = $('#ml-load-btn');
+    const prog = $('#ml-progress'), fill = $('#ml-progress-fill');
+    if (btn) { btn.classList.remove('loading'); btn.disabled = false; btn.textContent = (TRANSLATIONS[state.language || 'fr'] || {})['loader-load'] || 'Charger le modèle'; }
+    if (prog) prog.classList.add('hidden');
+    if (fill) fill.style.width = '0%';
+}
+
+// Read + clamp the context input/slider and keep both in sync.
+function _syncCtx(fromSlider) {
+    const slider = $('#ml-ctx-slider'), num = $('#ml-ctx-num'), hint = $('#ml-ctx-hint');
+    if (!slider || !num) return;
+    let v = clampGgufCtx(fromSlider ? slider.value : num.value);
+    slider.value = v;
+    if (fromSlider || document.activeElement !== num) num.value = v;
+    if (hint) hint.textContent = _fmtCtx(v);
+}
+
+// Load the selected model into memory (streams progress).
+async function loadLoaderModel() {
+    if (_loaderBusy) return;
+    const panel = $('#model-loader');
+    const name = panel && panel.dataset.selected;
+    if (!name) return;
+    const lang = state.language || 'fr';
+    const ctx = clampGgufCtx($('#ml-ctx-num').value);
+    const gpuLayers = $('#ml-gpu-select') ? $('#ml-gpu-select').value : '';
+    const variant = $('#ml-variant-select') ? $('#ml-variant-select').value : '';
+
+    // Persist the chosen options so the chat path reuses the same engine state.
+    state.config.ggufCtx = ctx;
+    state.config.ggufGpuLayers = gpuLayers;
+    state.config.ggufVariant = variant;
+    saveState();
+    const ggufCtxInput = $('#gguf-ctx-input'); if (ggufCtxInput) ggufCtxInput.value = ctx;
+
+    const btn = $('#ml-load-btn'), prog = $('#ml-progress'), fill = $('#ml-progress-fill');
+    _loaderBusy = true;
+    if (btn) { btn.classList.add('loading'); btn.disabled = true; btn.textContent = lang === 'en' ? 'Loading…' : 'Chargement…'; }
+    if (prog) prog.classList.remove('hidden');
+    if (fill) { fill.style.width = '8%'; }
+    // Indeterminate creep while the engine boots (caps below 90%).
+    let creep = 8;
+    const creepTimer = setInterval(() => { creep = Math.min(88, creep + 4); if (fill) fill.style.width = creep + '%'; }, 700);
+
+    try {
+        const res = await fetch('/api/gguf-load', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, ctx, gpuLayers, variant })
+        });
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = '', ok = false, errMsg = '';
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, { stream: true });
+            const lines = buf.split('\n'); buf = lines.pop();
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                let o; try { o = JSON.parse(line); } catch { continue; }
+                if (o.status === 'ready') ok = true;
+                else if (o.status === 'error') errMsg = o.error || 'load failed';
+            }
+        }
+        clearInterval(creepTimer);
+        if (!ok) throw new Error(errMsg || (lang === 'en' ? 'The engine did not start.' : "Le moteur n'a pas démarré."));
+
+        if (fill) fill.style.width = '100%';
+        _loaderLoaded = name;
+
+        // Make the loaded model the active chat model.
+        state.config.aiModel = 'gguf';
+        state.config.aiSubmodel = name;
+        saveState();
+        if (modelSelect) {
+            modelSelect.value = 'gguf';
+            if (typeof updateSubmodelDropdown === 'function') updateSubmodelDropdown();
+            if (submodelSelect) submodelSelect.value = name;
+            if (typeof createCustomSelect === 'function') { createCustomSelect('ai-model'); createCustomSelect('ai-submodel'); }
+            if (typeof applyModelColor === 'function') applyModelColor();
+            if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
+            if (typeof updateTokenMeter === 'function') updateTokenMeter();
+        }
+        updateLoaderButton();
+        renderModelLoaderList();
+        closeModelLoader();
+        showToast(lang === 'en' ? 'Model loaded' : 'Modèle chargé',
+            `${_ggufPretty(name)} • ${_fmtCtx(ctx)} ${lang === 'en' ? 'context' : 'de contexte'}`,
+            { icon: '✓', duration: 5000 });
+    } catch (e) {
+        clearInterval(creepTimer);
+        showToast(lang === 'en' ? 'Load failed' : 'Chargement impossible', e.message || String(e), { icon: '!' });
+    } finally {
+        _loaderBusy = false;
+        resetLoadButton();
+    }
+}
+
+// Eject (unload) the model currently in memory.
+async function ejectLoaderModel() {
+    const lang = state.language || 'fr';
+    try {
+        const res = await fetch('/api/gguf-unload', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) throw new Error(data.error || ('HTTP ' + res.status));
+        _loaderLoaded = null;
+        updateLoaderButton();
+        renderModelLoaderList();
+        showToast(lang === 'en' ? 'Model ejected' : 'Modèle déchargé',
+            lang === 'en' ? 'Memory has been freed.' : 'La mémoire a été libérée.',
+            { icon: '⏏', duration: 4000 });
+    } catch (e) {
+        showToast(lang === 'en' ? 'Eject failed' : 'Déchargement impossible', e.message || String(e), { icon: '!' });
+    }
+}
+
+function openModelLoader() {
+    const wrap = $('#model-loader');
+    if (!wrap) return;
+    wrap.classList.add('open');
+    // Always open on the model list first.
+    $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'select'));
+    $$('.ml-pane').forEach(p => p.classList.toggle('active', p.dataset.mlPane === 'select'));
+    if (typeof loadGgufModels === 'function') loadGgufModels();
+    renderModelLoaderList();
+}
+function closeModelLoader() {
+    const wrap = $('#model-loader');
+    if (wrap) wrap.classList.remove('open');
+}
+
+function initModelLoader() {
+    const wrap = $('#model-loader');
+    if (!wrap) return;
+    const btn = $('#model-loader-btn');
+    const eject = $('#model-loader-eject');
+
+    if (btn) btn.addEventListener('click', (e) => {
+        // The eject button lives inside the main button — ignore its clicks here.
+        if (e.target.closest('#model-loader-eject')) return;
+        wrap.classList.contains('open') ? closeModelLoader() : openModelLoader();
+    });
+    if (eject) eject.addEventListener('click', (e) => { e.stopPropagation(); ejectLoaderModel(); });
+
+    $$('.ml-tab').forEach(tab => tab.addEventListener('click', () => {
+        const t = tab.dataset.mlTab;
+        // Config tab only makes sense once a model is picked.
+        if (t === 'config' && !wrap.dataset.selected) return;
+        $$('.ml-tab').forEach(x => x.classList.toggle('active', x === tab));
+        $$('.ml-pane').forEach(p => p.classList.toggle('active', p.dataset.mlPane === t));
+    }));
+
+    const back = $('#ml-config-back');
+    if (back) back.addEventListener('click', () => {
+        $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'select'));
+        $$('.ml-pane').forEach(p => p.classList.toggle('active', p.dataset.mlPane === 'select'));
+    });
+
+    const slider = $('#ml-ctx-slider'), num = $('#ml-ctx-num');
+    if (slider) slider.addEventListener('input', () => _syncCtx(true));
+    if (num) {
+        num.addEventListener('input', () => { const slider2 = $('#ml-ctx-slider'); const v = parseInt(num.value, 10); if (slider2 && Number.isFinite(v)) slider2.value = Math.max(512, Math.min(131072, v)); const hint = $('#ml-ctx-hint'); if (hint && Number.isFinite(v)) hint.textContent = _fmtCtx(Math.max(512, Math.min(131072, v))); });
+        num.addEventListener('change', () => _syncCtx(false));
+        num.addEventListener('blur', () => _syncCtx(false));
+    }
+
+    const loadBtn = $('#ml-load-btn');
+    if (loadBtn) loadBtn.addEventListener('click', loadLoaderModel);
+
+    const getModels = $('#ml-get-models');
+    if (getModels) getModels.addEventListener('click', () => {
+        closeModelLoader();
+        const cat = $('#catalog-btn'); if (cat) cat.click();
+    });
+
+    // Close when clicking outside the loader.
+    document.addEventListener('click', (e) => {
+        if (wrap.classList.contains('open') && !e.target.closest('#model-loader')) closeModelLoader();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModelLoader(); });
+
+    updateLoaderButton();
+}
 
 // Gate the app behind authentication.
 setupAuth();

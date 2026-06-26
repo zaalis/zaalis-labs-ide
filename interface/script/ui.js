@@ -190,6 +190,15 @@ $('#open-project-btn').addEventListener('click', async e => {
     }
 });
 
+const noProjBtn = $('#no-project-btn');
+if (noProjBtn) {
+    noProjBtn.addEventListener('click', e => {
+        e.stopPropagation();
+        projectDropdown.classList.remove('open');
+        clearProject();
+    });
+}
+
 // Project modal
 $('#close-project-modal').addEventListener('click', () => $('#project-modal').classList.remove('active'));
 $('#cancel-project-btn').addEventListener('click', () => $('#project-modal').classList.remove('active'));
@@ -207,6 +216,31 @@ $('#project-path-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') $('#confirm-project-btn').click();
 });
 
+function removeRecentProject(path) {
+    let recent = getRecentProjects().filter(p => p !== path);
+    localStorage.setItem('zaalis-recent', JSON.stringify(recent));
+    syncRecentProjects(recent);
+    initRecentProjects();
+    if (state.projectRoot === path) {
+        clearProject();
+    }
+}
+
+function normalizeProjectPath(path) {
+    return String(path || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function conversationsForProject(projectPath, folderName, kind) {
+    const storeKey = kind === 'agents' ? 'agentConversations' : 'conversations';
+    const normalizedPath = normalizeProjectPath(projectPath);
+    return (state[storeKey] || [])
+        .filter(c => {
+            if (c.projectPath && normalizeProjectPath(c.projectPath) === normalizedPath) return true;
+            return !c.projectPath && c.project === folderName;
+        })
+        .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
+}
+
 function initRecentProjects() {
     const recent = getRecentProjects();
     const container = $('#recent-projects');
@@ -217,16 +251,124 @@ function initRecentProjects() {
     }
     container.innerHTML = '';
     recent.forEach(p => {
-        const item = document.createElement('button');
-        item.className = 'dropdown-item';
-        item.textContent = p.split(/[\\/]/).pop();   // folder name only (no full path)
-        item.title = p;                               // full path on hover only
-        item.addEventListener('click', e => {
-            e.stopPropagation();
+        const folderName = p.split(/[\\/]/).pop();
+        
+        // Row container
+        const projectRow = document.createElement('div');
+        projectRow.className = 'project-dropdown-row';
+        projectRow.title = p;
+        if (state.projectRoot === p) projectRow.classList.add('active');
+        
+        // Chevron button
+        const chev = document.createElement('button');
+        chev.className = 'proj-dropdown-chev-btn';
+        chev.type = 'button';
+        chev.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="proj-dropdown-chev"><polyline points="9 18 15 12 9 6"/></svg>`;
+        
+        // Project name button (opens project)
+        const nameBtn = document.createElement('button');
+        nameBtn.className = 'proj-dropdown-name-btn';
+        nameBtn.type = 'button';
+        nameBtn.innerHTML = `
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            <span></span>
+        `;
+        nameBtn.querySelector('span').textContent = folderName;
+        projectRow.addEventListener('click', e => {
+            if (chev.contains(e.target) || pencilBtn.contains(e.target) || trashBtn.contains(e.target)) {
+                return;
+            }
             projectDropdown.classList.remove('open');
             openProject(p, true);
         });
-        container.appendChild(item);
+
+        // Pencil button (Nouveau chat)
+        const pencilBtn = document.createElement('button');
+        pencilBtn.className = 'proj-dropdown-action-btn pencil';
+        pencilBtn.type = 'button';
+        pencilBtn.title = lang === 'en' ? 'New chat here' : 'Nouveau chat ici';
+        pencilBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
+        pencilBtn.addEventListener('click', async e => {
+            e.stopPropagation();
+            projectDropdown.classList.remove('open');
+            await openProject(p, true);
+            const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
+            if (typeof newConversation === 'function') {
+                newConversation(kind);
+            }
+        });
+
+        // Trash button (Supprimer)
+        const trashBtn = document.createElement('button');
+        trashBtn.className = 'proj-dropdown-action-btn trash';
+        trashBtn.type = 'button';
+        trashBtn.title = lang === 'en' ? 'Delete project' : 'Supprimer le projet';
+        trashBtn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`;
+        trashBtn.addEventListener('click', async e => {
+            e.stopPropagation();
+            const ok = await customConfirm(`"${folderName}"`, {
+                title: lang === 'en' ? 'Remove this project?' : 'Supprimer ce projet ?',
+                okText: lang === 'en' ? 'Delete' : 'Supprimer',
+                danger: true
+            });
+            if (ok) {
+                removeRecentProject(p);
+            }
+        });
+
+        projectRow.appendChild(chev);
+        projectRow.appendChild(nameBtn);
+        projectRow.appendChild(pencilBtn);
+        projectRow.appendChild(trashBtn);
+        container.appendChild(projectRow);
+
+        // Nested chats list container
+        const chatsContainer = document.createElement('div');
+        chatsContainer.className = 'project-dropdown-chats';
+        
+        chatsContainer.style.display = 'block';
+        chev.querySelector('.proj-dropdown-chev').classList.toggle('expanded', true);
+        
+        // Toggle chats list expand
+        chev.addEventListener('click', e => {
+            e.stopPropagation();
+            const isCollapsed = chatsContainer.style.display === 'none';
+            chatsContainer.style.display = isCollapsed ? 'block' : 'none';
+            chev.querySelector('.proj-dropdown-chev').classList.toggle('expanded', isCollapsed);
+        });
+
+        // Load nested chats
+        const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
+        const projectConvs = conversationsForProject(p, folderName, kind);
+
+        if (projectConvs.length === 0) {
+            chatsContainer.innerHTML = `<div class="dropdown-chat-empty">${lang === 'fr' ? 'Aucune conversation' : 'No conversations'}</div>`;
+        } else {
+            projectConvs.forEach(conv => {
+                const chatRow = document.createElement('button');
+                chatRow.className = 'dropdown-chat-item';
+                chatRow.type = 'button';
+                const currentStoreKey = kind === 'agents' ? 'currentAgentConvId' : 'currentConvId';
+                if (state[currentStoreKey] === conv.id) {
+                    chatRow.classList.add('active');
+                }
+                chatRow.innerHTML = `
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span></span>
+                `;
+                chatRow.querySelector('span').textContent = conv.title;
+                chatRow.addEventListener('click', e => {
+                    e.stopPropagation();
+                    projectDropdown.classList.remove('open');
+                    openProject(p, false);
+                    if (typeof loadConversation === 'function') {
+                        loadConversation(kind, conv.id);
+                    }
+                });
+                chatsContainer.appendChild(chatRow);
+            });
+        }
+        container.appendChild(chatsContainer);
     });
 }
 
@@ -350,12 +492,178 @@ const ICON_CHEVRON_D = '<svg width="10" height="10" viewBox="0 0 24 24"><polygon
 
 async function loadFileTree() {
     const fileTree = $('#file-tree');
-    // No project selected => the explorer must be completely empty (no leftover
-    // files/folders from a previously-open project).
-    if (!state.projectRoot) { if (fileTree) fileTree.innerHTML = ''; return; }
+    if (!fileTree) return;
+    const titleEl = document.querySelector('.sidebar-title span');
+    const stack = $('#sidebar-stack');
+    const lang = state.language || 'fr';
+
+    if (!state.projectRoot) {
+        document.body.classList.remove('project-open');
+        if (stack) {
+            stack.classList.add('no-project');
+            stack.classList.remove('project-open');
+        }
+        if (titleEl) {
+            titleEl.textContent = TRANSLATIONS[lang]['conversations-header'] || 'CONVERSATIONS';
+            titleEl.removeAttribute('data-i18n');
+        }
+        fileTree.innerHTML = '';
+        renderNoProjectConversations($('#sidebar-conversations-list'));
+        return;
+    }
+
+    document.body.classList.add('project-open');
+    if (stack) {
+        stack.classList.remove('no-project');
+        stack.classList.add('project-open');
+    }
+    if (titleEl) {
+        titleEl.textContent = TRANSLATIONS[lang]['files-header'] || 'FICHIERS';
+        titleEl.setAttribute('data-i18n', 'files-header');
+    }
     fileTree.innerHTML = '';
     const files = await fetchFiles('');
     renderTree(files, fileTree, 0);
+    renderSidebarConversations();
+}
+
+function renderNoProjectConversations(container) {
+    if (!container) return;
+    const lang = state.language || 'fr';
+    const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
+    const storeKey = kind === 'agents' ? 'agentConversations' : 'conversations';
+    const curIdKey = kind === 'agents' ? 'currentAgentConvId' : 'currentConvId';
+    const curId = state[curIdKey];
+    
+    const convs = (state[storeKey] || [])
+        .filter(c => !c.project)
+        .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
+
+    container.innerHTML = '';
+
+    // "+ Nouveau chat" button at the top of the conversations list
+    const newChatBtn = document.createElement('button');
+    newChatBtn.className = 'sidebar-no-project-new-chat-btn';
+    newChatBtn.type = 'button';
+    newChatBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>${lang === 'fr' ? 'Nouveau chat' : 'New chat'}</span>
+    `;
+    newChatBtn.addEventListener('click', () => {
+        if (typeof newConversation === 'function') {
+            newConversation(kind);
+        }
+    });
+    container.appendChild(newChatBtn);
+
+    if (convs.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'convo-empty';
+        empty.textContent = TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation';
+        container.appendChild(empty);
+        return;
+    }
+
+    convs.forEach(conv => {
+        const row = document.createElement('div');
+        row.className = 'convo-item' + (conv.id === curId ? ' active' : '');
+        row.title = conv.date || '';
+        
+        const titleEl = document.createElement('span');
+        titleEl.className = 'convo-title';
+        titleEl.textContent = conv.title;
+        titleEl.addEventListener('click', () => {
+            if (typeof loadConversation === 'function') {
+                loadConversation(kind, conv.id);
+            }
+        });
+        
+        const delBtn = document.createElement('button');
+        delBtn.className = 'convo-del';
+        delBtn.type = 'button';
+        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
+        delBtn.innerHTML = `
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        `;
+        delBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            if (typeof deleteConversation === 'function') {
+                deleteConversation(kind, conv.id);
+            }
+        });
+        
+        row.appendChild(titleEl);
+        row.appendChild(delBtn);
+        container.appendChild(row);
+    });
+}
+
+function renderSidebarConversations() {
+    const container = $('#sidebar-conversations-list');
+    if (!container) return;
+
+    const lang = state.language || 'fr';
+    const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
+    const curIdKey = kind === 'agents' ? 'currentAgentConvId' : 'currentConvId';
+    const curId = state[curIdKey];
+    const projectPath = state.projectRoot;
+    const folderName = projectPath ? projectPath.split(/[\\/]/).filter(Boolean).pop() : '';
+    if (!projectPath) {
+        renderNoProjectConversations(container);
+        return;
+    }
+    const convs = projectPath ? conversationsForProject(projectPath, folderName, kind) : [];
+
+    container.innerHTML = '';
+
+    const newChatBtn = document.createElement('button');
+    newChatBtn.className = 'sidebar-no-project-new-chat-btn';
+    newChatBtn.type = 'button';
+    newChatBtn.innerHTML = `
+        <svg viewBox="0 0 24 24" width="13" height="13" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>${lang === 'fr' ? 'Nouveau chat' : 'New chat'}</span>
+    `;
+    newChatBtn.addEventListener('click', () => {
+        if (typeof newConversation === 'function') newConversation(kind);
+    });
+    container.appendChild(newChatBtn);
+
+    if (!projectPath || convs.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'convo-empty';
+        empty.textContent = TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation';
+        container.appendChild(empty);
+        return;
+    }
+
+    convs.forEach(conv => {
+        const row = document.createElement('div');
+        row.className = 'convo-item' + (conv.id === curId ? ' active' : '');
+        row.title = conv.date || '';
+
+        const titleEl = document.createElement('span');
+        titleEl.className = 'convo-title';
+        titleEl.textContent = conv.title;
+        titleEl.addEventListener('click', () => {
+            if (typeof loadConversation === 'function') loadConversation(kind, conv.id);
+        });
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'convo-del';
+        delBtn.type = 'button';
+        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
+        delBtn.innerHTML = `
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        `;
+        delBtn.addEventListener('click', e => {
+            e.stopPropagation();
+            if (typeof deleteConversation === 'function') deleteConversation(kind, conv.id);
+        });
+
+        row.appendChild(titleEl);
+        row.appendChild(delBtn);
+        container.appendChild(row);
+    });
 }
 
 async function fetchFiles(subPath) {
@@ -1013,8 +1321,50 @@ async function checkAuthAndInit() {
 // One toggle (same icon, same place) collapses the sidebar to a thin rail.
 const sbToggle = $('#sidebar-toggle');
 if (sbToggle) sbToggle.addEventListener('click', () => {
-    const collapsed = $('#sidebar').classList.toggle('collapsed');
-    $('#app').classList.toggle('sidebar-collapsed', collapsed);
+    const sidebar = $('#sidebar');
+    const app = $('#app');
+    const collapsed = sidebar.classList.toggle('collapsed');
+    app.classList.toggle('sidebar-collapsed', collapsed);
+
+    if (collapsed) {
+        const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
+        if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
+        sidebar.style.width = '46px';
+        sidebar.style.minWidth = '46px';
+    } else {
+        const expandedWidth = sidebar.dataset.expandedWidth || '240px';
+        sidebar.style.width = expandedWidth;
+        sidebar.style.minWidth = '180px';
+    }
+
+    const projectBtn = $('#project-btn');
+    const stack = $('#sidebar-stack');
+    const profile = $('#sidebar-profile');
+    const profileName = $('#profile-name');
+    if (projectBtn) {
+        projectBtn.style.maxWidth = collapsed ? '0' : '';
+        projectBtn.style.paddingLeft = collapsed ? '0' : '';
+        projectBtn.style.paddingRight = collapsed ? '0' : '';
+        projectBtn.style.opacity = collapsed ? '0' : '';
+        projectBtn.style.transform = collapsed ? 'translateX(-14px)' : '';
+        projectBtn.style.pointerEvents = collapsed ? 'none' : '';
+    }
+    if (stack) {
+        stack.style.opacity = collapsed ? '0' : '';
+        stack.style.transform = collapsed ? 'translateX(-18px)' : '';
+        stack.style.pointerEvents = collapsed ? 'none' : '';
+    }
+    if (profile) {
+        profile.style.justifyContent = collapsed ? 'center' : '';
+        profile.style.gap = collapsed ? '0' : '';
+        profile.style.padding = collapsed ? '8px 0' : '';
+    }
+    if (profileName) {
+        profileName.style.maxWidth = collapsed ? '0' : '';
+        profileName.style.opacity = collapsed ? '0' : '';
+        profileName.style.transform = collapsed ? 'translateX(-12px)' : '';
+        profileName.style.pointerEvents = collapsed ? 'none' : '';
+    }
 });
 
 // Drag the edges to resize the sidebar and the AI panel.
@@ -1053,6 +1403,46 @@ function makeResizer(id, target, side) {
 }
 makeResizer('resizer-left', '#sidebar', 'left');
 makeResizer('resizer-right', '#ai-panel', 'right');
+
+const sidebarConvToggle = $('#sidebar-conversations-toggle');
+if (sidebarConvToggle) sidebarConvToggle.addEventListener('click', () => {
+    const section = $('#sidebar-conversations-section');
+    if (!section) return;
+    const collapsed = section.classList.toggle('collapsed');
+    sidebarConvToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+});
+
+const sidebarSplitter = $('#sidebar-splitter');
+if (sidebarSplitter) sidebarSplitter.addEventListener('mousedown', e => {
+    const stack = $('#sidebar-stack');
+    const files = $('#sidebar-files-section');
+    const conversations = $('#sidebar-conversations-section');
+    if (!stack || !files || !conversations || conversations.classList.contains('collapsed')) return;
+    e.preventDefault();
+    sidebarSplitter.classList.add('dragging');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+
+    const move = ev => {
+        const rect = stack.getBoundingClientRect();
+        const splitterH = sidebarSplitter.getBoundingClientRect().height || 9;
+        const total = rect.height - splitterH;
+        const minConvs = 112;
+        const minFiles = 118;
+        const next = Math.max(minConvs, Math.min(ev.clientY - rect.top, total - minFiles));
+        conversations.style.flex = `0 0 ${Math.round(next)}px`;
+        files.style.flex = '1 1 auto';
+    };
+    const up = () => {
+        sidebarSplitter.classList.remove('dragging');
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', up);
+});
 
 // Collapse / expand the agent model cards (chevron = house roof).
 const agCollapse = $('#agents-collapse');

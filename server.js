@@ -1254,6 +1254,37 @@ app.get('/api/gguf-engine', (req, res) => {
   });
 });
 
+// POST /api/gguf-load { name, ctx, gpuLayers, variant } -> explicitly load a
+// model into memory (LM Studio style). Streams NDJSON: loading -> ready/error.
+app.post('/api/gguf-load', async (req, res) => {
+  const b = req.body || {};
+  const name = path.basename(String(b.name || ''));
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  if (!name.toLowerCase().endsWith('.gguf')) {
+    try { res.write(JSON.stringify({ status: 'error', error: 'Nom de modèle invalide.' }) + '\n'); } catch {}
+    return res.end();
+  }
+  // Heartbeat so the client can show progress while the engine boots.
+  try { res.write(JSON.stringify({ status: 'loading', name }) + '\n'); } catch {}
+  const hb = setInterval(() => { try { res.write(JSON.stringify({ status: 'loading', name }) + '\n'); } catch {} }, 1500);
+  try {
+    await ensureEngine(name, b.variant || undefined, { ctx: b.ctx, gpuLayers: b.gpuLayers });
+    clearInterval(hb);
+    try { res.write(JSON.stringify({ status: 'ready', name, variant: engineVariant, ctx: engineOpts.split('|')[0] }) + '\n'); } catch {}
+    res.end();
+  } catch (e) {
+    clearInterval(hb);
+    try { res.write(JSON.stringify({ status: 'error', error: (e && e.message) || String(e) }) + '\n'); } catch {}
+    res.end();
+  }
+});
+
+// POST /api/gguf-unload -> eject the model currently held in memory.
+app.post('/api/gguf-unload', async (req, res) => {
+  try { await stopEngine(); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || String(e) }); }
+});
+
 // POST /api/gguf-delete { name }
 app.post('/api/gguf-delete', async (req, res) => {
   try {
