@@ -316,15 +316,21 @@ SLASH_HANDLERS.run = async (arg, out, lang) => {
             cmd);
         if (!ok) { _sysMsg(out, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); return; }
     }
-    _sysMsg(out, '$ ' + cmd);
     const t0 = Date.now();
     try {
         const res = await _postJSON('/api/exec', { command: cmd, cwd: state.projectRoot });
         const text = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim();
         const dur = Math.round((Date.now() - t0) / 100) / 10;
-        addMsg(out, 'ai', 'Terminal', text || (lang === 'en' ? `(no output, ${dur}s)` : `(aucune sortie, ${dur}s)`));
+        const html = (typeof commandCardHTML === 'function')
+            ? commandCardHTML(cmd, text, { lang, duration: dur })
+            : _toolCard(lang === 'en' ? 'Command' : 'Commande', `ok · ${dur}s`, `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(text || (lang === 'en' ? '(no output)' : '(aucune sortie)'))}</pre>`, false);
+        _sysHTML(out, html);
     } catch (e) {
-        _sysMsg(out, (lang === 'en' ? 'Command error: ' : 'Erreur commande : ') + e.message);
+        const dur = Math.round((Date.now() - t0) / 100) / 10;
+        const html = (typeof commandCardHTML === 'function')
+            ? commandCardHTML(cmd, '', { lang, error: e.message, duration: dur })
+            : _toolCard(lang === 'en' ? 'Command' : 'Commande', lang === 'en' ? 'error' : 'erreur', `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(e.message)}</pre>`, false);
+        _sysHTML(out, html);
     }
 };
 

@@ -1,12 +1,13 @@
 {
   "name": "connexion-ide",
-  "version": "1.0.16",
+  "version": "1.0.13",
   "description": "This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:server": "pkg . --targets node22-win-x64 --output native/dist/zaalis-server.exe"
+    "build:server": "pkg . --targets node22-win-x64 --output native/dist/zaalis-server.exe",
+    "build:cli": "pkg cli.js --targets node22-win-x64 --output native/dist/zaalis-cli.exe"
   },
   "pkg": {
     "assets": [

@@ -4,13 +4,14 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
+const { runAgentTurn } = require('./agent-engine');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
@@ -1344,6 +1345,70 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // ---------------------------------------------------------------------------
 // AI CHAT API
 // ---------------------------------------------------------------------------
+
+// POST /api/agent-chat
+// Shared Claude-Code-style loop used by both the Windows app and the CLI.
+// It keeps the provider dispatch in /api/chat, but centralizes project context
+// and local tools here so every client sees the same files and behavior.
+app.post('/api/agent-chat', async (req, res) => {
+  try {
+    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    const b = req.body || {};
+    const model = b.model;
+    const message = String(b.message || '');
+    if (!model || !message.trim()) {
+      return res.status(400).json({ error: 'model and message are required' });
+    }
+
+    const root = resolveBase(b.root || b.projectRoot);
+    const cookie = req.headers.cookie || '';
+    const callModel = async (payload) => {
+      const requestedTimeout = parseInt(payload.timeoutMs, 10);
+      const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? Math.max(1000, Math.min(requestedTimeout, 120000))
+        : 0;
+      const ac = timeoutMs ? new AbortController() : null;
+      const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
+      if (timer && timer.unref) timer.unref();
+      try {
+        const cleanPayload = { ...payload };
+        delete cleanPayload.timeoutMs;
+        return await fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          body: JSON.stringify(cleanPayload),
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      } catch (e) {
+        if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
+        throw e;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const result = await runAgentTurn({
+      root,
+      model,
+      submodel: b.submodel,
+      message,
+      config: b.config || {},
+      reasoningLevel: b.reasoningLevel,
+      images: Array.isArray(b.images) ? b.images : [],
+      history: Array.isArray(b.history) ? b.history : [],
+      permissionMode: b.permissionMode || 'supervised',
+      language: b.language || 'fr',
+      subAgentTimeoutMs: b.subAgentTimeoutMs,
+      callModel,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
