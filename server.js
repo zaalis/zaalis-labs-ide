@@ -4,13 +4,14 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
+const { runAgentTurn } = require('./agent-engine');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
@@ -566,10 +567,7 @@ app.post('/api/file', (req, res) => {
 // ---------------------------------------------------------------------------
 
 // POST /api/exec  { command, cwd }
-// Use execFile with cmd.exe instead of exec() to reliably hide the console
-// window on Windows. exec() spawns an intermediate cmd.exe shell that can
-// flash a visible window even with windowsHide:true, especially from a
-// pkg-packaged .exe. execFile + explicit cmd.exe avoids the extra shell.
+// macOS builds execute commands through the system POSIX shell.
 app.post('/api/exec', (req, res) => {
   try {
     const { command, cwd } = req.body;
@@ -577,11 +575,10 @@ app.post('/api/exec', (req, res) => {
 
     const execCwd = cwd || APP_DIR;
 
-    execFile('cmd.exe', ['/c', command], {
+    execFile('/bin/sh', ['-lc', command], {
       cwd: execCwd,
       timeout: 30000,
       maxBuffer: 1024 * 1024 * 5,
-      windowsHide: true
     }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
@@ -838,8 +835,8 @@ app.get('/api/doctor', async (req, res) => {
     try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), 'llama-server.exe') }; } catch {}
 
     const installerPaths = [
-      path.join(APP_DIR, 'native', 'installer', 'zaalis-setup.exe'),
-      path.join(process.cwd(), 'native', 'installer', 'zaalis-setup.exe'),
+      path.join(APP_DIR, 'native', 'installer', 'zaalis-macos-universal-installer.tar.gz'),
+      path.join(process.cwd(), 'native', 'installer', 'zaalis-macos-universal-installer.tar.gz'),
     ];
     const installer = installerPaths.some((p) => { try { return fs.existsSync(p); } catch { return false; } });
 
@@ -858,6 +855,7 @@ app.get('/api/doctor', async (req, res) => {
       version: APP_VERSION,
       node: process.version,
       npm, git, rg, ollama, gguf, installer,
+      installerPath: 'native/installer/zaalis-macos-universal-installer.tar.gz',
       scripts, projectGit,
       platform: process.platform,
     });
@@ -1345,6 +1343,70 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // AI CHAT API
 // ---------------------------------------------------------------------------
 
+// POST /api/agent-chat
+// Shared Claude-Code-style loop used by both the Windows app and the CLI.
+// It keeps the provider dispatch in /api/chat, but centralizes project context
+// and local tools here so every client sees the same files and behavior.
+app.post('/api/agent-chat', async (req, res) => {
+  try {
+    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    const b = req.body || {};
+    const model = b.model;
+    const message = String(b.message || '');
+    if (!model || !message.trim()) {
+      return res.status(400).json({ error: 'model and message are required' });
+    }
+
+    const root = resolveBase(b.root || b.projectRoot);
+    const cookie = req.headers.cookie || '';
+    const callModel = async (payload) => {
+      const requestedTimeout = parseInt(payload.timeoutMs, 10);
+      const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
+        ? Math.max(1000, Math.min(requestedTimeout, 120000))
+        : 0;
+      const ac = timeoutMs ? new AbortController() : null;
+      const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
+      if (timer && timer.unref) timer.unref();
+      try {
+        const cleanPayload = { ...payload };
+        delete cleanPayload.timeoutMs;
+        return await fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          body: JSON.stringify(cleanPayload),
+          ...(ac ? { signal: ac.signal } : {}),
+        });
+      } catch (e) {
+        if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
+        throw e;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+
+    const result = await runAgentTurn({
+      root,
+      model,
+      submodel: b.submodel,
+      message,
+      config: b.config || {},
+      reasoningLevel: b.reasoningLevel,
+      images: Array.isArray(b.images) ? b.images : [],
+      history: Array.isArray(b.history) ? b.history : [],
+      permissionMode: b.permissionMode || 'supervised',
+      language: b.language || 'fr',
+      subAgentTimeoutMs: b.subAgentTimeoutMs,
+      callModel,
+    });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 app.post('/api/chat', async (req, res) => {
@@ -1823,7 +1885,7 @@ app.get('/api/check-update', async (req, res) => {
     });
     if (!ghRes.ok) return res.status(502).json({ error: 'GitHub API error ' + ghRes.status });
     const release = await ghRes.json();
-    const asset = (release.assets || []).find(a => a.name === 'zaalis-setup.exe');
+    const asset = (release.assets || []).find(a => a.name === 'zaalis-macos-universal-installer.tar.gz');
     const latestVersion = release.tag_name || null;
     res.json({
       tag_name: latestVersion,
@@ -1845,7 +1907,7 @@ app.post('/api/update/download', (req, res) => {
     if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
-    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
+    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-macos-universal-installer.tar.gz');
     downloadProgress = 0;
     downloadedInstallerPath = null;
     try { fs.unlinkSync(dest); } catch {}
@@ -1892,17 +1954,15 @@ app.get('/api/update/progress', (req, res) => {
 
 app.post('/api/update/install', (req, res) => {
   try {
-    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
+    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-macos-universal-installer.tar.gz');
     if (!fs.existsSync(installerPath)) {
       return res.status(409).json({ error: 'Installer not downloaded yet.' });
     }
 
-    // Ask Explorer to open the installer. Explorer owns the process, so it is
-    // independent from the IDE/server process tree if the app needs to close.
-    const child = spawn('explorer.exe', [installerPath], {
+    // Ask Finder to open the downloaded installer archive.
+    const child = spawn('open', [installerPath], {
       detached: true,
       stdio: 'ignore',
-      windowsHide: true
     });
     child.unref();
 

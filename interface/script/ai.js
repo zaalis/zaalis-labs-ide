@@ -457,6 +457,32 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
     }
 }
 
+async function callAgentAI(model, submodel, message, images = [], signal = undefined, history = []) {
+    const { keys, ...safeConfig } = state.config;
+    const res = await fetch('/api/agent-chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            model,
+            submodel,
+            message,
+            root: state.projectRoot,
+            permissionMode: state.permissionMode,
+            language: state.language || 'fr',
+            config: safeConfig,
+            reasoningLevel: state.reasoningLevel,
+            images,
+            history
+        }),
+        signal
+    });
+    try {
+        return await res.json();
+    } catch {
+        return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
+    }
+}
+
 // Token / context meter.
 function updateTokenMeter() {
     const fill = $('#token-fill'), txt = $('#token-text');
@@ -557,22 +583,20 @@ async function sendChat(message) {
     // OR whenever the project changed since the last injection — so switching
     // project "à chaud" actually updates the assistant's context instead of
     // keeping the old tree. Weak models still don't get it on every turn.
-    const projectChanged = state.lastContextRoot !== state.projectRoot;
-    const needCtx = state.chatHistory.length === 0 || projectChanged;
-    const ctx = needCtx ? await projectContext(isLocal) : '';
+    // Project context is injected by /api/agent-chat, shared with the CLI.
     if (state.projectRoot) state.lastContextRoot = state.projectRoot;
-    let sys = codeAgentPrompt(isLocal, modelIdentity(model, submodel, lang)) + ctx;
+    let aiMessage = message + aiText;
     // /fast and /deep tweak the answer style without touching the tool protocol.
     if (state.responseStyle === 'fast') {
-        sys += lang === 'en'
+        aiMessage += lang === 'en'
             ? '\n\n[STYLE] Be concise: short, direct answers, minimal preamble.'
             : '\n\n[STYLE] Sois concis : réponses courtes et directes, peu de préambule.';
     } else if (state.responseStyle === 'deep') {
-        sys += lang === 'en'
+        aiMessage += lang === 'en'
             ? '\n\n[STYLE] Be thorough: consider edge cases, explain trade-offs, and verify with reads/searches when useful.'
             : '\n\n[STYLE] Sois approfondi : considère les cas limites, explique les compromis, et vérifie via lectures/recherches si utile.';
     }
-    const aiMessage = message + aiText;            // user message stays clean
+    // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
     const body = addTypingMsg($('#chat-messages'), modelLabel);
@@ -582,7 +606,7 @@ async function sendChat(message) {
     let history = state.chatHistory.slice();
     if (isLocal) {
         const win = contextWindow(model, submodel);
-        const sysTokens = estimateTokens(sys);
+        const sysTokens = 4096;
         const msgTokens = estimateTokens(aiMessage);
         const budget = Math.max(0, win - sysTokens - msgTokens - 2048); // reserve 2k for response
         let histTokens = 0;
@@ -601,7 +625,7 @@ async function sendChat(message) {
     chatAbort = controller;
     setChatBusy(true);
     try {
-        const data = await callAI(model, submodel, aiMessage, sys, images, controller.signal, history);
+        const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history);
         stopThinking(body);
         if (data.error) {
             body.textContent = data.error;
@@ -610,7 +634,8 @@ async function sendChat(message) {
             const duration = Date.now() - t0;
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
-            const formatted = formatAIResponse(data.response);
+            const responseText = data.response || '';
+            const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
             // Generated image = single rectangle (instant); text = streamed word-by-word.
             body.classList.toggle('has-image', isImg);
@@ -618,33 +643,40 @@ async function sendChat(message) {
                 body.innerHTML = reasoning + formatted;
             } else {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
-                await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, $('#chat-messages'));
+                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
+            }
+            if (Array.isArray(data.toolResults) && data.toolResults.length) {
+                body.insertAdjacentHTML('beforeend', data.toolResults.map(agentToolCardHTML).join(''));
+                followScroll($('#chat-messages'));
             }
 
             // Update conversation memory + token meter. For images, keep a light
             // placeholder in memory instead of the heavy base64 data URL.
-            let assistantMemory = data.response;
+            let assistantMemory = responseText;
             if (isImg) {
-                const am = data.response.match(/!\[([^\]]*)\]/);
+                const am = responseText.match(/!\[([^\]]*)\]/);
                 assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
             }
-            state.chatHistory.push({ role: 'user', content: message }, { role: 'assistant', content: assistantMemory });
+            if (Array.isArray(data.toolResults) && data.toolResults.length) {
+                const toolMemory = data.toolResults
+                    .map(t => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
+                    .join('\n\n');
+                assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
+            }
+            if (Array.isArray(data.todos) && data.todos.length) {
+                const todoMemory = data.todos
+                    .map(t => `- [${t.status || 'pending'}] ${t.content || ''}`)
+                    .join('\n');
+                assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
+            }
+            state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
             if (data.usage && data.usage.input != null) {
                 // Use actual token counts from the API when available.
                 state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
             } else {
-                state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0) + estimateTokens(codeAgentPrompt(isLocal));
+                state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
             }
             updateTokenMeter();
-
-            // Check if AI wants to modify a file / run a command.
-            const applied = await handleAIResponse(data.response, modelLabel);
-            // If diff edits failed to apply, feed the errors back so it self-corrects.
-            if (applied && applied.editErrors && applied.editErrors.length) {
-                await resolveEditRetries(applied.editErrors, model, submodel, isLocal, lang);
-            }
-            // Check if AI asked to read project files, then let it analyze them.
-            await resolveReadRequests(data.response, model, submodel, isLocal, lang);
         }
     } catch (err) {
         stopThinking(body);
@@ -748,6 +780,30 @@ function diffCardHTML(path, hunks) {
     const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
     const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
     return `<details class="file-card diff-card" open><summary>${icon}<span class="file-card-name">${escapeHTML(path)}</span><span class="diff-badge">diff</span>${chevron}</summary><div class="file-card-body diff-body">${rows.join('')}</div></details>`;
+}
+
+function commandCardHTML(cmd, output, opts = {}) {
+    const lang = opts.lang || state.language || 'fr';
+    const failed = !!opts.error;
+    const duration = opts.duration != null ? ` · ${opts.duration}s` : '';
+    const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : `ok${duration}`;
+    const title = lang === 'en' ? 'Command' : 'Commande';
+    const empty = lang === 'en' ? '(no output)' : '(aucune sortie)';
+    const text = `$ ${cmd}\n\n${failed ? opts.error : ((output || '').trim() || empty)}`;
+    const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>';
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    return `<details class="file-card tool-card command-card"><summary>${icon}<span class="file-card-name">${escapeHTML(title)}</span><span class="tool-badge">${escapeHTML(badge)}</span>${chevron}</summary><div class="file-card-body tool-card-body"><pre class="tool-pre">${escapeHTML(text)}</pre></div></details>`;
+}
+
+function agentToolCardHTML(result) {
+    const lang = state.language || 'fr';
+    const failed = !!(result && (result.error || result.blocked));
+    const title = (result && (result.summary || result.tool)) || (lang === 'en' ? 'Tool' : 'Outil');
+    const badge = failed ? (lang === 'en' ? 'blocked' : 'bloque') : 'ok';
+    const text = (result && result.text) ? String(result.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
+    const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82V9a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82z"/></svg>';
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    return `<details class="file-card tool-card command-card"><summary>${icon}<span class="file-card-name">${escapeHTML(title)}</span><span class="tool-badge">${escapeHTML(badge)}</span>${chevron}</summary><div class="file-card-body tool-card-body"><pre class="tool-pre">${escapeHTML(text)}</pre></div></details>`;
 }
 
 // Apply every ```edit block. Returns { wroteAny, errors:[{path,error}] }.
@@ -951,7 +1007,7 @@ async function handleAIResponse(response, agentName, container) {
                 continue;
             }
         }
-        addMsg(out, 'system', null, '$ ' + cmd);
+        const t0 = Date.now();
         try {
             const res = await fetch('/api/exec', {
                 method: 'POST',
@@ -960,16 +1016,16 @@ async function handleAIResponse(response, agentName, container) {
             });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const execRes = await res.json();
+            const duration = Math.round((Date.now() - t0) / 100) / 10;
             if (execRes.error) {
-                addMsg(out, 'system', null,
-                    `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${execRes.error}`);
+                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: execRes.error, duration }), true);
             } else {
                 const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
-                addMsg(out, 'ai', 'Terminal', text || (lang === 'en' ? '(no output)' : '(aucune sortie)'));
+                addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
             }
         } catch (err) {
-            addMsg(out, 'system', null,
-                `${lang === 'en' ? 'Command error' : 'Erreur commande'}: ${err.message}`);
+            const duration = Math.round((Date.now() - t0) / 100) / 10;
+            addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: err.message, duration }), true);
         }
     }
 

@@ -316,15 +316,21 @@ SLASH_HANDLERS.run = async (arg, out, lang) => {
             cmd);
         if (!ok) { _sysMsg(out, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); return; }
     }
-    _sysMsg(out, '$ ' + cmd);
     const t0 = Date.now();
     try {
         const res = await _postJSON('/api/exec', { command: cmd, cwd: state.projectRoot });
         const text = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim();
         const dur = Math.round((Date.now() - t0) / 100) / 10;
-        addMsg(out, 'ai', 'Terminal', text || (lang === 'en' ? `(no output, ${dur}s)` : `(aucune sortie, ${dur}s)`));
+        const html = (typeof commandCardHTML === 'function')
+            ? commandCardHTML(cmd, text, { lang, duration: dur })
+            : _toolCard(lang === 'en' ? 'Command' : 'Commande', `ok · ${dur}s`, `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(text || (lang === 'en' ? '(no output)' : '(aucune sortie)'))}</pre>`, false);
+        _sysHTML(out, html);
     } catch (e) {
-        _sysMsg(out, (lang === 'en' ? 'Command error: ' : 'Erreur commande : ') + e.message);
+        const dur = Math.round((Date.now() - t0) / 100) / 10;
+        const html = (typeof commandCardHTML === 'function')
+            ? commandCardHTML(cmd, '', { lang, error: e.message, duration: dur })
+            : _toolCard(lang === 'en' ? 'Command' : 'Commande', lang === 'en' ? 'error' : 'erreur', `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(e.message)}</pre>`, false);
+        _sysHTML(out, html);
     }
 };
 
@@ -361,7 +367,7 @@ SLASH_HANDLERS.doctor = async (arg, out, lang) => {
     html += line(data.rg && data.rg.available, 'ripgrep', (data.rg && data.rg.available) ? data.rg.version : (lang === 'en' ? 'absent (JS fallback used)' : 'absent (repli JS utilisé)'), data.rg && !data.rg.available);
     html += line(data.ollama && data.ollama.reachable, 'Ollama', data.ollama && data.ollama.reachable ? `${data.ollama.models} ${lang === 'en' ? 'models' : 'modèles'}` : (lang === 'en' ? 'unreachable' : 'injoignable'), data.ollama && !data.ollama.reachable);
     html += line(data.gguf && data.gguf.installed, 'GGUF', data.gguf ? `${data.gguf.variant}${data.gguf.installed ? '' : (lang === 'en' ? ' (not installed)' : ' (non installé)')}` : '', data.gguf && !data.gguf.installed);
-    html += line(!!data.installer, lang === 'en' ? 'Installer' : 'Installateur', data.installer ? 'native/installer/zaalis-setup.exe' : (lang === 'en' ? 'missing' : 'absent'), !data.installer);
+    html += line(!!data.installer, lang === 'en' ? 'Installer' : 'Installateur', data.installer ? (data.installerPath || 'native/installer/zaalis-macos-universal-installer.tar.gz') : (lang === 'en' ? 'missing' : 'absent'), !data.installer);
     html += line((data.scripts || []).length > 0, lang === 'en' ? 'npm scripts' : 'scripts npm', (data.scripts || []).join(', '));
     html += line(!!data.projectGit, lang === 'en' ? 'Project git' : 'Git projet', data.projectGit ? `branch ${data.projectGit}` : (lang === 'en' ? 'not a repo / no project' : 'pas un dépôt / pas de projet'), !data.projectGit);
     html += line(cfgKeys.length > 0, lang === 'en' ? 'API keys' : 'Clés API', cfgKeys.length ? cfgKeys.join(', ') : (lang === 'en' ? 'none configured' : 'aucune configurée'), cfgKeys.length === 0);

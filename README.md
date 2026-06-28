@@ -1,54 +1,42 @@
-# zaalis labs IDE
+# zaalis IDE macOS
 
-Local IDE by zaalis labs with a web interface, local Node.js server, and native Windows application powered by WebView2.
+Packages portables macOS x64 et arm64.
 
-## Launch with the Windows installer
-
-Download and run:
-
-[zaalis-setup.exe](https://github.com/zaalis/zaalis-labs-ide/raw/main/native/installer/zaalis-setup.exe)
-
-The installer adds the application to Windows and creates launch shortcuts.
-
-## Launch manually
-
-Prerequisite: Node.js.
-
-```bash
-npm install
-npm start
-```
-
-Then open:
-
-```text
-http://localhost:3000
-```
-
-## Rebuild the Windows application
-
-Prerequisites:
-
-- Node.js
-- Visual Studio with the Desktop C++ workload
-- Inno Setup 6
+Build depuis Windows:
 
 ```bat
-native\build_server.bat
-native\build_shell.bat
-native\build_installer.bat
+native\build_macos.bat
 ```
 
-The generated installer can be found here:
+Sorties:
 
 ```text
-native\installer\zaalis-setup.exe
+native\installer\zaalis-macos-x64.tar.gz
+native\installer\zaalis-macos-arm64.tar.gz
+native\installer\zaalis-macos-universal-installer.tar.gz
 ```
 
-## License and copyright
+Installation sur macOS:
 
-Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
+Decompressez `zaalis-macos-universal-installer.tar.gz`, puis double-cliquez sur
+`Installer zaalis IDE.command`.
 
-zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) file and the [NOTICE](NOTICE) file included in this repository.
+Lancement portable:
 
-No ownership rights are transferred by accessing, cloning, using, modifying, or contributing to this repository.
+```sh
+mkdir -p zaalis-macos
+tar -xzf zaalis-macos-arm64.tar.gz -C zaalis-macos
+cd zaalis-macos
+chmod +x zaalis-server bin/zaalis zaalis-ide.command
+codesign --sign - zaalis-server bin/zaalis 2>/dev/null || true
+./zaalis-ide.command
+```
+
+Sur Mac Intel, utilisez `zaalis-macos-x64.tar.gz`.
+
+CLI:
+
+```sh
+./bin/zaalis
+./bin/zaalis "analyse le dossier"
+```
