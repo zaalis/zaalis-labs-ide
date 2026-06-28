@@ -1,6 +1,6 @@
 # zaalis IDE Linux
 
-Package portable Linux x64.
+Package Electron Linux x64 autonome.
 
 Build depuis Windows:
 
@@ -20,19 +20,30 @@ Installation sur Linux:
 Double-cliquez sur `zaalis-linux-x64.deb`, puis installez avec l'application
 logiciels de votre distribution.
 
+Apres installation:
+
+```sh
+zaalis
+zaalis ide
+zaalis-ide
+```
+
+Le raccourci `zaalis IDE` ouvre une vraie application Electron locale avec
+Chromium embarque. Chrome, Chromium, Edge ou Brave ne sont pas requis.
+
 Lancement portable:
 
 ```sh
 mkdir -p zaalis-linux
 tar -xzf zaalis-linux-x64.tar.gz -C zaalis-linux
 cd zaalis-linux
-chmod +x zaalis-server bin/zaalis zaalis-ide.sh
-./zaalis-ide.sh
+chmod +x zaalis-ide resources/app/bundle/zaalis-server resources/app/bundle/bin/zaalis
+./zaalis-ide
 ```
 
 CLI:
 
 ```sh
-./bin/zaalis
-./bin/zaalis "analyse le dossier"
+./resources/app/bundle/bin/zaalis
+./resources/app/bundle/bin/zaalis "analyse le dossier"
 ```

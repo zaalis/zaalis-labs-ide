@@ -13,9 +13,13 @@ server-data/
 
 # Generated native builds and installers
 native/dist/
+native/dist-linux*/
+native/.electron-cache/
 native/installer/
 !native/installer/
-!native/installer/zaalis-setup.exe
+native/installer/*.tar.gz
+native/installer/*.deb
+native/installer/*.dmg
 native/packages/*.zip
 # Third-party tunnel binary (vendored locally; already bundled in the installer)
 native/cloudflared.exe

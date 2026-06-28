@@ -175,8 +175,7 @@ $('#open-project-btn').addEventListener('click', async e => {
     projectDropdown.classList.remove('open');
     // Open the native OS folder picker via the local server.
     try {
-        const res = await fetch('/api/pick-folder', { method: 'POST' });
-        const data = await res.json();
+        const data = await pickZaalisFolder();
         if (data && data.path) {
             openProject(data.path, true);
             return;

@@ -1,0 +1,8 @@
+{
+  "name": "zaalis-ide-electron",
+  "version": "1.0.13",
+  "description": "Electron shell for zaalis IDE",
+  "main": "main.js",
+  "private": true,
+  "license": "ISC"
+}

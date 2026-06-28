@@ -1,50 +1,24 @@
-# zaalis IDE - application native Windows (C++ + WebView2)
+# zaalis IDE - Linux Electron package
 
-Coquille C++ qui demarre le serveur Node embarque en arriere-plan, affiche l'interface dans une fenetre WebView2 et arrete le serveur automatiquement a la fermeture.
+This Linux copy ships as a local Electron desktop app with its own Chromium
+runtime, the zaalis local server, and the zaalis CLI. The Debian installer can
+be opened with the system software installer on common Debian/Ubuntu desktops.
 
-```text
-[zaalis.exe] -> [zaalis-server.exe, port 3000] -> interface WebView2
-```
-
-## Lancer l'app native
-
-Double-clic sur:
-
-```text
-native\dist\zaalis.exe
-```
-
-Le dossier `native\dist\` est genere par les scripts de build et contient:
-
-- `zaalis.exe`
-- `zaalis-server.exe`
-- `pickfolder.exe`
-- `interface\`
-
-Le dossier `server-data\` est cree automatiquement au premier lancement pour les comptes, sessions et historiques locaux.
-
-## Reconstruire
-
-Prerequis:
-
-- Node.js
-- Visual Studio avec la charge C++ Desktop
-- Inno Setup 6 pour l'installateur
+Build:
 
 ```bat
-native\build_server.bat
-native\build_shell.bat
-native\build_installer.bat
+native\build_linux.bat
 ```
 
-Resultat installateur:
+Outputs:
 
 ```text
-native\installer\zaalis-setup.exe
+native\installer\zaalis-linux-x64.tar.gz
+native\installer\zaalis-linux-x64.deb
 ```
 
-## Details techniques
-
-- `server.js` sert les fichiers depuis `interface\`.
-- `native\main.cpp` lance `zaalis-server.exe` et ouvre `http://localhost:3000`.
-- `native\installer.iss` copie `zaalis.exe`, `zaalis-server.exe`, `pickfolder.exe` et le dossier `interface\`.
+The `.deb` installs the app under `/opt/zaalis-ide`, adds a desktop launcher,
+and exposes `zaalis` plus `zaalis-ide` in the terminal. The graphical IDE is
+now a real Electron application and does not require Chrome, Chromium, Edge, or
+Brave to be installed separately.
+Windows installer files are intentionally not kept in this Linux package folder.

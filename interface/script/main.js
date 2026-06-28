@@ -244,8 +244,7 @@ $('#save-btn').addEventListener('click', async () => {
 const pickFolderBtn = $('#settings-pick-folder-btn');
 if (pickFolderBtn) pickFolderBtn.addEventListener('click', async () => {
     try {
-        const res = await fetch('/api/pick-folder', { method: 'POST' });
-        const data = await res.json();
+        const data = await pickZaalisFolder();
         if (data && data.path) {
             const inp = $('#settings-default-folder');
             if (inp) inp.value = data.path;
@@ -1054,13 +1053,13 @@ if (confirmUpdateBtn) {
                         if (progContainer) progContainer.classList.remove('hidden');
                         if (waiting) waiting.classList.add('hidden');
                         progressBar.style.width = '100%';
-                        downloadedUpdatePath = pData.dest || data.dest || "C:\\Users\\boque\\Downloads\\zaalis-update.exe";
+                        downloadedUpdatePath = pData.dest || data.dest || "";
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis lancez zaalis-update.exe depuis votre dossier Telechargements.";
+                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis ouvrez le fichier d'installation telecharge.";
                         // Un seul bouton orange "Fermer l'IDE" qui ferme totalement l'app.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
