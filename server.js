@@ -36,12 +36,8 @@ try {
 // stable per-user location that survives app updates and reinstalls
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() {
-  // When packaged with pkg, the executable lives in a read-only, often
-  // root-owned install location (e.g. /opt on Linux, Program Files on
-  // Windows). Writing server-data next to it then fails with EACCES and the
-  // server crashes on boot. Persist user data in a stable per-user directory
-  // instead, so accounts/chats survive updates and a system-wide install can
-  // still write as a normal user.
+  // When packaged with pkg, the executable can live in a read-only install
+  // location. Keep accounts/chats/session secret in a stable per-user folder.
   if (process.pkg) {
     if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
       return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
@@ -49,16 +45,12 @@ function resolveDataDir() {
     if (process.platform === 'darwin') {
       return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
     }
-    // Linux / other POSIX: follow the XDG Base Directory spec.
     const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
     return path.join(base, 'zaalis', 'server-data');
   }
   return path.join(APP_DIR, 'server-data');
 }
 
-// Resolve the writable data dir, falling back to a temp location if the
-// preferred per-user directory cannot be created. This guarantees the server
-// boots even on unusual installs rather than dying with EACCES.
 function ensureWritableDataDir() {
   const preferred = resolveDataDir();
   try {
@@ -608,7 +600,7 @@ app.post('/api/exec', (req, res) => {
     execFile('/bin/sh', ['-lc', command], {
       cwd: execCwd,
       timeout: 30000,
-      maxBuffer: 1024 * 1024 * 5,
+      maxBuffer: 1024 * 1024 * 5
     }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
@@ -1378,13 +1370,41 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // It keeps the provider dispatch in /api/chat, but centralizes project context
 // and local tools here so every client sees the same files and behavior.
 app.post('/api/agent-chat', async (req, res) => {
+  let wantsStream = false;
+  let streamOpen = false;
+  const openStream = (status = 200) => {
+    if (streamOpen) return;
+    streamOpen = true;
+    if (res.headersSent) return;
+    res.status(status);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  };
+  const writeStreamEvent = (event) => {
+    try {
+      openStream();
+      res.write(JSON.stringify(event) + '\n');
+    } catch {}
+  };
+  const respondError = (status, message) => {
+    if (wantsStream) {
+      openStream(status);
+      try { res.write(JSON.stringify({ type: 'error', error: message }) + '\n'); } catch {}
+      try { res.end(); } catch {}
+      return;
+    }
+    res.status(status).json({ error: message });
+  };
   try {
-    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
     const b = req.body || {};
+    wantsStream = b.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
+    if (req.isMobile) return respondError(403, 'Action indisponible en mode mobile.');
     const model = b.model;
     const message = String(b.message || '');
     if (!model || !message.trim()) {
-      return res.status(400).json({ error: 'model and message are required' });
+      return respondError(400, 'model and message are required');
     }
 
     const root = resolveBase(b.root || b.projectRoot);
@@ -1430,10 +1450,22 @@ app.post('/api/agent-chat', async (req, res) => {
       language: b.language || 'fr',
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
+      emitEvent: wantsStream ? writeStreamEvent : undefined,
     });
-    res.json(result);
+    if (wantsStream) {
+      writeStreamEvent({ type: 'done', result });
+      try { res.end(); } catch {}
+    } else {
+      res.json(result);
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (wantsStream) {
+      openStream(res.headersSent ? 200 : 500);
+      try { res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n'); } catch {}
+      try { res.end(); } catch {}
+    } else {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
@@ -1992,7 +2024,7 @@ app.post('/api/update/install', (req, res) => {
     // Ask the desktop environment to open the Debian package.
     const child = spawn('xdg-open', [installerPath], {
       detached: true,
-      stdio: 'ignore',
+      stdio: 'ignore'
     });
     child.unref();
 
@@ -2136,18 +2168,19 @@ app.get('/m', (req, res) => {
 // Kill the tunnel when the server exits.
 process.on('exit', () => { try { if (cfProc) cfProc.kill(); } catch {} });
 
-// Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
-// Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
-// fichiers avant que l'utilisateur lance l'installateur manuellement.
+// Ferme totalement l'IDE. Sous Electron Linux/macOS, la fenetre observe l'arret
+// du serveur et quitte aussi l'app; sous Windows, on ferme le shell WebView.
 app.post('/api/app/close', (req, res) => {
   res.json({ success: true });
   setTimeout(() => {
     try { if (engineProc) engineProc.kill(); } catch {}
-    try {
-      spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
-        detached: true, stdio: 'ignore', windowsHide: true
-      }).unref();
-    } catch {}
+    if (process.platform === 'win32') {
+      try {
+        spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
+          detached: true, stdio: 'ignore', windowsHide: true
+        }).unref();
+      } catch {}
+    }
     process.exit(0);
   }, 300);
 });

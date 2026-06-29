@@ -457,11 +457,60 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
     }
 }
 
-async function callAgentAI(model, submodel, message, images = [], signal = undefined, history = []) {
+async function readAgentEventStream(res, onEvent) {
+    const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+    if (!reader) {
+        try { return await res.json(); }
+        catch { return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` }; }
+    }
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let result = null;
+    let streamError = null;
+    let parseError = false;
+    const handleLine = (line) => {
+        const clean = line.trim();
+        if (!clean) return;
+        let event = null;
+        try {
+            event = JSON.parse(clean);
+        } catch {
+            parseError = true;
+            return;
+        }
+        if (event.type === 'done') {
+            result = event.result || {};
+        } else if (event.type === 'error') {
+            streamError = event.error || 'Erreur agent.';
+        } else if (typeof onEvent === 'function') {
+            onEvent(event);
+        }
+    };
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        for (const line of lines) handleLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer) handleLine(buffer);
+    if (result) return result;
+    if (streamError) return { error: streamError };
+    if (parseError) return { error: `Flux agent invalide (HTTP ${res.status} ${res.statusText}).` };
+    return { error: `Reponse agent incomplete (HTTP ${res.status} ${res.statusText}).` };
+}
+
+async function callAgentAI(model, submodel, message, images = [], signal = undefined, history = [], options = {}) {
     const { keys, ...safeConfig } = state.config;
+    const wantsStream = typeof options.onEvent === 'function';
     const res = await fetch('/api/agent-chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+            'Content-Type': 'application/json',
+            ...(wantsStream ? { 'Accept': 'application/x-ndjson' } : {})
+        },
         body: JSON.stringify({
             model,
             submodel,
@@ -472,10 +521,12 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             config: safeConfig,
             reasoningLevel: state.reasoningLevel,
             images,
-            history
+            history,
+            stream: wantsStream
         }),
         signal
     });
+    if (wantsStream) return readAgentEventStream(res, options.onEvent);
     try {
         return await res.json();
     } catch {
@@ -554,8 +605,152 @@ function reasoningBlock(thinking, durationMs) {
 
 // --- Send / Stop button state ---
 let chatAbort = null;
+let pendingChatDraft = null;
+let pendingChatDrawer = null;
+let agentTaskRunning = false;
+let pendingAgentDraft = null;
+let pendingAgentDrawer = null;
 const SEND_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
 const STOP_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+function createQueuedDraft(message) {
+    const consumed = consumeAttachments();
+    return { message: String(message || '').trim(), ...consumed };
+}
+function createChatDraft(message) { return createQueuedDraft(message); }
+function createAgentDraft(message) { return createQueuedDraft(message); }
+function ensurePendingChatDrawer() {
+    if (pendingChatDrawer) return pendingChatDrawer;
+    const input = $('#chat-input');
+    const area = input && input.closest('.chat-input-area');
+    pendingChatDrawer = document.createElement('div');
+    pendingChatDrawer.className = 'chat-pending-drawer';
+    pendingChatDrawer.innerHTML = `
+        <div class="chat-pending-head">En attente</div>
+        <div class="chat-pending-row">
+            <span class="chat-pending-text"></span>
+            <button type="button" class="chat-pending-cancel" aria-label="Annuler le message en attente" title="Annuler">&times;</button>
+        </div>`;
+    const cancel = pendingChatDrawer.querySelector('.chat-pending-cancel');
+    cancel.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        restorePendingChatToInput();
+    });
+    if (area && input) area.insertBefore(pendingChatDrawer, input);
+    return pendingChatDrawer;
+}
+function ensurePendingAgentDrawer() {
+    if (pendingAgentDrawer) return pendingAgentDrawer;
+    const input = $('#agents-input');
+    const area = input && input.closest('.chat-input-area');
+    pendingAgentDrawer = document.createElement('div');
+    pendingAgentDrawer.className = 'chat-pending-drawer agents-pending-drawer';
+    pendingAgentDrawer.innerHTML = `
+        <div class="chat-pending-head">En attente</div>
+        <div class="chat-pending-row">
+            <span class="chat-pending-text"></span>
+            <button type="button" class="chat-pending-cancel" aria-label="Annuler la tache en attente" title="Annuler">&times;</button>
+        </div>`;
+    pendingAgentDrawer.querySelector('.chat-pending-cancel').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        restorePendingAgentToInput();
+    });
+    if (area && input) area.insertBefore(pendingAgentDrawer, input);
+    return pendingAgentDrawer;
+}
+function renderPendingChat() {
+    const drawer = ensurePendingChatDrawer();
+    const input = $('#chat-input');
+    const area = input && input.closest('.chat-input-area');
+    const on = !!pendingChatDraft;
+    drawer.classList.toggle('show', on);
+    if (area) area.classList.toggle('has-pending-chat', on);
+    if (on) {
+        drawer.querySelector('.chat-pending-text').textContent = pendingChatDraft.message || '';
+    }
+}
+function queuePendingChat(message) {
+    const lang = state.language || 'fr';
+    if (pendingChatDraft) {
+        showToast(lang === 'en' ? 'Already queued' : 'Deja en attente',
+            lang === 'en' ? 'Only one message can wait at a time.' : 'Un seul message peut etre en attente a la fois.',
+            { icon: '!', duration: 2600 });
+        return false;
+    }
+    pendingChatDraft = createChatDraft(message);
+    renderPendingChat();
+    return true;
+}
+function restorePendingChatToInput() {
+    if (!pendingChatDraft) return false;
+    const draft = pendingChatDraft;
+    pendingChatDraft = null;
+    renderPendingChat();
+    const input = $('#chat-input');
+    if (input) {
+        const existing = input.value.trim();
+        input.value = draft.message + (existing ? '\n' + existing : '');
+        autoGrow(input);
+        input.focus();
+    }
+    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+        state.attachments = draft.attachments.concat(state.attachments || []);
+        renderAttachments();
+    }
+    return true;
+}
+function takePendingChatDraft() {
+    const draft = pendingChatDraft;
+    pendingChatDraft = null;
+    renderPendingChat();
+    return draft;
+}
+function renderPendingAgent() {
+    const drawer = ensurePendingAgentDrawer();
+    const input = $('#agents-input');
+    const area = input && input.closest('.chat-input-area');
+    const on = !!pendingAgentDraft;
+    drawer.classList.toggle('show', on);
+    if (area) area.classList.toggle('has-pending-chat', on);
+    if (on) drawer.querySelector('.chat-pending-text').textContent = pendingAgentDraft.message || '';
+}
+function queuePendingAgent(message) {
+    const lang = state.language || 'fr';
+    if (pendingAgentDraft) {
+        showToast(lang === 'en' ? 'Already queued' : 'Deja en attente',
+            lang === 'en' ? 'Only one agent task can wait at a time.' : 'Une seule tache Agents peut etre en attente a la fois.',
+            { icon: '!', duration: 2600 });
+        return false;
+    }
+    pendingAgentDraft = createAgentDraft(message);
+    renderPendingAgent();
+    return true;
+}
+function restorePendingAgentToInput() {
+    if (!pendingAgentDraft) return false;
+    const draft = pendingAgentDraft;
+    pendingAgentDraft = null;
+    renderPendingAgent();
+    const input = $('#agents-input');
+    if (input) {
+        const existing = input.value.trim();
+        input.value = draft.message + (existing ? '\n' + existing : '');
+        autoGrow(input);
+        input.focus();
+    }
+    if (Array.isArray(draft.attachments) && draft.attachments.length) {
+        state.attachments = draft.attachments.concat(state.attachments || []);
+        renderAttachments();
+    }
+    return true;
+}
+function takePendingAgentDraft() {
+    const draft = pendingAgentDraft;
+    pendingAgentDraft = null;
+    renderPendingAgent();
+    return draft;
+}
 function setChatBusy(on) {
     const btn = $('#send-btn');
     document.body.classList.toggle('ai-busy', !!on);
@@ -566,15 +761,19 @@ function setChatBusy(on) {
     btn.innerHTML = on ? STOP_ICON : SEND_ICON;
 }
 
-async function sendChat(message) {
+async function sendChat(input) {
     const model = modelSelect.value;
     const submodel = submodelSelect.value;
 
     const lang = state.language || 'fr';
-    const { aiText, names, images } = consumeAttachments();
+    const draft = (input && typeof input === 'object') ? input : createChatDraft(input);
+    const message = draft.message || '';
+    const { aiText = '', names = [], images = [] } = draft;
 
     const isLocal = model === 'local' || model === 'gguf';
     const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    let completed = false;
+    let aborted = false;
 
     // Compact the running context first if it's getting close to the limit.
     await maybeCompact(model, submodel);
@@ -599,6 +798,8 @@ async function sendChat(message) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
+    const liveActivity = createLiveAgentActivity($('#chat-messages'));
+    let liveActivityFinished = false;
     const body = addTypingMsg($('#chat-messages'), modelLabel);
 
     // For local models, limit history to avoid overflowing the context window.
@@ -625,12 +826,20 @@ async function sendChat(message) {
     chatAbort = controller;
     setChatBusy(true);
     try {
-        const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history);
+        const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
+            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+        });
         stopThinking(body);
         if (data.error) {
+            if (liveActivity) liveActivity.fail(data.error);
             body.textContent = data.error;
             body.classList.add('error');
         } else {
+            completed = true;
+            if (liveActivity) {
+                liveActivity.finish(data);
+                liveActivityFinished = true;
+            }
             const duration = Date.now() - t0;
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
@@ -645,8 +854,8 @@ async function sendChat(message) {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
                 await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
             }
-            if (Array.isArray(data.toolResults) && data.toolResults.length) {
-                body.insertAdjacentHTML('beforeend', data.toolResults.map(agentToolCardHTML).join(''));
+            if (!liveActivity && Array.isArray(data.toolResults) && data.toolResults.length) {
+                body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
                 followScroll($('#chat-messages'));
             }
 
@@ -681,8 +890,12 @@ async function sendChat(message) {
     } catch (err) {
         stopThinking(body);
         if (err && err.name === 'AbortError') {
+            aborted = true;
+            if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
             body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
+            restorePendingChatToInput();
         } else {
+            if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.');
             body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.';
             body.classList.add('error');
         }
@@ -692,6 +905,10 @@ async function sendChat(message) {
     }
 
     saveConversation();
+    if (completed && !aborted && pendingChatDraft) {
+        const next = takePendingChatDraft();
+        if (next) setTimeout(() => sendChat(next), 0);
+    }
 }
 
 // Handle AI file modifications based on permission mode.
@@ -779,7 +996,7 @@ function diffCardHTML(path, hunks) {
     if (rows.length && rows[rows.length - 1] === '<div class="diff-sep"></div>') rows.pop();
     const icon = '<svg class="file-card-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
     const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
-    return `<details class="file-card diff-card" open><summary>${icon}<span class="file-card-name">${escapeHTML(path)}</span><span class="diff-badge">diff</span>${chevron}</summary><div class="file-card-body diff-body">${rows.join('')}</div></details>`;
+    return `<details class="file-card diff-card"><summary>${icon}<span class="file-card-name">${escapeHTML(path)}</span><span class="diff-badge">diff</span>${chevron}</summary><div class="file-card-body diff-body">${rows.join('')}</div></details>`;
 }
 
 function commandCardHTML(cmd, output, opts = {}) {
@@ -806,10 +1023,224 @@ function agentToolCardHTML(result) {
     return `<details class="file-card tool-card command-card"><summary>${icon}<span class="file-card-name">${escapeHTML(title)}</span><span class="tool-badge">${escapeHTML(badge)}</span>${chevron}</summary><div class="file-card-body tool-card-body"><pre class="tool-pre">${escapeHTML(text)}</pre></div></details>`;
 }
 
+function pluralFr(n, one, many) { return n === 1 ? one : many; }
+function toolDisplayName(result) {
+    const tool = String(result && result.tool || '').toLowerCase();
+    const input = result && result.input || {};
+    if (tool === 'glob') return `glob ${input.pattern || ''}`.trim();
+    if (tool === 'grep') return `grep ${input.pattern || ''}`.trim();
+    if (tool === 'read') return `read ${(input.paths || []).join(', ')}`.trim();
+    if (tool === 'task') return `sous-agent ${input.title || ''}`.trim();
+    if (tool === 'todo') return 'todo';
+    if (tool === 'run') return `run ${input.command || ''}`.trim();
+    return result.summary || tool || 'outil';
+}
+function toolRunDetailsHTML(results) {
+    if (!results.length) return '';
+    const lang = state.language || 'fr';
+    const count = results.length;
+    const label = lang === 'en'
+        ? `${count} ${count === 1 ? 'command executed' : 'commands executed'}`
+        : `${count} ${pluralFr(count, 'commande executee', 'commandes executees')}`;
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    const body = results.map(r => {
+        const failed = !!(r.error || r.blocked);
+        const name = toolDisplayName(r);
+        const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
+        const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
+        return `<details class="ghost-tool-item">
+            <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
+            <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
+        </details>`;
+    }).join('');
+    return `<details class="ghost-tool-group">
+        <summary><span class="ghost-chevron">${chevron}</span><span>${escapeHTML(label)}</span></summary>
+        <div class="ghost-tool-body">${body}</div>
+    </details>`;
+}
+function fileChangeDetailsHTML(results) {
+    const changes = [];
+    for (const r of results) {
+        const tool = String(r.tool || '').toLowerCase();
+        const input = r.input || {};
+        if (tool === 'edit' && input.path) {
+            changes.push({
+                kind: state.language === 'en' ? 'Modified' : 'Modifie',
+                path: input.path,
+                body: diffCardHTML(input.path, input.hunks || [])
+            });
+        } else if (tool === 'write' && input.path) {
+            const content = String(input.content || '');
+            changes.push({
+                kind: state.language === 'en' ? 'Written' : 'Ecrit',
+                path: input.path,
+                body: `<pre class="ghost-tool-pre">${escapeHTML(content || '(vide)')}</pre>`
+            });
+        }
+    }
+    if (!changes.length) return '';
+    const lang = state.language || 'fr';
+    const label = lang === 'en'
+        ? `${changes.length} ${changes.length === 1 ? 'file changed' : 'files changed'}`
+        : `${changes.length === 1 ? 'Un fichier modifie' : changes.length + ' fichiers modifies'}`;
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    const body = changes.map(c => `<details class="ghost-tool-item ghost-file-change">
+        <summary><span class="ghost-tool-name">${escapeHTML(c.kind)} ${escapeHTML(c.path)}</span>${chevron}</summary>
+        <div class="ghost-tool-nested">${c.body}</div>
+    </details>`).join('');
+    return `<details class="ghost-tool-group ghost-change-group">
+        <summary><span class="ghost-chevron">${chevron}</span><span>${escapeHTML(label)}</span></summary>
+        <div class="ghost-tool-body">${body}</div>
+    </details>`;
+}
+function agentToolResultsHTML(results) {
+    const list = Array.isArray(results) ? results : [];
+    const changes = list.filter(r => ['edit', 'write'].includes(String(r.tool || '').toLowerCase()));
+    const reads = list.filter(r => !['edit', 'write'].includes(String(r.tool || '').toLowerCase()));
+    return fileChangeDetailsHTML(changes) + toolRunDetailsHTML(reads);
+}
+
+function liveToolResultHTML(result) {
+    const tool = String(result && result.tool || '').toLowerCase();
+    if (tool === 'edit' || tool === 'write') return fileChangeDetailsHTML([result]);
+    return toolRunDetailsHTML([result]);
+}
+
+function createLiveAgentActivity(container) {
+    if (!container) return null;
+    const lang = state.language || 'fr';
+    const startedAt = Date.now();
+    const body = addMsg(container, 'ai', null, '', true);
+    const msg = body.closest('.msg');
+    if (msg) msg.classList.add('live-agent-msg');
+    body.classList.add('live-agent-body', 'live-agent-active');
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    body.innerHTML = `
+        <details class="ghost-tool-group live-agent-activity" open>
+            <summary>
+                <span class="ghost-chevron">${chevron}</span>
+                <span class="live-agent-title">${lang === 'en' ? 'Analyzing' : 'Analyse en cours'}</span>
+                <span class="live-agent-status">${lang === 'en' ? 'Preparing context' : 'Preparation du contexte'}</span>
+            </summary>
+            <div class="ghost-tool-body live-agent-tools"></div>
+        </details>`;
+    const details = body.querySelector('.live-agent-activity');
+    const titleEl = body.querySelector('.live-agent-title');
+    const statusEl = body.querySelector('.live-agent-status');
+    const toolsEl = body.querySelector('.live-agent-tools');
+    let seenActivity = 0;
+
+    const setStatus = (text) => {
+        if (!statusEl || !text) return;
+        statusEl.textContent = text;
+    };
+    const pendingHTML = (event) => {
+        const id = String(event.id || '');
+        const label = toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary });
+        const badge = event.tool || 'outil';
+        return `<div class="ghost-tool-item live-tool-pending" data-live-tool-id="${escapeHTML(id)}">
+            <span class="live-tool-dot"></span>
+            <span class="ghost-tool-name">${escapeHTML(label)}</span>
+            <span class="ghost-tool-badge">${escapeHTML(badge)}</span>
+        </div>`;
+    };
+    const replacePending = (event, html) => {
+        const id = String(event.id || '');
+        const existing = id ? toolsEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
+        if (existing) existing.outerHTML = html;
+        else toolsEl.insertAdjacentHTML('beforeend', html);
+        followScroll(container);
+    };
+
+    return {
+        onEvent(event) {
+            if (!event || !event.type) return;
+            if (event.type === 'phase' || event.type === 'model_start') {
+                setStatus(event.label || (lang === 'en' ? 'Thinking' : 'Reflexion'));
+                return;
+            }
+            if (event.type === 'tool_batch') {
+                const count = Number(event.count || 0);
+                setStatus(lang === 'en'
+                    ? `${count} ${count === 1 ? 'tool' : 'tools'} planned`
+                    : `${count} ${pluralFr(count, 'outil prevu', 'outils prevus')}`);
+                return;
+            }
+            if (event.type === 'assistant_note') {
+                const note = String(event.text || '').trim();
+                if (note) {
+                    seenActivity++;
+                    toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(note)}</div>`);
+                    setStatus(lang === 'en' ? 'Planning tools' : 'Preparation des outils');
+                    followScroll(container);
+                }
+                return;
+            }
+            if (event.type === 'tool_started') {
+                seenActivity++;
+                toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
+                setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
+                followScroll(container);
+                return;
+            }
+            if (event.type === 'tool_done') {
+                seenActivity++;
+                const result = {
+                    tool: event.tool,
+                    input: event.input || {},
+                    summary: event.summary,
+                    text: event.text,
+                    error: event.error,
+                    blocked: event.blocked,
+                    todos: event.todos,
+                    events: event.events,
+                    subToolResults: event.subToolResults,
+                };
+                replacePending(event, liveToolResultHTML(result));
+                setStatus(event.summary || toolDisplayName(result));
+                return;
+            }
+            if (event.type === 'error') {
+                this.fail(event.error || 'Erreur agent.');
+            }
+        },
+        finish(data) {
+            const results = Array.isArray(data && data.toolResults) ? data.toolResults : [];
+            if (!results.length && !seenActivity) {
+                if (msg) msg.remove();
+                return;
+            }
+            if (titleEl) {
+                titleEl.textContent = lang === 'en'
+                    ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
+                    : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
+            }
+            setStatus(results.length
+                ? (lang === 'en' ? `${results.length} steps` : `${results.length} ${pluralFr(results.length, 'etape', 'etapes')}`)
+                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
+            const html = agentToolResultsHTML(results);
+            toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            if (details) details.removeAttribute('open');
+            body.classList.remove('live-agent-active');
+            followScroll(container);
+        },
+        fail(error) {
+            seenActivity++;
+            if (titleEl) titleEl.textContent = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
+            setStatus(error || (lang === 'en' ? 'Agent error' : 'Erreur agent'));
+            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
+            body.classList.remove('live-agent-active');
+            if (details) details.removeAttribute('open');
+            followScroll(container);
+        }
+    };
+}
+
 // Apply every ```edit block. Returns { wroteAny, errors:[{path,error}] }.
 async function applyEditBlocks(editBlocks, agentName, out, lang) {
     let wroteAny = false;
     const errors = [];
+    const changed = [];
     for (const { path: targetFile, hunks } of editBlocks) {
         const isMarkdown = /\.(md|mdx)$/i.test(targetFile);
         // Load current content (from the open editor if available, else from disk).
@@ -877,14 +1308,14 @@ async function applyEditBlocks(editBlocks, agentName, out, lang) {
                 if (typeof renderHighlight === 'function') renderHighlight();
                 renderTabs();
             }
-            // Show the diff card.
-            addMsg(out, 'system', null, diffCardHTML(targetFile, applied), true);
+            changed.push({ tool: 'edit', input: { path: targetFile, hunks: applied } });
             wroteAny = true;
         } catch (err) {
             errors.push({ path: targetFile, error: err.message });
             addMsg(out, 'system', null, `${lang === 'en' ? 'Write error' : 'Erreur ecriture'} ${targetFile}: ${err.message}`);
         }
     }
+    if (changed.length) addMsg(out, 'system', null, fileChangeDetailsHTML(changed), true);
     return { wroteAny, errors };
 }
 
@@ -937,6 +1368,7 @@ async function handleAIResponse(response, agentName, container) {
         editErrors = er.errors;
         if (er.wroteAny) wroteAny = true;
     }
+    const writeChanges = [];
     for (const { path: targetFile, content: codeContent } of blocks) {
         if (state.permissionMode === 'supervised') {
             const desc = lang === 'en'
@@ -977,13 +1409,14 @@ async function handleAIResponse(response, agentName, container) {
                 renderTabs();
             }
 
-            addMsg(out, 'system', null, `${lang === 'en' ? 'File' : 'Fichier'} ${targetFile} ${TRANSLATIONS[lang]['file-modified'] || 'modifie.'}`);
+            writeChanges.push({ tool: 'write', input: { path: targetFile, content: codeContent } });
             wroteAny = true;
         } catch (err) {
             addMsg(out, 'system', null,
                 `${lang === 'en' ? 'Write error' : 'Erreur ecriture'} ${targetFile}: ${err.message}`);
         }
     }
+    if (writeChanges.length) addMsg(out, 'system', null, fileChangeDetailsHTML(writeChanges), true);
 
     // Refresh the file tree so newly-created files appear in the explorer.
     if (wroteAny) await loadFileTree();
@@ -1221,11 +1654,17 @@ function acceptSlash() {
 
 // Decide whether a typed line is a command or a normal message.
 function handleChatSubmit() {
-    if (chatAbort) return;
     const text = slashInput.value.trim();
     if (!text) return;
     closeSlash();
     if (text.startsWith('/')) {
+        if (chatAbort) {
+            const lang = state.language || 'fr';
+            showToast(lang === 'en' ? 'Command paused' : 'Commande en pause',
+                lang === 'en' ? 'Wait for the current answer before running a slash command.' : 'Attends la fin de la reponse en cours pour lancer une commande slash.',
+                { icon: '!', duration: 2400 });
+            return;
+        }
         const parts = text.slice(1).split(/\s+/);
         const name = parts[0].toLowerCase();
         const argStr = text.slice(1 + parts[0].length).trim();
@@ -1233,7 +1672,11 @@ function handleChatSubmit() {
         runSlashCommand(name, argStr);
         return;
     }
-    sendChat(text);
+    if (chatAbort) {
+        if (queuePendingChat(text)) resetInput(slashInput);
+        return;
+    }
+    sendChat(createChatDraft(text));
     resetInput(slashInput);
 }
 
@@ -1269,8 +1712,9 @@ $('#send-btn').addEventListener('click', () => {
 // ==========================================================
 //  AGENTS MODE - MULTI AI
 // ==========================================================
-async function sendAgentTask(task) {
+async function sendAgentTask(input) {
     const lang = state.language || 'fr';
+    let task = (input && typeof input === 'object') ? String(input.message || '').trim() : String(input || '').trim();
     if (!state.agentMode) {
         addMsg($('#agents-log'), 'system', null, lang === 'en' ? "Activate Agent Mode first." : "Activez le Mode Agents d'abord.");
         return;
@@ -1301,6 +1745,9 @@ async function sendAgentTask(task) {
         return;
     }
 
+    agentTaskRunning = true;
+    try {
+
     // Identify lead agent
     const leadIdx = activeAgents.findIndex(a => a.role === 'lead');
     let leadAgent;
@@ -1319,7 +1766,8 @@ async function sendAgentTask(task) {
     }
 
     // Attach any selected files/images to the task given to the agents.
-    const { aiText, names, images: taskImages } = consumeAttachments();
+    const taskDraft = (input && typeof input === 'object') ? input : createAgentDraft(task);
+    const { aiText = '', names = [], images: taskImages = [] } = taskDraft;
     const displayTask = task + (names.length ? `\n📎 ${names.join(', ')}` : '');
     task = task + aiText;
     const projCtx = await projectContext(false); // appended to each agent's SYSTEM prompt (full for agents)
@@ -1482,23 +1930,33 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
 
     // Save this agents session to the (separate) agents history.
     saveConversation('agents');
+    } finally {
+        agentTaskRunning = false;
+        if (pendingAgentDraft) {
+            const next = takePendingAgentDraft();
+            if (next) setTimeout(() => sendAgentTask(next), 0);
+        }
+    }
 }
 
+function handleAgentsSubmit() {
+    const input = $('#agents-input');
+    const text = input.value.trim();
+    if (!text) return;
+    if (agentTaskRunning) {
+        if (queuePendingAgent(text)) resetInput(input);
+        return;
+    }
+    sendAgentTask(text);
+    resetInput(input);
+}
 $('#agents-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
-        if ($('#agents-input').value.trim()) {
-            sendAgentTask($('#agents-input').value.trim());
-            resetInput($('#agents-input'));
-        }
+        handleAgentsSubmit();
     }
 });
-$('#agents-send-btn').addEventListener('click', () => {
-    if ($('#agents-input').value.trim()) {
-        sendAgentTask($('#agents-input').value.trim());
-        resetInput($('#agents-input'));
-    }
-});
+$('#agents-send-btn').addEventListener('click', handleAgentsSubmit);
 
 // ==========================================================
 //  CONVERSATION HISTORY
@@ -1907,7 +2365,8 @@ function addAttachment(file) {
 // Build the AI payload from attachments (text injected into the message,
 // images returned as base64 for the vision APIs), then clear them.
 function consumeAttachments() {
-    if (!state.attachments.length) return { aiText: '', names: [], images: [] };
+    if (!state.attachments.length) return { aiText: '', names: [], images: [], attachments: [] };
+    const attachments = state.attachments.slice();
     let aiText = '';
     const names = [];
     const images = [];
@@ -1922,7 +2381,7 @@ function consumeAttachments() {
     });
     state.attachments = [];
     renderAttachments();
-    return { aiText, names, images };
+    return { aiText, names, images, attachments };
 }
 
 // Build a compact project context (file tree + open file) so the AI can

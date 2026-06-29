@@ -40,6 +40,7 @@ const ICON_PATH = path.join(BUNDLE_DIR, 'image', process.platform === 'darwin' ?
 let serverProcess = null;
 let mainWindow = null;
 let serverOwnedByApp = false;
+let isQuitting = false;
 
 function logDir() {
   const dir = path.join(app.getPath('userData'), 'logs');
@@ -143,6 +144,12 @@ async function startServer(port, reuseExisting) {
   serverProcess.once('exit', (code, signal) => {
     appendLog('zaalis-electron.log', `server exited code=${code} signal=${signal}`);
     serverProcess = null;
+    // The UI is served by zaalis-server. If the owned server exits, quit the
+    // Electron shell too so /api/app/close behaves like the native Windows app.
+    if (!isQuitting) {
+      isQuitting = true;
+      app.quit();
+    }
   });
 
   for (let i = 0; i < 80; i += 1) {
@@ -211,7 +218,10 @@ ipcMain.handle('pick-folder', async () => {
   return { path: result.filePaths[0] };
 });
 
-app.on('before-quit', stopServer);
+app.on('before-quit', () => {
+  isQuitting = true;
+  stopServer();
+});
 app.on('window-all-closed', () => app.quit());
 
 app.whenReady().then(async () => {

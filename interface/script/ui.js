@@ -173,7 +173,7 @@ document.addEventListener('click', () => {
 $('#open-project-btn').addEventListener('click', async e => {
     e.stopPropagation();
     projectDropdown.classList.remove('open');
-    // Open the native OS folder picker via the local server.
+    // Open the native OS folder picker via Electron when available, then fall back.
     try {
         const data = await pickZaalisFolder();
         if (data && data.path) {
@@ -1507,12 +1507,19 @@ function forceScrollBottom(container, smooth) {
     c.pinned = true;
     c.autoScrolling = true;
     clearTimeout(c.autoTimer);
+    const settle = () => {
+        container.scrollTop = container.scrollHeight;
+        updatePinButton(container);
+    };
     if (smooth) {
         container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+        requestAnimationFrame(settle);
+        setTimeout(settle, 80);
+        setTimeout(settle, 220);
         // Guard against the smooth-scroll's intermediate scroll events un-pinning us.
-        c.autoTimer = setTimeout(() => { c.autoScrolling = false; c.pinned = true; updatePinButton(container); }, 460);
+        c.autoTimer = setTimeout(() => { settle(); c.autoScrolling = false; c.pinned = true; updatePinButton(container); }, 460);
     } else {
-        container.scrollTop = container.scrollHeight;
+        settle();
         c.autoScrolling = false;
         updatePinButton(container);
     }
@@ -1545,6 +1552,11 @@ function initScrollPins() {
             if (e.deltaY < 0 && !c.autoScrolling) { c.pinned = false; updatePinButton(container); }
         }, { passive: true });
 
+        btn.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            forceScrollBottom(container, false);
+        });
         btn.addEventListener('click', e => {
             e.stopPropagation();
             btn.classList.remove('pin-bounce');

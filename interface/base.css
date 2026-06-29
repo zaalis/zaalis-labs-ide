@@ -177,7 +177,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .ai-view.active{display:flex;}
 
 /* Chat Messages */
-.chat-messages,.agents-log{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px;}
+.chat-messages,.agents-log{flex:1;min-height:0;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:12px;}
 
 /* Smart auto-scroll: messages live inside this wrapper so the "jump to bottom"
    button can float over the bottom of the list without scrolling with it. */
@@ -535,6 +535,54 @@ input,select,textarea{font-family:inherit;color:inherit;}
     flex-shrink: 0;
     transition: border-color 0.15s ease;
 }
+.chat-input-area.has-pending-chat{gap:6px;}
+.chat-pending-drawer{
+    display:none;
+    padding:6px 8px;
+    background:rgba(255,255,255,.035);
+    border:1px solid var(--border-subtle);
+    border-radius:9px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.025);
+}
+.chat-pending-drawer.show{display:block;}
+.chat-pending-head{
+    font-size:10px;
+    line-height:1;
+    color:var(--text-3);
+    font-weight:600;
+    letter-spacing:.02em;
+    margin-bottom:4px;
+}
+.chat-pending-row{display:flex;align-items:center;gap:8px;min-width:0;}
+.chat-pending-text{
+    min-width:0;
+    flex:1;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+    color:var(--text-2);
+    opacity:.72;
+    font-size:12px;
+    line-height:1.25;
+}
+.chat-pending-cancel{
+    width:18px;
+    height:18px;
+    border:0;
+    border-radius:50%;
+    background:var(--bg-hover);
+    color:var(--text-2);
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    line-height:1;
+    opacity:0;
+    transform:scale(.92);
+    transition:opacity .14s ease,transform .14s ease,background .14s ease,color .14s ease;
+}
+.chat-pending-drawer:hover .chat-pending-cancel,.chat-pending-cancel:focus-visible{opacity:1;transform:scale(1);}
+.chat-pending-cancel:hover{background:rgba(239,68,68,.14);color:var(--red);}
 /* Slash-command suggestion menu (opens above the input, Anthropic-style) */
 .slash-menu {
     display: none;
