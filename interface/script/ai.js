@@ -2781,10 +2781,107 @@ function initReasoningSlider() {
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
+function setupMacNativeVoiceRecognition(btn, textarea) {
+    const nativeSpeech = window.zaalisNative && window.zaalisNative.speech;
+    if (!nativeSpeech || typeof nativeSpeech.start !== 'function' || typeof nativeSpeech.stop !== 'function') return false;
+
+    let engineState = 'inactive';
+    let baseText = '';
+    let detachNativeEvents = null;
+
+    if (typeof nativeSpeech.supported === 'function') {
+        nativeSpeech.supported().then((supported) => {
+            if (!supported) btn.style.display = 'none';
+        }).catch(() => {});
+    }
+
+    function setRecording(active, starting) {
+        btn.classList.toggle('recording', !!active);
+        textarea.classList.toggle('recording-text', !!active);
+        if (starting) btn.title = state.language === 'en' ? 'Starting voice dictation...' : 'DÃ©marrage de la dictÃ©e vocale...';
+        else if (active) btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrÃªter';
+        else btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictÃ©e vocale';
+    }
+
+    function applyTranscript(text) {
+        const transcript = String(text || '').trim();
+        const separator = (baseText && !baseText.endsWith(' ') && transcript) ? ' ' : '';
+        textarea.value = baseText ? `${baseText}${separator}${transcript}` : transcript;
+        autoGrow(textarea);
+        textarea.dispatchEvent(new Event('input'));
+    }
+
+    function cleanupState() {
+        engineState = 'inactive';
+        setRecording(false, false);
+    }
+
+    detachNativeEvents = nativeSpeech.onEvent((event) => {
+        if (!event || engineState === 'inactive') return;
+        if (event.status === 'ready') {
+            engineState = 'active';
+            setRecording(true, false);
+        } else if (event.status === 'transcript') {
+            applyTranscript(event.text);
+        } else if (event.status === 'error') {
+            console.error('macOS speech recognition error:', event.error);
+            cleanupState();
+        } else if (event.status === 'end') {
+            cleanupState();
+        }
+    });
+
+    async function startRecording() {
+        if (engineState !== 'inactive') return;
+        engineState = 'starting';
+        baseText = textarea.value;
+        setRecording(true, true);
+        try {
+            const language = state.language === 'en' ? 'en-US' : 'fr-FR';
+            const result = await nativeSpeech.start(language);
+            if (!result || !result.ok) throw new Error((result && result.error) || 'speech-start-failed');
+        } catch (err) {
+            console.error('Failed to start macOS speech recognition:', err);
+            cleanupState();
+        }
+    }
+
+    async function stopRecording() {
+        if (engineState !== 'active' && engineState !== 'starting') return;
+        engineState = 'stopping';
+        try {
+            await nativeSpeech.stop();
+        } catch (err) {
+            console.error('Failed to stop macOS speech recognition:', err);
+            cleanupState();
+        }
+    }
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (engineState === 'active' || engineState === 'starting') {
+            stopRecording();
+        } else if (engineState === 'inactive') {
+            startRecording();
+        }
+    });
+
+    window.addEventListener('beforeunload', () => {
+        if (detachNativeEvents) detachNativeEvents();
+        if (engineState !== 'inactive') nativeSpeech.stop().catch(() => {});
+    });
+
+    return true;
+}
+
 function setupVoiceRecognition(btnId, textareaId) {
     const btn = $('#' + btnId);
     const textarea = $('#' + textareaId);
     if (!btn || !textarea) return;
+
+    if (window.zaalisNative && window.zaalisNative.platform === 'darwin' && setupMacNativeVoiceRecognition(btn, textarea)) {
+        return;
+    }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {

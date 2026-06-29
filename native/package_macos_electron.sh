@@ -8,6 +8,10 @@ ELECTRON_ZIP=${4:?missing electron zip}
 FINAL_DIST=${5:?missing final dist}
 VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/package.json" | head -n 1)
 VERSION=${VERSION:-1.0.0}
+SWIFT_TARGET="arm64-apple-macos12.0"
+if [ "$ARCH" = "x64" ]; then
+  SWIFT_TARGET="x86_64-apple-macos12.0"
+fi
 
 WORK="${TMPDIR:-/tmp}/zaalis-electron-macos-${ARCH}-$$"
 APP="$FINAL_DIST/zaalis IDE.app"
@@ -39,6 +43,15 @@ mkdir -p "$APP_RES" "$BUNDLE"
 cp "$ROOT/native/electron/package.json" "$APP_RES/package.json"
 cp "$ROOT/native/electron/main.js" "$APP_RES/main.js"
 cp "$ROOT/native/electron/preload.js" "$APP_RES/preload.js"
+if command -v swiftc >/dev/null 2>&1; then
+  swiftc -target "$SWIFT_TARGET" -O \
+    -framework Foundation -framework Speech -framework AVFoundation \
+    "$ROOT/native/macos_speech_transcriber.swift" \
+    -o "$APP_RES/macos-speech-transcriber"
+else
+  echo "ERROR: swiftc not found. macOS voice dictation helper cannot be built." >&2
+  exit 1
+fi
 cp -R "$SOURCE_DIST/." "$BUNDLE/"
 cp "$ROOT/package.json" "$BUNDLE/package.json"
 if [ -f "$ROOT/README_MACOS.md" ]; then
@@ -66,6 +79,9 @@ data["CFBundleVersion"] = version
 data["CFBundleIconFile"] = "logo-zaalis.icns"
 data["LSMinimumSystemVersion"] = data.get("LSMinimumSystemVersion", "10.15")
 data["NSHighResolutionCapable"] = True
+data["NSMicrophoneUsageDescription"] = "zaalis IDE uses the microphone only when you start voice dictation."
+data["NSSpeechRecognitionUsageDescription"] = "zaalis IDE uses macOS speech recognition only when you start voice dictation."
+data["NSAudioCaptureUsageDescription"] = "zaalis IDE uses audio capture only when you start voice dictation."
 
 with open(plist_path, "wb") as f:
     plistlib.dump(data, f, sort_keys=False)
@@ -73,6 +89,7 @@ PY
 
 find "$APP" -type d -exec chmod 755 {} +
 chmod +x "$APP/Contents/MacOS/zaalis-ide" \
+  "$APP/Contents/Resources/app/macos-speech-transcriber" \
   "$APP/Contents/Resources/app/bundle/zaalis-server" \
   "$APP/Contents/Resources/app/bundle/bin/zaalis" 2>/dev/null || true
 

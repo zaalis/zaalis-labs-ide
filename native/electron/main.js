@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session, shell, systemPreferences } = require('electron');
 const fs = require('fs');
 const http = require('http');
 const net = require('net');
@@ -36,11 +36,15 @@ const BUNDLE_DIR = path.join(APP_ROOT, 'bundle');
 const SERVER_BIN = process.platform === 'win32' ? 'zaalis-server.exe' : 'zaalis-server';
 const SERVER_PATH = path.join(BUNDLE_DIR, SERVER_BIN);
 const ICON_PATH = path.join(BUNDLE_DIR, 'image', process.platform === 'darwin' ? 'logo-zaalis.icns' : 'logo-zaalis.png');
+const SPEECH_HELPER_PATH = app.isPackaged
+  ? path.join(APP_ROOT, 'macos-speech-transcriber')
+  : path.join(APP_ROOT, '..', 'macos-speech-transcriber');
 
 let serverProcess = null;
 let mainWindow = null;
 let serverOwnedByApp = false;
 let isQuitting = false;
+let speechProcess = null;
 
 function logDir() {
   const dir = path.join(app.getPath('userData'), 'logs');
@@ -164,6 +168,12 @@ async function startServer(port, reuseExisting) {
 
 function createWindow(port) {
   const baseUrl = `http://127.0.0.1:${port}`;
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    const url = webContents.getURL();
+    const allowedOrigin = url.startsWith(baseUrl);
+    callback(allowedOrigin && (permission === 'media' || permission === 'audioCapture'));
+  });
+
   mainWindow = new BrowserWindow({
     width: 1320,
     height: 860,
@@ -199,6 +209,32 @@ function createWindow(port) {
   mainWindow.loadURL(baseUrl);
 }
 
+function emitSpeechEvent(payload) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('mac-speech-event', payload);
+}
+
+function stopSpeechProcess() {
+  return new Promise((resolve) => {
+    if (!speechProcess) return resolve();
+    const proc = speechProcess;
+    speechProcess = null;
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      emitSpeechEvent({ status: 'end' });
+      resolve();
+    };
+    proc.once('exit', finish);
+    try { proc.stdin.write('stop\n'); } catch {}
+    setTimeout(() => {
+      try { if (!proc.killed) proc.kill('SIGTERM'); } catch {}
+      finish();
+    }, 1500);
+  });
+}
+
 function stopServer() {
   if (!serverOwnedByApp || !serverProcess) return;
   try {
@@ -221,8 +257,72 @@ ipcMain.handle('pick-folder', async () => {
   return { path: result.filePaths[0] };
 });
 
+ipcMain.handle('mac-speech-supported', async () => {
+  return process.platform === 'darwin' && fs.existsSync(SPEECH_HELPER_PATH);
+});
+
+ipcMain.handle('mac-speech-start', async (_event, language) => {
+  if (process.platform !== 'darwin') return { ok: false, error: 'unsupported-platform' };
+  if (!fs.existsSync(SPEECH_HELPER_PATH)) return { ok: false, error: 'helper-missing' };
+
+  await stopSpeechProcess();
+
+  let microphoneAllowed = true;
+  try {
+    microphoneAllowed = await systemPreferences.askForMediaAccess('microphone');
+  } catch {
+    microphoneAllowed = false;
+  }
+  if (!microphoneAllowed) return { ok: false, error: 'microphone-denied' };
+
+  try { fs.chmodSync(SPEECH_HELPER_PATH, 0o755); } catch {}
+
+  const lang = String(language || 'fr-FR');
+  const proc = spawn(SPEECH_HELPER_PATH, [lang], {
+    cwd: path.dirname(SPEECH_HELPER_PATH),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  speechProcess = proc;
+
+  let stdout = '';
+  proc.stdout.on('data', (chunk) => {
+    stdout += chunk.toString('utf8');
+    const lines = stdout.split(/\r?\n/);
+    stdout = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try { emitSpeechEvent(JSON.parse(line)); }
+      catch { emitSpeechEvent({ status: 'error', error: 'invalid-helper-output' }); }
+    }
+  });
+
+  proc.stderr.on('data', (chunk) => {
+    appendLog('zaalis-speech.err.log', chunk.toString('utf8').trim());
+  });
+
+  proc.once('error', (error) => {
+    if (speechProcess === proc) speechProcess = null;
+    emitSpeechEvent({ status: 'error', error: error && error.message ? error.message : String(error) });
+  });
+
+  proc.once('exit', (code, signal) => {
+    if (speechProcess === proc) {
+      speechProcess = null;
+      emitSpeechEvent({ status: 'end', code, signal });
+    }
+  });
+
+  return { ok: true };
+});
+
+ipcMain.handle('mac-speech-stop', async () => {
+  await stopSpeechProcess();
+  return { ok: true };
+});
+
 app.on('before-quit', () => {
   isQuitting = true;
+  stopSpeechProcess();
   stopServer();
 });
 app.on('window-all-closed', () => app.quit());
