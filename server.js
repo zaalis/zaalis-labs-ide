@@ -184,6 +184,50 @@ function chatsFile(userId, kind) {
   return path.join(CHATS_DIR, `${userId}__${k}.json`);
 }
 
+const SHARED_CONFIG_DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  ollamaModel: 'qwen3:8b',
+  ggufCtx: 8192,
+  ggufVariant: '',
+  ggufGpuLayers: ''
+};
+const GGUF_VARIANTS = new Set(['', 'metal', 'cpu']);
+
+function clampSharedGgufCtx(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return SHARED_CONFIG_DEFAULTS.ggufCtx;
+  return Math.max(512, Math.min(131072, n));
+}
+
+function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = { ...SHARED_CONFIG_DEFAULTS, ...(base || {}) };
+  if ('ollamaUrl' in src) {
+    const v = String(src.ollamaUrl || '').trim();
+    out.ollamaUrl = v || SHARED_CONFIG_DEFAULTS.ollamaUrl;
+  }
+  if ('ollamaModel' in src) {
+    const v = String(src.ollamaModel || '').trim();
+    out.ollamaModel = v || SHARED_CONFIG_DEFAULTS.ollamaModel;
+  }
+  if ('ggufCtx' in src) out.ggufCtx = clampSharedGgufCtx(src.ggufCtx);
+  if ('ggufVariant' in src) {
+    const v = String(src.ggufVariant || '').trim().toLowerCase();
+    out.ggufVariant = GGUF_VARIANTS.has(v) ? v : '';
+  }
+  if ('ggufGpuLayers' in src) {
+    const raw = src.ggufGpuLayers;
+    out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
+      ? ''
+      : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
+  }
+  return out;
+}
+
+function sharedConfigForUser(user) {
+  return sanitizeSharedConfig(user && user.sharedConfig);
+}
+
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
@@ -334,6 +378,30 @@ app.post('/api/profile', (req, res) => {
   };
   saveUsers(users);
   res.json({ success: true, profile: users[userIdx].profile });
+});
+
+// Shared local runtime settings used by both the desktop IDE and the CLI.
+// This intentionally covers hardware/local-model settings, not UI state.
+app.get('/api/config', (req, res) => {
+  res.json({
+    configured: !!(req.user && req.user.sharedConfig),
+    config: sharedConfigForUser(req.user)
+  });
+});
+
+app.put('/api/config', (req, res) => {
+  try {
+    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    const users = loadUsers();
+    const userIdx = users.findIndex((u) => u.id === req.user.id);
+    if (userIdx === -1) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    const current = sharedConfigForUser(users[userIdx]);
+    users[userIdx].sharedConfig = sanitizeSharedConfig((req.body && req.body.config) || {}, current);
+    saveUsers(users);
+    res.json({ success: true, config: users[userIdx].sharedConfig });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 

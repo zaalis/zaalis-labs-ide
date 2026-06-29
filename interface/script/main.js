@@ -67,6 +67,54 @@ function initSettingsCustomSelects() {
     _settingsSelectsReady = true;
 }
 
+function sharedHardwareConfigPayload() {
+    const c = state.config || {};
+    return {
+        ollamaUrl: (c.ollamaUrl || 'http://127.0.0.1:11434').trim(),
+        ollamaModel: c.ollamaModel || 'qwen3:8b',
+        ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
+        ggufVariant: normalizeGgufVariant(c.ggufVariant),
+        ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers
+    };
+}
+
+function applySharedHardwareConfig(config) {
+    if (!config || typeof config !== 'object') return;
+    const c = state.config || {};
+    if ('ollamaUrl' in config) c.ollamaUrl = String(config.ollamaUrl || '').trim() || 'http://127.0.0.1:11434';
+    if ('ollamaModel' in config) c.ollamaModel = String(config.ollamaModel || '').trim() || 'qwen3:8b';
+    if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 8192);
+    if ('ggufVariant' in config) c.ggufVariant = normalizeGgufVariant(String(config.ggufVariant || '').trim().toLowerCase());
+    if ('ggufGpuLayers' in config) {
+        const raw = config.ggufGpuLayers;
+        c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
+    }
+}
+
+async function syncSharedHardwareConfig() {
+    try {
+        await fetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: sharedHardwareConfigPayload() })
+        });
+    } catch {}
+}
+
+async function loadSharedHardwareConfig() {
+    try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.configured && data.config) {
+            applySharedHardwareConfig(data.config);
+            saveState();
+        } else {
+            await syncSharedHardwareConfig();
+        }
+    } catch {}
+}
+
 // Push the current config values into the settings controls, then refresh the
 // custom dropdown displays.
 function populateSettingsControls() {
@@ -214,6 +262,7 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
+        await syncSharedHardwareConfig();
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
                 method: 'PUT',
@@ -1445,6 +1494,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
@@ -1677,6 +1727,7 @@ async function loadLoaderModel() {
     state.config.ggufGpuLayers = gpuLayers;
     state.config.ggufVariant = variant;
     saveState();
+    await syncSharedHardwareConfig();
     const ggufCtxInput = $('#gguf-ctx-input'); if (ggufCtxInput) ggufCtxInput.value = ctx;
 
     const btn = $('#ml-load-btn'), prog = $('#ml-progress'), fill = $('#ml-progress-fill');

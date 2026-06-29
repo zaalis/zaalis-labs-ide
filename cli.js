@@ -243,6 +243,64 @@ function authed(method, pathname, body) {
   return request(method, pathname, { body, cookie: session.cookie });
 }
 
+const SHARED_CONFIG_DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  ollamaModel: 'qwen3:8b',
+  ggufCtx: 8192,
+  ggufVariant: '',
+  ggufGpuLayers: ''
+};
+let sharedConfigCache = null;
+
+function normalizeSharedRuntimeConfig(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = { ...SHARED_CONFIG_DEFAULTS };
+  if ('ollamaUrl' in src) {
+    const v = String(src.ollamaUrl || '').trim();
+    out.ollamaUrl = v || SHARED_CONFIG_DEFAULTS.ollamaUrl;
+  }
+  if ('ollamaModel' in src) {
+    const v = String(src.ollamaModel || '').trim();
+    out.ollamaModel = v || SHARED_CONFIG_DEFAULTS.ollamaModel;
+  }
+  if ('ggufCtx' in src) {
+    const n = parseInt(src.ggufCtx, 10);
+    out.ggufCtx = Number.isFinite(n) ? Math.max(512, Math.min(131072, n)) : SHARED_CONFIG_DEFAULTS.ggufCtx;
+  }
+  if ('ggufVariant' in src) {
+    const v = String(src.ggufVariant || '').trim().toLowerCase();
+    out.ggufVariant = (v === 'metal' || v === 'cpu') ? v : '';
+  }
+  if ('ggufGpuLayers' in src) {
+    const raw = src.ggufGpuLayers;
+    out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
+      ? ''
+      : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
+  }
+  return out;
+}
+
+async function getSharedRuntimeConfig() {
+  if (sharedConfigCache) return sharedConfigCache;
+  let config = normalizeSharedRuntimeConfig({});
+  try {
+    const r = await authed('GET', '/api/config');
+    if (r.status === 200 && r.json && r.json.config) {
+      config = normalizeSharedRuntimeConfig(r.json.config);
+    }
+  } catch {}
+  sharedConfigCache = config;
+  return config;
+}
+
+function configForCurrentModel(sharedConfig) {
+  const config = normalizeSharedRuntimeConfig(sharedConfig);
+  if ((session.model || '') === 'local' && session.submodel) {
+    config.ollamaModel = session.submodel;
+  }
+  return config;
+}
+
 // ---------------------------------------------------------------------------
 // Server bootstrap — start the local server if it isn't already up
 // ---------------------------------------------------------------------------
@@ -825,18 +883,13 @@ async function applyTools(response, events) {
 }
 
 async function callChat(message, systemPrompt, hist) {
+  const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
     submodel: session.submodel || undefined,
     message,
     systemPrompt,
-    config: {
-      ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: session.submodel || 'llama3',
-      ggufCtx: 8192,
-      ggufVariant: '',
-      ggufGpuLayers: '',
-    },
+    config: runtimeConfig,
     history: (hist || history).slice(-20),
     reasoningLevel: currentEffort().level,
   };
@@ -928,6 +981,7 @@ async function sendChat(message, hooks = {}) {
   } else if (session.responseStyle === 'deep') {
     effectiveMessage += '\n\n[STYLE] Sois approfondi : considere les cas limites, explique les compromis, et verifie via lectures/recherches si utile.';
   }
+  const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
     submodel: session.submodel || undefined,
@@ -935,13 +989,7 @@ async function sendChat(message, hooks = {}) {
     root: projectRoot(),
     permissionMode: currentPermission().id,
     language: 'fr',
-    config: {
-      ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: session.submodel || 'llama3',
-      ggufCtx: 8192,
-      ggufVariant: '',
-      ggufGpuLayers: '',
-    },
+    config: runtimeConfig,
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
     stream: true,
