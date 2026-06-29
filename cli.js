@@ -1861,9 +1861,10 @@ function nextInput(opts = {}) {
     inputMode = 'normal';
     boxActive = true;
 
-    const finish = (result, echo) => {
+    const finish = (result, echo, clearBuffer) => {
       process.stdout.removeListener('resize', onResize);
       process.stdin.removeListener('keypress', onKp);
+      if (clearBuffer) { inBuf = ''; inCur = 0; inMenuIdx = 0; }
       boxActive = false;
       if (echo) emit(echo); else repaint();   // the echo flows into the transcript
       resolve(result);
@@ -1881,11 +1882,11 @@ function nextInput(opts = {}) {
       if (key.name === 'return' || key.name === 'enter') {
         if (menu.length) {
           const name = menu[inMenuIdx % menu.length].name;
-          return finish({ kind: 'command', name, arg: '' }, brand('› ') + '/' + name);
+          return finish({ kind: 'command', name, arg: '' }, brand('› ') + '/' + name, true);
         }
         const ev = parseInput(inBuf);
         if (!ev) return;
-        return finish(ev, brand('› ') + ev.raw);
+        return finish(ev, brand('› ') + ev.raw, true);
       }
       if (key.name === 'tab') {
         if (menu.length) { inBuf = '/' + menu[inMenuIdx].name + ' '; inCur = inBuf.length; }
@@ -2051,7 +2052,7 @@ async function repl() {
     detachAnswerInput();
     currentAbort = null;
     hooks.stop();
-    preserveInput = true;
+    preserveInput = !!inBuf;
     if (aborted) {
       cancelQueuedInput();
       emit(dim('  ⛔ Réponse interrompue.'));
