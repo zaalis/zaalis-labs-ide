@@ -63,16 +63,16 @@ function spawnDetached(file, args = [], options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Colors (truecolor ANSI, with a NO_COLOR / non-TTY fallback)
+// Colors (ANSI 256, with a NO_COLOR / non-TTY fallback)
 // ---------------------------------------------------------------------------
-const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
-const RGB = (r, g, b) => (s) => (COLOR ? `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m` : String(s));
-const brand = RGB(99, 102, 241);   // zaalis purple — matches IDE --accent #6366f1
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+const FG = (code) => (s) => (COLOR ? `\x1b[38;5;${code}m${s}\x1b[39m` : String(s));
+const brand = FG(99);   // zaalis purple, ANSI-256 for better macOS Terminal compatibility.
 const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : String(s));
 const bold = (s) => (COLOR ? `\x1b[1m${s}\x1b[0m` : String(s));
-const green = RGB(126, 200, 120);
-const yellow = RGB(220, 180, 90);
-const gray = RGB(150, 150, 150);
+const green = FG(107);
+const yellow = FG(179);
+const gray = FG(246);
 
 // Visible length, ignoring ANSI escapes — needed to pad inside the box.
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
@@ -95,7 +95,7 @@ function clipText(s, width) {
 const mdBold  = (s) => (COLOR ? `\x1b[1m${s}\x1b[22m` : String(s));
 const mdItal  = (s) => (COLOR ? `\x1b[3m${s}\x1b[23m` : String(s));
 const mdUnder = (s) => (COLOR ? `\x1b[4m${s}\x1b[24m` : String(s));
-const mdCode  = (s) => (COLOR ? `\x1b[38;2;220;180;90m${s}\x1b[39m` : String(s));
+const mdCode  = (s) => (COLOR ? `\x1b[38;5;179m${s}\x1b[39m` : String(s));
 
 function mdInline(s) {
   s = String(s);
@@ -948,7 +948,7 @@ async function sendChat(message, hooks = {}) {
   };
   const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
-  if (r.status === 401) return { error: 'Session expirÃ©e â€” relancez `zaalis login`.' };
+  if (r.status === 401) return { error: 'Session expiree - relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
   if (hooks.stop) hooks.stop();
 
@@ -1542,7 +1542,7 @@ function wrapAnsi(str, width) {
         else if (codes === '22') active = active.filter((a) => !/\[[12]m$/.test(a)); // bold/dim off
         else if (codes === '23') active = active.filter((a) => !/\[3m$/.test(a));    // italic off
         else if (codes === '24') active = active.filter((a) => !/\[4m$/.test(a));    // underline off
-        else if (codes === '39') active = active.filter((a) => !/\[38;2;/.test(a));  // default fg
+        else if (codes === '39') active = active.filter((a) => !/\[38;(2|5);/.test(a));  // default fg
         else active.push(esc);
         i += esc.length;
         continue;
