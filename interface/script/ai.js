@@ -2798,9 +2798,9 @@ function setupMacNativeVoiceRecognition(btn, textarea) {
     function setRecording(active, starting) {
         btn.classList.toggle('recording', !!active);
         textarea.classList.toggle('recording-text', !!active);
-        if (starting) btn.title = state.language === 'en' ? 'Starting voice dictation...' : 'DÃ©marrage de la dictÃ©e vocale...';
-        else if (active) btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrÃªter';
-        else btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictÃ©e vocale';
+        if (starting) btn.title = state.language === 'en' ? 'Starting voice dictation...' : 'Démarrage de la dictée vocale...';
+        else if (active) btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
+        else btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
     }
 
     function applyTranscript(text) {

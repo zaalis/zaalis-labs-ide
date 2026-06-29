@@ -1143,6 +1143,26 @@ function ensureExecutable(file) {
   try { fs.chmodSync(file, 0o755); } catch {}
 }
 
+function terminalGgufPullStatus(status) {
+  return status === 'success' || status === 'error' || status === 'canceled';
+}
+
+function ggufPullSnapshot(task) {
+  return {
+    id: task.id,
+    status: task.status,
+    name: task.name,
+    repo: task.repo,
+    file: task.file,
+    completed: task.completed || 0,
+    total: task.total || 0,
+    error: task.error || '',
+    startedAt: task.startedAt,
+    updatedAt: task.updatedAt,
+    doneAt: task.doneAt || 0,
+  };
+}
+
 // Stream a URL to a file; calls onProgress(received, total). Abortable.
 async function downloadTo(url, dest, onProgress, signal) {
   const res = await fetch(url, { redirect: 'follow', signal });
@@ -1163,6 +1183,83 @@ async function downloadTo(url, dest, onProgress, signal) {
   } finally {
     await new Promise((r) => out.end(r));
   }
+}
+
+const ggufPullTasks = new Map();
+
+function sweepGgufPullTasks() {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [id, task] of ggufPullTasks) {
+    if (task.doneAt && task.doneAt < cutoff) ggufPullTasks.delete(id);
+  }
+}
+
+function startGgufPullTask({ repo, file, url }) {
+  sweepGgufPullTasks();
+  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
+  if (!url) throw new Error('url, ou repo+file requis');
+
+  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
+  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
+  const dest = path.join(MODELS_DIR, base);
+  const tmp = dest + '.part';
+
+  for (const task of ggufPullTasks.values()) {
+    if (!terminalGgufPullStatus(task.status) && task.dest === dest) return task;
+  }
+
+  const ac = new AbortController();
+  const task = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    repo,
+    file,
+    url,
+    name: base,
+    dest,
+    tmp,
+    status: 'queued',
+    completed: 0,
+    total: 0,
+    error: '',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    doneAt: 0,
+    ac,
+  };
+  ggufPullTasks.set(task.id, task);
+
+  task.promise = (async () => {
+    try {
+      ensureDir(MODELS_DIR);
+      if (fs.existsSync(dest)) {
+        const size = fs.statSync(dest).size;
+        task.completed = size;
+        task.total = size;
+        task.status = 'success';
+        return;
+      }
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = 'downloading';
+      await downloadTo(url, tmp, (rec, tot) => {
+        task.completed = rec;
+        task.total = tot || task.total || 0;
+        task.status = 'downloading';
+        task.updatedAt = Date.now();
+      }, ac.signal);
+      fs.renameSync(tmp, dest);
+      task.completed = task.total || task.completed;
+      task.status = 'success';
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = ac.signal.aborted ? 'canceled' : 'error';
+      task.error = ac.signal.aborted ? 'Téléchargement annulé.' : ((e && e.message) || String(e));
+    } finally {
+      task.updatedAt = Date.now();
+      task.doneAt = Date.now();
+    }
+  })();
+
+  return task;
 }
 
 // Extract a .zip or .tar.gz. Tricky on Windows:
@@ -1366,35 +1463,54 @@ app.post('/api/gguf-delete', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress
+// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress.
+// The download is owned by the server, not by the browser request. Closing the
+// catalog/model window only detaches this progress stream; it does not cancel.
 app.get('/api/gguf-pull', async (req, res) => {
-  const repo = String(req.query.repo || '').trim();
-  const file = String(req.query.file || '').trim();
-  let url = String(req.query.url || '').trim();
-  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
-  if (!url) return res.status(400).json({ error: 'url, ou repo+file requis' });
-  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
-  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
-  const dest = path.join(MODELS_DIR, base);
-  const tmp = dest + '.part';
   res.setHeader('Content-Type', 'application/x-ndjson');
-  const ac = new AbortController();
-  req.on('close', () => ac.abort());
+  let task;
   try {
-    ensureDir(MODELS_DIR);
-    let last = 0;
-    await downloadTo(url, tmp, (rec, tot) => {
-      const now = Date.now();
-      if (now - last > 200 || rec === tot) { last = now; try { res.write(JSON.stringify({ status: 'downloading', completed: rec, total: tot }) + '\n'); } catch {} }
-    }, ac.signal);
-    fs.renameSync(tmp, dest);
-    res.write(JSON.stringify({ status: 'success', name: base }) + '\n');
-    res.end();
+    task = startGgufPullTask({
+      repo: String(req.query.repo || '').trim(),
+      file: String(req.query.file || '').trim(),
+      url: String(req.query.url || '').trim(),
+    });
   } catch (e) {
-    try { fs.unlinkSync(tmp); } catch {}
-    if (!ac.signal.aborted) { try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {} }
+    try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {}
     try { res.end(); } catch {}
+    return;
   }
+
+  let closed = false;
+  let lastPayload = '';
+  const writeSnapshot = () => {
+    if (closed) return;
+    const payload = JSON.stringify(ggufPullSnapshot(task));
+    if (payload === lastPayload && !terminalGgufPullStatus(task.status)) return;
+    lastPayload = payload;
+    try { res.write(payload + '\n'); } catch { closed = true; }
+    if (terminalGgufPullStatus(task.status)) {
+      closed = true;
+      clearInterval(timer);
+      try { res.end(); } catch {}
+    }
+  };
+  const timer = setInterval(writeSnapshot, 300);
+  req.on('close', () => { closed = true; clearInterval(timer); });
+  writeSnapshot();
+});
+
+app.get('/api/gguf-pulls', (req, res) => {
+  sweepGgufPullTasks();
+  res.json({ tasks: Array.from(ggufPullTasks.values()).map(ggufPullSnapshot) });
+});
+
+app.post('/api/gguf-pull-cancel', (req, res) => {
+  const id = String((req.body && req.body.id) || req.query.id || '').trim();
+  const task = ggufPullTasks.get(id);
+  if (!task) return res.status(404).json({ error: 'Téléchargement introuvable.' });
+  if (!terminalGgufPullStatus(task.status)) task.ac.abort();
+  res.json({ success: true, task: ggufPullSnapshot(task) });
 });
 
 // GET /api/gguf-engine-pull?variant=cpu|metal|cuda|vulkan -> download the engine, NDJSON progress

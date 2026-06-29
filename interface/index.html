@@ -25,17 +25,17 @@
             <input type="email" id="login-email" placeholder="Adresse email" autocomplete="username" required>
             <input type="password" id="login-password" placeholder="Mot de passe" autocomplete="current-password" required>
             <button type="submit" class="btn btn-primary auth-submit">Se connecter</button>
-            <p class="auth-switch">Pas encore de compte ? <a href="#" id="show-register">CrÃ©er un compte</a></p>
+            <p class="auth-switch">Pas encore de compte ? <a href="#" id="show-register">Créer un compte</a></p>
         </form>
 
         <!-- Register -->
         <form id="register-form" class="auth-form hidden" autocomplete="off">
-            <h2>CrÃ©er un compte</h2>
+            <h2>Créer un compte</h2>
             <input type="email" id="reg-email" placeholder="Adresse email" autocomplete="username" required>
-            <input type="password" id="reg-password" placeholder="Mot de passe (6 caractÃ¨res min.)" autocomplete="new-password" required>
+            <input type="password" id="reg-password" placeholder="Mot de passe (6 caractères min.)" autocomplete="new-password" required>
             <input type="password" id="reg-password2" placeholder="Confirmer le mot de passe" autocomplete="new-password" required>
-            <button type="submit" class="btn btn-primary auth-submit">CrÃ©er le compte</button>
-            <p class="auth-switch">DÃ©jÃ  un compte ? <a href="#" id="show-login">Se connecter</a></p>
+            <button type="submit" class="btn btn-primary auth-submit">Créer le compte</button>
+            <p class="auth-switch">Déjà un compte ? <a href="#" id="show-login">Se connecter</a></p>
         </form>
     </div>
 </div>
@@ -49,28 +49,28 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
                 <span>zaalis IDE</span>
             </div>
-            <!-- Bouton Update (MasquÃ© par dÃ©faut) -->
+            <!-- Bouton Update (Masqué par défaut) -->
             <button class="btn btn-primary btn-sm update-btn hidden" id="app-update-btn">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-                <span data-i18n="update-btn">Mise Ã  jour disponible</span>
+                <span data-i18n="update-btn">Mise à jour disponible</span>
             </button>
         </div>
         <div class="topbar-center">
             <!-- ===== LOCAL MODEL LOADER (LM Studio style) ===== -->
             <div class="model-loader" id="model-loader">
-                <button class="model-loader-btn" id="model-loader-btn" type="button" data-i18n-title="loader-title" title="Charger un modÃ¨le local">
+                <button class="model-loader-btn" id="model-loader-btn" type="button" data-i18n-title="loader-title" title="Charger un modèle local">
                     <svg class="ml-chip" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg>
-                    <span class="model-loader-label" id="model-loader-label" data-i18n="loader-empty">Charger un modÃ¨le</span>
+                    <span class="model-loader-label" id="model-loader-label" data-i18n="loader-empty">Charger un modèle</span>
                     <span class="model-loader-badge hidden" id="model-loader-badge"></span>
                     <svg class="ml-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
                 </button>
-                <button class="model-loader-eject hidden" id="model-loader-eject" type="button" data-i18n-title="loader-eject" title="DÃ©charger le modÃ¨le" aria-label="DÃ©charger">
+                <button class="model-loader-eject hidden" id="model-loader-eject" type="button" data-i18n-title="loader-eject" title="Décharger le modèle" aria-label="Décharger">
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 4 5 13 19 13"/><line x1="5" y1="18" x2="19" y2="18"/></svg>
                 </button>
 
                 <div class="model-loader-panel" id="model-loader-panel">
                     <div class="ml-tabs">
-                        <button class="ml-tab active" type="button" data-ml-tab="select" data-i18n="loader-tab-models">ModÃ¨les</button>
+                        <button class="ml-tab active" type="button" data-ml-tab="select" data-i18n="loader-tab-models">Modèles</button>
                         <button class="ml-tab" type="button" data-ml-tab="config" data-i18n="loader-tab-config">Configuration</button>
                     </div>
 
@@ -79,7 +79,7 @@
                         <div class="ml-list" id="ml-model-list"></div>
                         <button class="ml-get-models" type="button" id="ml-get-models">
                             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                            <span data-i18n="loader-get-models">TÃ©lÃ©charger des modÃ¨les</span>
+                            <span data-i18n="loader-get-models">Télécharger des modèles</span>
                         </button>
                     </div>
 
@@ -87,7 +87,7 @@
                     <div class="ml-pane" data-ml-pane="config">
                         <button class="ml-back" type="button" id="ml-config-back">
                             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
-                            <span class="ml-config-name" id="ml-config-name">â€”</span>
+                            <span class="ml-config-name" id="ml-config-name">—</span>
                         </button>
 
                         <div class="ml-field">
@@ -104,7 +104,7 @@
                         </div>
 
                         <div class="ml-field-row">
-                            <span class="ml-field-label" data-i18n="loader-gpu">DÃ©chargement GPU</span>
+                            <span class="ml-field-label" data-i18n="loader-gpu">Déchargement GPU</span>
                             <select id="ml-gpu-select" class="ml-select">
                                 <option value="" data-i18n="loader-gpu-auto">Auto (tout)</option>
                                 <option value="50">50</option>
@@ -126,7 +126,7 @@
 
                         <div class="ml-progress hidden" id="ml-progress"><div class="ml-progress-fill" id="ml-progress-fill"></div></div>
 
-                        <button class="ml-load-btn" type="button" id="ml-load-btn" data-i18n="loader-load">Charger le modÃ¨le</button>
+                        <button class="ml-load-btn" type="button" id="ml-load-btn" data-i18n="loader-load">Charger le modèle</button>
                     </div>
                 </div>
             </div>
@@ -136,15 +136,15 @@
                 <option value="fr">FR</option>
                 <option value="en">EN</option>
             </select>
-            <button class="topbar-label-btn" id="catalog-btn" data-i18n-title="install-models-title" title="Installer des modÃ¨les locaux">
+            <button class="topbar-label-btn" id="catalog-btn" data-i18n-title="install-models-title" title="Installer des modèles locaux">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-                <span data-i18n="install-models-btn">Installer des modÃ¨les</span>
+                <span data-i18n="install-models-btn">Installer des modèles</span>
             </button>
             <button class="topbar-label-btn" id="help-btn" title="Aide">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1.25 2.1-2 2.5-.5.27-1 .8-1 1.5"/><circle cx="11.5" cy="16.5" r="1.1" fill="currentColor" stroke="none"/></svg>
                 <span data-i18n="help-btn">Aide</span>
             </button>
-            <button class="topbar-btn remote-btn" id="remote-btn" title="Remote control (tÃ©lÃ©phone)">
+            <button class="topbar-btn remote-btn" id="remote-btn" title="Remote control (téléphone)">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
                 <span class="remote-dot" id="remote-dot"></span>
             </button>
@@ -229,7 +229,7 @@
                     <button class="btn btn-primary btn-sm" id="save-profile" data-i18n="save-profile-btn">Sauvegarder</button>
                     <div class="profile-account">
                         <span class="profile-email" id="profile-email"></span>
-                        <button class="btn btn-ghost btn-sm" id="logout-btn">DÃ©connexion</button>
+                        <button class="btn btn-ghost btn-sm" id="logout-btn">Déconnexion</button>
                     </div>
                 </div>
             </div>
@@ -326,7 +326,7 @@
                 </div>
 
                 <!-- Token / context meter -->
-                <div class="token-meter" id="token-meter" title="Contexte utilisÃ©">
+                <div class="token-meter" id="token-meter" title="Contexte utilisé">
                     <div class="token-bar"><div class="token-fill" id="token-fill"></div></div>
                     <span class="token-text" id="token-text">0 / 0</span>
                 </div>
@@ -349,27 +349,27 @@
                             <div class="mode-select-wrap">
                                 <button class="mode-select-btn" id="chat-mode-btn" type="button">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                                    <span class="mode-select-label" data-i18n="perm-supervised">SupervisÃ©</span>
+                                    <span class="mode-select-label" data-i18n="perm-supervised">Supervisé</span>
                                     <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
                                 </button>
                                 <div class="mode-dropdown" id="chat-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
-                                        <span class="mode-item-title" data-i18n="perm-supervised">SupervisÃ©</span>
+                                        <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
                                         <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validÃ©es</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
-                                        <span class="mode-item-desc" data-i18n="perm-auto-title">ContrÃ´le total, aucune validation</span>
+                                        <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
                                     </button>
                                 </div>
                             </div>
                         </div>
                         <div class="chat-input-bottom-right">
-                            <button class="voice-btn" id="chat-voice-btn" title="Activer la dictÃ©e vocale">
+                            <button class="voice-btn" id="chat-voice-btn" title="Activer la dictée vocale">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
                             </button>
                             <button class="send-btn" id="send-btn">
@@ -395,7 +395,7 @@
             <div class="ai-view" id="view-agents">
                 <div class="agents-header">
                     <p class="agents-desc" data-i18n="agents-desc">Configurez et lancez vos agents IA. Minimum 2 actifs pour le mode collaboratif.</p>
-                    <button class="agents-collapse" id="agents-collapse" title="RÃ©duire les modÃ¨les">
+                    <button class="agents-collapse" id="agents-collapse" title="Réduire les modèles">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 15 12 9 18 15"/></svg>
                     </button>
                 </div>
@@ -572,27 +572,27 @@
                             <div class="mode-select-wrap">
                                 <button class="mode-select-btn" id="agents-mode-btn" type="button">
                                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                                    <span class="mode-select-label" data-i18n="perm-supervised">SupervisÃ©</span>
+                                    <span class="mode-select-label" data-i18n="perm-supervised">Supervisé</span>
                                     <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
                                 </button>
                                 <div class="mode-dropdown" id="agents-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
-                                        <span class="mode-item-title" data-i18n="perm-supervised">SupervisÃ©</span>
+                                        <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
                                         <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validÃ©es</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
-                                        <span class="mode-item-desc" data-i18n="perm-auto-title">ContrÃ´le total, aucune validation</span>
+                                        <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
                                     </button>
                                 </div>
                             </div>
                         </div>
                         <div class="chat-input-bottom-right">
-                            <button class="voice-btn" id="agents-voice-btn" title="Activer la dictÃ©e vocale">
+                            <button class="voice-btn" id="agents-voice-btn" title="Activer la dictée vocale">
                                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
                             </button>
                             <button class="send-btn" id="agents-send-btn">
@@ -643,7 +643,7 @@
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="models">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
-                <span data-i18n="settings-models-title">ModÃ¨les par dÃ©faut</span>
+                <span data-i18n="settings-models-title">Modèles par défaut</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -655,11 +655,11 @@
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="privacy">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-                <span data-i18n="settings-privacy-title">ConfidentialitÃ©</span>
+                <span data-i18n="settings-privacy-title">Confidentialité</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="updates">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/></svg>
-                <span data-i18n="settings-updates-title">Mises Ã  jour</span>
+                <span data-i18n="settings-updates-title">Mises à jour</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="backup">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -751,8 +751,8 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="gguf-ctx-input" data-i18n="settings-gguf-ctx-label">Contexte GGUF par dÃ©faut</label>
-                            <p data-i18n="settings-gguf-ctx-hint">Taille de la fenÃªtre de contexte du moteur local (tokens). Plus grand = plus de mÃ©moire utilisÃ©e.</p>
+                            <label for="gguf-ctx-input" data-i18n="settings-gguf-ctx-label">Contexte GGUF par défaut</label>
+                            <p data-i18n="settings-gguf-ctx-hint">Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.</p>
                         </div>
                         <input class="settings-number-input" id="gguf-ctx-input" type="number" min="512" max="131072" step="1024" value="8192" list="gguf-ctx-presets" inputmode="numeric">
                         <datalist id="gguf-ctx-presets">
@@ -768,7 +768,7 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="gguf-ngl-select" data-i18n="settings-gguf-ngl-label">Limite VRAM (couches GPU)</label>
-                            <p data-i18n="settings-gguf-ngl-hint">Nombre de couches dÃ©chargÃ©es sur le GPU. Â« Tout Â» = vitesse max ; baisser pour Ã©conomiser la VRAM.</p>
+                            <p data-i18n="settings-gguf-ngl-hint">Nombre de couches déchargées sur le GPU. « Tout » = vitesse max ; baisser pour économiser la VRAM.</p>
                         </div>
                         <select id="gguf-ngl-select">
                             <option value="" data-i18n="settings-gguf-ngl-all">Tout (auto)</option>
@@ -782,7 +782,7 @@
                     <input type="hidden" id="ollama-url" value="http://127.0.0.1:11434">
                     <div class="ollama-box settings-installed-box">
                         <div class="ollama-box-head">
-                            <span data-i18n="gguf-installed-label">ModÃ¨les installÃ©s</span>
+                            <span data-i18n="gguf-installed-label">Modèles installés</span>
                         </div>
                         <div class="ollama-models" id="gguf-models-list"></div>
                     </div>
@@ -791,10 +791,10 @@
                 <!-- ===== APPEARANCE ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="appearance">
                     <h3 data-i18n="settings-appearance-title">Apparence</h3>
-                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thÃ¨me, la densitÃ© et la taille du texte de ZS IDE.</p>
+                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de ZS IDE.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-theme-select" data-i18n="settings-theme-label">ThÃ¨me</label>
+                            <label for="settings-theme-select" data-i18n="settings-theme-label">Thème</label>
                             <p data-i18n="settings-theme-hint">Mode sombre ou clair de l'interface.</p>
                         </div>
                         <select id="settings-theme-select">
@@ -804,8 +804,8 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-density-select" data-i18n="settings-density-label">DensitÃ©</label>
-                            <p data-i18n="settings-density-hint">Compacte rÃ©duit les espacements pour afficher plus de contenu.</p>
+                            <label for="settings-density-select" data-i18n="settings-density-label">Densité</label>
+                            <p data-i18n="settings-density-hint">Compacte réduit les espacements pour afficher plus de contenu.</p>
                         </div>
                         <select id="settings-density-select">
                             <option value="normal" data-i18n="settings-density-normal">Normale</option>
@@ -827,12 +827,12 @@
 
                 <!-- ===== DEFAULT MODELS ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="models">
-                    <h3 data-i18n="settings-models-title">ModÃ¨les par dÃ©faut</h3>
-                    <p class="form-hint" data-i18n="settings-models-hint">Choix prÃ©sÃ©lectionnÃ©s Ã  l'ouverture de l'application.</p>
+                    <h3 data-i18n="settings-models-title">Modèles par défaut</h3>
+                    <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">ModÃ¨le chat par dÃ©faut</label>
-                            <p data-i18n="settings-default-chat-hint">ModÃ¨le sÃ©lectionnÃ© par dÃ©faut dans le chat.</p>
+                            <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">Modèle chat par défaut</label>
+                            <p data-i18n="settings-default-chat-hint">Modèle sélectionné par défaut dans le chat.</p>
                         </div>
                         <select id="settings-default-chat-select">
                             <option value="codex">Codex (OpenAI)</option>
@@ -846,8 +846,8 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-default-agent-select" data-i18n="settings-default-agent-label">ModÃ¨le agents par dÃ©faut</label>
-                            <p data-i18n="settings-default-agent-hint">ModÃ¨le chef de projet prÃ©sÃ©lectionnÃ© en mode Agents.</p>
+                            <label for="settings-default-agent-select" data-i18n="settings-default-agent-label">Modèle agents par défaut</label>
+                            <p data-i18n="settings-default-agent-hint">Modèle chef de projet présélectionné en mode Agents.</p>
                         </div>
                         <select id="settings-default-agent-select">
                             <option value="codex">Codex (OpenAI)</option>
@@ -861,8 +861,8 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-default-reasoning-select" data-i18n="settings-default-reasoning-label">Effort de raisonnement par dÃ©faut</label>
-                            <p data-i18n="settings-default-reasoning-hint">Niveau de rÃ©flexion appliquÃ© au dÃ©marrage (modÃ¨les compatibles).</p>
+                            <label for="settings-default-reasoning-select" data-i18n="settings-default-reasoning-label">Effort de raisonnement par défaut</label>
+                            <p data-i18n="settings-default-reasoning-hint">Niveau de réflexion appliqué au démarrage (modèles compatibles).</p>
                         </div>
                         <select id="settings-default-reasoning-select">
                             <option value="0" data-i18n="settings-reasoning-min">Minimal</option>
@@ -875,14 +875,14 @@
                 <!-- ===== PROJECT ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="project">
                     <h3 data-i18n="settings-project-title">Projet</h3>
-                    <p class="form-hint" data-i18n="settings-project-hint">Comportement par dÃ©faut Ã  l'ouverture des projets.</p>
+                    <p class="form-hint" data-i18n="settings-project-hint">Comportement par défaut à l'ouverture des projets.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-default-folder" data-i18n="settings-default-folder-label">Dossier par dÃ©faut</label>
-                            <p data-i18n="settings-default-folder-hint">Dossier proposÃ© en premier dans le sÃ©lecteur de projet.</p>
+                            <label for="settings-default-folder" data-i18n="settings-default-folder-label">Dossier par défaut</label>
+                            <p data-i18n="settings-default-folder-hint">Dossier proposé en premier dans le sélecteur de projet.</p>
                         </div>
                         <div class="settings-folder-pick">
-                            <input type="text" id="settings-default-folder" placeholder="C:\\â€¦">
+                            <input type="text" id="settings-default-folder" placeholder="C:\\...">
                             <button type="button" class="btn btn-ghost" id="settings-pick-folder-btn" data-i18n="settings-browse-btn">Parcourir</button>
                         </div>
                     </div>
@@ -897,8 +897,8 @@
 
                 <!-- ===== PRIVACY ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="privacy">
-                    <h3 data-i18n="settings-privacy-title">ConfidentialitÃ©</h3>
-                    <p class="form-hint" data-i18n="settings-privacy-hint">Effacez vos donnÃ©es stockÃ©es localement. Ces actions sont irrÃ©versibles.</p>
+                    <h3 data-i18n="settings-privacy-title">Confidentialité</h3>
+                    <p class="form-hint" data-i18n="settings-privacy-hint">Effacez vos données stockées localement. Ces actions sont irréversibles.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label data-i18n="settings-clear-history-label">Supprimer l'historique local</label>
@@ -908,27 +908,27 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label data-i18n="settings-clear-keys-label">Supprimer les clÃ©s API</label>
-                            <p data-i18n="settings-clear-keys-hint">Retire toutes les clÃ©s API enregistrÃ©es sur ce compte.</p>
+                            <label data-i18n="settings-clear-keys-label">Supprimer les clés API</label>
+                            <p data-i18n="settings-clear-keys-hint">Retire toutes les clés API enregistrées sur ce compte.</p>
                         </div>
                         <button type="button" class="btn btn-danger" id="settings-clear-keys-btn" data-i18n="settings-delete-btn">Supprimer</button>
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label data-i18n="settings-reset-label">RÃ©initialisation complÃ¨te</label>
-                            <p data-i18n="settings-reset-hint">Remet Ã  zÃ©ro tous les rÃ©glages locaux, l'historique et les prÃ©fÃ©rences.</p>
+                            <label data-i18n="settings-reset-label">Réinitialisation complète</label>
+                            <p data-i18n="settings-reset-hint">Remet à zéro tous les réglages locaux, l'historique et les préférences.</p>
                         </div>
-                        <button type="button" class="btn btn-danger" id="settings-reset-btn" data-i18n="settings-reset-btn">Tout rÃ©initialiser</button>
+                        <button type="button" class="btn btn-danger" id="settings-reset-btn" data-i18n="settings-reset-btn">Tout réinitialiser</button>
                     </div>
                 </section>
 
                 <!-- ===== UPDATES ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="updates">
-                    <h3 data-i18n="settings-updates-title">Mises Ã  jour</h3>
-                    <p class="form-hint" data-i18n="settings-updates-hint">GÃ©rez la vÃ©rification et le canal des mises Ã  jour.</p>
+                    <h3 data-i18n="settings-updates-title">Mises à jour</h3>
+                    <p class="form-hint" data-i18n="settings-updates-hint">Gérez la vérification et le canal des mises à jour.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label for="settings-autoupdate-toggle" data-i18n="settings-autoupdate-label">VÃ©rifier au dÃ©marrage</label>
+                            <label for="settings-autoupdate-toggle" data-i18n="settings-autoupdate-label">Vérifier au démarrage</label>
                             <p data-i18n="settings-autoupdate-hint">Recherche automatiquement une nouvelle version au lancement.</p>
                         </div>
                         <label class="zs-switch"><input type="checkbox" id="settings-autoupdate-toggle"><span class="zs-slider"></span></label>
@@ -936,37 +936,37 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-channel-select" data-i18n="settings-channel-label">Canal</label>
-                            <p data-i18n="settings-channel-hint">Stable = versions finales. BÃªta = nouveautÃ©s en avant-premiÃ¨re.</p>
+                            <p data-i18n="settings-channel-hint">Stable = versions finales. Bêta = nouveautés en avant-première.</p>
                         </div>
                         <select id="settings-channel-select">
                             <option value="stable" data-i18n="settings-channel-stable">Stable</option>
-                            <option value="beta" data-i18n="settings-channel-beta">BÃªta</option>
+                            <option value="beta" data-i18n="settings-channel-beta">Bêta</option>
                         </select>
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
-                            <label data-i18n="settings-check-now-label">VÃ©rifier maintenant</label>
-                            <p data-i18n="settings-check-now-hint">Lance une recherche de mise Ã  jour immÃ©diate.</p>
+                            <label data-i18n="settings-check-now-label">Vérifier maintenant</label>
+                            <p data-i18n="settings-check-now-hint">Lance une recherche de mise à jour immédiate.</p>
                         </div>
-                        <button type="button" class="btn btn-ghost" id="settings-check-now-btn" data-i18n="settings-check-now-btn">VÃ©rifier</button>
+                        <button type="button" class="btn btn-ghost" id="settings-check-now-btn" data-i18n="settings-check-now-btn">Vérifier</button>
                     </div>
                 </section>
 
                 <!-- ===== BACKUP ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="backup">
                     <h3 data-i18n="settings-backup-title">Sauvegarde</h3>
-                    <p class="form-hint" data-i18n="settings-backup-hint">Exportez ou importez votre configuration. Les clÃ©s API ne sont jamais incluses.</p>
+                    <p class="form-hint" data-i18n="settings-backup-hint">Exportez ou importez votre configuration. Les clés API ne sont jamais incluses.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label data-i18n="settings-export-label">Exporter la configuration</label>
-                            <p data-i18n="settings-export-hint">TÃ©lÃ©charge un fichier .json de vos rÃ©glages (sans les clÃ©s API).</p>
+                            <p data-i18n="settings-export-hint">Télécharge un fichier .json de vos réglages (sans les clés API).</p>
                         </div>
                         <button type="button" class="btn btn-ghost" id="settings-export-btn" data-i18n="settings-export-btn">Exporter</button>
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label data-i18n="settings-import-label">Importer la configuration</label>
-                            <p data-i18n="settings-import-hint">Restaure vos rÃ©glages depuis un fichier .json exportÃ©.</p>
+                            <p data-i18n="settings-import-hint">Restaure vos réglages depuis un fichier .json exporté.</p>
                         </div>
                         <button type="button" class="btn btn-ghost" id="settings-import-btn" data-i18n="settings-import-btn">Importer</button>
                         <input type="file" id="settings-import-file" accept="application/json,.json" style="display:none">
@@ -1025,7 +1025,7 @@
 <div class="modal-overlay" id="catalog-modal">
     <div class="modal modal-lg">
         <div class="modal-header">
-            <h2 id="catalog-title" data-i18n="catalog-title">ModÃ¨les GGUF locaux Ã  installer</h2>
+            <h2 id="catalog-title" data-i18n="catalog-title">Modèles GGUF locaux à installer</h2>
             <button class="modal-close" id="close-catalog">&times;</button>
         </div>
         <div class="modal-body">
@@ -1037,13 +1037,13 @@
             <!-- One unified search bar for both tabs -->
             <div class="catalog-search">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                <input type="text" id="catalog-search-input" placeholder="Rechercher un modÃ¨leâ€¦" autocomplete="off">
+                <input type="text" id="catalog-search-input" placeholder="Rechercher un modèle..." autocomplete="off">
             </div>
 
             <div class="catalog-tabs">
                 <button class="catalog-tab active" data-cat="curated" type="button" data-i18n="catalog-popular">Populaires</button>
                 <button class="catalog-tab" data-cat="hf" type="button">Hugging Face</button>
-                <button class="catalog-tab" data-cat="installed" type="button" data-i18n="catalog-installed">ModÃ¨les installÃ©s</button>
+                <button class="catalog-tab" data-cat="installed" type="button" data-i18n="catalog-installed">Modèles installés</button>
             </div>
 
             <div class="catalog-pane" id="catalog-pane-curated">
@@ -1053,9 +1053,9 @@
             <div class="catalog-pane hidden" id="catalog-pane-hf">
                 <!-- Default view (empty search): two sections -->
                 <div id="hf-default">
-                    <div class="cat-section-title"><span class="cat-section-ico">ðŸ”¥</span><span data-i18n="hf-trending">Populaires</span></div>
+                    <div class="cat-section-title"><span class="cat-section-ico">🔥</span><span data-i18n="hf-trending">Populaires</span></div>
                     <div class="catalog-grid" id="hf-popular"></div>
-                    <div class="cat-section-title dl"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span data-i18n="hf-downloads">Plus tÃ©lÃ©chargÃ©s</span></div>
+                    <div class="cat-section-title dl"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg><span data-i18n="hf-downloads">Plus téléchargés</span></div>
                     <div class="catalog-grid" id="hf-downloads"></div>
                 </div>
                 <!-- Search results -->
@@ -1088,7 +1088,7 @@
 <!-- ========== IMAGE LIGHTBOX ========== -->
 <div class="modal-overlay" id="image-lightbox">
     <div class="lightbox">
-        <a class="lightbox-btn lightbox-download" id="lightbox-download" download="image.png" title="TÃ©lÃ©charger">
+        <a class="lightbox-btn lightbox-download" id="lightbox-download" download="image.png" title="Télécharger">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
         </a>
         <button class="lightbox-btn lightbox-close" id="lightbox-close" type="button" title="Fermer">
@@ -1107,7 +1107,7 @@
             <button class="modal-close" id="close-quant">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" data-i18n="quant-hint">Plus la version est Ã©levÃ©e, meilleure est la qualitÃ© â€” mais plus c'est lourd.</p>
+            <p class="form-hint" data-i18n="quant-hint">Plus la version est élevée, meilleure est la qualité — mais plus c'est lourd.</p>
             <div class="quant-grid" id="quant-grid"></div>
         </div>
     </div>
@@ -1121,7 +1121,7 @@
             <button class="modal-close" id="close-help">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" data-i18n="help-hint">Clique sur une question pour voir la rÃ©ponse.</p>
+            <p class="form-hint" data-i18n="help-hint">Clique sur une question pour voir la réponse.</p>
             <div class="help-list" id="help-list"></div>
         </div>
     </div>
@@ -1131,17 +1131,17 @@
 <div class="modal-overlay" id="update-modal">
     <div class="modal modal-sm">
         <div class="modal-header">
-            <h2 data-i18n="update-header">Mise Ã  jour disponible</h2>
+            <h2 data-i18n="update-header">Mise à jour disponible</h2>
             <button class="modal-close" id="close-update-modal">&times;</button>
         </div>
         <div class="modal-body">
             <p class="form-hint" id="update-release-name">zaalis IDE V1.0.13</p>
             <div class="update-steps">
                 <div class="update-step active" id="update-step-download">
-                    <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">âœ“</span></div>
+                    <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">✓</span></div>
                     <div class="update-step-text">
-                        <strong>TÃ©lÃ©chargement</strong>
-                        <span>TÃ©lÃ©chargez la nouvelle version dans votre dossier TÃ©lÃ©chargements.</span>
+                        <strong>Téléchargement</strong>
+                        <span>Téléchargez la nouvelle version dans votre dossier Téléchargements.</span>
                     </div>
                 </div>
                 <div class="update-step" id="update-step-install">
@@ -1157,13 +1157,13 @@
             </div>
             <div class="update-waiting hidden" id="update-waiting">
                 <span class="update-spinner"></span>
-                <span data-i18n="update-waiting-restart">En attente du redÃ©marrageâ€¦</span>
+                <span data-i18n="update-waiting-restart">En attente du redémarrage...</span>
             </div>
-            <p class="update-status" id="update-status-text" data-i18n="update-ready">PrÃªt Ã  tÃ©lÃ©charger</p>
+            <p class="update-status" id="update-status-text" data-i18n="update-ready">Prêt à télécharger</p>
         </div>
         <div class="modal-footer">
             <button class="btn btn-ghost" id="cancel-update-btn" data-i18n="cancel-btn">Annuler</button>
-            <button class="btn btn-primary" id="confirm-update-btn" data-i18n="update-start-btn">TÃ©lÃ©charger</button>
+            <button class="btn btn-primary" id="confirm-update-btn" data-i18n="update-start-btn">Télécharger</button>
         </div>
     </div>
 </div>
@@ -1176,21 +1176,21 @@
             <button class="modal-close" id="close-remote">&times;</button>
         </div>
         <div class="modal-body remote-body">
-            <p class="form-hint" id="remote-intro">ContrÃ´lez cet ordinateur depuis votre tÃ©lÃ©phone. Un QR code crÃ©e un lien sÃ©curisÃ© (tunnel chiffrÃ©) vers ce PC â€” vous gardez la puissance des modÃ¨les locaux, oÃ¹ que vous soyez.</p>
+            <p class="form-hint" id="remote-intro">Contrôlez cet ordinateur depuis votre téléphone. Un QR code crée un lien sécurisé (tunnel chiffré) vers ce PC — vous gardez la puissance des modèles locaux, où que vous soyez.</p>
 
             <!-- idle: explanation + generate -->
             <div id="remote-idle">
                 <ul class="remote-points">
-                    <li>Le tÃ©lÃ©phone n'accÃ¨de qu'au <b>chat</b> â€” jamais Ã  vos fichiers ni au terminal.</li>
-                    <li>Le lien reste le mÃªme tant que la session est active.</li>
-                    <li>Vous pouvez tout couper depuis ce PC ou depuis le tÃ©lÃ©phone.</li>
+                    <li>Le téléphone n'accède qu'au <b>chat</b> — jamais à vos fichiers ni au terminal.</li>
+                    <li>Le lien reste le même tant que la session est active.</li>
+                    <li>Vous pouvez tout couper depuis ce PC ou depuis le téléphone.</li>
                 </ul>
             </div>
 
             <!-- active: QR + url + stop -->
             <div id="remote-active" class="hidden">
                 <div class="remote-qr"><img id="remote-qr-img" alt="QR code de connexion"></div>
-                <p class="remote-scan-hint">Scannez ce QR code avec l'appareil photo de votre tÃ©lÃ©phone.</p>
+                <p class="remote-scan-hint">Scannez ce QR code avec l'appareil photo de votre téléphone.</p>
                 <div class="remote-url-row">
                     <input type="text" id="remote-url" readonly>
                     <button class="btn btn-ghost btn-sm" id="remote-copy">Copier</button>
@@ -1202,7 +1202,7 @@
         </div>
         <div class="modal-footer">
             <button class="btn btn-danger hidden" id="remote-stop-btn">Stopper</button>
-            <button class="btn btn-primary" id="remote-generate-btn">GÃ©nÃ©rer le QR code</button>
+            <button class="btn btn-primary" id="remote-generate-btn">Générer le QR code</button>
         </div>
     </div>
 </div>

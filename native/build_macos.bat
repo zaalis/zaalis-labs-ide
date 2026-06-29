@@ -16,6 +16,10 @@ echo [1/10] Ensuring build tools are installed...
 call npm install --save-dev @yao-pkg/pkg electron@42.5.0 @electron/packager@20.0.1 png2icons@2.0.1
 if errorlevel 1 goto :failed
 
+echo Checking source encoding...
+call npm run check:mojibake
+if errorlevel 1 goto :failed
+
 echo [2/10] Preparing Electron icons...
 powershell -NoProfile -ExecutionPolicy Bypass -File native\prepare_electron_icons.ps1
 if errorlevel 1 goto :failed

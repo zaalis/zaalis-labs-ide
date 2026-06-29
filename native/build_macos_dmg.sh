@@ -19,6 +19,7 @@ VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$RO
 VERSION=${VERSION:-1.0.0}
 
 echo "[1/3] Preparing Electron icon (.icns)..."
+npm run check:mojibake
 node native/make_icns.js
 
 build_arch() {

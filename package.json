@@ -6,10 +6,11 @@
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:server": "pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/zaalis-server",
-    "build:cli": "pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/bin/zaalis",
-    "build:server:arm64": "pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/zaalis-server",
-    "build:cli:arm64": "pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/bin/zaalis",
+    "check:mojibake": "node scripts/check-mojibake.js",
+    "build:server": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/zaalis-server",
+    "build:cli": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/bin/zaalis",
+    "build:server:arm64": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/zaalis-server",
+    "build:cli:arm64": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/bin/zaalis",
     "build:macos": "native/build_macos.bat"
   },
   "pkg": {
