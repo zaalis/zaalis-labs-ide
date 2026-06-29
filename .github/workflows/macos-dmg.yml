@@ -9,6 +9,8 @@ name: Build macOS DMGs
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "macos"
     tags:
       - "v*"
 

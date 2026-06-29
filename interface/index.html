@@ -119,8 +119,7 @@
                             <span class="ml-field-label" data-i18n="loader-engine">Moteur</span>
                             <select id="ml-variant-select" class="ml-select">
                                 <option value="" data-i18n="loader-engine-auto">Auto</option>
-                                <option value="cuda">CUDA</option>
-                                <option value="vulkan">Vulkan</option>
+                                <option value="metal">Metal</option>
                                 <option value="cpu">CPU</option>
                             </select>
                         </div>
@@ -742,12 +741,11 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="gguf-variant-select" data-i18n="settings-gguf-engine-label">Moteur GGUF</label>
-                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne CUDA, Vulkan ou CPU selon le poste.</p>
+                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne Metal sur macOS, puis CPU si necessaire.</p>
                         </div>
                         <select id="gguf-variant-select">
                             <option value="" data-i18n="settings-gguf-auto">Auto</option>
-                            <option value="cuda">CUDA (NVIDIA)</option>
-                            <option value="vulkan">Vulkan (AMD / Intel)</option>
+                            <option value="metal">Metal</option>
                             <option value="cpu">CPU</option>
                         </select>
                     </div>

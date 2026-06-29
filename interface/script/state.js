@@ -15,7 +15,7 @@ const state = {
         ollamaModel: 'qwen3:8b',
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
         ggufModels: [],        // installed local GGUF files (llama.cpp engine)
-        ggufVariant: '',       // '' = auto-detect (cuda / vulkan / cpu)
+        ggufVariant: '',       // '' = auto-detect (metal / cpu on macOS)
         catalogTarget: 'gguf',
         // ----- Appearance -----
         theme: 'dark',         // 'dark' | 'light'
@@ -309,11 +309,11 @@ const TRANSLATIONS = {
         'api-keys-section': 'Cles API',
         'api-keys-hint': 'Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.',
         'settings-performance-title': 'Performance',
-        'settings-performance-hint': 'Choisissez le moteur local GGUF de ZS IDE. Auto utilise la meilleure option detectee sur cette machine.',
+        'settings-performance-hint': 'Choisissez le moteur local GGUF de ZS IDE. Auto utilise Metal sur macOS, puis CPU si necessaire.',
         'settings-detected-label': 'Detecte',
         'settings-engine-status-label': 'Statut moteur',
         'settings-gguf-engine-label': 'Moteur GGUF',
-        'settings-gguf-engine-hint': 'Auto selectionne CUDA, Vulkan ou CPU selon le poste.',
+        'settings-gguf-engine-hint': 'Auto selectionne Metal sur macOS, puis CPU si necessaire.',
         'settings-gguf-auto': 'Auto',
         'settings-gguf-ctx-label': 'Contexte GGUF par dÃ©faut',
         'settings-gguf-ctx-hint': 'Taille de la fenetre de contexte du moteur local (512 a 131072 tokens). Plus grand = plus de memoire utilisee.',
@@ -519,11 +519,11 @@ const TRANSLATIONS = {
         'api-keys-section': 'API Keys',
         'api-keys-hint': 'Each cloud model requires its own API key. Ollama works without key.',
         'settings-performance-title': 'Performance',
-        'settings-performance-hint': 'Choose the ZS IDE local GGUF engine. Auto uses the best option detected on this machine.',
+        'settings-performance-hint': 'Choose the ZS IDE local GGUF engine. Auto uses Metal on macOS, then CPU if needed.',
         'settings-detected-label': 'Detected',
         'settings-engine-status-label': 'Engine status',
         'settings-gguf-engine-label': 'GGUF engine',
-        'settings-gguf-engine-hint': 'Auto selects CUDA, Vulkan, or CPU for this machine.',
+        'settings-gguf-engine-hint': 'Auto selects Metal on macOS, then CPU if needed.',
         'settings-gguf-auto': 'Auto',
         'settings-gguf-ctx-label': 'Default GGUF context',
         'settings-gguf-ctx-hint': 'Local engine context window (512 to 131072 tokens). Larger = more memory used.',

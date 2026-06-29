@@ -56,6 +56,10 @@ const SETTINGS_SELECT_IDS = [
     'settings-default-reasoning-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
+function normalizeGgufVariant(value) {
+    return value === 'metal' || value === 'cpu' ? value : '';
+}
+
 function initSettingsCustomSelects() {
     if (_settingsSelectsReady) return;
     if (typeof createCustomSelect !== 'function') return;
@@ -74,7 +78,7 @@ function populateSettingsControls() {
         el.dispatchEvent(new Event('change')); // refresh custom-select display
     };
     setVal('settings-lang-select', state.language || 'fr');
-    setVal('gguf-variant-select', c.ggufVariant || '');
+    setVal('gguf-variant-select', normalizeGgufVariant(c.ggufVariant));
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
     setVal('settings-theme-select', c.theme || 'dark');
@@ -176,7 +180,7 @@ $('#save-btn').addEventListener('click', async () => {
     const settingsLang = $('#settings-lang-select');
     if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
     const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
+    if (variantSelect) state.config.ggufVariant = normalizeGgufVariant(variantSelect.value);
     const ollamaUrlInput = $('#ollama-url');
     state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
@@ -679,11 +683,13 @@ async function loadGgufModels() {
         if (!res.ok) return;
         const data = await res.json();
         state.config.ggufModels = (data.models || []).map(m => m.name);
+        const normalizedVariant = normalizeGgufVariant(state.config.ggufVariant);
+        if (state.config.ggufVariant !== normalizedVariant) state.config.ggufVariant = normalizedVariant;
         saveState();
         const st = $('#gguf-engine-status');
         if (st) {
             const v = (data.variant || 'cpu').toUpperCase();
-            const selected = state.config.ggufVariant ? state.config.ggufVariant.toUpperCase() : v;
+            const selected = normalizedVariant ? normalizedVariant.toUpperCase() : v;
             st.textContent = (state.language === 'en' ? 'Engine: ' : 'Moteur : ') + selected + (data.running ? ' • ON' : '');
         }
         const detected = $('#gguf-detected-variant');
@@ -1466,7 +1472,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');
-    _set('#gguf-variant-select', state.config.ggufVariant || '');
+    _set('#gguf-variant-select', normalizeGgufVariant(state.config.ggufVariant));
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
@@ -1615,7 +1621,7 @@ function openLoaderConfig(name) {
     if (num) num.value = ctx;
     if (hint) hint.textContent = _fmtCtx(ctx);
     const gpu = $('#ml-gpu-select'); if (gpu) gpu.value = state.config.ggufGpuLayers || '';
-    const variant = $('#ml-variant-select'); if (variant) variant.value = state.config.ggufVariant || '';
+    const variant = $('#ml-variant-select'); if (variant) variant.value = normalizeGgufVariant(state.config.ggufVariant);
 
     // Activate the config tab.
     $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'config'));
@@ -1650,7 +1656,7 @@ async function loadLoaderModel() {
     const lang = state.language || 'fr';
     const ctx = clampGgufCtx($('#ml-ctx-num').value);
     const gpuLayers = $('#ml-gpu-select') ? $('#ml-gpu-select').value : '';
-    const variant = $('#ml-variant-select') ? $('#ml-variant-select').value : '';
+    const variant = $('#ml-variant-select') ? normalizeGgufVariant($('#ml-variant-select').value) : '';
 
     // Persist the chosen options so the chat path reuses the same engine state.
     state.config.ggufCtx = ctx;

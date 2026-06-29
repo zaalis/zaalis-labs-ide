@@ -854,7 +854,7 @@ app.get('/api/doctor', async (req, res) => {
     } catch {}
 
     let gguf = { variant: '', installed: false };
-    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), 'llama-server.exe') }; } catch {}
+    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), engineBinaryName()) }; } catch {}
 
     const installerPaths = [
       path.join(APP_DIR, 'native', 'installer', 'zaalis-macos-universal-installer.tar.gz'),
@@ -1057,8 +1057,8 @@ app.get('/api/ollama-pull', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // LOCAL GGUF ENGINE (llama.cpp) — run GGUF models directly, NO Ollama needed.
-// We download the official llama.cpp `llama-server.exe` build that matches the
-// machine (CUDA / Vulkan / CPU) into %LOCALAPPDATA%\zaalis\engine, spawn it as a
+// We download the official llama.cpp `llama-server` build that matches the
+// machine (Metal / CUDA / Vulkan / CPU) into the local zaalis engine dir, spawn it as a
 // child process, and proxy chat to its OpenAI-compatible /v1/chat/completions.
 // This is exactly how LM Studio / Jan work, but fully self-contained.
 // ---------------------------------------------------------------------------
@@ -1074,6 +1074,7 @@ ensureDir(MODELS_DIR);
 let _gpuVariant = null;
 function detectEngineVariant() {
   if (_gpuVariant) return _gpuVariant;
+  if (process.platform === 'darwin') { _gpuVariant = 'metal'; return _gpuVariant; }
   if (process.platform !== 'win32') { _gpuVariant = 'cpu'; return _gpuVariant; }
   let names = '';
   try {
@@ -1091,8 +1092,28 @@ function execSyncSafe(cmd) {
   return execSync(cmd, { timeout: 9000, windowsHide: true }).toString();
 }
 
+function engineBinaryName() {
+  return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
+}
+
+function normalizeEngineVariant(variant) {
+  const v = String(variant || '').toLowerCase();
+  if (process.platform === 'darwin') return (v === 'metal' || v === 'cpu') ? v : detectEngineVariant();
+  if (process.platform === 'win32') return (v === 'cuda' || v === 'vulkan' || v === 'cpu') ? v : detectEngineVariant();
+  return v === 'cpu' ? 'cpu' : detectEngineVariant();
+}
+
+function macosEngineArch() {
+  return process.arch === 'arm64' ? 'arm64' : 'x64';
+}
+
 function engineAssetUrls(variant) {
+  variant = normalizeEngineVariant(variant);
   const base = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
+  if (process.platform === 'darwin') {
+    // The macOS release asset includes Metal support; CPU mode is enforced at launch with -ngl 0.
+    return [base + `llama-${LLAMA_TAG}-bin-macos-${macosEngineArch()}.tar.gz`];
+  }
   if (variant === 'cuda') return [
     base + `llama-${LLAMA_TAG}-bin-win-cuda-12.4-x64.zip`,
     base + `cudart-llama-bin-win-cuda-12.4-x64.zip`,   // CUDA runtime DLLs
@@ -1117,6 +1138,11 @@ function findExeRecursive(dir, name) {
   return found;
 }
 
+function ensureExecutable(file) {
+  if (process.platform === 'win32' || !file) return;
+  try { fs.chmodSync(file, 0o755); } catch {}
+}
+
 // Stream a URL to a file; calls onProgress(received, total). Abortable.
 async function downloadTo(url, dest, onProgress, signal) {
   const res = await fetch(url, { redirect: 'follow', signal });
@@ -1139,37 +1165,46 @@ async function downloadTo(url, dest, onProgress, signal) {
   }
 }
 
-// Extract a .zip. Tricky on Windows:
+// Extract a .zip or .tar.gz. Tricky on Windows:
 //  - the SYSTEM tar (C:\Windows\System32\tar.exe = bsdtar) reads zip, but a bare
 //    "tar" may resolve to Git's GNU tar (no zip support), so we call it by full
 //    path. bsdtar also reads "C:\path" as host:path, so we cd into the folder
 //    and pass a relative name (no colon).
 //  - if that fails, fall back to PowerShell's Expand-Archive (always present).
-function extractZip(zipPath, destDir) {
+function extractArchive(archivePath, destDir) {
   ensureDir(destDir);
   const { execSync } = require('child_process');
+  if (/\.tar\.gz$/i.test(archivePath) || /\.tgz$/i.test(archivePath)) {
+    execSync(`tar -xzf "${archivePath}" -C "${destDir}"`, { timeout: 300000, windowsHide: true });
+    return;
+  }
   const sysTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
   if (fs.existsSync(sysTar)) {
     try {
-      execSync(`"${sysTar}" -xf "${path.basename(zipPath)}" -C .`, {
-        cwd: path.dirname(zipPath), timeout: 180000, windowsHide: true,
+      execSync(`"${sysTar}" -xf "${path.basename(archivePath)}" -C .`, {
+        cwd: path.dirname(archivePath), timeout: 180000, windowsHide: true,
       });
       return;
     } catch { /* fall through to PowerShell */ }
   }
   const q = (s) => s.replace(/'/g, "''");
-  const ps = `Expand-Archive -LiteralPath '${q(zipPath)}' -DestinationPath '${q(destDir)}' -Force`;
+  const ps = `Expand-Archive -LiteralPath '${q(archivePath)}' -DestinationPath '${q(destDir)}' -Force`;
   execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${ps}"`, { timeout: 300000, windowsHide: true });
 }
 
-// Ensure the engine binary for `variant` exists; returns the llama-server.exe path.
+// Ensure the engine binary for `variant` exists; returns the llama-server path.
 // Downloads + extracts on first use, reporting progress via onLog({stage, pct}).
 const engineExePaths = {};
 async function ensureEngineBinary(variant, onLog) {
-  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return engineExePaths[variant];
+  variant = normalizeEngineVariant(variant);
+  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) {
+    ensureExecutable(engineExePaths[variant]);
+    return engineExePaths[variant];
+  }
   const vdir = path.join(ENGINE_DIR, variant);
-  let exe = findExeRecursive(vdir, 'llama-server.exe');
-  if (exe) { engineExePaths[variant] = exe; return exe; }
+  const binName = engineBinaryName();
+  let exe = findExeRecursive(vdir, binName);
+  if (exe) { ensureExecutable(exe); engineExePaths[variant] = exe; return exe; }
   ensureDir(vdir);
   const urls = engineAssetUrls(variant);
   for (let i = 0; i < urls.length; i++) {
@@ -1180,11 +1215,12 @@ async function ensureEngineBinary(variant, onLog) {
       if (onLog && tot) onLog({ stage: 'engine', pct: Math.round((rec / tot) * 100), part: i + 1, parts: urls.length });
     });
     if (onLog) onLog({ stage: 'extract', pct: 100, part: i + 1, parts: urls.length });
-    extractZip(zip, vdir);
+    extractArchive(zip, vdir);
     try { fs.unlinkSync(zip); } catch {}
   }
-  exe = findExeRecursive(vdir, 'llama-server.exe');
-  if (!exe) throw new Error('llama-server.exe introuvable après extraction.');
+  exe = findExeRecursive(vdir, binName);
+  if (!exe) throw new Error(`${binName} introuvable après extraction.`);
+  ensureExecutable(exe);
   engineExePaths[variant] = exe;
   return exe;
 }
@@ -1195,7 +1231,7 @@ let engineProc = null, engineModelFile = null, engineVariant = null, engineStart
 function stopEngine() {
   return new Promise((resolve) => {
     if (!engineProc) return resolve();
-    const p = engineProc; engineProc = null; engineModelFile = null;
+    const p = engineProc; engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
     let done = false;
     const fin = () => { if (!done) { done = true; resolve(); } };
     try { p.once('exit', fin); p.kill(); setTimeout(fin, 2000); } catch { fin(); }
@@ -1217,6 +1253,7 @@ async function waitForHealth(port, timeoutMs) {
 // Track the engine options the running process was started with, so a change in
 // context size / GPU layers forces a restart even when the model is unchanged.
 let engineOpts = '';
+let engineRequestedVariant = null;
 
 // Make sure the engine is running and serving `modelFile`. Swaps model if needed.
 // `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
@@ -1230,23 +1267,36 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
   const optsKey = `${ctx}|${ngl}`;
-  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return; }
+  const requestedVariant = normalizeEngineVariant(preferredVariant || detectEngineVariant());
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return; }
   engineStarting = (async () => {
     await stopEngine();
-    let variant = preferredVariant || detectEngineVariant();
-    let exe;
-    try { exe = await ensureEngineBinary(variant); }
-    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
-    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
-    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
-    if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
-    engineOpts = optsKey;
-    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
-    proc.on('error', () => {});
-    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
-    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
-    await waitForHealth(ENGINE_PORT, 180000);
+    const variant = requestedVariant;
+    const startVariant = async (v) => {
+      const exe = await ensureEngineBinary(v);
+      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+      // CPU mode must not offload layers, even when the macOS binary includes Metal.
+      if (v === 'cpu') args.push('-ngl', '0');
+      else if (ngl > 0) args.push('-ngl', String(ngl));
+      engineOpts = optsKey;
+      const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+      proc.on('error', () => {});
+      engineProc = proc; engineModelFile = modelFile; engineVariant = v; engineRequestedVariant = requestedVariant;
+      proc.once('exit', () => {
+        if (engineProc === proc) {
+          engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
+        }
+      });
+      await waitForHealth(ENGINE_PORT, 180000);
+    };
+    try {
+      await startVariant(variant);
+    } catch (e) {
+      await stopEngine();
+      if (variant === 'cpu') throw e;
+      await startVariant('cpu');
+    }
   })();
   try { await engineStarting; } finally { engineStarting = null; }
 }
@@ -1269,7 +1319,7 @@ app.get('/api/gguf-engine', (req, res) => {
   const variant = detectEngineVariant();
   res.json({
     variant,
-    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), 'llama-server.exe'),
+    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), engineBinaryName()),
     running: !!engineProc, current: engineModelFile,
   });
 });
@@ -1347,11 +1397,11 @@ app.get('/api/gguf-pull', async (req, res) => {
   }
 });
 
-// GET /api/gguf-engine-pull?variant=cpu|cuda|vulkan -> download the engine, NDJSON progress
+// GET /api/gguf-engine-pull?variant=cpu|metal|cuda|vulkan -> download the engine, NDJSON progress
 app.get('/api/gguf-engine-pull', async (req, res) => {
   res.setHeader('Content-Type', 'application/x-ndjson');
   try {
-    const variant = String(req.query.variant || detectEngineVariant());
+    const variant = normalizeEngineVariant(req.query.variant || detectEngineVariant());
     await ensureEngineBinary(variant, (p) => { try { res.write(JSON.stringify({ status: p.stage, pct: p.pct, part: p.part, parts: p.parts }) + '\n'); } catch {} });
     res.write(JSON.stringify({ status: 'success', variant }) + '\n');
     res.end();
