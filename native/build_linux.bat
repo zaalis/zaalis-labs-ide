@@ -17,7 +17,11 @@ if not exist "%SERVERDIST%\bin" mkdir "%SERVERDIST%\bin"
 if not exist "%INSTALLER%" mkdir "%INSTALLER%"
 
 echo [1/7] Ensuring build tools are installed...
-call npm install --save-dev @yao-pkg/pkg electron@42.5.0 @electron/packager@20.0.1 png2icons@2.0.1
+call npm install
+if errorlevel 1 goto :failed
+
+echo [1b/7] Checking source encoding...
+call npm run check:mojibake
 if errorlevel 1 goto :failed
 
 echo [2/7] Preparing Electron icons...

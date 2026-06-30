@@ -6,8 +6,9 @@
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:server": "pkg . --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/zaalis-server",
-    "build:cli": "pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/bin/zaalis",
+    "check:mojibake": "node scripts/check-mojibake.js",
+    "build:server": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/zaalis-server",
+    "build:cli": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/bin/zaalis",
     "build:linux": "native/build_linux.bat"
   },
   "pkg": {
