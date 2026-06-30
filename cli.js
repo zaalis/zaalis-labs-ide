@@ -34,10 +34,9 @@ const CFG_DIR = path.join(os.homedir(), '.zaalis');
 const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 
 // When packaged, this CLI lives in {app}/bin while the other binaries
-// (zaalis-server, zaalis-ide.command) sit in {app} — i.e. the PARENT folder.
+// (zaalis-server, zaalis-ide.command) sit in {app} - i.e. the PARENT folder.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 const IS_WIN = process.platform === 'win32';
-const IS_MAC = process.platform === 'darwin';
 
 // Locate a sibling binary, looking in this folder then its parent (so the CLI
 // in {app}/bin finds zaalis-server / zaalis-ide.command in {app}). Returns the
@@ -54,14 +53,13 @@ function findBinary(names) {
 }
 
 function spawnDetached(file, args = [], options = {}) {
-  const isCommandScript = process.platform !== 'win32' && /\.(command|sh)$/i.test(file);
-  const command = isCommandScript ? '/bin/sh' : file;
-  const finalArgs = isCommandScript ? [file, ...args] : args;
+  const isShellScript = process.platform !== 'win32' && /\.(command|sh)$/i.test(file);
+  const command = isShellScript ? '/bin/sh' : file;
+  const finalArgs = isShellScript ? [file, ...args] : args;
   const child = spawn(command, finalArgs, { detached: true, stdio: 'ignore', ...options });
   child.unref();
   return child;
 }
-
 // ---------------------------------------------------------------------------
 // Colors (ANSI 256, with a NO_COLOR / non-TTY fallback)
 // ---------------------------------------------------------------------------
@@ -111,9 +109,44 @@ function mdRender(text) {
   const lines = String(text).replace(/\r\n/g, '\n').split('\n');
   const res = [];
   let inFence = false;
+  let fenceInfo = '';
+  let fenceLines = [];
+  const codePreviewWidth = () => Math.max(30, Math.min(140, (termCols() || 80) - 6));
+  const codeLine = (raw) => {
+    const s = String(raw == null ? '' : raw);
+    const w = codePreviewWidth();
+    return s.length > w ? s.slice(0, Math.max(1, w - 3)).trimEnd() + '...' : s;
+  };
+  const flushFence = () => {
+    while (fenceLines.length && fenceLines[fenceLines.length - 1] === '') fenceLines.pop();
+    const body = fenceLines.join('\n');
+    const info = fenceInfo.trim() || 'code';
+    const shouldFold = fenceLines.length > 14 || body.length > 1200;
+    if (!shouldFold) {
+      for (const line of fenceLines) res.push(mdCode('  ' + line));
+    } else {
+      const preview = fenceLines.slice(0, Math.min(3, fenceLines.length));
+      res.push(dim(`  [${info} replie: ${fenceLines.length} lignes, ${body.length} caracteres]`));
+      for (const line of preview) res.push(mdCode('  ' + codeLine(line)));
+      if (fenceLines.length > preview.length) res.push(dim(`  ... ${fenceLines.length - preview.length} lignes masquees`));
+    }
+    fenceInfo = '';
+    fenceLines = [];
+  };
   for (const raw of lines) {
-    if (/^\s*```/.test(raw)) { inFence = !inFence; continue; }          // drop ``` fences
-    if (inFence) { res.push(mdCode('  ' + raw)); continue; }            // code block body
+    const fence = raw.match(/^\s*```(.*)$/);
+    if (fence) {
+      if (inFence) {
+        flushFence();
+        inFence = false;
+      } else {
+        inFence = true;
+        fenceInfo = fence[1] || '';
+        fenceLines = [];
+      }
+      continue;
+    }
+    if (inFence) { fenceLines.push(raw); continue; }                    // code block body
     const line = raw;
     const h = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*$/);             // # heading
     if (h) { const t = mdInline(h[2]); res.push(h[1].length <= 2 ? mdBold(brand(t)) : mdBold(t)); continue; }
@@ -126,6 +159,7 @@ function mdRender(text) {
     if (num) { res.push(num[1] + brand(num[2] + '.') + ' ' + mdInline(num[3])); continue; }
     res.push(mdInline(line));
   }
+  if (inFence) flushFence();
   return res.join('\n');
 }
 
@@ -267,10 +301,7 @@ function normalizeSharedRuntimeConfig(input) {
     const n = parseInt(src.ggufCtx, 10);
     out.ggufCtx = Number.isFinite(n) ? Math.max(512, Math.min(131072, n)) : SHARED_CONFIG_DEFAULTS.ggufCtx;
   }
-  if ('ggufVariant' in src) {
-    const v = String(src.ggufVariant || '').trim().toLowerCase();
-    out.ggufVariant = (v === 'metal' || v === 'cpu') ? v : '';
-  }
+  if ('ggufVariant' in src) out.ggufVariant = String(src.ggufVariant || '').trim().toLowerCase();
   if ('ggufGpuLayers' in src) {
     const raw = src.ggufGpuLayers;
     out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
@@ -321,7 +352,7 @@ async function ensureServer({ quiet } = {}) {
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
-    child = spawn(serverExe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(serverExe) });
+    child = spawnDetached(serverExe, [], { cwd: path.dirname(serverExe) });
   } else {
     // Dev: run the Node source directly. (cwd must be a real folder, not the
     // pkg virtual snapshot — hence __dirname only matters when not packaged.)
@@ -329,7 +360,7 @@ async function ensureServer({ quiet } = {}) {
       detached: true, stdio: 'ignore', cwd: __dirname,
     });
   }
-  child.unref();
+  if (child && child.unref) child.unref();
 
   for (let i = 0; i < 60; i++) {            // up to ~15s
     await new Promise((r) => setTimeout(r, 250));
@@ -610,7 +641,7 @@ src/app.js
 package.json
 \`\`\`
 
-4) Executer une commande macOS sh:
+4) Executer une commande macOS/Unix via le shell POSIX:
 \`\`\`run
 npm test
 \`\`\`
@@ -996,7 +1027,7 @@ async function sendChat(message, hooks = {}) {
   };
   const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
-  if (r.status === 401) return { error: 'Session expiree - relancez `zaalis login`.' };
+  if (r.status === 401) return { error: 'Session expirée — relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
   if (hooks.stop) hooks.stop();
 
@@ -1559,14 +1590,16 @@ let inputMode = 'normal';  // normal | answering
 let queuedInput = null;    // one pending { kind, text/name/arg, raw } while AI answers
 let queueNotice = null;
 let queueNoticeTimer = null;
+let bracketPaste = false;
+let bracketPasteText = '';
 
 // Use the terminal's ALTERNATE screen buffer: it has no scrollback, so the
 // terminal itself can't be scrolled into stale repaints — scrolling the
 // conversation is handled in-app instead (mouse wheel / arrows). ?1007h turns
 // the mouse wheel into arrow keys while in the alt buffer (so wheel = scroll,
 // and text selection still works).
-function enterFullscreen() { out('\x1b[?1049h\x1b[?1007h\x1b[2J\x1b[H'); }
-function leaveFullscreen() { out('\x1b[?1007l\x1b[?1049l\x1b[?25h'); }
+function enterFullscreen() { out('\x1b[?1049h\x1b[?1007h\x1b[?2004h\x1b[2J\x1b[H'); }
+function leaveFullscreen() { out('\x1b[?2004l\x1b[?1007l\x1b[?1049l\x1b[?25h'); }
 
 // Split an ANSI-colored string into physical rows of at most `width` visible
 // columns, carrying the color escapes across each break. Keeps row accounting
@@ -1590,7 +1623,7 @@ function wrapAnsi(str, width) {
         else if (codes === '22') active = active.filter((a) => !/\[[12]m$/.test(a)); // bold/dim off
         else if (codes === '23') active = active.filter((a) => !/\[3m$/.test(a));    // italic off
         else if (codes === '24') active = active.filter((a) => !/\[4m$/.test(a));    // underline off
-        else if (codes === '39') active = active.filter((a) => !/\[38;(2|5);/.test(a));  // default fg
+        else if (codes === '39') active = active.filter((a) => !/\[38;2;/.test(a));  // default fg
         else active.push(esc);
         i += esc.length;
         continue;
@@ -1642,6 +1675,16 @@ function cancelQueuedInput() {
   return true;
 }
 
+function appendInputText(text) {
+  const clean = String(text || '')
+    .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!clean) return;
+  inBuf = inBuf.slice(0, inCur) + clean + inBuf.slice(inCur);
+  inCur += clean.length;
+}
+
 function queueCurrentInput() {
   const ev = parseInput(inBuf);
   if (!ev) return false;
@@ -1654,6 +1697,67 @@ function queueCurrentInput() {
   inCur = 0;
   inMenuIdx = 0;
   repaint();
+  return true;
+}
+
+function promptEcho(raw) {
+  const text = String(raw || '').trim();
+  const flat = text.replace(/\s+/g, ' ');
+  const width = Math.max(24, termCols() - 6);
+  if (flat.length <= width) return brand('› ') + flat;
+  const lines = text.split(/\r?\n/).filter((l) => l.trim()).length || 1;
+  return brand('› ') + clipText(flat, width) + '\n' + dim(`  ... prompt replie (${text.length} caracteres, ${lines} lignes)`);
+}
+
+function flushBracketPaste() {
+  if (!bracketPasteText) return;
+  appendInputText(bracketPasteText);
+  bracketPasteText = '';
+  repaint();
+}
+
+function handleBracketPaste(str, key) {
+  const raw = String(str || '');
+  const startToken = '\x1b[200~';
+  const endToken = '\x1b[201~';
+
+  if (!bracketPaste && (key && key.name === 'paste-start')) {
+    bracketPaste = true;
+    bracketPasteText = '';
+    return true;
+  }
+
+  if (!bracketPaste && raw.includes(startToken)) {
+    bracketPaste = true;
+    bracketPasteText = '';
+    const afterStart = raw.slice(raw.indexOf(startToken) + startToken.length);
+    if (afterStart.includes(endToken)) {
+      bracketPasteText += afterStart.slice(0, afterStart.indexOf(endToken));
+      bracketPaste = false;
+      flushBracketPaste();
+    } else {
+      bracketPasteText += afterStart;
+    }
+    return true;
+  }
+
+  if (!bracketPaste) return false;
+
+  if (key && key.name === 'paste-end') {
+    bracketPaste = false;
+    flushBracketPaste();
+    return true;
+  }
+
+  let chunk = raw;
+  if (!chunk && key && (key.name === 'return' || key.name === 'enter')) chunk = ' ';
+  if (chunk.includes(endToken)) {
+    bracketPasteText += chunk.slice(0, chunk.indexOf(endToken));
+    bracketPaste = false;
+    flushBracketPaste();
+  } else {
+    bracketPasteText += chunk;
+  }
   return true;
 }
 
@@ -1683,10 +1787,11 @@ function buildFrame() {
   const avail = inner - 1 - 2;
   const start = inCur > avail ? inCur - avail : 0;
   const placeholder = inputMode === 'answering'
-    ? (queuedInput ? 'Un message est deja en attente  ·  Ctrl+X annuler' : 'Ecrivez le prochain message...  ·  Echap/Ctrl+C stoppe l IA')
+    ? 'Reponse en cours...  ·  Echap/Ctrl+C pour arreter'
     : 'Ecrivez votre message...';
-  const view = inBuf
-    ? inBuf.slice(start, start + avail)
+  const visibleInput = inBuf.replace(/\s+/g, ' ');
+  const view = visibleInput
+    ? visibleInput.slice(start, start + avail)
     : dim(clipText(placeholder, Math.max(0, avail)));
   const content = promptDisp + view;
   const inputLine = brand('│') + ' ' + content + ' '.repeat(Math.max(0, inner - 1 - vlen(content))) + brand('│');
@@ -1874,6 +1979,7 @@ function nextInput(opts = {}) {
 
     const onKp = (str, key) => {
       if (!key) return;
+      if (handleBracketPaste(str, key)) return;
       const menu = menuMatches();
       if (key.ctrl && key.name === 'c') return finish({ kind: 'exit' });
       // Shift+Tab cycles the AI permission level, live (no Enter to validate).
@@ -1886,7 +1992,7 @@ function nextInput(opts = {}) {
         }
         const ev = parseInput(inBuf);
         if (!ev) return;
-        return finish(ev, brand('› ') + ev.raw, true);
+        return finish(ev, promptEcho(ev.raw), true);
       }
       if (key.name === 'tab') {
         if (menu.length) { inBuf = '/' + menu[inMenuIdx].name + ' '; inCur = inBuf.length; }
@@ -1907,8 +2013,7 @@ function nextInput(opts = {}) {
       if (key.name === 'escape') { inBuf = ''; inCur = 0; return repaint(); }
       // printable (single char or a paste — special keys already returned above)
       if (str && !key.ctrl && !key.meta && str.charCodeAt(0) >= 0x20) {
-        const clean = str.replace(/[\r\n]/g, ' ');
-        inBuf = inBuf.slice(0, inCur) + clean + inBuf.slice(inCur); inCur += clean.length; return repaint();
+        appendInputText(str); return repaint();
       }
     };
 
@@ -1920,44 +2025,26 @@ function nextInput(opts = {}) {
 
 function attachAnswerInput(onAbort) {
   inputMode = 'answering';
+  inBuf = '';
+  inCur = 0;
+  inMenuIdx = 0;
+  queuedInput = null;
   boxActive = true;
   repaint();
   const onKp = (str, key) => {
     if (!key) return;
-    const menu = menuMatches();
     if (key.ctrl && key.name === 'c') { onAbort(); return repaint(); }
     if (key.name === 'escape') { onAbort(); return repaint(); }
-    if (key.ctrl && key.name === 'x') {
-      if (!cancelQueuedInput()) setQueueNotice('Aucun message en attente.');
-      return;
-    }
     if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
-    if (key.name === 'return' || key.name === 'enter') {
-      if (menu.length) {
-        inBuf = '/' + menu[inMenuIdx % menu.length].name;
-        inCur = inBuf.length;
-      }
-      queueCurrentInput();
-      return;
-    }
-    if (key.name === 'tab') {
-      if (menu.length) { inBuf = '/' + menu[inMenuIdx].name + ' '; inCur = inBuf.length; }
-      return repaint();
-    }
-    if (key.name === 'up') { if (menu.length) { inMenuIdx = (inMenuIdx - 1 + menu.length) % menu.length; repaint(); } else scrollLines(SCROLL_STEP); return; }
-    if (key.name === 'down') { if (menu.length) { inMenuIdx = (inMenuIdx + 1) % menu.length; repaint(); } else scrollLines(-SCROLL_STEP); return; }
+    if (key.name === 'up') { scrollLines(SCROLL_STEP); return; }
+    if (key.name === 'down') { scrollLines(-SCROLL_STEP); return; }
     if (key.name === 'pageup') { scrollPage(1); return; }
     if (key.name === 'pagedown') { scrollPage(-1); return; }
-    if (key.name === 'left') { if (inCur > 0) inCur--; return repaint(); }
-    if (key.name === 'right') { if (inCur < inBuf.length) inCur++; return repaint(); }
-    if (key.name === 'home') { inCur = 0; return repaint(); }
-    if (key.name === 'end') { inCur = inBuf.length; return repaint(); }
-    if (key.name === 'backspace') { if (inCur > 0) { inBuf = inBuf.slice(0, inCur - 1) + inBuf.slice(inCur); inCur--; } return repaint(); }
-    if (key.name === 'delete') { inBuf = inBuf.slice(0, inCur) + inBuf.slice(inCur + 1); return repaint(); }
-    if (str && !key.ctrl && !key.meta && str.charCodeAt(0) >= 0x20) {
-      const clean = str.replace(/[\r\n]/g, ' ');
-      inBuf = inBuf.slice(0, inCur) + clean + inBuf.slice(inCur);
-      inCur += clean.length;
+    if (inBuf || inCur || queuedInput) {
+      inBuf = '';
+      inCur = 0;
+      inMenuIdx = 0;
+      queuedInput = null;
       return repaint();
     }
   };
@@ -1965,6 +2052,10 @@ function attachAnswerInput(onAbort) {
   return () => {
     process.stdin.removeListener('keypress', onKp);
     inputMode = 'normal';
+    inBuf = '';
+    inCur = 0;
+    inMenuIdx = 0;
+    queuedInput = null;
     repaint();
   };
 }
@@ -2011,7 +2102,7 @@ async function repl() {
       ev = queuedInput;
       queuedInput = null;
       repaint();
-      emit(brand('› ') + ev.raw);
+      emit(promptEcho(ev.raw));
     } else {
       ev = await nextInput({ preserveBuffer: preserveInput });
       preserveInput = false;
@@ -2022,6 +2113,11 @@ async function repl() {
       if (action === 'exit') { bye(); process.exit(0); }
       continue;
     }
+    // The submitted text is now part of the transcript; while the answer is
+    // generated, the live input box is locked and must stay empty.
+    inBuf = '';
+    inCur = 0;
+    inMenuIdx = 0;
     // chat — two blank lines after the user's message so it reads clearly apart
     // from the AI's answer. A fresh turn snaps back to the bottom and follows.
     followTail = true; scrollOffset = 0;
@@ -2052,7 +2148,7 @@ async function repl() {
     detachAnswerInput();
     currentAbort = null;
     hooks.stop();
-    preserveInput = !!inBuf;
+    preserveInput = false;
     if (aborted) {
       cancelQueuedInput();
       emit(dim('  ⛔ Réponse interrompue.'));
@@ -2126,21 +2222,23 @@ async function main() {
   }
 
   if (cmd === 'ide') {
-    // The GUI lives outside {app}/bin. Never relaunch the CLI itself.
     const self = process.execPath.toLowerCase();
-    const guiCandidates = IS_WIN
+    const exe = (IS_WIN
       ? [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
-      : IS_MAC
+      : (process.platform === 'darwin'
         ? [
             path.join(APP_DIR, '..', 'zaalis-ide.command'),
             path.join(APP_DIR, 'zaalis-ide.command'),
-            path.join(APP_DIR, '..', '..', 'MacOS', 'zaalis-ide'),
-            path.join(APP_DIR, '..', '..', '..', '..', 'MacOS', 'zaalis-ide'),
+            path.join(APP_DIR, '..', 'zaalis-ide.sh'),
+            path.join(APP_DIR, 'zaalis-ide.sh'),
           ]
-        : [path.join(APP_DIR, '..', 'zaalis-ide.sh'), path.join(APP_DIR, 'zaalis-ide.sh')];
-    const exe = guiCandidates
+        : [
+            path.join(APP_DIR, '..', 'zaalis-ide.sh'),
+            path.join(APP_DIR, 'zaalis-ide.sh'),
+            path.join(APP_DIR, '..', '..', '..', '..', 'zaalis-ide'),
+          ]))
       .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-    if (exe) spawnDetached(exe, [], { cwd: path.dirname(exe) });
+    if (exe) spawnDetached(exe);
     else console.log(brand('✗ ') + (IS_WIN ? 'zaalis.exe (IDE) introuvable.' : 'zaalis IDE introuvable.'));
     return;
   }

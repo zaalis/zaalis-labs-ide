@@ -13,7 +13,7 @@ set "INSTALLER=native\installer"
 if not exist "%INSTALLER%" mkdir "%INSTALLER%"
 
 echo [1/10] Ensuring build tools are installed...
-call npm install --save-dev @yao-pkg/pkg electron@42.5.0 @electron/packager@20.0.1 png2icons@2.0.1
+call npm install
 if errorlevel 1 goto :failed
 
 echo Checking source encoding...
