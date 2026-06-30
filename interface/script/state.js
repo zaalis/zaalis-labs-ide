@@ -42,7 +42,7 @@ const state = {
     contextTokens: 0,         // estimated tokens currently in context
     agentConversations: [],   // agents-mode history (separate)
     currentAgentConvId: null,
-    attachments: [], // [{ name, ext, isImage, url?, content? }]
+    attachments: [], // [{ name, ext, isImage, url?, content }]
     language: 'fr' // 'fr' | 'en'
 };
 
@@ -196,11 +196,11 @@ function fmtDuration(ms) {
 //  PERMISSION MODES (Claude-Code-style)
 // ==========================================================
 // supervised : ask before every write/edit/run         (UI selector)
-// semi       : write/edit auto, ask before run          (UI selector)
-// auto       : everything auto, ask only for dangerous  (UI selector)
-// plan       : read/search only, NEVER write or run     (/plan, /permissions)
+// semi     ?  : write/edit auto, ask before run          (UI selector)
+// auto     ?  : everything auto, ask only for dangerous  (UI selector)
+// plan     ?  : read/search only, NEVER write or run     (/plan, /permissions)
 // read-only  : read/search only, NEVER write or run     (/permissions)
-// bypass     : everything, no confirmation at all        (/permissions, danger)
+// bypass   ?  : everything, no confirmation at all        (/permissions, danger)
 const PERMISSION_MODES = ['read-only', 'plan', 'supervised', 'semi', 'auto', 'bypass'];
 const PERMISSION_LABELS = {
     'read-only': { fr: 'Lecture seule', en: 'Read-only' },

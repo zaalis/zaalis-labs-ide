@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -162,6 +162,50 @@ function chatsFile(userId, kind) {
   return path.join(CHATS_DIR, `${userId}__${k}.json`);
 }
 
+const SHARED_CONFIG_DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  ollamaModel: 'qwen3:8b',
+  ggufCtx: 8192,
+  ggufVariant: '',
+  ggufGpuLayers: ''
+};
+const GGUF_VARIANTS = new Set(['', 'cuda', 'vulkan', 'cpu']);
+
+function clampSharedGgufCtx(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return SHARED_CONFIG_DEFAULTS.ggufCtx;
+  return Math.max(512, Math.min(131072, n));
+}
+
+function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = { ...SHARED_CONFIG_DEFAULTS, ...(base || {}) };
+  if ('ollamaUrl' in src) {
+    const v = String(src.ollamaUrl || '').trim();
+    out.ollamaUrl = v || SHARED_CONFIG_DEFAULTS.ollamaUrl;
+  }
+  if ('ollamaModel' in src) {
+    const v = String(src.ollamaModel || '').trim();
+    out.ollamaModel = v || SHARED_CONFIG_DEFAULTS.ollamaModel;
+  }
+  if ('ggufCtx' in src) out.ggufCtx = clampSharedGgufCtx(src.ggufCtx);
+  if ('ggufVariant' in src) {
+    const v = String(src.ggufVariant || '').trim().toLowerCase();
+    out.ggufVariant = GGUF_VARIANTS.has(v) ? v : '';
+  }
+  if ('ggufGpuLayers' in src) {
+    const raw = src.ggufGpuLayers;
+    out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
+      ? ''
+      : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
+  }
+  return out;
+}
+
+function sharedConfigForUser(user) {
+  return sanitizeSharedConfig(user && user.sharedConfig);
+}
+
 // ---------------------------------------------------------------------------
 // Middleware
 // ---------------------------------------------------------------------------
@@ -312,6 +356,30 @@ app.post('/api/profile', (req, res) => {
   };
   saveUsers(users);
   res.json({ success: true, profile: users[userIdx].profile });
+});
+
+// Shared local runtime settings used by both the desktop IDE and the CLI.
+// This intentionally covers hardware/local-model settings, not UI state.
+app.get('/api/config', (req, res) => {
+  res.json({
+    configured: !!(req.user && req.user.sharedConfig),
+    config: sharedConfigForUser(req.user)
+  });
+});
+
+app.put('/api/config', (req, res) => {
+  try {
+    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    const users = loadUsers();
+    const userIdx = users.findIndex((u) => u.id === req.user.id);
+    if (userIdx === -1) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    const current = sharedConfigForUser(users[userIdx]);
+    users[userIdx].sharedConfig = sanitizeSharedConfig((req.body && req.body.config) || {}, current);
+    saveUsers(users);
+    res.json({ success: true, config: users[userIdx].sharedConfig });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 
@@ -600,6 +668,35 @@ app.post('/api/exec', (req, res) => {
 // These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
 // are strictly read-only, bounded in output, and path-guarded to the project.
 
+app.get('/api/browser-search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'q is required' });
+
+  const mode = String(req.query.mode || 'newtab').toLowerCase();
+  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
+  const visibleParam = background ? '&background=1' : '';
+  const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
+  const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 2500);
+  try {
+    const r = await fetch(url, { signal: ctrl.signal });
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok || body.error) {
+      return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
+    }
+    res.json({ ok: true, query: q, mode, background, browser: body });
+  } catch (e) {
+    const msg = e && e.name === 'AbortError'
+      ? 'zaalis browser ne repond pas'
+      : 'zaalis browser est indisponible';
+    res.status(502).json({ error: msg, detail: e && e.message });
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
 // Detect a CLI tool once (node/npm/git/rg). Cached promise so /doctor and the
 // grep fallback don't re-spawn the same probe repeatedly.
 const _cliCache = new Map();
@@ -733,7 +830,7 @@ function jsGrep(searchAbs, base, pattern, ignoreCase, glob, max) {
   return { list, truncated };
 }
 
-// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults? }
+// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults }
 app.post('/api/grep', async (req, res) => {
   try {
     const b = req.body || {};
@@ -1098,6 +1195,26 @@ function findExeRecursive(dir, name) {
   return found;
 }
 
+function terminalGgufPullStatus(status) {
+  return status === 'success' || status === 'error' || status === 'canceled';
+}
+
+function ggufPullSnapshot(task) {
+  return {
+    id: task.id,
+    status: task.status,
+    name: task.name,
+    repo: task.repo,
+    file: task.file,
+    completed: task.completed || 0,
+    total: task.total || 0,
+    error: task.error || '',
+    startedAt: task.startedAt,
+    updatedAt: task.updatedAt,
+    doneAt: task.doneAt || 0,
+  };
+}
+
 // Stream a URL to a file; calls onProgress(received, total). Abortable.
 async function downloadTo(url, dest, onProgress, signal) {
   const res = await fetch(url, { redirect: 'follow', signal });
@@ -1118,6 +1235,83 @@ async function downloadTo(url, dest, onProgress, signal) {
   } finally {
     await new Promise((r) => out.end(r));
   }
+}
+
+const ggufPullTasks = new Map();
+
+function sweepGgufPullTasks() {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [id, task] of ggufPullTasks) {
+    if (task.doneAt && task.doneAt < cutoff) ggufPullTasks.delete(id);
+  }
+}
+
+function startGgufPullTask({ repo, file, url }) {
+  sweepGgufPullTasks();
+  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
+  if (!url) throw new Error('url, ou repo+file requis');
+
+  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
+  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
+  const dest = path.join(MODELS_DIR, base);
+  const tmp = dest + '.part';
+
+  for (const task of ggufPullTasks.values()) {
+    if (!terminalGgufPullStatus(task.status) && task.dest === dest) return task;
+  }
+
+  const ac = new AbortController();
+  const task = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    repo,
+    file,
+    url,
+    name: base,
+    dest,
+    tmp,
+    status: 'queued',
+    completed: 0,
+    total: 0,
+    error: '',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    doneAt: 0,
+    ac,
+  };
+  ggufPullTasks.set(task.id, task);
+
+  task.promise = (async () => {
+    try {
+      ensureDir(MODELS_DIR);
+      if (fs.existsSync(dest)) {
+        const size = fs.statSync(dest).size;
+        task.completed = size;
+        task.total = size;
+        task.status = 'success';
+        return;
+      }
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = 'downloading';
+      await downloadTo(url, tmp, (rec, tot) => {
+        task.completed = rec;
+        task.total = tot || task.total || 0;
+        task.status = 'downloading';
+        task.updatedAt = Date.now();
+      }, ac.signal);
+      fs.renameSync(tmp, dest);
+      task.completed = task.total || task.completed;
+      task.status = 'success';
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = ac.signal.aborted ? 'canceled' : 'error';
+      task.error = ac.signal.aborted ? 'Téléchargement annulé.' : ((e && e.message) || String(e));
+    } finally {
+      task.updatedAt = Date.now();
+      task.doneAt = Date.now();
+    }
+  })();
+
+  return task;
 }
 
 // Extract a .zip. Tricky on Windows:
@@ -1210,12 +1404,13 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
+  const desiredVariant = preferredVariant || detectEngineVariant();
   const optsKey = `${ctx}|${ngl}`;
-  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey) return; }
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
   engineStarting = (async () => {
     await stopEngine();
-    let variant = preferredVariant || detectEngineVariant();
+    let variant = desiredVariant;
     let exe;
     try { exe = await ensureEngineBinary(variant); }
     catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
@@ -1297,35 +1492,54 @@ app.post('/api/gguf-delete', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress
+// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress.
+// The download is owned by the server, not by the browser request. Closing the
+// catalog/model window only detaches this progress stream; it does not cancel.
 app.get('/api/gguf-pull', async (req, res) => {
-  const repo = String(req.query.repo || '').trim();
-  const file = String(req.query.file || '').trim();
-  let url = String(req.query.url || '').trim();
-  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
-  if (!url) return res.status(400).json({ error: 'url, ou repo+file requis' });
-  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
-  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
-  const dest = path.join(MODELS_DIR, base);
-  const tmp = dest + '.part';
   res.setHeader('Content-Type', 'application/x-ndjson');
-  const ac = new AbortController();
-  req.on('close', () => ac.abort());
+  let task;
   try {
-    ensureDir(MODELS_DIR);
-    let last = 0;
-    await downloadTo(url, tmp, (rec, tot) => {
-      const now = Date.now();
-      if (now - last > 200 || rec === tot) { last = now; try { res.write(JSON.stringify({ status: 'downloading', completed: rec, total: tot }) + '\n'); } catch {} }
-    }, ac.signal);
-    fs.renameSync(tmp, dest);
-    res.write(JSON.stringify({ status: 'success', name: base }) + '\n');
-    res.end();
+    task = startGgufPullTask({
+      repo: String(req.query.repo || '').trim(),
+      file: String(req.query.file || '').trim(),
+      url: String(req.query.url || '').trim(),
+    });
   } catch (e) {
-    try { fs.unlinkSync(tmp); } catch {}
-    if (!ac.signal.aborted) { try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {} }
+    try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {}
     try { res.end(); } catch {}
+    return;
   }
+
+  let closed = false;
+  let lastPayload = '';
+  const writeSnapshot = () => {
+    if (closed) return;
+    const payload = JSON.stringify(ggufPullSnapshot(task));
+    if (payload === lastPayload && !terminalGgufPullStatus(task.status)) return;
+    lastPayload = payload;
+    try { res.write(payload + '\n'); } catch { closed = true; }
+    if (terminalGgufPullStatus(task.status)) {
+      closed = true;
+      clearInterval(timer);
+      try { res.end(); } catch {}
+    }
+  };
+  const timer = setInterval(writeSnapshot, 300);
+  req.on('close', () => { closed = true; clearInterval(timer); });
+  writeSnapshot();
+});
+
+app.get('/api/gguf-pulls', (req, res) => {
+  sweepGgufPullTasks();
+  res.json({ tasks: Array.from(ggufPullTasks.values()).map(ggufPullSnapshot) });
+});
+
+app.post('/api/gguf-pull-cancel', (req, res) => {
+  const id = String((req.body && req.body.id) || req.query.id || '').trim();
+  const task = ggufPullTasks.get(id);
+  if (!task) return res.status(404).json({ error: 'Téléchargement introuvable.' });
+  if (!terminalGgufPullStatus(task.status)) task.ac.abort();
+  res.json({ success: true, task: ggufPullSnapshot(task) });
 });
 
 // GET /api/gguf-engine-pull?variant=cpu|cuda|vulkan -> download the engine, NDJSON progress
@@ -1351,13 +1565,41 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // It keeps the provider dispatch in /api/chat, but centralizes project context
 // and local tools here so every client sees the same files and behavior.
 app.post('/api/agent-chat', async (req, res) => {
+  let wantsStream = false;
+  let streamOpen = false;
+  const openStream = (status = 200) => {
+    if (streamOpen) return;
+    streamOpen = true;
+    if (res.headersSent) return;
+    res.status(status);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  };
+  const writeStreamEvent = (event) => {
+    try {
+      openStream();
+      res.write(JSON.stringify(event) + '\n');
+    } catch {}
+  };
+  const respondError = (status, message) => {
+    if (wantsStream) {
+      openStream(status);
+      try { res.write(JSON.stringify({ type: 'error', error: message }) + '\n'); } catch {}
+      try { res.end(); } catch {}
+      return;
+    }
+    res.status(status).json({ error: message });
+  };
   try {
-    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
     const b = req.body || {};
+    wantsStream = b.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
+    if (req.isMobile) return respondError(403, 'Action indisponible en mode mobile.');
     const model = b.model;
     const message = String(b.message || '');
     if (!model || !message.trim()) {
-      return res.status(400).json({ error: 'model and message are required' });
+      return respondError(400, 'model and message are required');
     }
 
     const root = resolveBase(b.root || b.projectRoot);
@@ -1403,10 +1645,22 @@ app.post('/api/agent-chat', async (req, res) => {
       language: b.language || 'fr',
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
+      emitEvent: wantsStream ? writeStreamEvent : undefined,
     });
-    res.json(result);
+    if (wantsStream) {
+      writeStreamEvent({ type: 'done', result });
+      try { res.end(); } catch {}
+    } else {
+      res.json(result);
+    }
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    if (wantsStream) {
+      openStream(res.headersSent ? 200 : 500);
+      try { res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n'); } catch {}
+      try { res.end(); } catch {}
+    } else {
+      res.status(500).json({ error: err.message });
+    }
   }
 });
 
@@ -1675,7 +1929,7 @@ app.post('/api/chat', async (req, res) => {
       const olModel = submodel || ollamaModel;
 
       // Estimate total tokens to pick an appropriate num_ctx.
-      // Rough estimate: 1 token ≈ 4 chars.
+      // Rough estimate: 1 token â‰ˆ 4 chars.
       const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
       const estimatedTokens = Math.ceil(totalChars / 4);
       // Pick num_ctx from fixed BUCKETS rather than a value that changes on every

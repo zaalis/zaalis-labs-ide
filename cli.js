@@ -63,6 +63,13 @@ const gray = RGB(150, 150, 150);
 // Visible length, ignoring ANSI escapes — needed to pad inside the box.
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
 const vlen = (s) => stripAnsi(s).length;
+function clipText(s, width) {
+  const text = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  if (width <= 0) return '';
+  if (text.length <= width) return text;
+  if (width <= 3) return '.'.repeat(width);
+  return text.slice(0, width - 3).trimEnd() + '...';
+}
 
 // ---------------------------------------------------------------------------
 // Minimal Markdown -> ANSI renderer (no external dependency — pure Node)
@@ -90,21 +97,57 @@ function mdRender(text) {
   const lines = String(text).replace(/\r\n/g, '\n').split('\n');
   const res = [];
   let inFence = false;
+  let fenceInfo = '';
+  let fenceLines = [];
+  const codePreviewWidth = () => Math.max(30, Math.min(140, (termCols() || 80) - 6));
+  const codeLine = (raw) => {
+    const s = String(raw == null ? '' : raw);
+    const w = codePreviewWidth();
+    return s.length > w ? s.slice(0, Math.max(1, w - 3)).trimEnd() + '...' : s;
+  };
+  const flushFence = () => {
+    while (fenceLines.length && fenceLines[fenceLines.length - 1] === '') fenceLines.pop();
+    const body = fenceLines.join('\n');
+    const info = fenceInfo.trim() || 'code';
+    const shouldFold = fenceLines.length > 14 || body.length > 1200;
+    if (!shouldFold) {
+      for (const line of fenceLines) res.push(mdCode('  ' + line));
+    } else {
+      const preview = fenceLines.slice(0, Math.min(3, fenceLines.length));
+      res.push(dim(`  [${info} replie: ${fenceLines.length} lignes, ${body.length} caracteres]`));
+      for (const line of preview) res.push(mdCode('  ' + codeLine(line)));
+      if (fenceLines.length > preview.length) res.push(dim(`  ... ${fenceLines.length - preview.length} lignes masquees`));
+    }
+    fenceInfo = '';
+    fenceLines = [];
+  };
   for (const raw of lines) {
-    if (/^\s*```/.test(raw)) { inFence = !inFence; continue; }          // drop ``` fences
-    if (inFence) { res.push(mdCode('  ' + raw)); continue; }            // code block body
+    const fence = raw.match(/^\s*```(.*)$/);
+    if (fence) {
+      if (inFence) {
+        flushFence();
+        inFence = false;
+      } else {
+        inFence = true;
+        fenceInfo = fence[1] || '';
+        fenceLines = [];
+      }
+      continue;
+    }
+    if (inFence) { fenceLines.push(raw); continue; }                    // code block body
     const line = raw;
     const h = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*$/);             // # heading
     if (h) { const t = mdInline(h[2]); res.push(h[1].length <= 2 ? mdBold(brand(t)) : mdBold(t)); continue; }
-    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { res.push(dim('─'.repeat(Math.min(48, Math.max(3, (termCols() || 80) - 2))))); continue; } // ---
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { res.push(dim('â”€'.repeat(Math.min(48, Math.max(3, (termCols() || 80) - 2))))); continue; } // ---
     const bq = line.match(/^\s*>\s?(.*)$/);                             // > quote
-    if (bq) { res.push(dim('▎ ') + mdInline(bq[1])); continue; }
+    if (bq) { res.push(dim('â–Ž ') + mdInline(bq[1])); continue; }
     const bullet = line.match(/^(\s*)[-*+]\s+(.*)$/);                   // - bullet
     if (bullet) { res.push(bullet[1] + brand('•') + ' ' + mdInline(bullet[2])); continue; }
     const num = line.match(/^(\s*)(\d{1,3})\.\s+(.*)$/);               // 1. numbered
     if (num) { res.push(num[1] + brand(num[2] + '.') + ' ' + mdInline(num[3])); continue; }
     res.push(mdInline(line));
   }
+  if (inFence) flushFence();
   return res.join('\n');
 }
 
@@ -140,6 +183,71 @@ function request(method, pathname, { body, cookie } = {}) {
   });
 }
 
+// Streaming variant of request() for the NDJSON agent endpoint (stream:true).
+// Parses one JSON event per line and forwards live events to onEvent; the final
+// `done` event's result (or an `error` event) becomes the resolved payload. If
+// the server answers with a non-streamed body (older build, or an early JSON
+// error such as 401/400), it transparently buffers + JSON-parses instead, so
+// callers always get the same { status, json } shape.
+function requestStream(method, pathname, { body, cookie, onEvent } = {}) {
+  return new Promise((resolve, reject) => {
+    const data = body ? Buffer.from(JSON.stringify(body)) : null;
+    const req = http.request(
+      { host: HOST, port: PORT, method, path: pathname, signal: currentAbort ? currentAbort.signal : undefined, headers: {
+        ...(data ? { 'Content-Type': 'application/json', 'Content-Length': data.length } : {}),
+        ...(cookie ? { Cookie: cookie } : {}),
+        Accept: 'application/x-ndjson',
+      } },
+      (res) => {
+        const ct = String(res.headers['content-type'] || '');
+        // Non-streamed answer (older server / early error): buffer + JSON parse.
+        if (!/x-ndjson/i.test(ct)) {
+          const chunks = [];
+          res.on('data', (d) => chunks.push(d));
+          res.on('end', () => {
+            const text = Buffer.concat(chunks).toString('utf-8');
+            let json = null;
+            try { json = JSON.parse(text); } catch {}
+            resolve({ status: res.statusCode, headers: res.headers, json, streamed: false });
+          });
+          return;
+        }
+        let buffer = '';
+        let result = null;
+        let streamError = null;
+        const handleLine = (line) => {
+          const clean = line.trim();
+          if (!clean) return;
+          let event;
+          try { event = JSON.parse(clean); } catch { return; }
+          if (event.type === 'done') result = event.result || {};
+          else if (event.type === 'error') streamError = event.error || 'Erreur agent.';
+          else if (typeof onEvent === 'function') { try { onEvent(event); } catch {} }
+        };
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          buffer += chunk;
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || '';
+          for (const l of lines) handleLine(l);
+        });
+        res.on('end', () => {
+          if (buffer) handleLine(buffer);
+          resolve({
+            status: res.statusCode,
+            headers: res.headers,
+            json: streamError ? { error: streamError } : result,
+            streamed: true,
+          });
+        });
+      }
+    );
+    req.on('error', reject);
+    if (data) req.write(data);
+    req.end();
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Session persistence
 // ---------------------------------------------------------------------------
@@ -155,6 +263,61 @@ let session = loadSession();
 
 function authed(method, pathname, body) {
   return request(method, pathname, { body, cookie: session.cookie });
+}
+
+const SHARED_CONFIG_DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  ollamaModel: 'qwen3:8b',
+  ggufCtx: 8192,
+  ggufVariant: '',
+  ggufGpuLayers: ''
+};
+let sharedConfigCache = null;
+
+function normalizeSharedRuntimeConfig(input) {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = { ...SHARED_CONFIG_DEFAULTS };
+  if ('ollamaUrl' in src) {
+    const v = String(src.ollamaUrl || '').trim();
+    out.ollamaUrl = v || SHARED_CONFIG_DEFAULTS.ollamaUrl;
+  }
+  if ('ollamaModel' in src) {
+    const v = String(src.ollamaModel || '').trim();
+    out.ollamaModel = v || SHARED_CONFIG_DEFAULTS.ollamaModel;
+  }
+  if ('ggufCtx' in src) {
+    const n = parseInt(src.ggufCtx, 10);
+    out.ggufCtx = Number.isFinite(n) ? Math.max(512, Math.min(131072, n)) : SHARED_CONFIG_DEFAULTS.ggufCtx;
+  }
+  if ('ggufVariant' in src) out.ggufVariant = String(src.ggufVariant || '').trim().toLowerCase();
+  if ('ggufGpuLayers' in src) {
+    const raw = src.ggufGpuLayers;
+    out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
+      ? ''
+      : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
+  }
+  return out;
+}
+
+async function getSharedRuntimeConfig() {
+  if (sharedConfigCache) return sharedConfigCache;
+  let config = normalizeSharedRuntimeConfig({});
+  try {
+    const r = await authed('GET', '/api/config');
+    if (r.status === 200 && r.json && r.json.config) {
+      config = normalizeSharedRuntimeConfig(r.json.config);
+    }
+  } catch {}
+  sharedConfigCache = config;
+  return config;
+}
+
+function configForCurrentModel(sharedConfig) {
+  const config = normalizeSharedRuntimeConfig(sharedConfig);
+  if ((session.model || '') === 'local' && session.submodel) {
+    config.ollamaModel = session.submodel;
+  }
+  return config;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +463,7 @@ async function gatherModels() {
 async function listModels() {
   const m = await gatherModels();
   console.log('\n' + bold('Modèles disponibles'));
-  console.log(brand('  ☁  Cloud'));
+  console.log(brand('  â˜  Cloud'));
   for (const x of m.cloud) {
     const mark = x.ready ? green('●') : gray('○');
     const note = x.ready ? '' : dim('  (pas de clé API)');
@@ -739,18 +902,13 @@ async function applyTools(response, events) {
 }
 
 async function callChat(message, systemPrompt, hist) {
+  const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
     submodel: session.submodel || undefined,
     message,
     systemPrompt,
-    config: {
-      ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: session.submodel || 'llama3',
-      ggufCtx: 8192,
-      ggufVariant: '',
-      ggufGpuLayers: '',
-    },
+    config: runtimeConfig,
     history: (hist || history).slice(-20),
     reasoningLevel: currentEffort().level,
   };
@@ -798,30 +956,70 @@ async function resolveReadRequests(response, systemPrompt, events, hooks, depth 
   return { texts: [...texts, ...nested.texts], thinking: [data.thinking, nested.thinking].filter(Boolean).join('\n\n') };
 }
 
+// Short, human label for a streamed tool event ("read src/app.js", "grep …").
+function agentToolLabel(event) {
+  const tool = event.tool || 'outil';
+  const input = event.input || {};
+  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || '';
+  return hint ? `${tool} ${String(hint).replace(/\n/g, ' ').slice(0, 60)}` : tool;
+}
+
+// Map a streamed agent event to terminal output: `status` updates the live
+// spinner label (transient); `line` is appended permanently to the transcript.
+function describeAgentEvent(event) {
+  if (!event || !event.type) return {};
+  switch (event.type) {
+    case 'phase':
+    case 'model_start':
+      return { status: event.label || 'réflexion' };
+    case 'tool_batch': {
+      const n = Number(event.count || 0);
+      return { status: `${n} ${n === 1 ? 'outil prévu' : 'outils prévus'}` };
+    }
+    case 'assistant_note': {
+      const note = String(event.text || '').trim();
+      return note ? { line: dim('  â–¸ ' + note.replace(/\n/g, '\n    ')) } : {};
+    }
+    case 'tool_started':
+      return { status: agentToolLabel(event) };
+    case 'tool_done': {
+      const name = agentToolLabel(event);
+      const mark = event.error ? brand('✗') : (event.blocked ? dim('⊘') : brand('✓'));
+      const summary = String(event.summary || name).replace(/\n/g, ' ');
+      return { line: '  ' + mark + dim(' ' + summary), status: name };
+    }
+    default:
+      return {};
+  }
+}
+
 async function sendChat(message, hooks = {}) {
+  let effectiveMessage = String(message || '');
+  if (session.responseStyle === 'fast') {
+    effectiveMessage += '\n\n[STYLE] Sois concis : reponses courtes et directes, peu de preambule.';
+  } else if (session.responseStyle === 'deep') {
+    effectiveMessage += '\n\n[STYLE] Sois approfondi : considere les cas limites, explique les compromis, et verifie via lectures/recherches si utile.';
+  }
+  const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
     submodel: session.submodel || undefined,
-    message,
+    message: effectiveMessage,
     root: projectRoot(),
     permissionMode: currentPermission().id,
     language: 'fr',
-    config: {
-      ollamaUrl: 'http://127.0.0.1:11434',
-      ollamaModel: session.submodel || 'llama3',
-      ggufCtx: 8192,
-      ggufVariant: '',
-      ggufGpuLayers: '',
-    },
+    config: runtimeConfig,
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
+    stream: true,
   };
-  const r = await authed('POST', '/api/agent-chat', body);
-  if (r.status === 401) return { error: 'Session expirÃ©e â€” relancez `zaalis login`.' };
+  const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
+  const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
+  if (r.status === 401) return { error: 'Session expirée — relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
   if (hooks.stop) hooks.stop();
 
-  history.push({ role: 'user', content: message });
+  history.push({ role: 'user', content: effectiveMessage });
   const json = r.json || {};
   const toolMemory = Array.isArray(json.toolResults) && json.toolResults.length
     ? '\n\n[Outils utilises]\n' + json.toolResults
@@ -840,6 +1038,7 @@ async function sendChat(message, hooks = {}) {
     text: text || '(action effectuee)',
     thinking: cleanModelText(json.thinking || ''),
     events: Array.isArray(json.events) ? json.events : [],
+    streamed: !!(onEvent && r.streamed),
   };
 }
 
@@ -909,7 +1108,7 @@ function rawSelect({ title, items, footer, onKey, startIdx }) {
       if (title) lines.push(title);
       items.forEach((it, i) => {
         const sel = i === idx;
-        const pointer = sel ? brand('❯ ') : '  ';
+        const pointer = sel ? brand('â¯ ') : '  ';
         const label = sel ? bold(it.label) : it.label;
         lines.push(pointer + label + (it.hint ? '  ' + dim(it.hint) : ''));
       });
@@ -953,11 +1152,11 @@ const WORDMARK = [
 function box(lines, label) {
   const width = Math.min((process.stdout.columns || 90), 92);
   const inner = width - 2;
-  const top = brand('╭─') + brand(' ' + label + ' ') + brand('─'.repeat(Math.max(0, inner - vlen(label) - 3))) + brand('╮');
-  const bottom = brand('╰' + '─'.repeat(inner) + '╯');
+  const top = brand('â•­â”€') + brand(' ' + label + ' ') + brand('â”€'.repeat(Math.max(0, inner - vlen(label) - 3))) + brand('â•®');
+  const bottom = brand('â•°' + 'â”€'.repeat(inner) + 'â•¯');
   const rows = lines.map((l) => {
     const pad = Math.max(0, inner - 1 - vlen(l));
-    return brand('│') + ' ' + l + ' '.repeat(pad) + brand('│');
+    return brand('â”‚') + ' ' + l + ' '.repeat(pad) + brand('â”‚');
   });
   return [top, ...rows, bottom].join('\n');
 }
@@ -997,14 +1196,51 @@ function welcome(me, cwd) {
 // Slash commands (the autocomplete menu)
 // ---------------------------------------------------------------------------
 const SLASH = [
-  { name: 'model',  desc: 'changer de modèle' },
-  { name: 'models', desc: 'lister les modèles' },
-  { name: 'effort', desc: 'niveau de raisonnement' },
-  { name: 'think',  desc: 'déplier la dernière réflexion' },
-  { name: 'clear',  desc: 'effacer le contexte' },
-  { name: 'cwd',    desc: 'dossier courant' },
-  { name: 'help',   desc: 'aide' },
-  { name: 'exit',   desc: 'quitter' },
+  { name: 'help', category: 'general', desc: 'liste toutes les commandes' },
+  { name: 'clear', category: 'general', desc: 'effacer le contexte' },
+  { name: 'compact', category: 'general', desc: 'compacter le contexte' },
+  { name: 'reset', category: 'general', desc: 'reinitialisation locale' },
+  { name: 'grep', category: 'tools', desc: 'chercher un motif', usage: '<motif> [chemin]', args: true },
+  { name: 'search', category: 'tools', desc: 'ouvrir une recherche dans zaalis browser', usage: '<requete>', args: true },
+  { name: 'glob', category: 'tools', desc: 'trouver des fichiers', usage: '<**/*.js>', args: true },
+  { name: 'diff', category: 'tools', desc: 'afficher le diff Git', usage: '[staged|unstaged]' },
+  { name: 'run', category: 'tools', desc: 'executer une commande', usage: '<commande>', args: true },
+  { name: 'files', category: 'tools', desc: 'lister les fichiers du projet' },
+  { name: 'review', category: 'review', desc: 'revue du diff Git' },
+  { name: 'security-review', category: 'review', desc: 'revue securite du diff' },
+  { name: 'context', category: 'context', desc: 'afficher le contexte courant' },
+  { name: 'status', category: 'context', desc: 'etat du CLI et du projet' },
+  { name: 'doctor', category: 'context', desc: 'verifier l environnement' },
+  { name: 'version', category: 'context', desc: 'version de zaalis' },
+  { name: 'cost', category: 'context', desc: 'estimation tokens / cout' },
+  { name: 'usage', category: 'context', desc: 'estimation tokens / cout' },
+  { name: 'summary', category: 'context', desc: 'resumer la session' },
+  { name: 'memory', category: 'context', desc: 'afficher ZAALIS.md / AGENTS.md' },
+  { name: 'plan', category: 'mode', desc: 'mode plan sans modification' },
+  { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto]' },
+  { name: 'model', category: 'mode', desc: 'changer de modele', usage: '[modele]', args: true },
+  { name: 'models', category: 'mode', desc: 'lister les modeles' },
+  { name: 'effort', category: 'mode', desc: 'niveau de raisonnement' },
+  { name: 'fast', category: 'mode', desc: 'reponses courtes' },
+  { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
+  { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
+  { name: 'export', category: 'project', desc: 'exporter la session' },
+  { name: 'agents', category: 'project', desc: 'agents disponibles' },
+  { name: 'cwd', category: 'project', desc: 'dossier courant' },
+  { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
+  { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
+  { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
+  { name: 'resume', category: 'soon', desc: 'reprendre une session', stub: true },
+  { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
+  { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
+  { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
+  { name: 'mcp', category: 'soon', desc: 'serveurs MCP', stub: true },
+  { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
+  { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
+  { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
+  { name: 'voice', category: 'soon', desc: 'commandes vocales', stub: true },
+  { name: 'exit', category: 'general', desc: 'quitter' },
+  { name: 'quit', category: 'general', desc: 'quitter' },
 ];
 
 // Last reasoning text from the model, kept folded — `/think` expands it.
@@ -1074,19 +1310,252 @@ async function pickEffort() {
 }
 
 function printHelp() {
-  console.log([
-    '',
-    bold(' Commandes'),
-    '  /model     choisir le fournisseur, la version et l\'effort',
-    '  /models    lister les modèles disponibles',
-    '  /effort    niveau de raisonnement',
-    '  /think     déplier la réflexion du dernier message',
-    '  /clear     effacer le contexte de conversation',
-    '  /cwd       afficher le dossier courant',
-    '  /help      cette aide',
-    '  /exit      quitter',
-    '',
-  ].join('\n'));
+  const labels = {
+    general: 'General',
+    tools: 'Outils',
+    review: 'Revue',
+    context: 'Contexte',
+    mode: 'Mode',
+    project: 'Projet',
+    misc: 'Divers',
+    soon: 'Bientot',
+  };
+  const order = ['general', 'tools', 'review', 'context', 'mode', 'project', 'misc', 'soon'];
+  console.log('');
+  console.log(bold(' Commandes slash'));
+  for (const cat of order) {
+    const items = SLASH.filter((c) => c.category === cat);
+    if (!items.length) continue;
+    console.log('\n' + dim(labels[cat] || cat));
+    for (const c of items) {
+      const usage = c.usage ? ' ' + c.usage : '';
+      const soon = c.stub ? dim('  (bientot)') : '';
+      console.log(`  ${('/' + c.name + usage).padEnd(34)} ${c.desc}${soon}`);
+    }
+  }
+  console.log('');
+}
+
+function parseArgs(s) {
+  const out = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(s || '')) !== null) out.push(m[1] != null ? m[1] : (m[2] != null ? m[2] : m[3]));
+  return out;
+}
+
+function printRows(title, rows) {
+  console.log('\n' + bold(title));
+  for (const [k, v] of rows) console.log(`  ${dim(String(k).padEnd(16))} ${v}`);
+  console.log('');
+}
+
+function printBlock(title, text) {
+  console.log('\n' + bold(title));
+  console.log(String(text || '').trim() || dim('(vide)'));
+  console.log('');
+}
+
+async function printProjectFiles() {
+  const data = await apiGet(`/api/files?root=${encodeURIComponent(projectRoot())}`);
+  const list = Array.isArray(data) ? data : [];
+  printBlock('Fichiers', list.map((x) => `${x.isDirectory ? 'â–¸' : ' '} ${x.path || x.name}`).join('\n'));
+}
+
+async function runReadOnlyReview(kind) {
+  const data = await apiGet(`/api/gitdiff?root=${encodeURIComponent(projectRoot())}`);
+  if (!data.available) { console.log(brand('✗ ') + 'git est indisponible.'); return; }
+  if (!data.repo) { console.log(brand('✗ ') + 'Ce dossier n est pas un depot Git.'); return; }
+  const diff = [data.staged, data.unstaged].filter(Boolean).join('\n').slice(0, 40000);
+  if (!diff.trim()) { console.log(dim('Aucun diff a relire.')); return; }
+  const security = kind === 'security-review';
+  const sys = security
+    ? 'Tu es un relecteur securite senior. Relis uniquement le diff fourni. Cherche secrets, injections, auth/session, stockage dangereux, commandes shell. Donne les constats avec severite et fichier:ligne si possible.'
+    : 'Tu es un relecteur de code senior. Relis uniquement le diff fourni. Donne les constats par severite, les questions, puis un resume court.';
+  const promptText = (security ? 'Revue securite de ce diff:\n\n' : 'Revue de ce diff:\n\n') + '```diff\n' + diff + '\n```';
+  const stop = startThinkingAnimation(security ? 'revue securite' : 'revue');
+  try {
+    const data2 = await callChat(promptText, sys, []);
+    stop();
+    if (data2.error) console.log(brand('✗ ') + data2.error);
+    else console.log(mdRender(data2.text) + '\n');
+  } catch (e) {
+    stop();
+    console.log(brand('✗ ') + ((e && e.message) || e));
+  }
+}
+
+async function runSlashCommand(ev, me) {
+  const name = (ev.name || '').toLowerCase();
+  const arg = (ev.arg || '').trim();
+  const spec = SLASH.find((c) => c.name === name);
+  if (!spec) { console.log(brand('✗ ') + `Commande inconnue : /${name}`); return; }
+  if (spec.stub) { console.log(dim(`/${name} n est pas encore disponible dans le CLI.`)); return; }
+
+  if (name === 'exit' || name === 'quit') return 'exit';
+  if (name === 'help') { printHelp(); return; }
+  if (name === 'model') { arg ? await chooseModel(arg) : await runPicker(rawPickModel); return; }
+  if (name === 'models') { await listModels(); return; }
+  if (name === 'effort') { await runPicker(pickEffort); return; }
+  if (name === 'think') {
+    if (lastThinking) console.log('\n' + brand('💭 Réflexion') + '\n' + dim(lastThinking) + '\n');
+    else console.log(dim('Aucune réflexion pour le dernier message.'));
+    return;
+  }
+  if (name === 'clear') {
+    history.length = 0; lastThinking = ''; transcript.length = 0; emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
+    return;
+  }
+  if (name === 'cwd') { console.log(dim(process.cwd())); return; }
+  if (name === 'version') { console.log(`zaalis CLI v${VERSION}`); return; }
+  if (name === 'status' || name === 'context') {
+    let branch = '—';
+    try { const d = await apiGet(`/api/doctor?root=${encodeURIComponent(projectRoot())}`); branch = d.projectGit || branch; } catch {}
+    printRows(name === 'status' ? 'Etat' : 'Contexte', [
+      ['modele', currentModelLabel()],
+      ['dossier', projectRoot()],
+      ['branche', branch],
+      ['permission', currentPermission().label],
+      ['effort', currentEffort().label],
+      ['style', session.responseStyle || 'normal'],
+      ['messages', String(history.length)],
+    ]);
+    return;
+  }
+  if (name === 'permissions') {
+    const mode = arg.toLowerCase();
+    if (!mode) {
+      printRows('Permissions', PERMISSIONS.map((p) => [p.id === currentPermission().id ? '-> ' + p.id : p.id, p.label]));
+      return;
+    }
+    if (!PERMISSIONS.some((p) => p.id === mode)) { console.log(brand('✗ ') + 'Mode inconnu.'); return; }
+    session.permissionMode = mode; saveSession(session);
+    console.log(green('✓ ') + 'Permission : ' + currentPermission().label);
+    return;
+  }
+  if (name === 'plan') {
+    session.permissionMode = 'plan'; saveSession(session);
+    console.log(green('✓ ') + 'Mode Plan active : lectures et propositions, sans modifications.');
+    return;
+  }
+  if (name === 'fast' || name === 'deep') {
+    session.responseStyle = session.responseStyle === name ? 'normal' : name;
+    saveSession(session);
+    console.log(green('✓ ') + `Style : ${session.responseStyle || 'normal'}`);
+    return;
+  }
+  if (name === 'doctor') {
+    const d = await apiGet(`/api/doctor?root=${encodeURIComponent(projectRoot())}`);
+    printRows('Doctor', [
+      ['node', d.node || '—'],
+      ['npm', d.npm && d.npm.version || '—'],
+      ['git', d.git && d.git.version || '—'],
+      ['ripgrep', d.rg && d.rg.available ? d.rg.version : 'absent'],
+      ['ollama', d.ollama && d.ollama.reachable ? `${d.ollama.models} modeles` : 'off'],
+      ['gguf', d.gguf ? d.gguf.variant : '—'],
+      ['installer', d.installer ? 'present' : 'absent'],
+    ]);
+    return;
+  }
+  if (name === 'grep') {
+    const toks = parseArgs(arg);
+    if (!toks.length) { console.log(dim('Usage: /grep <motif> [chemin]')); return; }
+    const d = await apiPost('/api/grep', { root: projectRoot(), pattern: toks[0], path: toks[1] || '', ignoreCase: true });
+    const rows = (d.results || []).map((r) => `${r.file}:${r.line}: ${r.text}`).join('\n');
+    printBlock(`grep · ${toks[0]}`, rows || 'Aucun resultat.');
+    return;
+  }
+  if (name === 'search') {
+    if (!arg) { console.log(dim('Usage: /search <requete>')); return; }
+    try {
+      await apiGet(`/api/browser-search?q=${encodeURIComponent(arg)}&mode=newtab`);
+      console.log(green('OK ') + 'Recherche ouverte dans zaalis browser : ' + arg);
+    } catch (e) {
+      console.log(brand('Erreur ') + ((e && e.message) || e));
+    }
+    return;
+  }
+  if (name === 'glob') {
+    const pattern = arg || '**/*';
+    const d = await apiGet(`/api/glob?root=${encodeURIComponent(projectRoot())}&pattern=${encodeURIComponent(pattern)}`);
+    printBlock(`glob · ${pattern}`, (d.files || []).join('\n') || 'Aucun fichier.');
+    return;
+  }
+  if (name === 'diff') {
+    const d = await apiGet(`/api/gitdiff?root=${encodeURIComponent(projectRoot())}`);
+    if (!d.available) { console.log(brand('✗ ') + 'git est indisponible.'); return; }
+    if (!d.repo) { console.log(brand('✗ ') + 'Ce dossier n est pas un depot Git.'); return; }
+    const which = arg.toLowerCase();
+    const diff = which === 'staged' ? d.staged : which === 'unstaged' ? d.unstaged : [d.staged, d.unstaged].filter(Boolean).join('\n');
+    printBlock(`git diff ${which || ''}`.trim(), (d.status || '').trim() + (diff ? '\n\n' + diff : '\n\n(arbre propre)'));
+    return;
+  }
+  if (name === 'run') {
+    if (!arg) { console.log(dim('Usage: /run <commande>')); return; }
+    const dangerous = isDangerousCommand(arg);
+    const needAsk = dangerous || currentPermission().id === 'supervised';
+    if (currentPermission().id === 'plan') { console.log(dim('Mode Plan: commande bloquee.')); return; }
+    if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, arg))) return;
+    const d = await apiPost('/api/exec', { command: arg, cwd: projectRoot() });
+    printBlock(`$ ${arg}`, ((d.stdout || '') + (d.stderr ? '\n' + d.stderr : '')).trim() || '(aucune sortie)');
+    return;
+  }
+  if (name === 'files') { await printProjectFiles(); return; }
+  if (name === 'cost' || name === 'usage') {
+    const chars = history.reduce((n, h) => n + String(h.content || '').length, 0);
+    printRows('Usage', [['messages', String(history.length)], ['tokens est.', String(Math.ceil(chars / 4))], ['cout', isLocalModel(session.model) ? '0 (local)' : 'n/d']]);
+    return;
+  }
+  if (name === 'memory') {
+    for (const file of ['ZAALIS.md', 'AGENTS.md']) {
+      try {
+        const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=${encodeURIComponent(file)}`);
+        if (typeof d.content === 'string') { printBlock(file, d.content.slice(0, 6000)); return; }
+      } catch {}
+    }
+    console.log(dim('Aucun ZAALIS.md / AGENTS.md trouve.'));
+    return;
+  }
+  if (name === 'init') {
+    const body = `# ${path.basename(projectRoot())}\n\nNotes de projet pour l assistant IA (zaalis CLI).\n\n## Vue d ensemble\n- \n\n## Commandes\n- Install: \n- Build: \n- Test: \n- Run: \n`;
+    try { await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=ZAALIS.md`); console.log(dim('ZAALIS.md existe deja.')); return; } catch {}
+    if (!(await confirmAction('Creer ZAALIS.md', body))) return;
+    await apiPost('/api/file', { root: projectRoot(), path: 'ZAALIS.md', content: body });
+    console.log(green('✓ ') + 'ZAALIS.md cree.');
+    return;
+  }
+  if (name === 'export') {
+    const file = path.join(projectRoot(), `zaalis-cli-${Date.now()}.md`);
+    const md = history.map((h) => `**${h.role}**\n\n${h.content}\n`).join('\n---\n\n');
+    fs.writeFileSync(file, md, 'utf-8');
+    console.log(green('✓ ') + `Export : ${file}`);
+    return;
+  }
+  if (name === 'summary') {
+    if (!history.length) { console.log(dim('Rien a resumer.')); return; }
+    const data = await callChat('Resume cette session en trois parties: faits, etat actuel, prochaines etapes.\n\n' + history.map((h) => `${h.role}: ${h.content}`).join('\n').slice(0, 12000), 'Tu resumes une session de code de facon concise.', []);
+    console.log(data.error ? brand('✗ ') + data.error : mdRender(data.text) + '\n');
+    return;
+  }
+  if (name === 'review' || name === 'security-review') { await runReadOnlyReview(name); return; }
+  if (name === 'compact') {
+    if (history.length <= 6) { console.log(dim('Rien a compacter.')); return; }
+    const older = history.slice(0, -4);
+    const recent = history.slice(-4);
+    const data = await callChat('Resume ce contexte en moins de 250 mots, en gardant fichiers, decisions et faits importants:\n\n' + older.map((h) => `${h.role}: ${h.content}`).join('\n'), 'Tu compactes un historique de conversation.', []);
+    if (data.error) console.log(brand('✗ ') + data.error);
+    else { history.length = 0; history.push({ role: 'user', content: '[Resume du contexte precedent] ' + data.text }, ...recent); console.log(green('✓ ') + 'Contexte compacte.'); }
+    return;
+  }
+  if (name === 'reset') {
+    if (!(await confirmAction('Reinitialiser la session CLI locale', 'Efface le contexte courant, le style de reponse et le mode de permission. La connexion est conservee.'))) return;
+    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; saveSession(session);
+    console.log(green('✓ ') + 'Session CLI reinitialisee.');
+    return;
+  }
+  if (name === 'agents') {
+    console.log(dim('Le mode Agents complet est disponible dans l IDE. Le CLI utilise le modele courant.'));
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1106,14 +1575,30 @@ let inBuf = '', inCur = 0, inMenuIdx = 0;
 let boxActive = false;     // draw the input box? (off during modal pickers)
 let pendingLine = null;    // transient line just above the box (thinking spinner)
 let scrollOffset = 0;      // rows scrolled UP from the bottom of the conversation
+let followTail = true;     // auto-stick to the newest output unless scrolled up
+const SCROLL_STEP = 3;     // lines per wheel/arrow tick (snappy but still precise)
+// Scroll the conversation: n>0 goes UP into history, n<0 back toward the bottom.
+// followTail tracks whether we're pinned to the newest output (offset 0).
+function scrollLines(n) {
+  scrollOffset = Math.max(0, scrollOffset + n);
+  followTail = scrollOffset === 0;
+  repaint();
+}
+function scrollPage(dir) { scrollLines(dir * Math.max(1, termRows() - 4)); }
+let inputMode = 'normal';  // normal | answering
+let queuedInput = null;    // one pending { kind, text/name/arg, raw } while AI answers
+let queueNotice = null;
+let queueNoticeTimer = null;
+let bracketPaste = false;
+let bracketPasteText = '';
 
 // Use the terminal's ALTERNATE screen buffer: it has no scrollback, so the
 // terminal itself can't be scrolled into stale repaints — scrolling the
 // conversation is handled in-app instead (mouse wheel / arrows). ?1007h turns
 // the mouse wheel into arrow keys while in the alt buffer (so wheel = scroll,
 // and text selection still works).
-function enterFullscreen() { out('\x1b[?1049h\x1b[?1007h\x1b[2J\x1b[H'); }
-function leaveFullscreen() { out('\x1b[?1007l\x1b[?1049l\x1b[?25h'); }
+function enterFullscreen() { out('\x1b[?1049h\x1b[?1007h\x1b[?2004h\x1b[2J\x1b[H'); }
+function leaveFullscreen() { out('\x1b[?2004l\x1b[?1007l\x1b[?1049l\x1b[?25h'); }
 
 // Split an ANSI-colored string into physical rows of at most `width` visible
 // columns, carrying the color escapes across each break. Keeps row accounting
@@ -1123,12 +1608,32 @@ function wrapAnsi(str, width) {
   if (width < 1) return [s];
   const rows = [];
   let cur = '', w = 0;
+  // Stack of currently-open SGR escapes. Each wrapped row re-opens them at its
+  // start and closes with [0m at its end, so any row can become the top/bottom
+  // of a scrolled window without leaking (or losing) color into its neighbours.
+  let active = [];
   for (let i = 0; i < s.length; ) {
     if (s[i] === '\x1b') {
-      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
-      if (m) { cur += m[0]; i += m[0].length; continue; }
+      const m = /^\x1b\[([0-9;]*)m/.exec(s.slice(i));
+      if (m) {
+        const esc = m[0], codes = m[1];
+        cur += esc;
+        if (codes === '' || codes === '0') active = [];                       // full reset
+        else if (codes === '22') active = active.filter((a) => !/\[[12]m$/.test(a)); // bold/dim off
+        else if (codes === '23') active = active.filter((a) => !/\[3m$/.test(a));    // italic off
+        else if (codes === '24') active = active.filter((a) => !/\[4m$/.test(a));    // underline off
+        else if (codes === '39') active = active.filter((a) => !/\[38;2;/.test(a));  // default fg
+        else active.push(esc);
+        i += esc.length;
+        continue;
+      }
     }
-    if (w >= width) { rows.push(cur); cur = ''; w = 0; }
+    if (w >= width) {
+      if (active.length) cur += '\x1b[0m';   // close styles at the row break
+      rows.push(cur);
+      cur = active.join('');                 // re-open them on the next row
+      w = 0;
+    }
     cur += s[i]; w++; i++;
   }
   rows.push(cur);
@@ -1141,6 +1646,135 @@ function menuMatches() {
   return SLASH.filter((c) => c.name.startsWith(q));
 }
 
+function parseInput(input) {
+  const text = String(input || '').trim();
+  if (!text) return null;
+  if (text.startsWith('/')) {
+    const [name, ...rest] = text.slice(1).split(/\s+/);
+    return { kind: 'command', name, arg: rest.join(' '), raw: text };
+  }
+  return { kind: 'chat', text, raw: text };
+}
+
+function setQueueNotice(text) {
+  queueNotice = text;
+  if (queueNoticeTimer) clearTimeout(queueNoticeTimer);
+  queueNoticeTimer = setTimeout(() => { queueNotice = null; queueNoticeTimer = null; repaint(); }, 1400);
+  if (queueNoticeTimer.unref) queueNoticeTimer.unref();
+  repaint();
+}
+
+function cancelQueuedInput() {
+  if (!queuedInput) return false;
+  const restore = queuedInput.raw || queuedInput.text || '';
+  queuedInput = null;
+  inBuf = restore + (inBuf ? ' ' + inBuf : '');
+  inCur = inBuf.length;
+  repaint();
+  return true;
+}
+
+function appendInputText(text) {
+  const clean = String(text || '')
+    .replace(/\x1b\[[0-9;?]*[A-Za-z~]/g, '')
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ');
+  if (!clean) return;
+  inBuf = inBuf.slice(0, inCur) + clean + inBuf.slice(inCur);
+  inCur += clean.length;
+}
+
+function queueCurrentInput() {
+  const ev = parseInput(inBuf);
+  if (!ev) return false;
+  if (queuedInput) {
+    setQueueNotice('Un message est deja en attente.');
+    return false;
+  }
+  queuedInput = ev;
+  inBuf = '';
+  inCur = 0;
+  inMenuIdx = 0;
+  repaint();
+  return true;
+}
+
+function promptEcho(raw) {
+  const text = String(raw || '').trim();
+  const flat = text.replace(/\s+/g, ' ');
+  const width = Math.max(24, termCols() - 6);
+  if (flat.length <= width) return brand('› ') + flat;
+  const lines = text.split(/\r?\n/).filter((l) => l.trim()).length || 1;
+  return brand('› ') + clipText(flat, width) + '\n' + dim(`  ... prompt replie (${text.length} caracteres, ${lines} lignes)`);
+}
+
+function flushBracketPaste() {
+  if (!bracketPasteText) return;
+  appendInputText(bracketPasteText);
+  bracketPasteText = '';
+  repaint();
+}
+
+function handleBracketPaste(str, key) {
+  const raw = String(str || '');
+  const startToken = '\x1b[200~';
+  const endToken = '\x1b[201~';
+
+  if (!bracketPaste && (key && key.name === 'paste-start')) {
+    bracketPaste = true;
+    bracketPasteText = '';
+    return true;
+  }
+
+  if (!bracketPaste && raw.includes(startToken)) {
+    bracketPaste = true;
+    bracketPasteText = '';
+    const afterStart = raw.slice(raw.indexOf(startToken) + startToken.length);
+    if (afterStart.includes(endToken)) {
+      bracketPasteText += afterStart.slice(0, afterStart.indexOf(endToken));
+      bracketPaste = false;
+      flushBracketPaste();
+    } else {
+      bracketPasteText += afterStart;
+    }
+    return true;
+  }
+
+  if (!bracketPaste) return false;
+
+  if (key && key.name === 'paste-end') {
+    bracketPaste = false;
+    flushBracketPaste();
+    return true;
+  }
+
+  let chunk = raw;
+  if (!chunk && key && (key.name === 'return' || key.name === 'enter')) chunk = ' ';
+  if (chunk.includes(endToken)) {
+    bracketPasteText += chunk.slice(0, chunk.indexOf(endToken));
+    bracketPaste = false;
+    flushBracketPaste();
+  } else {
+    bracketPasteText += chunk;
+  }
+  return true;
+}
+
+function buildPendingDrawer(w) {
+  if (!queuedInput) return [];
+  const drawerW = Math.max(20, w - 4);
+  const inner = drawerW - 2;
+  const title = ' En attente ';
+  const titleLine = title.length >= inner
+    ? title.slice(0, inner)
+    : title + 'â”€'.repeat(inner - title.length);
+  const prompt = clipText(queuedInput.raw || queuedInput.text || '', Math.max(0, inner - 2));
+  return [
+    '  ' + dim('â•­â”€' + titleLine + 'â•®'),
+    '  ' + dim('â”‚ ' + prompt.padEnd(Math.max(0, inner - 2), ' ') + ' â”‚'),
+  ];
+}
+
 // The input block: optional slash menu on top, then the bordered box + status.
 function buildFrame() {
   // Span the FULL terminal width, like Claude Code — the box stretches
@@ -1151,15 +1785,23 @@ function buildFrame() {
   const promptDisp = brand('›') + ' ';              // visible width 2
   const avail = inner - 1 - 2;
   const start = inCur > avail ? inCur - avail : 0;
-  const view = inBuf.slice(start, start + avail);
+  const placeholder = inputMode === 'answering'
+    ? 'Reponse en cours...  ·  Echap/Ctrl+C pour arreter'
+    : 'Ecrivez votre message...';
+  const visibleInput = inBuf.replace(/\s+/g, ' ');
+  const view = visibleInput
+    ? visibleInput.slice(start, start + avail)
+    : dim(clipText(placeholder, Math.max(0, avail)));
   const content = promptDisp + view;
-  const inputLine = brand('│') + ' ' + content + ' '.repeat(Math.max(0, inner - 1 - vlen(content))) + brand('│');
-  const top = brand('╭' + '─'.repeat(inner) + '╮');
-  const bottom = brand('╰' + '─'.repeat(inner) + '╯');
+  const inputLine = brand('â”‚') + ' ' + content + ' '.repeat(Math.max(0, inner - 1 - vlen(content))) + brand('â”‚');
+  const top = queuedInput
+    ? brand('â•­â”€â”´' + 'â”€'.repeat(Math.max(0, w - 6)) + 'â”´â”€â•®')
+    : brand('â•­' + 'â”€'.repeat(inner) + 'â•®');
+  const bottom = brand('â•°' + 'â”€'.repeat(inner) + 'â•¯');
 
   const perm = currentPermission();
   const left = perm.paint('⏵ ' + perm.label) + dim('  ⇧Tab');
-  const right = `${currentModelLabel()}  ·  effort ${currentEffort().label}`;
+  const right = queueNotice ? dim(queueNotice) : `${currentModelLabel()}  ·  effort ${currentEffort().label}`;
   const gap = Math.max(2, w - vlen(left) - vlen(right));
   const status = left + ' '.repeat(gap) + dim(right);
 
@@ -1169,10 +1811,10 @@ function buildFrame() {
     inMenuIdx = Math.min(inMenuIdx, menu.length - 1);
     menu.forEach((c, i) => {
       const sel = i === inMenuIdx;
-      frame.push((sel ? brand('❯ ') : '  ') + (sel ? bold('/' + c.name) : dim('/' + c.name)) + '   ' + dim(c.desc));
+      frame.push((sel ? brand('â¯ ') : '  ') + (sel ? bold('/' + c.name) : dim('/' + c.name)) + '   ' + dim(c.desc));
     });
   } else inMenuIdx = 0;
-  frame.push(top, inputLine, bottom, status);
+  frame.push(...buildPendingDrawer(w), top, inputLine, bottom, status);
 
   const inputCol = 2 + 2 + (inCur - start);          // '│ ' + '› ' + offset
   return { frame, inputCol, inputIdx: frame.length - 3 };   // INPUT is 3rd from end
@@ -1226,7 +1868,25 @@ function repaint() {
   for (const l of frame) lines.push(l);
 
   // Hide the cursor while repainting (no flicker), then park it in the input.
-  let o = '\x1b[?25l\x1b[H' + lines.map((l) => '\x1b[2K' + l).join('\r\n') + '\x1b[0J';
+  // Each line starts with [0m so a wrapped/styled neighbour can never bleed its
+  // color into the next row.
+  let o = '\x1b[?25l\x1b[H' + lines.map((l) => '\x1b[2K\x1b[0m' + l).join('\r\n') + '\x1b[0J';
+
+  // Right-edge scrollbar (minibar): a thumb sized to the visible proportion and
+  // positioned by the scroll offset. Shown only when the conversation overflows
+  // the viewport. Drawn with absolute moves on the last column so it never
+  // disturbs line wrapping or content.
+  if (boxActive && phys.length > convoRows && convoRows > 0) {
+    const view = convoRows;
+    const thumb = Math.max(1, Math.min(view, Math.round((view * view) / phys.length / 2)));
+    const frac = maxOff > 0 ? startIdx / maxOff : 1;     // 0 = top of history, 1 = bottom
+    const thumbTop = Math.round(frac * (view - thumb));
+    for (let r = 0; r < view; r++) {
+      const onThumb = r >= thumbTop && r < thumbTop + thumb;
+      o += ESC + (r + 1) + ';' + cols + 'H' + (onThumb ? brand('â–ˆ') : dim('â”‚'));
+    }
+  }
+
   if (boxActive && frame.length) {
     const startRow = rows - frame.length + 1;
     o += ESC + (startRow + block.inputIdx) + ';' + (block.inputCol + 1) + 'H';
@@ -1236,33 +1896,79 @@ function repaint() {
 }
 
 // Append output (one or more lines) to the conversation and repaint.
+// When the user has scrolled up (followTail=false), keep their current view
+// fixed by bumping the offset by the number of physical rows we just added,
+// instead of yanking them back to the bottom.
 function emit(s) {
-  String(s == null ? '' : s).split('\n').forEach((l) => transcript.push(l));
+  const parts = String(s == null ? '' : s).split('\n');
+  if (!followTail) {
+    const cols = Math.max(1, termCols());
+    let added = 0;
+    for (const l of parts) added += wrapAnsi(l, cols).length;
+    scrollOffset += added;
+  }
+  for (const l of parts) transcript.push(l);
   if (transcript.length > 5000) transcript.splice(0, transcript.length - 5000);
-  scrollOffset = 0;          // new output snaps the view back to the bottom
+  if (followTail) scrollOffset = 0;   // pinned to the bottom: show the newest output
   repaint();
+}
+
+// Reveal the AI answer word-by-word (typewriter), like the IDE. Re-renders the
+// growing prefix in place so Markdown stays correct, and the final frame is
+// byte-identical to a plain emit(mdRender(text)). Cost is bounded to ~120 frames
+// regardless of length, and the whole reveal is capped at ~1s.
+async function streamAnswer(text) {
+  const full = String(text == null ? '' : text);
+  // Plain dump (no typewriter) when not on a TTY, when empty, or when the user
+  // has scrolled up to read — emit() then preserves their scroll position.
+  if (!process.stdout.isTTY || !full.trim() || !followTail) { emit(mdRender(full) + '\n'); return; }
+  const words = full.match(/\S+\s*/g) || [full];
+  const startLen = transcript.length;
+  const chunk = Math.max(1, Math.ceil(words.length / 120));   // <= ~120 frames
+  const frames = Math.ceil(words.length / chunk);
+  const delay = Math.max(8, Math.min(22, Math.round(1000 / frames)));
+  let acc = '';
+  for (let i = 0; i < words.length; i += chunk) {
+    acc += words.slice(i, i + chunk).join('');
+    transcript.length = startLen;                              // replace the growing block in place
+    mdRender(acc).split('\n').forEach((l) => transcript.push(l));
+    scrollOffset = 0;
+    repaint();
+    await new Promise((r) => setTimeout(r, delay));
+  }
+  // Final exact render + trailing blank line (parity with emit(... + '\n')).
+  transcript.length = startLen;
+  emit(mdRender(full) + '\n');
 }
 
 function startThinkingAnimation(label = 'réflexion') {
   const frames = ['   ', '.  ', '.. ', '...'];
   let i = 0;
-  const tick = () => { pendingLine = dim(`  ${frames[i % frames.length]} ${label}`); i++; repaint(); };
+  let curLabel = label;
+  const tick = () => { pendingLine = dim(`  ${frames[i % frames.length]} ${curLabel}`); i++; repaint(); };
   tick();
   const timer = setInterval(tick, 280);
   if (timer.unref) timer.unref();
-  return () => { clearInterval(timer); pendingLine = null; repaint(); };
+  const stop = () => { clearInterval(timer); pendingLine = null; repaint(); };
+  // Live-update the spinner label (used by the streaming agent events) without
+  // restarting the animation. Returned function stays callable as before.
+  stop.setLabel = (text) => { if (text) { curLabel = text; tick(); } };
+  return stop;
 }
 
 // Read one line of input with the bottom-pinned box + slash menu. Resolves with
 // { kind: 'chat'|'command'|'exit', ... }.
-function nextInput() {
+function nextInput(opts = {}) {
   return new Promise((resolve) => {
-    inBuf = ''; inCur = 0; inMenuIdx = 0;
+    if (!opts.preserveBuffer) { inBuf = ''; inCur = 0; }
+    inMenuIdx = 0;
+    inputMode = 'normal';
     boxActive = true;
 
-    const finish = (result, echo) => {
+    const finish = (result, echo, clearBuffer) => {
       process.stdout.removeListener('resize', onResize);
       process.stdin.removeListener('keypress', onKp);
+      if (clearBuffer) { inBuf = ''; inCur = 0; inMenuIdx = 0; }
       boxActive = false;
       if (echo) emit(echo); else repaint();   // the echo flows into the transcript
       resolve(result);
@@ -1272,6 +1978,7 @@ function nextInput() {
 
     const onKp = (str, key) => {
       if (!key) return;
+      if (handleBracketPaste(str, key)) return;
       const menu = menuMatches();
       if (key.ctrl && key.name === 'c') return finish({ kind: 'exit' });
       // Shift+Tab cycles the AI permission level, live (no Enter to validate).
@@ -1280,15 +1987,11 @@ function nextInput() {
       if (key.name === 'return' || key.name === 'enter') {
         if (menu.length) {
           const name = menu[inMenuIdx % menu.length].name;
-          return finish({ kind: 'command', name, arg: '' }, brand('› ') + '/' + name);
+          return finish({ kind: 'command', name, arg: '' }, brand('› ') + '/' + name, true);
         }
-        const input = inBuf.trim();
-        if (!input) return;
-        if (input.startsWith('/')) {
-          const [name, ...rest] = input.slice(1).split(/\s+/);
-          return finish({ kind: 'command', name, arg: rest.join(' ') }, brand('› ') + input);
-        }
-        return finish({ kind: 'chat', text: input }, brand('› ') + input);
+        const ev = parseInput(inBuf);
+        if (!ev) return;
+        return finish(ev, promptEcho(ev.raw), true);
       }
       if (key.name === 'tab') {
         if (menu.length) { inBuf = '/' + menu[inMenuIdx].name + ' '; inCur = inBuf.length; }
@@ -1296,10 +1999,10 @@ function nextInput() {
       }
       // Up/Down navigate the slash menu when it's open, otherwise scroll the
       // conversation history (the mouse wheel arrives here too, via ?1007h).
-      if (key.name === 'up') { if (menu.length) inMenuIdx = (inMenuIdx - 1 + menu.length) % menu.length; else scrollOffset += 1; return repaint(); }
-      if (key.name === 'down') { if (menu.length) inMenuIdx = (inMenuIdx + 1) % menu.length; else scrollOffset = Math.max(0, scrollOffset - 1); return repaint(); }
-      if (key.name === 'pageup') { scrollOffset += Math.max(1, termRows() - 4); return repaint(); }
-      if (key.name === 'pagedown') { scrollOffset = Math.max(0, scrollOffset - Math.max(1, termRows() - 4)); return repaint(); }
+      if (key.name === 'up') { if (menu.length) { inMenuIdx = (inMenuIdx - 1 + menu.length) % menu.length; repaint(); } else scrollLines(SCROLL_STEP); return; }
+      if (key.name === 'down') { if (menu.length) { inMenuIdx = (inMenuIdx + 1) % menu.length; repaint(); } else scrollLines(-SCROLL_STEP); return; }
+      if (key.name === 'pageup') { scrollPage(1); return; }
+      if (key.name === 'pagedown') { scrollPage(-1); return; }
       if (key.name === 'left') { if (inCur > 0) inCur--; return repaint(); }
       if (key.name === 'right') { if (inCur < inBuf.length) inCur++; return repaint(); }
       if (key.name === 'home') { inCur = 0; return repaint(); }
@@ -1309,8 +2012,7 @@ function nextInput() {
       if (key.name === 'escape') { inBuf = ''; inCur = 0; return repaint(); }
       // printable (single char or a paste — special keys already returned above)
       if (str && !key.ctrl && !key.meta && str.charCodeAt(0) >= 0x20) {
-        const clean = str.replace(/[\r\n]/g, ' ');
-        inBuf = inBuf.slice(0, inCur) + clean + inBuf.slice(inCur); inCur += clean.length; return repaint();
+        appendInputText(str); return repaint();
       }
     };
 
@@ -1318,6 +2020,43 @@ function nextInput() {
     process.stdin.on('keypress', onKp);
     repaint();
   });
+}
+
+function attachAnswerInput(onAbort) {
+  inputMode = 'answering';
+  inBuf = '';
+  inCur = 0;
+  inMenuIdx = 0;
+  queuedInput = null;
+  boxActive = true;
+  repaint();
+  const onKp = (str, key) => {
+    if (!key) return;
+    if (key.ctrl && key.name === 'c') { onAbort(); return repaint(); }
+    if (key.name === 'escape') { onAbort(); return repaint(); }
+    if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
+    if (key.name === 'up') { scrollLines(SCROLL_STEP); return; }
+    if (key.name === 'down') { scrollLines(-SCROLL_STEP); return; }
+    if (key.name === 'pageup') { scrollPage(1); return; }
+    if (key.name === 'pagedown') { scrollPage(-1); return; }
+    if (inBuf || inCur || queuedInput) {
+      inBuf = '';
+      inCur = 0;
+      inMenuIdx = 0;
+      queuedInput = null;
+      return repaint();
+    }
+  };
+  process.stdin.on('keypress', onKp);
+  return () => {
+    process.stdin.removeListener('keypress', onKp);
+    inputMode = 'normal';
+    inBuf = '';
+    inCur = 0;
+    inMenuIdx = 0;
+    queuedInput = null;
+    repaint();
+  };
 }
 
 // Run a modal selector (model / effort picker) on a clean screen: the pinned
@@ -1355,60 +2094,74 @@ async function repl() {
   rawOn();
   const bye = () => { leaveFullscreen(); rawOff(); process.stdout.write(dim('À bientôt.') + '\n'); };
   process.on('exit', () => { leaveFullscreen(); rawOff(); });
+  let preserveInput = false;
   for (;;) {
-    const ev = await nextInput();
+    let ev;
+    if (queuedInput) {
+      ev = queuedInput;
+      queuedInput = null;
+      repaint();
+      emit(promptEcho(ev.raw));
+    } else {
+      ev = await nextInput({ preserveBuffer: preserveInput });
+      preserveInput = false;
+    }
     if (ev.kind === 'exit') { bye(); process.exit(0); }
     if (ev.kind === 'command') {
-      const n = ev.name;
-      if (n === 'exit' || n === 'quit') { bye(); process.exit(0); }
-      else if (n === 'help') printHelp();
-      else if (n === 'model') ev.arg ? await chooseModel(ev.arg) : await runPicker(rawPickModel);
-      else if (n === 'models') await listModels();
-      else if (n === 'effort') await runPicker(pickEffort);
-      else if (n === 'think') {
-        if (lastThinking) console.log('\n' + brand('💭 Réflexion') + '\n' + dim(lastThinking) + '\n');
-        else console.log(dim('Aucune réflexion pour le dernier message.'));
-      }
-      else if (n === 'clear') { history.length = 0; lastThinking = ''; transcript.length = 0; emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.')); }
-      else if (n === 'cwd') console.log(dim(process.cwd()));
-      else console.log(brand('✗ ') + `Commande inconnue : /${n}`);
+      const action = await runSlashCommand(ev, me);
+      if (action === 'exit') { bye(); process.exit(0); }
       continue;
     }
+    // The submitted text is now part of the transcript; while the answer is
+    // generated, the live input box is locked and must stay empty.
+    inBuf = '';
+    inCur = 0;
+    inMenuIdx = 0;
     // chat — two blank lines after the user's message so it reads clearly apart
-    // from the AI's answer.
+    // from the AI's answer. A fresh turn snaps back to the bottom and follows.
+    followTail = true; scrollOffset = 0;
     emit('\n');
     let stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)');
     const hooks = {
       stop: () => { if (stopWait) { stopWait(); stopWait = null; } },
       start: () => { if (!stopWait) stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)'); },
+      // Live agent events: completed tools/notes are logged permanently, the
+      // current activity drives the spinner label.
+      onEvent: (event) => {
+        const d = describeAgentEvent(event);
+        if (d.line) emit(d.line);
+        if (d.status && stopWait && stopWait.setLabel) stopWait.setLabel(d.status);
+      },
     };
-    // Let Esc abort the request while the AI is answering.
+    // Keep the prompt active while the AI is answering: Enter queues one next
+    // message, Ctrl+X cancels it, Esc/Ctrl+C abort the current response.
     let aborted = false;
     currentAbort = new AbortController();
-    const onEsc = (s, key) => {
-      if (key && (key.name === 'escape' || (key.ctrl && key.name === 'c'))) {
-        aborted = true;
-        try { currentAbort.abort(); } catch {}
-      }
-    };
-    process.stdin.on('keypress', onEsc);
+    const detachAnswerInput = attachAnswerInput(() => {
+      aborted = true;
+      try { currentAbort.abort(); } catch {}
+    });
     let res;
     try { res = await sendChat(ev.text, hooks); }
     catch (e) { res = { error: aborted ? null : (e && e.message ? e.message : String(e)) }; }
-    process.stdin.removeListener('keypress', onEsc);
+    detachAnswerInput();
     currentAbort = null;
     hooks.stop();
-    if (aborted) emit(dim('  ⛔ Réponse interrompue.'));
+    preserveInput = false;
+    if (aborted) {
+      cancelQueuedInput();
+      emit(dim('  ⛔ Réponse interrompue.'));
+    }
     else if (res.error) console.log(brand('✗ ') + res.error);
     else {
       // The reasoning is shown folded — one dim line; `/think` expands it.
       if (res.thinking) { lastThinking = res.thinking; console.log(dim('  💭 Réflexion — /think pour déplier')); }
       else lastThinking = '';
-      if (res.events && res.events.length) {
-        for (const ev of res.events) console.log(dim('  ▸ ' + ev.replace(/\n/g, '\n    ')));
+      if (!res.streamed && res.events && res.events.length) {
+        for (const ev of res.events) console.log(dim('  â–¸ ' + ev.replace(/\n/g, '\n    ')));
       }
-      // Render the answer's Markdown into styled terminal text.
-      emit(mdRender(res.text) + '\n');
+      // Reveal the answer word-by-word (typewriter), like the IDE.
+      await streamAnswer(res.text);
     }
   }
 }

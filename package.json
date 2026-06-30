@@ -6,8 +6,9 @@
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:server": "pkg . --targets node22-win-x64 --output native/dist/zaalis-server.exe",
-    "build:cli": "pkg cli.js --targets node22-win-x64 --output native/dist/zaalis-cli.exe"
+    "check:mojibake": "node scripts/check-mojibake.js",
+    "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
+    "build:cli": "npm run check:mojibake && pkg cli.js --targets node22-win-x64 --output native/dist/zaalis-cli.exe"
   },
   "pkg": {
     "assets": [
@@ -25,6 +26,6 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.20.0"
+    "@yao-pkg/pkg": "^6.21.0"
   }
 }

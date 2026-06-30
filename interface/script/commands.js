@@ -1,4 +1,4 @@
-// ==========================================================
+﻿// ==========================================================
 //  SLASH COMMANDS — central registry + handlers
 // ==========================================================
 // Loaded BEFORE ai.js. ai.js owns the suggestion-menu UI and calls into the
@@ -17,6 +17,7 @@ const SLASH_COMMANDS = [
 
     // tools
     { name: 'grep',     category: 'tools', fr: 'Recherche un motif dans le projet', en: 'Search a pattern across the project', usage: '<motif> [chemin]', args: true },
+    { name: 'search',   category: 'tools', fr: 'Ouvre une recherche dans zaalis browser', en: 'Open a search in zaalis browser', usage: '<requete>', args: true },
     { name: 'glob',     category: 'tools', fr: 'Trouve des fichiers par motif',     en: 'Find files by glob pattern',        usage: '<**/*.js>', args: true },
     { name: 'diff',     category: 'tools', fr: 'Affiche le diff Git (status + diff)', en: 'Show the Git diff (status + diff)',  usage: '[staged|unstaged]' },
     { name: 'run',      category: 'tools', fr: 'Exécute une commande (selon permissions)', en: 'Run a command (respects permissions)', usage: '<commande>', args: true },
@@ -28,7 +29,7 @@ const SLASH_COMMANDS = [
 
     // context / diagnostics
     { name: 'context', category: 'context', fr: 'Affiche le contexte courant',        en: 'Show the current context' },
-    { name: 'status',  category: 'context', fr: 'État : modèle, projet, branche, mode', en: 'Status: model, project, branch, mode' },
+    { name: 'status', category: 'context', fr: 'État : modèle, projet, branche, mode', en: 'Status: model, project, branch, mode' },
     { name: 'doctor',  category: 'context', fr: 'Vérifie l’environnement (node, git, rg…)', en: 'Check the environment (node, git, rg…)' },
     { name: 'version', category: 'context', fr: 'Affiche la version de l’application',  en: 'Show the application version' },
     { name: 'cost',    category: 'context', fr: 'Estimation des tokens / coût',         en: 'Token / cost estimate' },
@@ -37,7 +38,7 @@ const SLASH_COMMANDS = [
     { name: 'memory',  category: 'context', fr: 'Affiche la mémoire projet (ZAALIS.md)', en: 'Show the project memory (ZAALIS.md)' },
 
     // mode
-    { name: 'plan',        category: 'mode', fr: 'Mode plan : propose sans modifier',   en: 'Plan mode: propose without editing' },
+    { name: 'plan',       category: 'mode', fr: 'Mode plan : propose sans modifier',   en: 'Plan mode: propose without editing' },
     { name: 'permissions', category: 'mode', fr: 'Affiche / change le mode de permission', en: 'Show / change the permission mode', usage: '[' + PERMISSION_MODES.join('|') + ']', args: true },
     { name: 'model',       category: 'mode', fr: 'Affiche / change le modèle',          en: 'Show / change the model', usage: '[fournisseur [sous-modèle]]', args: true },
     { name: 'fast',        category: 'mode', fr: 'Réponses courtes et directes',         en: 'Short, direct answers' },
@@ -148,7 +149,7 @@ function _applyPermissionMode(mode, out, lang) {
     updatePermissionBadge();
     if (mode === 'bypass') {
         _sysMsg(out, lang === 'en'
-            ? '⚠ Bypass mode: every action runs with NO confirmation, including destructive commands.'
+            ? 'âš  Bypass mode: every action runs with NO confirmation, including destructive commands.'
             : '⚠ Mode bypass : chaque action s’exécute SANS confirmation, y compris les commandes destructives.');
     } else {
         _sysMsg(out, (lang === 'en' ? 'Permission mode → ' : 'Mode de permission → ') + permissionLabel(mode, lang));
@@ -284,6 +285,18 @@ SLASH_HANDLERS.grep = async (arg, out, lang) => {
         `<div class="grep-row"><span class="grep-loc">${_esc(r.file)}:${r.line}</span><span class="grep-text">${_esc(r.text)}</span></div>`).join('');
     const badge = `${data.count}${data.truncated ? '+' : ''}`;
     _sysHTML(out, _toolCard(`grep · ${pattern}`, badge, rows + (data.truncated ? `<div class="tool-more">${lang === 'en' ? 'results truncated' : 'résultats tronqués'}</div>` : '')));
+};
+
+SLASH_HANDLERS.search = async (arg, out, lang) => {
+    const query = (arg || '').trim();
+    if (!query) { _sysMsg(out, lang === 'en' ? 'Usage: /search <query>' : 'Usage : /search <requete>'); return; }
+    const data = await _getJSON(`/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab`);
+    const rows = _kvRows([
+        [lang === 'en' ? 'Query' : 'Recherche', query],
+        [lang === 'en' ? 'Target' : 'Cible', 'zaalis browser'],
+        [lang === 'en' ? 'Mode' : 'Mode', data.background ? 'arriere-plan' : 'vue normale']
+    ]);
+    _sysHTML(out, _toolCard(lang === 'en' ? 'Search opened' : 'Recherche ouverte', 'browser', rows));
 };
 
 SLASH_HANDLERS.glob = async (arg, out, lang) => {

@@ -63,6 +63,54 @@ function initSettingsCustomSelects() {
     _settingsSelectsReady = true;
 }
 
+function sharedHardwareConfigPayload() {
+    const c = state.config || {};
+    return {
+        ollamaUrl: (c.ollamaUrl || 'http://127.0.0.1:11434').trim(),
+        ollamaModel: c.ollamaModel || 'qwen3:8b',
+        ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
+        ggufVariant: c.ggufVariant || '',
+        ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers
+    };
+}
+
+function applySharedHardwareConfig(config) {
+    if (!config || typeof config !== 'object') return;
+    const c = state.config || {};
+    if ('ollamaUrl' in config) c.ollamaUrl = String(config.ollamaUrl || '').trim() || 'http://127.0.0.1:11434';
+    if ('ollamaModel' in config) c.ollamaModel = String(config.ollamaModel || '').trim() || 'qwen3:8b';
+    if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 8192);
+    if ('ggufVariant' in config) c.ggufVariant = String(config.ggufVariant || '').trim().toLowerCase();
+    if ('ggufGpuLayers' in config) {
+        const raw = config.ggufGpuLayers;
+        c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
+    }
+}
+
+async function syncSharedHardwareConfig() {
+    try {
+        await fetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: sharedHardwareConfigPayload() })
+        });
+    } catch {}
+}
+
+async function loadSharedHardwareConfig() {
+    try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.configured && data.config) {
+            applySharedHardwareConfig(data.config);
+            saveState();
+        } else {
+            await syncSharedHardwareConfig();
+        }
+    } catch {}
+}
+
 // Push the current config values into the settings controls, then refresh the
 // custom dropdown displays.
 function populateSettingsControls() {
@@ -210,6 +258,7 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
+        await syncSharedHardwareConfig();
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
                 method: 'PUT',
@@ -1115,22 +1164,31 @@ async function installGgufFromCatalog(repo, file, card) {
     pfill.style.width = '0%';
     ptext.textContent = lang === 'en' ? 'Starting...' : 'Demarrage...';
 
-    const controller = new AbortController();
     prog.querySelectorAll('.cat-cancel').forEach(b => b.remove());
     const cancel = document.createElement('button');
     cancel.className = 'cat-cancel'; cancel.type = 'button';
     cancel.textContent = lang === 'en' ? 'Cancel' : 'Annuler';
-    cancel.addEventListener('click', () => controller.abort());
+    cancel.disabled = true;
     prog.appendChild(cancel);
 
     try {
         const qs = 'repo=' + encodeURIComponent(repo) + '&file=' + encodeURIComponent(file);
-        const res = await fetch('/api/gguf-pull?' + qs, { signal: controller.signal });
+        const res = await fetch('/api/gguf-pull?' + qs);
         if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
         const reader = res.body.getReader();
         const dec = new TextDecoder();
-        let buf = '', installedName = '';
+        let buf = '', installedName = '', taskId = '';
         const mb = n => (n / 1e6).toFixed(0);
+        cancel.addEventListener('click', async () => {
+            if (!taskId) return;
+            cancel.disabled = true;
+            cancel.textContent = lang === 'en' ? 'Canceling...' : 'Annulation...';
+            await fetch('/api/gguf-pull-cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: taskId })
+            }).catch(() => {});
+        });
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -1139,6 +1197,10 @@ async function installGgufFromCatalog(repo, file, card) {
             for (const line of lines) {
                 if (!line.trim()) continue;
                 let o; try { o = JSON.parse(line); } catch { continue; }
+                if (o.id && !taskId) {
+                    taskId = o.id;
+                    cancel.disabled = false;
+                }
                 if (o.status === 'downloading' && o.total) {
                     const pct = Math.round((o.completed || 0) / o.total * 100);
                     pfill.style.width = pct + '%';
@@ -1147,6 +1209,8 @@ async function installGgufFromCatalog(repo, file, card) {
                     installedName = o.name || ggufFileName(file);
                     pfill.style.width = '100%';
                     ptext.textContent = lang === 'en' ? 'Installed' : 'Installe';
+                } else if (o.status === 'canceled') {
+                    throw new DOMException('Canceled', 'AbortError');
                 } else if (o.status === 'error') {
                     throw new Error(o.error || 'download failed');
                 }
@@ -1162,9 +1226,8 @@ async function installGgufFromCatalog(repo, file, card) {
         cancel.remove();
         prog.style.display = 'none';
         pfill.style.width = '0%';
-        if (!(e && e.name === 'AbortError')) {
-            ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
-        }
+        if (e && e.name === 'AbortError') ptext.textContent = lang === 'en' ? 'Canceled' : 'Annule';
+        else ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
         setCardActions(card, card.dataset.name);
     }
 }
@@ -1426,6 +1489,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
@@ -1658,6 +1722,7 @@ async function loadLoaderModel() {
     state.config.ggufGpuLayers = gpuLayers;
     state.config.ggufVariant = variant;
     saveState();
+    await syncSharedHardwareConfig();
     const ggufCtxInput = $('#gguf-ctx-input'); if (ggufCtxInput) ggufCtxInput.value = ctx;
 
     const btn = $('#ml-load-btn'), prog = $('#ml-progress'), fill = $('#ml-progress-fill');

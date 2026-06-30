@@ -10,7 +10,7 @@ call npm install --save-dev @yao-pkg/pkg
 if errorlevel 1 goto :error
 
 echo [2/2] Packaging server.js -^> native\dist\zaalis-server.exe ...
-call npx pkg . --targets node22-win-x64 --output native\dist\zaalis-server.exe
+call npx pkg . --targets node22-win-x64 --no-bytecode --public --output native\dist\zaalis-server.exe
 if errorlevel 1 goto :error
 
 echo.

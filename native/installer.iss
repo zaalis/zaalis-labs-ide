@@ -44,14 +44,14 @@ Source: "dist\interface\*";       DestDir: "{app}\interface"; Flags: ignoreversi
 Source: "dist\zaalis-cli.exe";    DestDir: "{app}\bin"; DestName: "zaalis.exe"; Flags: ignoreversion
 
 [Icons]
-; Desktop shortcut â€” the .lnk stores the absolute path of the exe,
+; Desktop shortcut — the .lnk stores the absolute path of the exe,
 ; so it launches the app wherever the shortcut itself is moved.
 Name: "{userdesktop}\zaalis IDE";              Filename: "{app}\zaalis.exe"; WorkingDir: "{app}"
 Name: "{group}\zaalis IDE";                    Filename: "{app}\zaalis.exe"; WorkingDir: "{app}"
 Name: "{group}\Desinstaller zaalis IDE";       Filename: "{uninstallexe}"
 
 [Run]
-; Lancement manuel (installation interactive) â€” case a cocher en fin d'assistant.
+; Lancement manuel (installation interactive) — case a cocher en fin d'assistant.
 ; En mise a jour silencieuse, c'est le script de l'app (bat) qui relance l'IDE.
 Filename: "{app}\zaalis.exe"; Description: "Lancer zaalis IDE"; Flags: nowait postinstall skipifsilent
 
