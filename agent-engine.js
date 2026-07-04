@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { execFile } = require('child_process');
+const { spawn } = require('child_process');
 
 const FILTERED_NAMES = new Set(['node_modules', '.git', '.env', '.DS_Store', 'server-data']);
 const MAX_TOOL_ROUNDS = 6;
@@ -475,26 +475,65 @@ function isDangerousCommand(cmd) {
   ].some((re) => re.test(c));
 }
 
+// Decide whether a tool may run in the given permission mode.
+// `askable: true` means the tool is blocked by default but MAY run if the
+// client approves it live (approval_request event -> /api/agent-approve).
 function mutationAllowed(toolName, permissionMode, input) {
   const mode = permissionMode || 'supervised';
   if (toolName === 'read' || toolName === 'glob' || toolName === 'grep' || toolName === 'todo' || toolName === 'task') return { allowed: true };
-  if (mode === 'read-only' || mode === 'plan') return { allowed: false, reason: `mode ${mode}` };
-  if (toolName === 'run' && isDangerousCommand(input && input.command) && mode !== 'bypass') return { allowed: false, reason: 'commande dangereuse bloquee' };
-  if (mode === 'supervised') return { allowed: false, reason: 'validation requise' };
-  if (mode === 'semi' && toolName === 'run') return { allowed: false, reason: 'validation requise' };
+  if (mode === 'read-only' || mode === 'plan') return { allowed: false, askable: false, reason: `mode ${mode}` };
+  if (toolName === 'run' && isDangerousCommand(input && input.command) && mode !== 'bypass') {
+    return { allowed: false, askable: true, dangerous: true, reason: 'commande dangereuse' };
+  }
+  if (mode === 'supervised') return { allowed: false, askable: true, reason: 'validation requise' };
+  if (mode === 'semi' && toolName === 'run') return { allowed: false, askable: true, reason: 'validation requise' };
   return { allowed: true };
 }
 
-async function execCmd(command, cwd) {
+// Run a shell command, streaming its output as it arrives via onOutput and
+// honouring an AbortSignal (the client disconnected / pressed Esc).
+async function execCmd(command, cwd, { onOutput, signal } = {}) {
   return await new Promise((resolve) => {
-    execFile('cmd.exe', ['/c', command], {
-      cwd,
-      timeout: 30000,
-      maxBuffer: 1024 * 1024 * 5,
-      windowsHide: true,
-    }, (err, stdout, stderr) => {
-      if (err && !stdout && !stderr) resolve({ error: err.message, stdout: '', stderr: '' });
-      else resolve({ stdout: stdout || '', stderr: stderr || '' });
+    const isWin = process.platform === 'win32';
+    let child;
+    try {
+      child = isWin
+        ? spawn('cmd.exe', ['/c', command], { cwd, windowsHide: true })
+        : spawn('/bin/sh', ['-c', command], { cwd });
+    } catch (e) {
+      return resolve({ error: e.message, stdout: '', stderr: '' });
+    }
+    const MAX = 1024 * 1024 * 5;
+    let stdout = '', stderr = '', settled = false, spawnError = null;
+    const finish = (extra) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      resolve({ stdout, stderr, ...(extra || {}) });
+    };
+    const onAbort = () => { try { child.kill('SIGKILL'); } catch {} finish({ error: 'interrompu' }); };
+    const timer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} finish({ error: 'timeout (30s)' }); }, 30000);
+    if (timer.unref) timer.unref();
+    if (signal) {
+      if (signal.aborted) return onAbort();
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    child.stdout.on('data', (d) => {
+      const s = String(d);
+      if (stdout.length < MAX) stdout += s.slice(0, MAX - stdout.length);
+      if (typeof onOutput === 'function') { try { onOutput(s); } catch {} }
+    });
+    child.stderr.on('data', (d) => {
+      const s = String(d);
+      if (stderr.length < MAX) stderr += s.slice(0, MAX - stderr.length);
+      if (typeof onOutput === 'function') { try { onOutput(s); } catch {} }
+    });
+    child.on('error', (e) => { spawnError = e; finish({ error: e.message }); });
+    child.on('close', (code) => {
+      if (spawnError) return;
+      if (code !== 0 && !stdout && !stderr) finish({ error: `exit code ${code}` });
+      else finish();
     });
   });
 }
@@ -626,12 +665,24 @@ async function runSubAgentTask(input, ctx) {
   };
 }
 
-async function runTool(tool, { root, permissionMode, callModel, model, submodel, config, reasoningLevel, taskState, subAgentTimeoutMs }) {
+async function runTool(tool, { root, permissionMode, callModel, model, submodel, config, reasoningLevel, taskState, subAgentTimeoutMs, requestApproval, onOutput, signal }) {
   const name = tool.name;
   const input = tool.input || {};
   const decision = mutationAllowed(name, permissionMode, input);
   if (!decision.allowed) {
-    return { name, blocked: true, summary: `${name} bloque (${decision.reason})`, text: `${name}: bloque (${decision.reason})` };
+    // Blocked but askable: hand the decision to the connected client (live
+    // approval). Without a client able to answer, keep the legacy hard block.
+    if (decision.askable && typeof requestApproval === 'function') {
+      let approved = false;
+      try {
+        approved = await requestApproval({ tool: name, input, dangerous: !!decision.dangerous, reason: decision.reason });
+      } catch { approved = false; }
+      if (!approved) {
+        return { name, blocked: true, summary: `${name} refuse par l'utilisateur`, text: `${name}: refuse par l'utilisateur` };
+      }
+    } else {
+      return { name, blocked: true, summary: `${name} bloque (${decision.reason})`, text: `${name}: bloque (${decision.reason})` };
+    }
   }
 
   if (name === 'todo') {
@@ -751,9 +802,9 @@ async function runTool(tool, { root, permissionMode, callModel, model, submodel,
   }
 
   if (name === 'run') {
-    const result = await execCmd(input.command, root);
+    const result = await execCmd(input.command, root, { onOutput, signal });
     const text = ((result.stdout || '') + (result.stderr ? '\n' + result.stderr : '') + (result.error ? '\n' + result.error : '')).trim();
-    return { name, summary: `run ${input.command}`, text: text || '(aucune sortie)' };
+    return { name, summary: `run ${input.command}`, text: text || '(aucune sortie)', error: !!result.error };
   }
 
   return { name, summary: `${name} inconnu`, text: `${name}: outil inconnu` };
@@ -776,6 +827,8 @@ function emitAgentEvent(options, event) {
 async function runAgentTurn(options) {
   const root = path.resolve(options.root || process.cwd());
   const permissionMode = options.permissionMode || 'supervised';
+  const signal = options.signal || null;
+  const aborted = () => !!(signal && signal.aborted);
   const history = Array.isArray(options.history) ? options.history : [];
   let todos = normalizeTodoList(options.todos || extractLatestTodos(history));
   const events = [];
@@ -796,6 +849,7 @@ async function runAgentTurn(options) {
   let usage = null;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+    if (aborted()) return { error: 'interrompu', events, toolResults };
     emitAgentEvent(options, { type: 'model_start', round: round + 1, label: round === 0 ? 'Preparation de la reponse' : 'Synthese apres outils' });
     const data = await options.callModel({
       model: options.model,
@@ -806,7 +860,12 @@ async function runAgentTurn(options) {
       reasoningLevel: options.reasoningLevel,
       images: round === 0 ? (options.images || []) : [],
       history: messages,
+      // Live token stream from the provider — forwarded to the client as
+      // assistant_delta events so the text appears while it is generated.
+      onDelta: (text) => emitAgentEvent(options, { type: 'assistant_delta', round: round + 1, text }),
+      onThinkingDelta: () => emitAgentEvent(options, { type: 'assistant_thinking', round: round + 1 }),
     });
+    if (aborted()) return { error: 'interrompu', events, toolResults };
     if (data.error) {
       emitAgentEvent(options, { type: 'error', error: data.error });
       return { error: data.error, events, toolResults };
@@ -845,6 +904,7 @@ ${originalUserMessage}`;
 
     const results = [];
     for (const tool of tools) {
+      if (aborted()) return { error: 'interrompu', events, toolResults };
       const eventId = `${round + 1}-${toolResults.length + results.length + 1}`;
       emitAgentEvent(options, {
         type: 'tool_started',
@@ -864,6 +924,13 @@ ${originalUserMessage}`;
           reasoningLevel: options.reasoningLevel,
           taskState,
           subAgentTimeoutMs: options.subAgentTimeoutMs,
+          requestApproval: options.requestApproval,
+          signal,
+          // Live command output (run tool): forwarded chunk by chunk.
+          onOutput: (chunk) => emitAgentEvent(options, {
+            type: 'tool_output', id: eventId, round: round + 1, tool: tool.name,
+            chunk: String(chunk).slice(0, 4000),
+          }),
         });
         results.push(result);
         if (result.todos) todos = normalizeTodoList(result.todos);

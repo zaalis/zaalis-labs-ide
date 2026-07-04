@@ -149,7 +149,7 @@ function _applyPermissionMode(mode, out, lang) {
     updatePermissionBadge();
     if (mode === 'bypass') {
         _sysMsg(out, lang === 'en'
-            ? 'âš  Bypass mode: every action runs with NO confirmation, including destructive commands.'
+            ? '⚠ Bypass mode: every action runs with NO confirmation, including destructive commands.'
             : '⚠ Mode bypass : chaque action s’exécute SANS confirmation, y compris les commandes destructives.');
     } else {
         _sysMsg(out, (lang === 'en' ? 'Permission mode → ' : 'Mode de permission → ') + permissionLabel(mode, lang));

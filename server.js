@@ -505,6 +505,179 @@ async function fetchJSON(url, options) {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming helpers — real token-level streaming from every provider.
+// ---------------------------------------------------------------------------
+
+// Surface the real upstream error message from a failed fetch Response.
+async function throwFetchError(res) {
+  const raw = await res.text();
+  let data;
+  try { data = JSON.parse(raw); } catch {
+    throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300) || res.statusText}`);
+  }
+  const errMsg =
+    data.error?.message || data.error?.type ||
+    (typeof data.error === 'string' ? data.error : '') ||
+    (data.error ? JSON.stringify(data.error) : '') || res.statusText;
+  throw new Error(errMsg);
+}
+
+// Consume a streamed fetch body line by line (SSE `data:` lines or NDJSON).
+async function streamBodyLines(res, onLine) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  for await (const chunk of res.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || '';
+    for (const line of lines) onLine(line);
+  }
+  buffer += decoder.decode();
+  if (buffer) onLine(buffer);
+}
+
+// Split a token stream that may embed <think>...</think> (deepseek-r1, qwen…)
+// into visible text vs reasoning, robust to tags split across chunks.
+function createThinkSplitter(onText, onThinking) {
+  let buf = '';
+  let inThink = false;
+  const process = (final) => {
+    for (;;) {
+      const tag = inThink ? '</think>' : '<think>';
+      const idx = buf.indexOf(tag);
+      if (idx !== -1) {
+        const before = buf.slice(0, idx);
+        if (before) (inThink ? onThinking : onText)(before);
+        buf = buf.slice(idx + tag.length);
+        inThink = !inThink;
+        continue;
+      }
+      // No full tag: hold back only a potential partial tag at the very end.
+      let keep = 0;
+      if (!final) {
+        const lt = buf.lastIndexOf('<');
+        if (lt !== -1 && buf.length - lt < tag.length && tag.startsWith(buf.slice(lt))) keep = buf.length - lt;
+      }
+      const emitLen = buf.length - keep;
+      if (emitLen > 0) { (inThink ? onThinking : onText)(buf.slice(0, emitLen)); buf = buf.slice(emitLen); }
+      return;
+    }
+  };
+  return {
+    push(s) { buf += String(s == null ? '' : s); process(false); },
+    end() { process(true); },
+  };
+}
+
+// OpenAI-compatible SSE streaming (OpenAI, xAI/Grok, Mistral, llama.cpp).
+async function streamOpenAICompat(url, headers, payload, { onDelta, onThinking, signal, includeUsage } = {}) {
+  const body = { ...payload, stream: true, ...(includeUsage ? { stream_options: { include_usage: true } } : {}) };
+  const res = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal });
+  if (!res.ok) await throwFetchError(res);
+  let text = '', thinking = '', usage = null;
+  const splitter = createThinkSplitter(
+    (t) => { text += t; if (onDelta) onDelta(t); },
+    (t) => { thinking += t; if (onThinking) onThinking(t); }
+  );
+  await streamBodyLines(res, (line) => {
+    const l = line.trim();
+    if (!l.startsWith('data:')) return;
+    const data = l.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    let j; try { j = JSON.parse(data); } catch { return; }
+    if (j.error) throw new Error(j.error.message || String(j.error));
+    const delta = j.choices && j.choices[0] && j.choices[0].delta;
+    if (delta && typeof delta.content === 'string' && delta.content) splitter.push(delta.content);
+    if (delta && typeof delta.reasoning_content === 'string' && delta.reasoning_content) {
+      thinking += delta.reasoning_content;
+      if (onThinking) onThinking(delta.reasoning_content);
+    }
+    if (j.usage) usage = { input: j.usage.prompt_tokens, output: j.usage.completion_tokens };
+  });
+  splitter.end();
+  return { text, thinking, usage };
+}
+
+// Anthropic Messages SSE streaming (text_delta + thinking_delta).
+async function streamAnthropic(body, apiKey, { onDelta, onThinking, signal } = {}) {
+  const res = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({ ...body, stream: true }),
+    signal,
+  });
+  if (!res.ok) await throwFetchError(res);
+  let text = '', thinking = '', usage = null, inputTokens = 0;
+  await streamBodyLines(res, (line) => {
+    const l = line.trim();
+    if (!l.startsWith('data:')) return;
+    let j; try { j = JSON.parse(l.slice(5).trim()); } catch { return; }
+    if (j.type === 'error' && j.error) throw new Error(j.error.message || 'Erreur Anthropic');
+    if (j.type === 'message_start' && j.message && j.message.usage) inputTokens = j.message.usage.input_tokens || 0;
+    if (j.type === 'content_block_delta' && j.delta) {
+      if (j.delta.type === 'text_delta' && j.delta.text) { text += j.delta.text; if (onDelta) onDelta(j.delta.text); }
+      else if (j.delta.type === 'thinking_delta' && j.delta.thinking) { thinking += j.delta.thinking; if (onThinking) onThinking(j.delta.thinking); }
+    }
+    if (j.type === 'message_delta' && j.usage) usage = { input: inputTokens, output: j.usage.output_tokens };
+  });
+  return { text, thinking, usage };
+}
+
+// Google Gemini SSE streaming (streamGenerateContent?alt=sse).
+async function streamGemini(modelName, apiKey, payload, { onDelta, signal } = {}) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:streamGenerateContent?alt=sse&key=${apiKey}`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+    signal,
+  });
+  if (!res.ok) await throwFetchError(res);
+  let text = '', usage = null;
+  await streamBodyLines(res, (line) => {
+    const l = line.trim();
+    if (!l.startsWith('data:')) return;
+    let j; try { j = JSON.parse(l.slice(5).trim()); } catch { return; }
+    const t = j.candidates?.[0]?.content?.parts?.map((p) => p.text || '').join('') || '';
+    if (t) { text += t; if (onDelta) onDelta(t); }
+    if (j.usageMetadata) usage = { input: j.usageMetadata.promptTokenCount, output: j.usageMetadata.candidatesTokenCount };
+  });
+  return { text, thinking: '', usage };
+}
+
+// Ollama NDJSON streaming (/api/chat with stream:true).
+async function streamOllamaChat(baseUrl, body, { onDelta, onThinking, signal } = {}) {
+  const res = await fetch(`${baseUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, stream: true }),
+    signal,
+  });
+  if (!res.ok) await throwFetchError(res);
+  let text = '', thinking = '', usage = null;
+  const splitter = createThinkSplitter(
+    (t) => { text += t; if (onDelta) onDelta(t); },
+    (t) => { thinking += t; if (onThinking) onThinking(t); }
+  );
+  await streamBodyLines(res, (line) => {
+    const l = line.trim();
+    if (!l) return;
+    let j; try { j = JSON.parse(l); } catch { return; }
+    if (j.error) throw new Error(String(j.error));
+    const c = j.message && j.message.content;
+    if (c) splitter.push(c);
+    if (j.message && j.message.thinking) { thinking += j.message.thinking; if (onThinking) onThinking(j.message.thinking); }
+    if (j.done && j.prompt_eval_count !== undefined) usage = { input: j.prompt_eval_count, output: j.eval_count };
+  });
+  splitter.end();
+  return { text, thinking, usage };
+}
+
+// ---------------------------------------------------------------------------
 // FILE SYSTEM API
 // ---------------------------------------------------------------------------
 
@@ -1560,6 +1733,46 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // AI CHAT API
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Live approvals — supervised/semi modes ask the connected client before each
+// mutation. The engine pauses on an approval_request event; the client answers
+// via POST /api/agent-approve. Unanswered requests time out as "deny".
+// ---------------------------------------------------------------------------
+const pendingApprovals = new Map(); // id -> { userId, timer, resolve }
+const APPROVAL_TIMEOUT_MS = 120000;
+
+app.post('/api/agent-approve', (req, res) => {
+  const { id, approved } = req.body || {};
+  const entry = pendingApprovals.get(String(id || ''));
+  if (!entry) return res.status(404).json({ error: 'Demande de validation expiree ou inconnue.' });
+  if (entry.userId && (!req.user || req.user.id !== entry.userId)) {
+    return res.status(403).json({ error: 'Non autorise.' });
+  }
+  pendingApprovals.delete(String(id));
+  clearTimeout(entry.timer);
+  entry.resolve(!!approved);
+  res.json({ ok: true });
+});
+
+// Compact, human-readable preview of what a tool wants to do (for the
+// approval prompt) — never ship a full file body to the client here.
+function approvalDetail(tool, input) {
+  const i = input || {};
+  if (tool === 'run') return String(i.command || '');
+  if (tool === 'write') {
+    const content = String(i.content || '');
+    return `${i.path || ''}\n${content.slice(0, 800)}${content.length > 800 ? '\n…' : ''}`;
+  }
+  if (tool === 'edit') {
+    const hunks = Array.isArray(i.hunks) ? i.hunks : [];
+    const preview = hunks.slice(0, 6)
+      .map((h) => `- ${String(h.search || '').split('\n')[0]}\n+ ${String(h.replace || '').split('\n')[0]}`)
+      .join('\n');
+    return `${i.path || ''}\n${preview}`;
+  }
+  return JSON.stringify(i).slice(0, 400);
+}
+
 // POST /api/agent-chat
 // Shared Claude-Code-style loop used by both the Windows app and the CLI.
 // It keeps the provider dispatch in /api/chat, but centralizes project context
@@ -1594,7 +1807,13 @@ app.post('/api/agent-chat', async (req, res) => {
   };
   try {
     const b = req.body || {};
-    wantsStream = b.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
+    // Key streaming on the explicit body flag ONLY. The CLI always sends
+    // `Accept: application/x-ndjson` (its stream reader tolerates a buffered
+    // reply), so treating that header as "wants stream" would wrongly enable
+    // the live approval loop for `zaalis -p` — where nobody can answer it — and
+    // hang the request until the 120s approval timeout. Both clients set
+    // `stream` in the body to signal real intent.
+    wantsStream = b.stream === true;
     if (req.isMobile) return respondError(403, 'Action indisponible en mode mobile.');
     const model = b.model;
     const message = String(b.message || '');
@@ -1604,6 +1823,52 @@ app.post('/api/agent-chat', async (req, res) => {
 
     const root = resolveBase(b.root || b.projectRoot);
     const cookie = req.headers.cookie || '';
+
+    // Client hung up (Esc in the CLI, closed tab…): abort the whole turn so
+    // model calls and running commands stop instead of finishing in the dark.
+    const turnAC = new AbortController();
+    const myApprovals = new Set();
+    let turnDone = false;
+    res.on('close', () => {
+      if (turnDone || res.writableEnded) return;
+      turnAC.abort();
+      for (const id of myApprovals) {
+        const entry = pendingApprovals.get(id);
+        if (entry) { pendingApprovals.delete(id); clearTimeout(entry.timer); try { entry.resolve(false); } catch {} }
+      }
+    });
+
+    // Live approval channel (streaming clients only): pause the tool, ask the
+    // user, resume on POST /api/agent-approve. Timeout = deny.
+    const requestApproval = wantsStream ? (info) => new Promise((resolve) => {
+      const id = 'apr_' + crypto.randomUUID();
+      const timer = setTimeout(() => {
+        pendingApprovals.delete(id);
+        myApprovals.delete(id);
+        writeStreamEvent({ type: 'approval_result', id, approved: false, timeout: true });
+        resolve(false);
+      }, APPROVAL_TIMEOUT_MS);
+      if (timer.unref) timer.unref();
+      pendingApprovals.set(id, {
+        userId: req.user && req.user.id,
+        timer,
+        resolve: (ok) => {
+          myApprovals.delete(id);
+          writeStreamEvent({ type: 'approval_result', id, approved: !!ok });
+          resolve(!!ok);
+        },
+      });
+      myApprovals.add(id);
+      writeStreamEvent({
+        type: 'approval_request',
+        id,
+        tool: info.tool,
+        dangerous: !!info.dangerous,
+        reason: info.reason || '',
+        detail: approvalDetail(info.tool, info.input),
+      });
+    }) : undefined;
+
     const callModel = async (payload) => {
       const requestedTimeout = parseInt(payload.timeoutMs, 10);
       const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
@@ -1612,20 +1877,55 @@ app.post('/api/agent-chat', async (req, res) => {
       const ac = timeoutMs ? new AbortController() : null;
       const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
       if (timer && timer.unref) timer.unref();
+      const signal = ac ? AbortSignal.any([ac.signal, turnAC.signal]) : turnAC.signal;
       try {
-        const cleanPayload = { ...payload };
+        const { onDelta, onThinkingDelta, ...cleanPayload } = payload;
         delete cleanPayload.timeoutMs;
+        const headers = {
+          'Content-Type': 'application/json',
+          ...(cookie ? { Cookie: cookie } : {}),
+        };
+        // Live path: ask /api/chat for its NDJSON stream and forward each token
+        // to the engine (which relays them to the client as assistant_delta).
+        if (wantsStream && typeof onDelta === 'function') {
+          const r = await fetch(`http://127.0.0.1:${PORT}/api/chat`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({ ...cleanPayload, stream: true }),
+            signal,
+          });
+          const ct = String(r.headers.get('content-type') || '');
+          if (!/x-ndjson/i.test(ct)) {
+            // Buffered answer (early JSON error): behave like fetchJSON.
+            if (!r.ok) await throwFetchError(r);
+            const raw = await r.text();
+            try { return JSON.parse(raw); } catch { throw new Error('Réponse non-JSON reçue du serveur de modèles.'); }
+          }
+          let result = null;
+          let streamError = null;
+          await streamBodyLines(r, (line) => {
+            const clean = line.trim();
+            if (!clean) return;
+            let ev; try { ev = JSON.parse(clean); } catch { return; }
+            if (ev.type === 'delta' && ev.text) onDelta(ev.text);
+            else if (ev.type === 'thinking_delta' && typeof onThinkingDelta === 'function') onThinkingDelta(ev.text || '');
+            else if (ev.type === 'done') result = { response: ev.response || '', thinking: ev.thinking, usage: ev.usage };
+            else if (ev.type === 'error') streamError = ev.error || 'Erreur modele.';
+          });
+          if (streamError) return { error: streamError };
+          return result || { error: 'Flux modele incomplet.' };
+        }
         return await fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(cookie ? { Cookie: cookie } : {}),
-          },
+          headers,
           body: JSON.stringify(cleanPayload),
-          ...(ac ? { signal: ac.signal } : {}),
+          signal,
         });
       } catch (e) {
-        if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
+        if (e && e.name === 'AbortError') {
+          if (turnAC.signal.aborted) throw new Error('interrompu');
+          throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
+        }
         throw e;
       } finally {
         if (timer) clearTimeout(timer);
@@ -1646,7 +1946,10 @@ app.post('/api/agent-chat', async (req, res) => {
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
       emitEvent: wantsStream ? writeStreamEvent : undefined,
+      requestApproval,
+      signal: turnAC.signal,
     });
+    turnDone = true;
     if (wantsStream) {
       writeStreamEvent({ type: 'done', result });
       try { res.end(); } catch {}
@@ -1664,9 +1967,49 @@ app.post('/api/agent-chat', async (req, res) => {
   }
 });
 
-// POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
+// POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images, stream }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
+// stream:true switches the response to NDJSON: {type:'delta'|'thinking_delta'}
+// events while the provider generates, then a final {type:'done', response,…}.
 app.post('/api/chat', async (req, res) => {
+  const wantsStream = req.body && req.body.stream === true;
+  let streamOpen = false;
+  let deltasSent = 0;
+  const openStream = () => {
+    if (streamOpen || res.headersSent) return;
+    streamOpen = true;
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  };
+  const sendEvent = (ev) => {
+    if (!wantsStream) return;
+    try { openStream(); res.write(JSON.stringify(ev) + '\n'); } catch {}
+  };
+  const emitDelta = (text) => { if (text) { deltasSent++; sendEvent({ type: 'delta', text }); } };
+  const emitThinking = (text) => { if (text) sendEvent({ type: 'thinking_delta', text }); };
+  // Unified terminator: JSON body in buffered mode, done/error event in stream mode.
+  let finished = false;
+  const finish = (obj, status = 200) => {
+    if (finished) return;
+    finished = true;
+    if (wantsStream) {
+      openStream();
+      try {
+        if (obj && obj.error) res.write(JSON.stringify({ type: 'error', error: obj.error }) + '\n');
+        else res.write(JSON.stringify({ type: 'done', ...(obj || {}) }) + '\n');
+      } catch {}
+      try { res.end(); } catch {}
+      return;
+    }
+    res.status(status).json(obj);
+  };
+  // If the caller drops the connection (Esc in the CLI, tab closed…), abort the
+  // in-flight provider request instead of letting it run to completion.
+  const upstreamAC = new AbortController();
+  res.on('close', () => { if (!finished && !res.writableEnded) upstreamAC.abort(); });
   try {
     const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
     const images = Array.isArray(req.body.images) ? req.body.images : [];
@@ -1675,7 +2018,7 @@ app.post('/api/chat', async (req, res) => {
       ? req.body.history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
       : [];
     if (!model || !message) {
-      return res.status(400).json({ error: 'model and message are required' });
+      return finish({ error: 'model and message are required' }, 400);
     }
 
     // API keys come from the encrypted per-user vault. Keys still sent by an
@@ -1688,9 +2031,21 @@ app.post('/api/chat', async (req, res) => {
     let thinkingText = '';
     let usage = null;
 
+    // Try the streaming call first (when requested); if the provider rejects
+    // streaming (some reasoning models), fall back to the buffered call —
+    // but only if no delta reached the client yet.
+    const tryStream = async (fn) => {
+      if (!wantsStream) return false;
+      try { await fn(); return true; }
+      catch (e) {
+        if (upstreamAC.signal.aborted || deltasSent > 0 || (e && e.name === 'AbortError')) throw e;
+        return false;
+      }
+    };
+
     // ----- OpenAI (Codex) -----
     if (model === 'codex') {
-      if (!keys.openai) return res.json({ response: '[OpenAI] Aucune cle API configuree.' });
+      if (!keys.openai) return finish({ response: '[OpenAI] Aucune cle API configuree.' });
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
@@ -1713,22 +2068,31 @@ app.post('/api/chat', async (req, res) => {
         payload.reasoning_effort = efforts[reasoningLevel] || 'medium';
       }
 
-      const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${keys.openai}`,
-        },
-        body: JSON.stringify(payload),
+      const openaiHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${keys.openai}`,
+      };
+      const streamed = await tryStream(async () => {
+        const s = await streamOpenAICompat('https://api.openai.com/v1/chat/completions', openaiHeaders, payload, {
+          onDelta: emitDelta, onThinking: emitThinking, signal: upstreamAC.signal, includeUsage: true,
+        });
+        responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
       });
-
-      responseText = data.choices?.[0]?.message?.content || '';
-      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+      if (!streamed) {
+        const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: openaiHeaders,
+          body: JSON.stringify(payload),
+          signal: upstreamAC.signal,
+        });
+        responseText = data.choices?.[0]?.message?.content || '';
+        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+      }
     }
 
     // ----- Anthropic (Claude) -----
     else if (model === 'claude') {
-      if (!keys.anthropic) return res.json({ response: '[Claude] Aucune cle API configuree.' });
+      if (!keys.anthropic) return finish({ response: '[Claude] Aucune cle API configuree.' });
 
       const claudeContent = images.length
         ? [
@@ -1758,25 +2122,33 @@ app.post('/api/chat', async (req, res) => {
         }
       }
 
-      const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': keys.anthropic,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify(body),
+      const streamed = await tryStream(async () => {
+        const s = await streamAnthropic(body, keys.anthropic, {
+          onDelta: emitDelta, onThinking: emitThinking, signal: upstreamAC.signal,
+        });
+        responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
       });
-
-      // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
-      responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
-      thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
-      if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
+      if (!streamed) {
+        const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': keys.anthropic,
+            'anthropic-version': '2023-06-01',
+          },
+          body: JSON.stringify(body),
+          signal: upstreamAC.signal,
+        });
+        // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
+        responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+        thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
+        if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
+      }
     }
 
     // ----- Google Gemini -----
     else if (model === 'gemini') {
-      if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
+      if (!keys.google) return finish({ response: '[Gemini] Aucune cle API configuree.' });
 
       const modelName = submodel || 'gemini-2.5-flash';
 
@@ -1803,20 +2175,28 @@ app.post('/api/chat', async (req, res) => {
         }
       }
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
-      const data = await fetchJSON(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const streamed = await tryStream(async () => {
+        const s = await streamGemini(modelName, keys.google, payload, {
+          onDelta: emitDelta, signal: upstreamAC.signal,
+        });
+        responseText = s.text; usage = s.usage || usage;
       });
-
-      responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
-      if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
+      if (!streamed) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
+        const data = await fetchJSON(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: upstreamAC.signal,
+        });
+        responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+        if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
+      }
     }
 
     // ----- xAI (Grok) -----
     else if (model === 'grok') {
-      if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
+      if (!keys.grok) return finish({ response: '[Grok] Aucune cle API configuree.' });
 
       const isImageModel = submodel && (submodel === 'grok-2-image-gen' || submodel === 'grok-image-gen');
 
@@ -1865,24 +2245,32 @@ app.post('/api/chat', async (req, res) => {
         // Only the small grok-3-mini-style models accept it, and none are in our
         // catalog, so we never send it.
         const grokPayload = { model: submodel || 'grok-4.3', messages };
-
-        const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${keys.grok}`,
-          },
-          body: JSON.stringify(grokPayload),
+        const grokHeaders = {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.grok}`,
+        };
+        const streamed = await tryStream(async () => {
+          const s = await streamOpenAICompat('https://api.x.ai/v1/chat/completions', grokHeaders, grokPayload, {
+            onDelta: emitDelta, onThinking: emitThinking, signal: upstreamAC.signal,
+          });
+          responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
         });
-
-        responseText = data.choices?.[0]?.message?.content || '';
-        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+        if (!streamed) {
+          const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
+            method: 'POST',
+            headers: grokHeaders,
+            body: JSON.stringify(grokPayload),
+            signal: upstreamAC.signal,
+          });
+          responseText = data.choices?.[0]?.message?.content || '';
+          if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+        }
       }
     }
 
     // ----- Mistral (Le Chat) -----
     else if (model === 'mistral') {
-      if (!keys.mistral) return res.json({ response: '[Mistral] Aucune cle API configuree.' });
+      if (!keys.mistral) return finish({ response: '[Mistral] Aucune cle API configuree.' });
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
@@ -1897,17 +2285,27 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
-      const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${keys.mistral}`,
-        },
-        body: JSON.stringify({ model: submodel || 'mistral-large-latest', messages }),
+      const mistralPayload = { model: submodel || 'mistral-large-latest', messages };
+      const mistralHeaders = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${keys.mistral}`,
+      };
+      const streamed = await tryStream(async () => {
+        const s = await streamOpenAICompat('https://api.mistral.ai/v1/chat/completions', mistralHeaders, mistralPayload, {
+          onDelta: emitDelta, onThinking: emitThinking, signal: upstreamAC.signal,
+        });
+        responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
       });
-
-      responseText = data.choices?.[0]?.message?.content || '';
-      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+      if (!streamed) {
+        const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
+          method: 'POST',
+          headers: mistralHeaders,
+          body: JSON.stringify(mistralPayload),
+          signal: upstreamAC.signal,
+        });
+        responseText = data.choices?.[0]?.message?.content || '';
+        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+      }
     }
 
     // ----- Ollama (Local) -----
@@ -1929,7 +2327,7 @@ app.post('/api/chat', async (req, res) => {
       const olModel = submodel || ollamaModel;
 
       // Estimate total tokens to pick an appropriate num_ctx.
-      // Rough estimate: 1 token â‰ˆ 4 chars.
+      // Rough estimate: 1 token ≈ 4 chars.
       const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
       const estimatedTokens = Math.ceil(totalChars / 4);
       // Pick num_ctx from fixed BUCKETS rather than a value that changes on every
@@ -1951,23 +2349,31 @@ app.post('/api/chat', async (req, res) => {
         keep_alive: '10m'
       };
 
-      // Abort if Ollama takes longer than 5 minutes.
+      // Abort if Ollama takes longer than 5 minutes — or the client hung up.
       const ollamaAC = new AbortController();
       const ollamaTimeout = setTimeout(() => ollamaAC.abort(), 300000);
+      const ollamaSignal = AbortSignal.any([ollamaAC.signal, upstreamAC.signal]);
       try {
-        const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(ollamaBody),
-          signal: ollamaAC.signal,
+        const streamed = await tryStream(async () => {
+          const s = await streamOllamaChat(ollamaUrl, ollamaBody, {
+            onDelta: emitDelta, onThinking: emitThinking, signal: ollamaSignal,
+          });
+          responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
         });
+        if (!streamed) {
+          const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(ollamaBody),
+            signal: ollamaSignal,
+          });
+          responseText = data.message?.content || '';
+          // deepseek-r1 etc. embed reasoning inside <think>...</think>.
+          const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
+          if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
+          if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
+        }
         clearTimeout(ollamaTimeout);
-
-        responseText = data.message?.content || '';
-
-        // deepseek-r1 etc. embed reasoning inside <think>...</think>.
-        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
-        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
 
         // Strip system prompt echo — some models regurgitate the instructions.
         // Detect and remove if the response starts with a large chunk of the system prompt.
@@ -1992,7 +2398,6 @@ app.post('/api/chat', async (req, res) => {
           }
         }
 
-        if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
       } catch (ollamaErr) {
         clearTimeout(ollamaTimeout);
         if (ollamaErr.name === 'AbortError') {
@@ -2026,18 +2431,29 @@ app.post('/api/chat', async (req, res) => {
 
       const ggufAC = new AbortController();
       const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
+      const ggufSignal = AbortSignal.any([ggufAC.signal, upstreamAC.signal]);
+      const ggufPayload = { model: 'local', messages, temperature: 0.7, max_tokens: 2048 };
+      const ggufUrl = `http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`;
       try {
-        const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 }),
-          signal: ggufAC.signal,
+        const streamed = await tryStream(async () => {
+          const s = await streamOpenAICompat(ggufUrl, { 'Content-Type': 'application/json' }, ggufPayload, {
+            onDelta: emitDelta, onThinking: emitThinking, signal: ggufSignal,
+          });
+          responseText = s.text; thinkingText = s.thinking; usage = s.usage || usage;
         });
+        if (!streamed) {
+          const data = await fetchJSON(ggufUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...ggufPayload, stream: false }),
+            signal: ggufSignal,
+          });
+          responseText = data.choices?.[0]?.message?.content || '';
+          const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
+          if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
+          if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+        }
         clearTimeout(ggufTimeout);
-        responseText = data.choices?.[0]?.message?.content || '';
-        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
-        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
-        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
       } catch (ggufErr) {
         clearTimeout(ggufTimeout);
         if (ggufErr.name === 'AbortError') throw new Error('Moteur GGUF : délai dépassé (5 min). Modèle trop lent ?');
@@ -2047,7 +2463,7 @@ app.post('/api/chat', async (req, res) => {
 
     // ----- Unknown model -----
     else {
-      return res.status(400).json({ error: `Unknown model: ${model}` });
+      return finish({ error: `Unknown model: ${model}` }, 400);
     }
 
     // Final safety net: strip any response that begins with the anti-leak marker
@@ -2066,9 +2482,9 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
+    finish({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    finish({ error: err.message }, 500);
   }
 });
 

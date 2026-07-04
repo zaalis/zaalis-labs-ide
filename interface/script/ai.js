@@ -129,6 +129,32 @@ $('#close-approval').addEventListener('click', () => {
     if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
 });
 
+// Server-side approval (supervised mode): the agent engine paused a tool and
+// waits for POST /api/agent-approve. Show the same modal, then answer it.
+async function handleApprovalEvent(event) {
+    const lang = state.language || 'fr';
+    const tool = event.tool || 'outil';
+    const desc = event.dangerous
+        ? (lang === 'en' ? 'The agent wants to run a DANGEROUS command' : 'L\'agent veut exécuter une commande DANGEREUSE')
+        : (lang === 'en' ? `The agent wants to execute: ${tool}` : `L'agent veut exécuter : ${tool}`);
+    let approved = false;
+    try { approved = await requestApproval(desc, String(event.detail || '').slice(0, 1500)); } catch {}
+    try {
+        await fetch('/api/agent-approve', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: event.id, approved })
+        });
+    } catch {}
+}
+
+// The server auto-refused a request left unanswered too long: close the modal.
+function handleApprovalTimeout() {
+    const modal = $('#approval-modal');
+    if (modal) modal.classList.remove('active');
+    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
+}
+
 // ==========================================================
 //  AI PANEL TABS
 // ==========================================================
@@ -318,20 +344,32 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Reveal `text` word-by-word into `el` (live typing effect), then replace it
 // with the final rendered HTML. Used for the chat reply and the lead synthesis.
+// Renders at animation-frame cadence with a fixed time budget — one markdown
+// render per FRAME instead of one per word chunk, so long answers no longer
+// thrash layout (the old 13ms loop re-rendered the full text hundreds of times).
 async function streamInto(el, text, finalHTML, signal, scrollEl) {
-    const words = String(text).split(/(\s+)/);
-    // Reveal several words at a time for long answers so it never feels sluggish.
-    const chunk = words.length > 400 ? 4 : (words.length > 150 ? 2 : 1);
-    let acc = '';
+    const full = String(text);
     el.classList.add('md');
-    for (let i = 0; i < words.length; i += chunk) {
-        if (signal && signal.aborted) { acc = text; break; }
-        acc += words.slice(i, i + chunk).join('');
-        el.innerHTML = renderMarkdown(acc);
-        if (scrollEl) followScroll(scrollEl);
-        await sleep(13);
+    if (full && !document.hidden && !(signal && signal.aborted)) {
+        const t0 = performance.now();
+        const duration = Math.min(1600, Math.max(400, full.length * 2));
+        await new Promise((resolve) => {
+            const frame = () => {
+                if ((signal && signal.aborted) || document.hidden) return resolve();
+                const p = Math.min(1, (performance.now() - t0) / duration);
+                const upto = Math.round(full.length * p);
+                // Cut on a word boundary so the tail never flickers mid-word.
+                let cut = upto >= full.length ? full.length : full.lastIndexOf(' ', upto);
+                if (cut <= 0) cut = upto;
+                el.innerHTML = renderMarkdown(full.slice(0, cut));
+                if (scrollEl) followScroll(scrollEl);
+                if (p >= 1) return resolve();
+                requestAnimationFrame(frame);
+            };
+            requestAnimationFrame(frame);
+        });
     }
-    el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
+    el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(full);
     if (scrollEl) followScroll(scrollEl);
 }
 
@@ -825,10 +863,53 @@ async function sendChat(input) {
     const controller = new AbortController();
     chatAbort = controller;
     setChatBusy(true);
+
+    // Live token stream: assistant_delta events render the answer WHILE the
+    // model generates it (real streaming — cloud and local models alike).
+    const liveText = { buf: '', raf: 0, active: false, seen: false };
+    const renderLiveText = () => {
+        liveText.raf = 0;
+        if (!liveText.active) return;
+        const target = body.querySelector('.stream-target');
+        if (target) {
+            target.innerHTML = renderMarkdown(liveText.buf);
+            followScroll($('#chat-messages'));
+        }
+    };
+    const onLiveEvent = (event) => {
+        if (!event || !event.type) return;
+        if (event.type === 'assistant_delta') {
+            liveText.seen = true;
+            if (!liveText.active) {
+                liveText.active = true;
+                stopThinking(body);
+                body.innerHTML = '<div class="stream-target md"></div>';
+            }
+            liveText.buf += String(event.text || '');
+            if (!liveText.raf) liveText.raf = requestAnimationFrame(renderLiveText);
+            return;
+        }
+        if (event.type === 'model_start' || event.type === 'tool_batch') {
+            // New round: the intermediate text is preserved as a note in the
+            // activity panel; the bubble goes back to "thinking" dots.
+            if (liveText.active) {
+                liveText.active = false;
+                liveText.buf = '';
+                if (liveText.raf) { cancelAnimationFrame(liveText.raf); liveText.raf = 0; }
+                startThinking(body);
+            }
+        }
+        if (event.type === 'approval_request') handleApprovalEvent(event);
+        if (event.type === 'approval_result' && event.timeout) handleApprovalTimeout();
+        if (liveActivity) liveActivity.onEvent(event);
+    };
+
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            onEvent: onLiveEvent
         });
+        liveText.active = false;
+        if (liveText.raf) { cancelAnimationFrame(liveText.raf); liveText.raf = 0; }
         stopThinking(body);
         if (data.error) {
             if (liveActivity) liveActivity.fail(data.error);
@@ -846,10 +927,13 @@ async function sendChat(input) {
             const responseText = data.response || '';
             const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
-            // Generated image = single rectangle (instant); text = streamed word-by-word.
+            // Generated image = single rectangle (instant). Text already seen
+            // streaming live = swap in the exact final render (no fake replay).
+            // Non-streamed provider = keep the typewriter reveal as fallback.
             body.classList.toggle('has-image', isImg);
-            if (isImg) {
+            if (isImg || liveText.seen) {
                 body.innerHTML = reasoning + formatted;
+                followScroll($('#chat-messages'));
             } else {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
                 await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
@@ -1155,8 +1239,36 @@ function createLiveAgentActivity(container) {
     return {
         onEvent(event) {
             if (!event || !event.type) return;
+            // Token stream + reasoning render in the chat bubble, not here.
+            if (event.type === 'assistant_delta' || event.type === 'assistant_thinking') return;
             if (event.type === 'phase' || event.type === 'model_start') {
                 setStatus(event.label || (lang === 'en' ? 'Thinking' : 'Reflexion'));
+                return;
+            }
+            // Live stdout/stderr of a running command, appended under its row.
+            if (event.type === 'tool_output') {
+                const id = String(event.id || '');
+                const item = id ? toolsEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
+                if (item) {
+                    let pre = item.querySelector('.live-tool-output');
+                    if (!pre) {
+                        pre = document.createElement('pre');
+                        pre.className = 'ghost-tool-pre live-tool-output';
+                        item.appendChild(pre);
+                    }
+                    if (pre.textContent.length < 6000) pre.textContent += String(event.chunk || '');
+                    followScroll(container);
+                }
+                return;
+            }
+            if (event.type === 'approval_request') {
+                setStatus(lang === 'en' ? 'Waiting for your approval…' : 'En attente de votre validation…');
+                return;
+            }
+            if (event.type === 'approval_result') {
+                setStatus(event.approved
+                    ? (lang === 'en' ? 'Approved' : 'Validé')
+                    : (lang === 'en' ? 'Refused' : 'Refusé'));
                 return;
             }
             if (event.type === 'tool_batch') {

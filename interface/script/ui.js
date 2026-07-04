@@ -724,8 +724,19 @@ function renderTree(files, container, depth) {
 // ==========================================================
 function updateGutter(content) {
     const g = $('#line-gutter');
+    if (!g) return;
     const n = (content || '').split('\n').length;
-    g.innerHTML = Array.from({ length: n }, (_, i) => `<div>${i + 1}</div>`).join('');
+    const cur = g.childElementCount;
+    if (cur === n) return;
+    // Diff instead of rebuild: append/remove only the trailing line numbers, so
+    // typing in a large file no longer recreates thousands of DOM nodes.
+    if (n > cur) {
+        let html = '';
+        for (let i = cur; i < n; i++) html += `<div>${i + 1}</div>`;
+        g.insertAdjacentHTML('beforeend', html);
+    } else {
+        while (g.childElementCount > n) g.removeChild(g.lastElementChild);
+    }
 }
 
 const textarea = $('#code-textarea');
