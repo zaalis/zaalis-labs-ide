@@ -813,9 +813,11 @@ async function sendChat(input) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
+    // Model reply first (name + typing dots), then the collapsed activity block
+    // below it — matches the Claude Code layout the user asked for.
+    const body = addTypingMsg($('#chat-messages'), modelLabel);
     const liveActivity = createLiveAgentActivity($('#chat-messages'));
     let liveActivityFinished = false;
-    const body = addTypingMsg($('#chat-messages'), modelLabel);
 
     // For local models, limit history to avoid overflowing the context window.
     // Keep only the last N turns so the system prompt + project context fit.
@@ -1130,8 +1132,10 @@ function createLiveAgentActivity(container) {
     if (msg) msg.classList.add('live-agent-msg');
     body.classList.add('live-agent-body', 'live-agent-active');
     const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    // Collapsed by default: only the compact summary line is visible; users
+    // click the chevron to expand and see the individual tool events.
     body.innerHTML = `
-        <details class="ghost-tool-group live-agent-activity" open>
+        <details class="ghost-tool-group live-agent-activity">
             <summary>
                 <span class="ghost-chevron">${chevron}</span>
                 <span class="live-agent-title">${lang === 'en' ? 'Analyzing' : 'Analyse en cours'}</span>
