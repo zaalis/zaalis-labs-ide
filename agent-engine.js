@@ -501,12 +501,33 @@ function mutationAllowed(toolName, permissionMode, input) {
   return { allowed: true };
 }
 
+// GUI-launched apps (Finder / Electron) inherit a minimal PATH that omits
+// Homebrew and other common tool locations, so node/npm/python3/git often fail
+// with "command not found". Append the usual bin dirs so the run tool actually
+// finds them. On Windows we leave the environment untouched.
+function execEnv() {
+  if (process.platform === 'win32') return process.env;
+  const extra = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    path.join(os.homedir(), '.local', 'bin'),
+  ];
+  const seen = new Set();
+  const merged = [];
+  for (const d of [...String(process.env.PATH || '').split(':'), ...extra]) {
+    if (d && !seen.has(d)) { seen.add(d); merged.push(d); }
+  }
+  return { ...process.env, PATH: merged.join(':') };
+}
+
 async function execCmd(command, cwd) {
   return await new Promise((resolve) => {
     execFile('/bin/sh', ['-lc', command], {
       cwd,
       timeout: 30000,
       maxBuffer: 1024 * 1024 * 5,
+      env: execEnv(),
     }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) resolve({ error: err.message, stdout: '', stderr: '' });
       else resolve({ stdout: stdout || '', stderr: stderr || '' });

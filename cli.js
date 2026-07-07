@@ -2492,23 +2492,46 @@ async function main() {
 
   if (cmd === 'ide') {
     const self = process.execPath.toLowerCase();
-    const exe = (IS_WIN
-      ? [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
-      : (process.platform === 'darwin'
-        ? [
-            path.join(APP_DIR, '..', 'zaalis-ide.command'),
-            path.join(APP_DIR, 'zaalis-ide.command'),
-            path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-            path.join(APP_DIR, 'zaalis-ide.sh'),
-          ]
-        : [
-            path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-            path.join(APP_DIR, 'zaalis-ide.sh'),
-            path.join(APP_DIR, '..', '..', '..', '..', 'zaalis-ide'),
-          ]))
-      .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
+    if (IS_WIN) {
+      const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
+        .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
+      if (exe) spawnDetached(exe);
+      else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
+      return;
+    }
+    if (process.platform === 'darwin') {
+      // In the packaged .app the CLI lives at
+      //   <App>/Contents/Resources/app/bundle/bin/zaalis
+      // and the Electron binary at
+      //   <App>/Contents/MacOS/zaalis-ide
+      // Try the bundle-relative path first, then fall back to `open -a` which
+      // asks Launch Services to locate an installed "zaalis IDE.app".
+      const bundleExe = path.join(APP_DIR, '..', '..', '..', '..', 'MacOS', 'zaalis-ide');
+      if (fs.existsSync(bundleExe) && bundleExe.toLowerCase() !== self) {
+        spawnDetached(bundleExe);
+        return;
+      }
+      const also = [
+        path.join(APP_DIR, '..', 'zaalis-ide.command'),
+        path.join(APP_DIR, 'zaalis-ide.command'),
+        path.join(APP_DIR, '..', 'zaalis-ide.sh'),
+        path.join(APP_DIR, 'zaalis-ide.sh'),
+      ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
+      if (also) { spawnDetached(also); return; }
+      try {
+        spawnDetached('/usr/bin/open', ['-a', 'zaalis IDE']);
+        return;
+      } catch {}
+      console.log(brand('✗ ') + 'zaalis IDE introuvable. Installez l\'app puis relancez.');
+      return;
+    }
+    const exe = [
+      path.join(APP_DIR, '..', 'zaalis-ide.sh'),
+      path.join(APP_DIR, 'zaalis-ide.sh'),
+      path.join(APP_DIR, '..', '..', '..', '..', 'zaalis-ide'),
+    ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
     if (exe) spawnDetached(exe);
-    else console.log(brand('✗ ') + (IS_WIN ? 'zaalis.exe (IDE) introuvable.' : 'zaalis IDE introuvable.'));
+    else console.log(brand('✗ ') + 'zaalis IDE introuvable.');
     return;
   }
 

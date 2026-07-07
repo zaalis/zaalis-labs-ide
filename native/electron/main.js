@@ -327,9 +327,36 @@ app.on('before-quit', () => {
 });
 app.on('window-all-closed', () => app.quit());
 
+// On macOS, expose the `zaalis` CLI in the shell PATH by symlinking it into
+// /usr/local/bin (if writable) or ~/.local/bin. The tar.gz installer already
+// does this, but a plain drag-to-Applications from the .dmg does not; without
+// it, `zaalis ide` in Terminal won't work. Silent on any failure — the app
+// itself still runs fine without the shell shortcut.
+function ensureZaalisSymlink() {
+  if (process.platform !== 'darwin' || !app.isPackaged) return;
+  const cliPath = path.join(BUNDLE_DIR, 'bin', process.platform === 'win32' ? 'zaalis.exe' : 'zaalis');
+  if (!fs.existsSync(cliPath)) return;
+  const targets = [];
+  try { fs.accessSync('/usr/local/bin', fs.constants.W_OK); targets.push('/usr/local/bin/zaalis'); } catch {}
+  if (!targets.length) {
+    const userBin = path.join(os.homedir(), '.local', 'bin');
+    try { fs.mkdirSync(userBin, { recursive: true }); targets.push(path.join(userBin, 'zaalis')); } catch {}
+  }
+  for (const link of targets) {
+    try {
+      const cur = fs.readlinkSync(link);
+      if (cur === cliPath) continue; // already correct
+      fs.unlinkSync(link);
+    } catch {}
+    try { fs.symlinkSync(cliPath, link); } catch {}
+  }
+}
+
 app.whenReady().then(async () => {
   app.setName('zaalis IDE');
   app.setPath('userData', path.join(app.getPath('appData'), 'zaalis', 'electron'));
+
+  ensureZaalisSymlink();
 
   try {
     const { port, reuseExisting } = await pickPort();

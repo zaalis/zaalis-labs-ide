@@ -666,6 +666,25 @@ app.post('/api/file', (req, res) => {
 // EXEC API
 // ---------------------------------------------------------------------------
 
+// GUI-launched apps (Finder / Electron) inherit a minimal PATH that omits
+// Homebrew and other common tool locations, so node/npm/python3/git often fail
+// with "command not found". Append the usual bin dirs. Windows is left as-is.
+function execEnv() {
+  if (process.platform === 'win32') return process.env;
+  const extra = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    path.join(os.homedir(), '.local', 'bin'),
+  ];
+  const seen = new Set();
+  const merged = [];
+  for (const d of [...String(process.env.PATH || '').split(':'), ...extra]) {
+    if (d && !seen.has(d)) { seen.add(d); merged.push(d); }
+  }
+  return { ...process.env, PATH: merged.join(':') };
+}
+
 // POST /api/exec  { command, cwd }
 // macOS builds execute commands through the system POSIX shell.
 app.post('/api/exec', (req, res) => {
@@ -678,7 +697,8 @@ app.post('/api/exec', (req, res) => {
     execFile('/bin/sh', ['-lc', command], {
       cwd: execCwd,
       timeout: 30000,
-      maxBuffer: 1024 * 1024 * 5
+      maxBuffer: 1024 * 1024 * 5,
+      env: execEnv()
     }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
@@ -1158,7 +1178,10 @@ function detectCli(name) {
       if (process.platform === 'win32') {
         execFile('cmd.exe', ['/c', `${name} --version`], { timeout: 5000, windowsHide: true }, done);
       } else {
-        execFile(name, ['--version'], { timeout: 5000 }, done);
+        // execFile bypasses the shell, so it resolves `name` against this
+        // process's PATH — which is minimal under Finder/Electron. Use the
+        // augmented env so installed tools (git, python3, node…) are found.
+        execFile(name, ['--version'], { timeout: 5000, env: execEnv() }, done);
       }
     } catch { resolve({ available: false, version: '' }); }
   });
@@ -1303,7 +1326,7 @@ app.post('/api/grep', async (req, res) => {
       if (ic) args.push('-i');
       if (glob) args.push('-g', glob);
       args.push('--regexp', pat, rel || '.');
-      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true }, (err, stdout, stderr) => {
+      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true, env: execEnv() }, (err, stdout, stderr) => {
         if (err && err.code === 1 && !stdout) return res.json({ tool: 'ripgrep', pattern: pat, results: [], count: 0, truncated: false });
         if (err && err.code !== 1 && !stdout) return res.status(500).json({ error: String(stderr || err.message || 'ripgrep error').slice(0, 300) });
         const r = parseRgOutput(stdout, maxResults);
@@ -1346,7 +1369,7 @@ app.get('/api/gitdiff', async (req, res) => {
     const git = await detectCli('git');
     if (!git.available) return res.json({ available: false, error: 'git introuvable' });
     const run = (args) => new Promise((resolve) => {
-      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true },
+      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true, env: execEnv() },
         (e, so) => resolve(e && !so ? '' : String(so || '')));
     });
     const inside = (await run(['rev-parse', '--is-inside-work-tree'])).trim();
@@ -1394,7 +1417,7 @@ app.get('/api/doctor', async (req, res) => {
     let projectGit = null;
     if (base && git.available) {
       projectGit = await new Promise((resolve) => {
-        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true },
+        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true, env: execEnv() },
           (e, so) => resolve(e ? null : String(so || '').trim()));
       });
     }
@@ -1415,8 +1438,25 @@ app.get('/api/doctor', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/pick-folder  -> { path } | { cancelled: true }
 app.post('/api/pick-folder', (req, res) => {
+  // In the packaged Electron app the renderer picks the folder through the
+  // native IPC bridge (window.zaalisNative.pickFolder); this HTTP endpoint is
+  // the browser/dev fallback. Provide a real dialog on macOS via osascript.
+  if (process.platform === 'darwin') {
+    const script = 'POSIX path of (choose folder with prompt "Choisissez le dossier du projet")';
+    execFile('osascript', ['-e', script], { timeout: 180000, env: execEnv() }, (err, stdout) => {
+      if (err) {
+        // -128 / "User canceled" = the user dismissed the dialog: not an error.
+        if (/User canceled|-128/i.test(err.message || '')) return res.json({ cancelled: true });
+        return res.status(500).json({ error: err.message });
+      }
+      const selected = (stdout || '').trim();
+      if (!selected) return res.json({ cancelled: true });
+      res.json({ path: selected });
+    });
+    return;
+  }
   if (process.platform !== 'win32') {
-    return res.status(501).json({ error: 'Folder picker only available on Windows.' });
+    return res.status(501).json({ error: 'Folder picker only available on Windows/macOS.' });
   }
 
   // Prefer the bundled modern Explorer-style picker (pickfolder.exe).
@@ -2753,13 +2793,69 @@ let cfStartedAt = 0;
 let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
 let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
 
-function cloudflaredPath() {
+// Where an auto-downloaded tunnel binary is cached (writable per-user dir).
+const CF_DIR = path.join(DATA_DIR, 'bin');
+const CF_EXE = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+
+// Look for an already-present cloudflared: bundled next to the app, vendored in
+// the repo, previously auto-downloaded, or installed system-wide (Homebrew…).
+function findCloudflared() {
   const candidates = [
-    path.join(APP_DIR, 'cloudflared.exe'),          // next to the packaged app
-    path.join(APP_DIR, 'native', 'cloudflared.exe'), // dev (repo root)
+    path.join(APP_DIR, CF_EXE),
+    path.join(APP_DIR, 'native', CF_EXE),
+    path.join(CF_DIR, CF_EXE),
   ];
+  if (process.platform === 'darwin') {
+    candidates.push('/opt/homebrew/bin/cloudflared', '/usr/local/bin/cloudflared');
+  } else if (process.platform === 'linux') {
+    candidates.push('/usr/local/bin/cloudflared', '/usr/bin/cloudflared');
+  }
   for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
-  return 'cloudflared'; // last resort: rely on PATH
+  return null;
+}
+
+// Official cloudflared release asset for this OS/arch. macOS ships a .tgz;
+// Linux/Windows ship a raw binary.
+function cloudflaredDownloadUrl() {
+  const base = 'https://github.com/cloudflare/cloudflared/releases/latest/download/';
+  if (process.platform === 'darwin') {
+    return base + (process.arch === 'arm64' ? 'cloudflared-darwin-arm64.tgz' : 'cloudflared-darwin-amd64.tgz');
+  }
+  if (process.platform === 'linux') {
+    const a = process.arch === 'arm64' ? 'arm64' : (process.arch === 'arm' ? 'arm' : 'amd64');
+    return base + 'cloudflared-linux-' + a;
+  }
+  return base + 'cloudflared-windows-amd64.exe';
+}
+
+// Return a usable cloudflared path, auto-downloading it into CF_DIR on first
+// use if none is bundled or installed. Throws a user-actionable error on
+// failure (e.g. offline) so the pairing modal can show it.
+async function ensureCloudflared() {
+  const existing = findCloudflared();
+  if (existing) { ensureExecutable(existing); return existing; }
+  ensureDir(CF_DIR);
+  const url = cloudflaredDownloadUrl();
+  const dest = path.join(CF_DIR, CF_EXE);
+  try {
+    if (/\.tgz$/i.test(url)) {
+      const tgz = path.join(CF_DIR, 'cloudflared.tgz');
+      await downloadTo(url, tgz);
+      const { execSync } = require('child_process');
+      execSync(`tar -xzf "${tgz}" -C "${CF_DIR}"`, { timeout: 120000 });
+      try { fs.unlinkSync(tgz); } catch {}
+    } else {
+      await downloadTo(url, dest);
+    }
+  } catch (e) {
+    const hint = process.platform === 'darwin'
+      ? ' Installez-le manuellement : brew install cloudflared.'
+      : '';
+    throw new Error('Impossible de télécharger cloudflared.' + hint);
+  }
+  if (!fs.existsSync(dest)) throw new Error('cloudflared introuvable après installation.');
+  ensureExecutable(dest);
+  return dest;
 }
 
 function makeMobileToken(userId) {
@@ -2800,29 +2896,34 @@ function stopTunnel() {
 function startTunnel() {
   if (cfUrl) return Promise.resolve(cfUrl);
   if (cfStarting) return cfStarting;
-  cfStarting = new Promise((resolve, reject) => {
-    let settled = false, proc;
-    try {
-      proc = spawn(cloudflaredPath(),
-        ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
-        { windowsHide: true });
-    } catch (e) { cfStarting = null; return reject(e); }
-    cfProc = proc;
-    const onData = (buf) => {
-      const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-      if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
-    };
-    proc.stdout && proc.stdout.on('data', onData);
-    proc.stderr && proc.stderr.on('data', onData);
-    proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
-    proc.on('exit', () => {
-      if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
-      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+  cfStarting = (async () => {
+    const bin = await ensureCloudflared(); // may auto-download; throws if unavailable
+    return await new Promise((resolve, reject) => {
+      let settled = false, proc;
+      try {
+        proc = spawn(bin,
+          ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
+          { windowsHide: true });
+      } catch (e) { return reject(e); }
+      cfProc = proc;
+      const onData = (buf) => {
+        const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+        if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
+      };
+      proc.stdout && proc.stdout.on('data', onData);
+      proc.stderr && proc.stderr.on('data', onData);
+      proc.on('error', (e) => { if (!settled) { settled = true; cfProc = null; reject(e); } });
+      proc.on('exit', () => {
+        if (!settled) { settled = true; cfProc = null; reject(new Error('cloudflared exited')); }
+        else { cfUrl = null; cfProc = null; } // tunnel died after being up
+      });
+      setTimeout(() => {
+        if (!settled) { settled = true; try { proc.kill(); } catch {} cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
+      }, 30000);
     });
-    setTimeout(() => {
-      if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
-    }, 30000);
-  });
+  })();
+  // On any failure, clear the in-flight promise so the next attempt retries.
+  cfStarting.catch(() => { cfStarting = null; });
   return cfStarting;
 }
 
