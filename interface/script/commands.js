@@ -1,4 +1,4 @@
-// ==========================================================
+﻿// ==========================================================
 //  SLASH COMMANDS — central registry + handlers
 // ==========================================================
 // Loaded BEFORE ai.js. ai.js owns the suggestion-menu UI and calls into the
@@ -17,6 +17,8 @@ const SLASH_COMMANDS = [
 
     // tools
     { name: 'grep',     category: 'tools', fr: 'Recherche un motif dans le projet', en: 'Search a pattern across the project', usage: '<motif> [chemin]', args: true },
+    { name: 'search',   category: 'tools', fr: 'Ouvre une recherche dans zaalis browser', en: 'Open a search in zaalis browser', usage: '<requete>', args: true },
+    { name: 'deep-search', category: 'tools', fr: 'Recherche web approfondie avec sources', en: 'Deep web search with sources', usage: '<requete>', args: true },
     { name: 'glob',     category: 'tools', fr: 'Trouve des fichiers par motif',     en: 'Find files by glob pattern',        usage: '<**/*.js>', args: true },
     { name: 'diff',     category: 'tools', fr: 'Affiche le diff Git (status + diff)', en: 'Show the Git diff (status + diff)',  usage: '[staged|unstaged]' },
     { name: 'run',      category: 'tools', fr: 'Exécute une commande (selon permissions)', en: 'Run a command (respects permissions)', usage: '<commande>', args: true },
@@ -28,7 +30,7 @@ const SLASH_COMMANDS = [
 
     // context / diagnostics
     { name: 'context', category: 'context', fr: 'Affiche le contexte courant',        en: 'Show the current context' },
-    { name: 'status',  category: 'context', fr: 'État : modèle, projet, branche, mode', en: 'Status: model, project, branch, mode' },
+    { name: 'status', category: 'context', fr: 'État : modèle, projet, branche, mode', en: 'Status: model, project, branch, mode' },
     { name: 'doctor',  category: 'context', fr: 'Vérifie l’environnement (node, git, rg…)', en: 'Check the environment (node, git, rg…)' },
     { name: 'version', category: 'context', fr: 'Affiche la version de l’application',  en: 'Show the application version' },
     { name: 'cost',    category: 'context', fr: 'Estimation des tokens / coût',         en: 'Token / cost estimate' },
@@ -37,7 +39,7 @@ const SLASH_COMMANDS = [
     { name: 'memory',  category: 'context', fr: 'Affiche la mémoire projet (ZAALIS.md)', en: 'Show the project memory (ZAALIS.md)' },
 
     // mode
-    { name: 'plan',        category: 'mode', fr: 'Mode plan : propose sans modifier',   en: 'Plan mode: propose without editing' },
+    { name: 'plan',       category: 'mode', fr: 'Mode plan : propose sans modifier',   en: 'Plan mode: propose without editing' },
     { name: 'permissions', category: 'mode', fr: 'Affiche / change le mode de permission', en: 'Show / change the permission mode', usage: '[' + PERMISSION_MODES.join('|') + ']', args: true },
     { name: 'model',       category: 'mode', fr: 'Affiche / change le modèle',          en: 'Show / change the model', usage: '[fournisseur [sous-modèle]]', args: true },
     { name: 'fast',        category: 'mode', fr: 'Réponses courtes et directes',         en: 'Short, direct answers' },
@@ -45,6 +47,7 @@ const SLASH_COMMANDS = [
 
     // project
     { name: 'init',    category: 'project', fr: 'Crée un fichier mémoire ZAALIS.md',    en: 'Create a ZAALIS.md memory file' },
+    { name: 'remember', category: 'project', fr: 'Ajoute une note à ZAALIS.md',         en: 'Add a note to ZAALIS.md', usage: '<note>', args: true },
     { name: 'export',  category: 'project', fr: 'Exporte la conversation en Markdown',  en: 'Export the conversation as Markdown' },
     { name: 'agents',  category: 'project', fr: 'Affiche les agents et leurs rôles',    en: 'Show the agents and their roles' },
 
@@ -56,7 +59,7 @@ const SLASH_COMMANDS = [
     { name: 'tasks',       category: 'misc', fr: 'Liste de tâches',          en: 'Task list',             stub: true },
     { name: 'skills',      category: 'misc', fr: 'Compétences disponibles',  en: 'Available skills',      stub: true },
     { name: 'mcp',         category: 'misc', fr: 'Serveurs MCP',             en: 'MCP servers',           stub: true },
-    { name: 'theme',       category: 'misc', fr: 'Changer le thème',         en: 'Change the theme',      stub: true },
+    { name: 'theme',       category: 'mode', fr: 'Changer le thème (sombre/clair)', en: 'Change the theme (dark/light)', usage: '[dark|light]' },
     { name: 'keybindings', category: 'misc', fr: 'Raccourcis clavier',       en: 'Keyboard shortcuts',    stub: true },
     { name: 'vim',         category: 'misc', fr: 'Mode Vim',                 en: 'Vim mode',              stub: true },
     { name: 'voice',       category: 'misc', fr: 'Commandes vocales',        en: 'Voice commands',        stub: true }
@@ -119,6 +122,108 @@ function _toolCard(title, badge, innerHTML, open) {
 function _kvRows(rows) {
     return '<div class="kv-list">' + rows.map(([k, v]) =>
         `<div class="kv-row"><span class="kv-k">${_esc(k)}</span><span class="kv-v">${_esc(v)}</span></div>`).join('') + '</div>';
+}
+function _sourceRows(results, lang) {
+    const list = (results || []).slice(0, 10);
+    if (!list.length) return `<div class="kv-row"><span class="kv-v">${lang === 'en' ? 'No source found.' : 'Aucune source trouvee.'}</span></div>`;
+    return list.map((r, i) => {
+        const title = r.title || r.url || (lang === 'en' ? 'Source' : 'Source');
+        const snippet = r.snippet || r.description || r.error || '';
+        const link = r.url
+            ? `<a href="${_esc(r.url)}" target="_blank" rel="noopener noreferrer">${_esc(title)}</a>`
+            : _esc(title);
+        return `<div class="grep-row"><span class="grep-loc">#${i + 1}</span><span class="grep-text">${link}${snippet ? `<br><span class="tool-more">${_esc(snippet)}</span>` : ''}</span></div>`;
+    }).join('');
+}
+function _hostFromUrl(url) {
+    try { return new URL(url).hostname.replace(/^www\./i, ''); } catch { return ''; }
+}
+function _deepIcon(kind) {
+    const common = 'width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"';
+    if (kind === 'user') return `<svg ${common}><path d="M21 15a4 4 0 0 1-4 4H7l-4 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z"/></svg>`;
+    if (kind === 'search') return `<svg ${common}><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>`;
+    if (kind === 'sources') return `<svg ${common}><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M4 9h16"/></svg>`;
+    if (kind === 'links') return `<svg ${common}><path d="M10 13a5 5 0 0 0 7.1 0l2-2a5 5 0 0 0-7.1-7.1l-1.2 1.2"/><path d="M14 11a5 5 0 0 0-7.1 0l-2 2a5 5 0 0 0 7.1 7.1l1.2-1.2"/></svg>`;
+    if (kind === 'done') return `<svg ${common}><path d="M20 6 9 17l-5-5"/></svg>`;
+    return `<svg ${common}><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/></svg>`;
+}
+function _deepStep(kind, eyebrow, title, body, extra, state) {
+    const cls = state === 'active' ? 'deep-step-active' : (state === 'done' ? 'deep-step-done' : '');
+    const dots = state === 'active' ? '<span class="deep-dots"><i></i><i></i><i></i></span>' : '';
+    return `<section class="deep-step ${cls}">
+        <div class="deep-step-icon">${_deepIcon(kind)}</div>
+        <div class="deep-step-content">
+            <div class="deep-eyebrow">${_esc(eyebrow)}${dots}</div>
+            <div class="deep-title">${_esc(title)}</div>
+            ${body ? `<div class="deep-body">${_esc(body)}</div>` : ''}
+            ${extra || ''}
+        </div>
+    </section>`;
+}
+function _deepQueriesFor(query) {
+    const base = String(query || '').replace(/\s+/g, ' ').trim();
+    return Array.from(new Set([base, `${base} avis`, `${base} guide`, `${base} meilleures sources`])).slice(0, 4);
+}
+function _deepTimeline(query, data, lang, phase) {
+    const results = Array.isArray(data && data.results) ? data.results : [];
+    const searchedQueries = Array.isArray(data && data.searchedQueries) && data.searchedQueries.length
+        ? data.searchedQueries
+        : _deepQueriesFor(query);
+    const order = ['question', 'analyzing', 'searching', 'sources', 'reading', 'synthesizing', 'done'];
+    const phaseIndex = Math.max(0, order.indexOf(phase));
+    const stepState = (name) => {
+        const i = order.indexOf(name);
+        if (i < phaseIndex) return 'done';
+        if (i === phaseIndex) return 'active';
+        return 'pending';
+    };
+    const include = (name) => order.indexOf(name) <= phaseIndex;
+    const sourceCards = results.slice(0, 4).map((r) => {
+        const host = r.host || _hostFromUrl(r.url);
+        const title = r.title || host || r.url;
+        const favicon = r.favicon || (host ? `/api/favicon?domain=${encodeURIComponent(host)}` : '');
+        return `<a class="deep-source-card" href="${_esc(r.url || '#')}" target="_blank" rel="noopener noreferrer">
+            <span class="deep-favicon-box">${favicon ? `<img class="deep-favicon" src="${_esc(favicon)}" alt="">` : ''}</span>
+            <span class="deep-source-copy"><strong>${_esc(title)}</strong><small>${_esc(host || '')}</small></span>
+        </a>`;
+    }).join('');
+    const quoteRows = results.map((r) => {
+        const host = r.host || _hostFromUrl(r.url);
+        const quote = r.quote || r.description || r.snippet || '';
+        return `<a class="deep-quote" href="${_esc(r.url || '#')}" target="_blank" rel="noopener noreferrer">
+            <code>${_esc(host || r.url || 'source')}</code>
+            <span>« ${_esc(quote || (lang === 'en' ? 'Relevant passage extracted.' : 'Passage pertinent extrait.'))} »</span>
+        </a>`;
+    }).join('');
+    const pills = searchedQueries.slice(0, 4).map((q) => `<span class="deep-pill">${_esc(q)}</span>`).join('');
+    const opened = Array.isArray(data && data.opened) ? Math.max(0, data.opened.length - 1) : 0;
+    const steps = [];
+    steps.push(_deepStep('user',
+            lang === 'en' ? 'User Request' : 'Requête utilisateur',
+            `« ${query} »`, '', '', stepState('question')));
+    if (include('analyzing')) steps.push(_deepStep('active',
+            lang === 'en' ? 'Deep Search Active' : 'Deep search activé',
+            lang === 'en' ? 'Analyzing the request and preparing search angles.' : 'Analyse de la demande et preparation des axes de recherche.',
+            '', '', stepState('analyzing')));
+    if (include('searching')) steps.push(_deepStep('search',
+            lang === 'en' ? 'Web Search' : 'Recherche sur internet',
+            lang === 'en' ? 'Launching parallel queries.' : 'Lancement de plusieurs requetes en parallele.',
+            '', `<div class="deep-pills">${pills}</div>`, stepState('searching')));
+    if (include('sources')) steps.push(_deepStep('sources',
+            lang === 'en' ? 'Sources Found' : 'Sources trouvées',
+            lang === 'en' ? 'Relevant pages are selected and ranked.' : 'Les pages pertinentes sont identifiees et classees.',
+            '', `<div class="deep-source-grid">${sourceCards || `<span class="deep-muted">${lang === 'en' ? 'Searching sources...' : 'Recherche des sources...'}</span>`}</div>`, stepState('sources')));
+    if (include('reading')) steps.push(_deepStep('links',
+            lang === 'en' ? 'Links & Excerpts Read' : 'Liens & extraits consultés',
+            lang === 'en' ? 'Useful passages are extracted.' : 'Les passages utiles sont extraits.',
+            '', `<div class="deep-quotes">${quoteRows || `<span class="deep-muted">${lang === 'en' ? 'Waiting for extracted passages.' : 'Extraction des passages en cours.'}</span>`}</div>`, stepState('reading')));
+    if (include('synthesizing')) steps.push(_deepStep('done',
+            lang === 'en' ? 'Synthesized Answer' : 'Réponse synthétisée',
+            lang === 'en'
+                ? `Cross-checking ${results.length} source(s), ${opened} tab(s), then writing the report.`
+                : `Recoupement de ${results.length} source(s), ${opened} onglet(s), puis redaction du resume.`,
+            '', '', stepState('synthesizing')));
+    return `<div class="deep-search-flow">${steps.join('')}</div>`;
 }
 
 // ==========================================================
@@ -284,6 +389,99 @@ SLASH_HANDLERS.grep = async (arg, out, lang) => {
         `<div class="grep-row"><span class="grep-loc">${_esc(r.file)}:${r.line}</span><span class="grep-text">${_esc(r.text)}</span></div>`).join('');
     const badge = `${data.count}${data.truncated ? '+' : ''}`;
     _sysHTML(out, _toolCard(`grep · ${pattern}`, badge, rows + (data.truncated ? `<div class="tool-more">${lang === 'en' ? 'results truncated' : 'résultats tronqués'}</div>` : '')));
+};
+
+SLASH_HANDLERS.search = async (arg, out, lang) => {
+    const query = (arg || '').trim();
+    if (!query) { _sysMsg(out, lang === 'en' ? 'Usage: /search <query>' : 'Usage : /search <requete>'); return; }
+    // zaalis browser est lance automatiquement cote serveur s'il n'est pas deja
+    // ouvert. En cas de mode local securise ou d'echec de lancement, le
+    // serveur renvoie un code distinct (offline_mode / browser_unavailable)
+    // qu'on affiche tel quel plutot qu'une erreur generique.
+    const r = await fetch(`/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab`);
+    const data = await r.json().catch(() => ({}));
+    if (data.error === 'offline_mode') {
+        _sysMsg(out, data.message || (lang === 'en' ? 'Secure local mode is on: search is unavailable.' : 'Mode local securise actif : recherche impossible.'));
+        return;
+    }
+    if (data.error === 'browser_unavailable') {
+        _sysMsg(out, lang === 'en' ? 'zaalis browser could not be found or started.' : 'zaalis browser est introuvable ou n a pas pu demarrer.');
+        return;
+    }
+    if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
+    const rows = _kvRows([
+        [lang === 'en' ? 'Query' : 'Recherche', query],
+        [lang === 'en' ? 'Target' : 'Cible', 'zaalis browser'],
+        [lang === 'en' ? 'Mode' : 'Mode', data.background ? 'arriere-plan' : 'vue normale']
+    ]);
+    _sysHTML(out, _toolCard(lang === 'en' ? 'Search opened' : 'Recherche ouverte', 'browser', rows));
+};
+
+SLASH_HANDLERS['deep-search'] = async (arg, out, lang) => {
+    const query = (arg || '').trim();
+    if (!query) { _sysMsg(out, lang === 'en' ? 'Usage: /deep-search <query>' : 'Usage : /deep-search <requete>'); return; }
+    if (chatAbort) { _sysMsg(out, lang === 'en' ? 'Busy — wait for the current answer.' : 'Occupe — attends la reponse en cours.'); return; }
+
+    const status = addMsg(out, 'system', null, _deepTimeline(query, null, lang, 'question'), true);
+    status.classList.add('deep-search-host');
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    let data;
+    const renderPhase = (phase, payload) => {
+        status.innerHTML = _deepTimeline(query, payload || data || null, lang, phase);
+        if (typeof followScroll === 'function') followScroll(out);
+    };
+    try {
+        await sleep(180);
+        renderPhase('analyzing');
+        await sleep(320);
+        renderPhase('searching');
+        const r = await fetch('/api/deep-search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, lang, maxResults: 8, maxPages: 5, openTabs: 5 })
+        });
+        data = await r.json().catch(() => ({}));
+        if (data.error === 'offline_mode') {
+            status.textContent = data.message || (lang === 'en' ? 'Secure local mode is on: deep search is unavailable.' : 'Mode local securise actif : recherche approfondie impossible.');
+            return;
+        }
+        if (data.error === 'browser_unavailable') {
+            status.textContent = lang === 'en' ? 'zaalis browser could not be found or started.' : 'zaalis browser est introuvable ou n a pas pu demarrer.';
+            return;
+        }
+        if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
+    } catch (e) {
+        status.textContent = (lang === 'en' ? 'Deep search failed: ' : 'Recherche approfondie echouee : ') + ((e && e.message) || e);
+        status.classList.add('error');
+        return;
+    }
+
+    const results = Array.isArray(data.results) ? data.results : [];
+    renderPhase('sources', data);
+    await sleep(360);
+    renderPhase('reading', data);
+    await sleep(360);
+    renderPhase('synthesizing', data);
+
+    if (!results.length) {
+        _sysMsg(out, lang === 'en' ? 'No exploitable web result found.' : 'Aucun resultat web exploitable trouve.');
+        return;
+    }
+
+    const context = results.map((r, i) => {
+        return `[${i + 1}] ${r.title || r.url}\nURL: ${r.url}\nSearch query: ${r.sourceQuery || query}\nSnippet: ${r.snippet || ''}\nPage title: ${r.title || ''}\nDescription: ${r.description || ''}\nExcerpt:\n${r.excerpt || r.error || ''}`;
+    }).join('\n\n---\n\n');
+
+    const systemPrompt = lang === 'en'
+        ? 'You are a senior web investigation analyst inside zaalis IDE. Use only the supplied sources and be explicit about uncertainty. Write a compact cited mini-report: one direct answer, 3 to 5 verified findings, caveats or missing evidence, then a Sources section with Markdown links. Cross-check claims across sources when possible, prefer primary/official sources, do not invent dates, numbers, quotes, or links, and keep the tone professional.'
+        : 'Tu es un analyste senior de recherche web dans zaalis IDE. Utilise uniquement les sources fournies et signale clairement les incertitudes. Redige un mini rapport cite et compact : une reponse directe, 3 a 5 constats verifies, les limites ou preuves manquantes, puis une section Sources avec liens Markdown. Recoupe les affirmations entre sources quand c est possible, privilegie les sources primaires/officielles, n invente jamais de dates, chiffres, citations ou liens, et garde un ton professionnel.';
+    const userPrompt = (lang === 'en'
+        ? `Deep search question: ${query}\n\nCollected sources:\n\n${context}\n\nReturn the mini-report now. Every source-backed claim should be cited with a Markdown link.`
+        : `Question de deep search : ${query}\n\nSources collectees :\n\n${context}\n\nRends maintenant le mini rapport. Chaque affirmation appuyee par une source doit etre citee avec un lien Markdown.`);
+
+    await _aiReadOnly(systemPrompt, userPrompt, lang === 'en' ? 'Deep search' : 'Deep search');
+    renderPhase('done', data);
+    if (typeof saveConversation === 'function') saveConversation('chat');
 };
 
 SLASH_HANDLERS.glob = async (arg, out, lang) => {
@@ -490,6 +688,41 @@ SLASH_HANDLERS.memory = async (arg, out, lang) => {
         } catch {}
     }
     _sysMsg(out, lang === 'en' ? 'No ZAALIS.md / AGENTS.md found. Create one with /init.' : 'Aucun ZAALIS.md / AGENTS.md. Crée-en un avec /init.');
+};
+
+SLASH_HANDLERS.theme = async (arg, out, lang) => {
+    const want = (arg || '').trim().toLowerCase();
+    const next = (want === 'dark' || want === 'light')
+        ? want
+        : (state.config.theme === 'light' ? 'dark' : 'light');
+    state.config.theme = next;
+    if (typeof applyAppearance === 'function') applyAppearance();
+    const sel = document.getElementById('settings-theme-select');
+    if (sel) sel.value = next;
+    if (typeof saveState === 'function') saveState();
+    _sysMsg(out, (lang === 'en' ? 'Theme → ' : 'Thème → ') + (next === 'dark'
+        ? (lang === 'en' ? 'dark' : 'sombre')
+        : (lang === 'en' ? 'light' : 'clair')));
+};
+
+SLASH_HANDLERS.remember = async (arg, out, lang) => {
+    if (!_needProject(out, lang)) return;
+    const note = (arg || '').trim();
+    if (!note) { _sysMsg(out, lang === 'en' ? 'Usage: /remember <note>' : 'Usage : /remember <note>'); return; }
+    if (isReadOnlyMode()) { _sysMsg(out, lang === 'en' ? 'Read-only/plan mode — cannot write.' : 'Mode lecture seule/plan — écriture impossible.'); return; }
+    let current = '';
+    try {
+        const r = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=ZAALIS.md`);
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && !d.error && typeof d.content === 'string') current = d.content;
+    } catch {}
+    const name = state.projectRoot.split(/[\\/]/).pop() || 'projet';
+    const base = current
+        ? current.replace(/\s+$/, '') + '\n'
+        : `# ${name}\n\n${lang === 'en' ? 'Project notes for the AI assistant (zaalis IDE).' : "Notes de projet pour l'assistant IA (zaalis IDE)."}\n\n## Notes\n`;
+    await _postJSON('/api/file', { root: state.projectRoot, path: 'ZAALIS.md', content: base + `- ${note}\n` });
+    if (typeof loadFileTree === 'function') { try { await loadFileTree(); } catch {} }
+    _sysMsg(out, lang === 'en' ? 'Note added to ZAALIS.md.' : 'Note ajoutée à ZAALIS.md.');
 };
 
 SLASH_HANDLERS.init = async (arg, out, lang) => {

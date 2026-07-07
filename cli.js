@@ -17,6 +17,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const readline = require('readline');
 const { spawn, spawnSync } = require('child_process');
 
@@ -32,6 +33,9 @@ try { VERSION = require('./package.json').version || VERSION; } catch {}
 
 const CFG_DIR = path.join(os.homedir(), '.zaalis');
 const SESSION_FILE = path.join(CFG_DIR, 'session.json');
+// Per-project conversation snapshots (for /resume and `zaalis --continue`),
+// one file per working directory, like Claude Code's per-project sessions.
+const SESSIONS_DIR = path.join(CFG_DIR, 'sessions');
 
 // When packaged, this CLI lives in {app}/bin while the other binaries
 // (zaalis-server, zaalis-ide.command) sit in {app} - i.e. the PARENT folder.
@@ -60,6 +64,7 @@ function spawnDetached(file, args = [], options = {}) {
   child.unref();
   return child;
 }
+
 // ---------------------------------------------------------------------------
 // Colors (ANSI 256, with a NO_COLOR / non-TTY fallback)
 // ---------------------------------------------------------------------------
@@ -451,7 +456,7 @@ function modelLabel(id) { return MODEL_LABELS[id] || id; }
 const CLOUD = [
   { id: 'claude',  label: 'Claude',       keyName: 'anthropic', submodel: SUBMODELS.claude[0] },
   { id: 'codex',   label: 'GPT (OpenAI)', keyName: 'openai',    submodel: SUBMODELS.codex[0] },
-  { id: 'gemini',  label: 'Gemini',       keyName: 'gemini',    submodel: SUBMODELS.gemini[0] },
+  { id: 'gemini',  label: 'Gemini',       keyName: 'google',    submodel: SUBMODELS.gemini[0] },
   { id: 'grok',    label: 'Grok',         keyName: 'grok',      submodel: SUBMODELS.grok[0] },
   { id: 'mistral', label: 'Mistral',      keyName: 'mistral',   submodel: SUBMODELS.mistral[0] },
 ];
@@ -570,6 +575,35 @@ const history = [];
 
 function projectRoot() {
   return process.cwd();
+}
+
+// ---------------------------------------------------------------------------
+// Conversation persistence — /resume and `zaalis --continue` (Claude-Code-like)
+// ---------------------------------------------------------------------------
+function conversationFile() {
+  const key = crypto.createHash('sha1').update(projectRoot().toLowerCase()).digest('hex').slice(0, 12);
+  return path.join(SESSIONS_DIR, key + '.json');
+}
+function persistConversation() {
+  try {
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+    fs.writeFileSync(conversationFile(), JSON.stringify({
+      cwd: projectRoot(),
+      savedAt: Date.now(),
+      model: session.model || null,
+      submodel: session.submodel || null,
+      history: history.slice(-40),
+    }));
+  } catch {}
+}
+function restoreConversation() {
+  try {
+    const d = JSON.parse(fs.readFileSync(conversationFile(), 'utf-8'));
+    if (!Array.isArray(d.history) || !d.history.length) return null;
+    history.length = 0;
+    history.push(...d.history);
+    return d;
+  } catch { return null; }
 }
 
 function isLocalModel(model) {
@@ -825,11 +859,17 @@ async function confirmAction(desc, detail) {
   if (currentPermission().id === 'auto' && !/DANGEREUSE/i.test(desc)) return true;
   if (!process.stdin.isTTY) return false;
   const wasRaw = !!(process.stdin.isTTY && process.stdin.isRaw);
+  // This drops to a plain (non-raw) readline prompt, which owns stdin/stdout
+  // directly — the pinned box must get out of the way for the duration, or
+  // its border/placeholder fights with the prompt's own output.
+  const wasBoxActive = boxActive;
+  boxActive = false;
   if (wasRaw) rawOff();
   console.log('\n' + yellow('? ') + desc);
   if (detail) console.log(dim(String(detail).slice(0, 1200)));
   const ans = await prompt('Valider ? [o/N] ');
   if (wasRaw) rawOn();
+  boxActive = wasBoxActive;
   return /^(o|oui|y|yes)$/i.test(String(ans).trim());
 }
 
@@ -896,7 +936,7 @@ async function applyTools(response, events) {
 
   for (const cmd of commands) {
     const dangerous = isDangerousCommand(cmd);
-    const needAsk = dangerous || perm === 'supervised';
+    const needAsk = dangerous || perm === 'supervised' || perm === 'semi';
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
       events.push(`Commande refusee: ${cmd}`);
       continue;
@@ -1045,6 +1085,7 @@ async function sendChat(message, hooks = {}) {
     : '';
   const text = cleanModelText(json.response || '');
   history.push({ role: 'assistant', content: text + toolMemory + todoMemory });
+  persistConversation();
 
   return {
     text: text || '(action effectuee)',
@@ -1082,6 +1123,7 @@ function currentEffort() {
 const PERMISSIONS = [
   { id: 'plan',       label: 'Plan',      paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
   { id: 'supervised', label: 'Supervisé', paint: (s) => brand(s),  desc: 'demande avant chaque action' },
+  { id: 'semi',       label: 'Semi-auto', paint: (s) => brand(s),  desc: 'fichiers auto, commandes validées' },
   { id: 'auto',       label: 'Autonome',  paint: (s) => yellow(s), desc: 'agit sans demander' },
 ];
 function currentPermission() {
@@ -1173,6 +1215,18 @@ function box(lines, label) {
   return [top, ...rows, bottom].join('\n');
 }
 
+// A single bordered "card" for one deep-search source — the terminal
+// equivalent of the tool-card rectangles the IDE renders in the chat panel.
+function sourceCard(i, r) {
+  const width = Math.min((process.stdout.columns || 90), 92);
+  const usable = width - 3; // matches box()'s '│ ' + content + '│' layout
+  const lines = [bold(clipText(r.title || r.url || 'Source', usable))];
+  if (r.url) lines.push(dim(clipText(r.url, usable)));
+  const snippet = r.snippet || r.description || r.error || '';
+  if (snippet) lines.push(clipText(snippet, usable));
+  return box(lines, dim(`source ${i}`));
+}
+
 function welcome(me, cwd) {
   const left = [];
   WORDMARK.forEach((w) => left.push(brand(w)));
@@ -1213,6 +1267,8 @@ const SLASH = [
   { name: 'compact', category: 'general', desc: 'compacter le contexte' },
   { name: 'reset', category: 'general', desc: 'reinitialisation locale' },
   { name: 'grep', category: 'tools', desc: 'chercher un motif', usage: '<motif> [chemin]', args: true },
+  { name: 'search', category: 'tools', desc: 'ouvrir une recherche dans zaalis browser', usage: '<requete>', args: true },
+  { name: 'deep-search', category: 'tools', desc: 'recherche web approfondie avec sources', usage: '<requete>', args: true },
   { name: 'glob', category: 'tools', desc: 'trouver des fichiers', usage: '<**/*.js>', args: true },
   { name: 'diff', category: 'tools', desc: 'afficher le diff Git', usage: '[staged|unstaged]' },
   { name: 'run', category: 'tools', desc: 'executer une commande', usage: '<commande>', args: true },
@@ -1235,13 +1291,14 @@ const SLASH = [
   { name: 'fast', category: 'mode', desc: 'reponses courtes' },
   { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
   { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
+  { name: 'remember', category: 'project', desc: 'ajouter une note a ZAALIS.md', usage: '<note>', args: true },
+  { name: 'resume', category: 'project', desc: 'reprendre la derniere session de ce dossier' },
   { name: 'export', category: 'project', desc: 'exporter la session' },
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
-  { name: 'resume', category: 'soon', desc: 'reprendre une session', stub: true },
   { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
   { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
   { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
@@ -1396,6 +1453,63 @@ async function runReadOnlyReview(kind) {
   }
 }
 
+async function runDeepSearchCli(query) {
+  if (!query) { console.log(dim('Usage: /deep-search <requete>')); return; }
+
+  let stop = startThinkingAnimation('deep search');
+  let payload;
+  try {
+    const r = await authed('POST', '/api/deep-search', { query, maxResults: 8, maxPages: 5, openTabs: 5 });
+    payload = r.json || {};
+    if (r.status < 200 || r.status >= 300 || payload.error) {
+      stop();
+      if (payload.error === 'offline_mode') console.log(brand('! ') + (payload.message || 'Mode local securise actif : recherche approfondie impossible.'));
+      else if (payload.error === 'browser_unavailable') console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+      else console.log(brand('Erreur ') + (payload.message || payload.error || `HTTP ${r.status}`));
+      return;
+    }
+  } catch (e) {
+    stop();
+    console.log(brand('Erreur ') + ((e && e.message) || e));
+    return;
+  }
+  stop();
+
+  const results = Array.isArray(payload.results) ? payload.results : [];
+  const opened = Array.isArray(payload.opened) ? payload.opened.length : 0;
+  printRows('Deep search', [
+    ['requete', query],
+    ['sources', String(results.length)],
+    ['onglets', String(opened)],
+  ]);
+  console.log('\n' + bold('Sources'));
+  if (!results.length) console.log(dim('(aucune)'));
+  else results.forEach((r, i) => console.log(sourceCard(i + 1, r)));
+  console.log('');
+  if (!results.length) return;
+
+  const context = results.map((r, i) =>
+    `[${i + 1}] ${r.title || r.url}\nURL: ${r.url}\nSearch query: ${r.sourceQuery || query}\nSnippet: ${r.snippet || ''}\nPage title: ${r.title || ''}\nDescription: ${r.description || ''}\nExcerpt:\n${r.excerpt || r.error || ''}`
+  ).join('\n\n---\n\n');
+  const sys = 'Tu es un analyste senior de recherche web dans zaalis IDE. Utilise uniquement les sources fournies et signale clairement les incertitudes. Redige un mini rapport cite et compact : une reponse directe, 3 a 5 constats verifies, les limites ou preuves manquantes, puis une section Sources avec liens Markdown. Recoupe les affirmations entre sources quand c est possible, privilegie les sources primaires/officielles, n invente jamais de dates, chiffres, citations ou liens, et garde un ton professionnel.';
+  const promptText = `Question de deep search : ${query}\n\nSources collectees :\n\n${context}\n\nRends maintenant le mini rapport. Chaque affirmation appuyee par une source doit etre citee avec un lien Markdown.`;
+
+  stop = startThinkingAnimation('synthese');
+  try {
+    const data = await callChat(promptText, sys, []);
+    stop();
+    if (data.error) console.log(brand('✗ ') + data.error);
+    else {
+      history.push({ role: 'user', content: `/deep-search ${query}` });
+      history.push({ role: 'assistant', content: data.text });
+      console.log(mdRender(data.text) + '\n');
+    }
+  } catch (e) {
+    stop();
+    console.log(brand('Erreur ') + ((e && e.message) || e));
+  }
+}
+
 async function runSlashCommand(ev, me) {
   const name = (ev.name || '').toLowerCase();
   const arg = (ev.arg || '').trim();
@@ -1414,7 +1528,8 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'clear') {
-    history.length = 0; lastThinking = ''; transcript.length = 0; emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
+    history.length = 0; lastThinking = ''; transcript.length = 0; persistConversation();
+    emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
     return;
   }
   if (name === 'cwd') { console.log(dim(process.cwd())); return; }
@@ -1476,6 +1591,28 @@ async function runSlashCommand(ev, me) {
     printBlock(`grep · ${toks[0]}`, rows || 'Aucun resultat.');
     return;
   }
+  if (name === 'deep-search') { await runDeepSearchCli(arg); return; }
+  if (name === 'search') {
+    if (!arg) { console.log(dim('Usage: /search <requete>')); return; }
+    try {
+      // zaalis browser est lance automatiquement cote serveur s'il n'est pas
+      // deja ouvert (chemin d'installation fixe, independant d'un raccourci).
+      const r = await authed('GET', `/api/browser-search?q=${encodeURIComponent(arg)}&mode=newtab`);
+      const body = r.json || {};
+      if (r.status >= 200 && r.status < 300 && !body.error) {
+        console.log(green('OK ') + 'Recherche ouverte dans un nouvel onglet de zaalis browser : ' + arg);
+      } else if (body.error === 'offline_mode') {
+        console.log(brand('! ') + (body.message || 'Mode local securise actif : recherche impossible.'));
+      } else if (body.error === 'browser_unavailable') {
+        console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+      } else {
+        console.log(brand('Erreur ') + (body.error || `HTTP ${r.status}`));
+      }
+    } catch (e) {
+      console.log(brand('Erreur ') + ((e && e.message) || e));
+    }
+    return;
+  }
   if (name === 'glob') {
     const pattern = arg || '**/*';
     const d = await apiGet(`/api/glob?root=${encodeURIComponent(projectRoot())}&pattern=${encodeURIComponent(pattern)}`);
@@ -1494,7 +1631,7 @@ async function runSlashCommand(ev, me) {
   if (name === 'run') {
     if (!arg) { console.log(dim('Usage: /run <commande>')); return; }
     const dangerous = isDangerousCommand(arg);
-    const needAsk = dangerous || currentPermission().id === 'supervised';
+    const needAsk = dangerous || ['supervised', 'semi'].includes(currentPermission().id);
     if (currentPermission().id === 'plan') { console.log(dim('Mode Plan: commande bloquee.')); return; }
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, arg))) return;
     const d = await apiPost('/api/exec', { command: arg, cwd: projectRoot() });
@@ -1523,6 +1660,28 @@ async function runSlashCommand(ev, me) {
     if (!(await confirmAction('Creer ZAALIS.md', body))) return;
     await apiPost('/api/file', { root: projectRoot(), path: 'ZAALIS.md', content: body });
     console.log(green('✓ ') + 'ZAALIS.md cree.');
+    return;
+  }
+  if (name === 'remember') {
+    if (!arg) { console.log(dim('Usage: /remember <note>  (ou tape « # ma note »)')); return; }
+    let current = '';
+    try {
+      const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=ZAALIS.md`);
+      current = typeof d.content === 'string' ? d.content : '';
+    } catch {}
+    const base = current
+      ? current.replace(/\s+$/, '') + '\n'
+      : `# ${path.basename(projectRoot())}\n\nNotes de projet pour l assistant IA (zaalis CLI).\n\n## Notes\n`;
+    await apiPost('/api/file', { root: projectRoot(), path: 'ZAALIS.md', content: base + `- ${arg}\n` });
+    console.log(green('✓ ') + 'Note ajoutee a ZAALIS.md');
+    return;
+  }
+  if (name === 'resume') {
+    const d = restoreConversation();
+    if (!d) { console.log(dim('Aucune session sauvegardee pour ce dossier.')); return; }
+    const when = new Date(d.savedAt || Date.now()).toLocaleString();
+    if (d.model) { session.model = d.model; session.submodel = d.submodel; saveSession(session); }
+    console.log(green('✓ ') + `Session restauree : ${Math.ceil(history.length / 2)} echange(s) (${when}). Modele : ${currentModelLabel()}`);
     return;
   }
   if (name === 'export') {
@@ -1647,9 +1806,31 @@ function menuMatches() {
   return SLASH.filter((c) => c.name.startsWith(q));
 }
 
+// Accept the highlighted slash-command suggestion into the buffer (name + a
+// trailing space to type its argument) without sending anything. Used by both
+// Tab and Enter while the autocomplete menu is open — only Enter on a bare
+// command (no menu left open) actually submits.
+function completeMenuSelection() {
+  const menu = menuMatches();
+  if (!menu.length) return false;
+  inBuf = '/' + menu[inMenuIdx % menu.length].name + ' ';
+  inCur = inBuf.length;
+  inMenuIdx = 0;
+  repaint();
+  return true;
+}
+
 function parseInput(input) {
   const text = String(input || '').trim();
   if (!text) return null;
+  // `!commande` = raccourci shell direct (comme Claude Code).
+  if (text.startsWith('!') && text.length > 1) {
+    return { kind: 'command', name: 'run', arg: text.slice(1).trim(), raw: text };
+  }
+  // `# note` = ajoute la note à la mémoire projet ZAALIS.md (comme Claude Code).
+  if (/^#\s+\S/.test(text)) {
+    return { kind: 'command', name: 'remember', arg: text.replace(/^#\s+/, ''), raw: text };
+  }
   if (text.startsWith('/')) {
     const [name, ...rest] = text.slice(1).split(/\s+/);
     return { kind: 'command', name, arg: rest.join(' '), raw: text };
@@ -1986,10 +2167,10 @@ function nextInput(opts = {}) {
       // (Alt+Tab can't be used — Windows captures it for app switching.)
       if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
       if (key.name === 'return' || key.name === 'enter') {
-        if (menu.length) {
-          const name = menu[inMenuIdx % menu.length].name;
-          return finish({ kind: 'command', name, arg: '' }, brand('› ') + '/' + name, true);
-        }
+        // With the suggestion menu open, Enter only accepts the highlighted
+        // command (name + a space to type its argument) — it must not send
+        // the command yet. A second Enter, once the menu is gone, submits it.
+        if (menu.length) { completeMenuSelection(); return; }
         const ev = parseInput(inBuf);
         if (!ev) return;
         return finish(ev, promptEcho(ev.raw), true);
@@ -2028,34 +2209,40 @@ function attachAnswerInput(onAbort) {
   inBuf = '';
   inCur = 0;
   inMenuIdx = 0;
-  queuedInput = null;
   boxActive = true;
   repaint();
   const onKp = (str, key) => {
     if (!key) return;
+    if (handleBracketPaste(str, key)) return;
+    const menu = menuMatches();
     if (key.ctrl && key.name === 'c') { onAbort(); return repaint(); }
     if (key.name === 'escape') { onAbort(); return repaint(); }
+    if (key.ctrl && key.name === 'x') { cancelQueuedInput(); return; }
     if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
-    if (key.name === 'up') { scrollLines(SCROLL_STEP); return; }
-    if (key.name === 'down') { scrollLines(-SCROLL_STEP); return; }
+    if (key.name === 'tab') { if (!completeMenuSelection()) repaint(); return; }
+    if (key.name === 'up') { if (menu.length) { inMenuIdx = (inMenuIdx - 1 + menu.length) % menu.length; return repaint(); } scrollLines(SCROLL_STEP); return; }
+    if (key.name === 'down') { if (menu.length) { inMenuIdx = (inMenuIdx + 1) % menu.length; return repaint(); } scrollLines(-SCROLL_STEP); return; }
     if (key.name === 'pageup') { scrollPage(1); return; }
     if (key.name === 'pagedown') { scrollPage(-1); return; }
-    if (inBuf || inCur || queuedInput) {
-      inBuf = '';
-      inCur = 0;
-      inMenuIdx = 0;
-      queuedInput = null;
-      return repaint();
+    // Same rule as the main prompt: Enter with the menu open only completes the
+    // command name (+ space), it does not queue/send it yet.
+    if (key.name === 'return' || key.name === 'enter') { if (!completeMenuSelection()) queueCurrentInput(); return; }
+    if (key.name === 'left') { if (inCur > 0) inCur--; return repaint(); }
+    if (key.name === 'right') { if (inCur < inBuf.length) inCur++; return repaint(); }
+    if (key.name === 'home') { inCur = 0; return repaint(); }
+    if (key.name === 'end') { inCur = inBuf.length; return repaint(); }
+    if (key.name === 'backspace') { if (inCur > 0) { inBuf = inBuf.slice(0, inCur - 1) + inBuf.slice(inCur); inCur--; } return repaint(); }
+    if (key.name === 'delete') { inBuf = inBuf.slice(0, inCur) + inBuf.slice(inCur + 1); return repaint(); }
+    // printable (single char or a paste — special keys already returned above)
+    if (str && !key.ctrl && !key.meta && str.charCodeAt(0) >= 0x20) {
+      appendInputText(str); return repaint();
     }
   };
   process.stdin.on('keypress', onKp);
   return () => {
     process.stdin.removeListener('keypress', onKp);
     inputMode = 'normal';
-    inBuf = '';
-    inCur = 0;
     inMenuIdx = 0;
-    queuedInput = null;
     repaint();
   };
 }
@@ -2068,12 +2255,16 @@ async function runPicker(fn) {
   await fn();
 }
 
-async function repl() {
+async function repl(opts = {}) {
   const me = await whoAmI();
+  const resumedNote = opts.resumed
+    ? green('✓ ') + `Session reprise : ${Math.ceil(history.length / 2)} échange(s) précédents rechargés.`
+    : null;
 
   // Non-TTY (piped / redirected): no raw mode, no fancy rendering — plain IO.
   if (!process.stdin.isTTY) {
     console.log('\n' + welcome(me, process.cwd()) + '\n');
+    if (resumedNote) console.log(resumedNote);
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
     rl.on('close', () => process.exit(0));
     for await (const line of rl) {
@@ -2091,6 +2282,7 @@ async function repl() {
   enterFullscreen();
   console.log = (...a) => emit(a.map(String).join(' '));
   emit('\n' + welcome(me, process.cwd()) + '\n');
+  if (resumedNote) emit(resumedNote + '\n');
 
   rawOn();
   const bye = () => { leaveFullscreen(); rawOff(); process.stdout.write(dim('À bientôt.') + '\n'); };
@@ -2109,7 +2301,16 @@ async function repl() {
     }
     if (ev.kind === 'exit') { bye(); process.exit(0); }
     if (ev.kind === 'command') {
+      // Keep the bottom box drawn for the whole command (grep/diff/deep-search/
+      // review can take a while) instead of tearing it down at submit time —
+      // commands that need a full-screen picker (e.g. /model) already flip
+      // boxActive off themselves via runPicker() and it comes back on the next
+      // nextInput() call.
+      boxActive = true;
+      inputMode = 'answering';
+      repaint();
       const action = await runSlashCommand(ev, me);
+      inputMode = 'normal';
       if (action === 'exit') { bye(); process.exit(0); }
       continue;
     }
@@ -2148,7 +2349,6 @@ async function repl() {
     detachAnswerInput();
     currentAbort = null;
     hooks.stop();
-    preserveInput = false;
     if (aborted) {
       cancelQueuedInput();
       emit(dim('  ⛔ Réponse interrompue.'));
@@ -2164,7 +2364,71 @@ async function repl() {
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
     }
+    // A fully queued message is handled at the top of the loop; a draft the
+    // user was still typing (not yet queued) carries over into the next box.
+    preserveInput = !queuedInput && inBuf.length > 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Model pull with live progress (Ollama NDJSON stream -> progress bar)
+// ---------------------------------------------------------------------------
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return '';
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + ' Go';
+  if (n >= 1e6) return (n / 1e6).toFixed(0) + ' Mo';
+  return (n / 1e3).toFixed(0) + ' Ko';
+}
+function progressBar(pct, width = 24) {
+  const filled = Math.round((pct / 100) * width);
+  return brand('█'.repeat(filled)) + dim('░'.repeat(Math.max(0, width - filled)));
+}
+function streamModelPull(pathname) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: HOST, port: PORT, method: 'GET', path: pathname,
+        headers: session.cookie ? { Cookie: session.cookie } : {} },
+      (res) => {
+        let buffer = '';
+        let lastError = null;
+        let sawSuccess = false;
+        const isTTY = !!process.stdout.isTTY;
+        res.setEncoding('utf-8');
+        const handleLine = (line) => {
+          const clean = line.trim();
+          if (!clean) return;
+          let ev; try { ev = JSON.parse(clean); } catch { return; }
+          if (ev.error) { lastError = String(ev.error); return; }
+          const status = String(ev.status || '');
+          if (/^success$/i.test(status)) sawSuccess = true;
+          const total = Number(ev.total || 0), done = Number(ev.completed || 0);
+          if (isTTY) {
+            if (total > 0) {
+              const pct = Math.min(100, Math.round((done / total) * 100));
+              process.stdout.write(`\r\x1b[2K  ${progressBar(pct)} ${String(pct).padStart(3)}%  ${dim(fmtBytes(done) + ' / ' + fmtBytes(total))}`);
+            } else if (status) {
+              process.stdout.write(`\r\x1b[2K  ${dim(status)}`);
+            }
+          }
+        };
+        res.on('data', (chunk) => {
+          buffer += chunk;
+          const lines = buffer.split(/\r?\n/);
+          buffer = lines.pop() || '';
+          for (const l of lines) handleLine(l);
+        });
+        res.on('end', () => {
+          if (buffer) handleLine(buffer);
+          if (isTTY) process.stdout.write('\r\x1b[2K');
+          if (lastError) return resolve({ ok: false, error: lastError });
+          if (res.statusCode !== 200) return resolve({ ok: false, error: `HTTP ${res.statusCode}` });
+          resolve({ ok: true, success: sawSuccess });
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -2190,7 +2454,11 @@ async function oneShot(message) {
 // Entry point
 // ---------------------------------------------------------------------------
 async function main() {
-  const argv = process.argv.slice(2);
+  // `zaalis -c` / `--continue` reprend la dernière conversation de ce dossier
+  // (comme `claude --continue`). Le flag est retiré du reste des arguments.
+  const rawArgv = process.argv.slice(2);
+  const continueSession = rawArgv.includes('-c') || rawArgv.includes('--continue');
+  const argv = rawArgv.filter((a) => a !== '-c' && a !== '--continue');
   const cmd = argv[0];
 
   // Sub-commands that don't need a started chat session up front.
@@ -2204,6 +2472,7 @@ async function main() {
       '  zaalis "<message>"     réponse unique (non-interactif)',
       '  echo "..." | zaalis    lire le message sur stdin',
       '  zaalis -p "<message>"  idem (mode print, comme claude -p)',
+      '  zaalis -c              reprendre la dernière session de ce dossier',
       '  zaalis models          lister les modèles',
       '  zaalis pull <modèle>   télécharger un modèle (Ollama/GGUF)',
       '  zaalis login           se connecter (compte zaalis)',
@@ -2269,16 +2538,23 @@ async function main() {
   if (cmd === 'pull') {
     const name = argv.slice(1).join(' ');
     if (!name) { console.error('Usage: zaalis pull <modèle>'); process.exit(1); }
-    console.log(dim(`Téléchargement de ${name}… (utilisez l’IDE pour le suivi détaillé)`));
-    const r = await authed('GET', `/api/ollama-pull?name=${encodeURIComponent(name)}`);
-    console.log(r.status === 200 ? green('✓ ') + 'Terminé.' : brand('✗ ') + 'Échec.');
+    console.log(dim(`Téléchargement de ${name}…`));
+    try {
+      const r = await streamModelPull(`/api/ollama-pull?name=${encodeURIComponent(name)}`);
+      if (r.ok) console.log(green('✓ ') + 'Terminé.');
+      else console.log(brand('✗ ') + 'Échec : ' + (r.error || 'erreur inconnue'));
+    } catch (e) {
+      console.log(brand('✗ ') + 'Échec : ' + ((e && e.message) || e));
+    }
     return;
   }
 
   if (message) { await oneShot(message); return; }
 
-  // Otherwise: interactive REPL.
-  await repl();
+  // Otherwise: interactive REPL (optionally resuming the last conversation).
+  let resumed = null;
+  if (continueSession) resumed = restoreConversation();
+  await repl({ resumed });
 }
 
 main().catch((e) => { try { leaveFullscreen(); } catch {} console.error(brand('✗ ') + (e && e.message ? e.message : String(e))); process.exit(1); });

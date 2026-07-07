@@ -364,6 +364,21 @@ document.addEventListener('click', e => {
     const img = e.target.closest && e.target.closest('.generated-image');
     if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
 });
+// Web links inside AI/system answers open in zaalis browser, so source links
+// from /deep-search stay in the same browsing workspace.
+document.addEventListener('click', async e => {
+    const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
+    if (!a || !a.closest('#chat-messages, #agents-log')) return;
+    const href = a.href;
+    if (!href) return;
+    e.preventDefault();
+    try {
+        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}`);
+        if (!r.ok) throw new Error('browser-open failed');
+    } catch {
+        window.open(href, '_blank', 'noopener,noreferrer');
+    }
+});
 
 function formatAIResponse(text) {
     const isImageGen = state.config.aiModel === 'grok' && 
@@ -1654,9 +1669,12 @@ function acceptSlash() {
 
 // Decide whether a typed line is a command or a normal message.
 function handleChatSubmit() {
-    const text = slashInput.value.trim();
+    let text = slashInput.value.trim();
     if (!text) return;
     closeSlash();
+    // Raccourcis façon Claude Code : `!commande` = /run, `# note` = /remember.
+    if (text.startsWith('!') && text.length > 1) text = '/run ' + text.slice(1).trim();
+    else if (/^#\s+\S/.test(text)) text = '/remember ' + text.replace(/^#\s+/, '');
     if (text.startsWith('/')) {
         if (chatAbort) {
             const lang = state.language || 'fr';
@@ -1983,6 +2001,22 @@ function projectLabel() {
     return parts[parts.length - 1] || null;
 }
 
+const PERSISTED_MSG_CLASSES = [
+    'deep-search-host',
+    'has-image',
+    'max-reasoning-text'
+];
+function persistedBodyClasses(body) {
+    if (!body) return [];
+    return PERSISTED_MSG_CLASSES.filter((cls) => body.classList.contains(cls));
+}
+function shouldPersistRichHTML(body, entry) {
+    if (!body || entry.type === 'user') return false;
+    return body.classList.contains('deep-search-host') ||
+        body.classList.contains('has-image') ||
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+}
+
 function saveConversation(kind = 'chat') {
     const cfg = HIST[kind];
     const data = [];
@@ -1995,6 +2029,9 @@ function saveConversation(kind = 'chat') {
             text: body ? body.textContent : '',
             type: m.classList.contains('msg-system') ? 'system' : m.classList.contains('msg-user') ? 'user' : 'ai'
         };
+        const classes = persistedBodyClasses(body);
+        if (classes.length) entry.bodyClasses = classes;
+        if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
         data.push(entry);
@@ -2125,8 +2162,12 @@ function loadConversation(kind, id) {
     const container = $(cfg.container);
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
-        const body = addMsg(container, m.type, m.label, m.text || '');
-        if (m.image && m.image.url) {
+        const hasRichHtml = m.html && m.type !== 'user';
+        const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
+            if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
+        });
+        if (!hasRichHtml && m.image && m.image.url) {
             body.innerHTML = imageBubble(m.image.url, m.image.alt || '');
             body.classList.add('has-image');
         }
