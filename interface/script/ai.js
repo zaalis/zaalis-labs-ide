@@ -2121,6 +2121,10 @@ async function syncChatsFromServer() {
     if (document.hidden) return;
     if (chatAbort) return; // never mutate the stores while a request is in flight
     let changed = false;
+    // Kinds whose currently-open conversation was replaced by a newer server
+    // version (typically because the phone remote appended a message to it).
+    // We re-render its container after the merge so the new messages appear.
+    const reopenCur = [];
     for (const kind of ['chat', 'agents']) {
         const cfg = HIST[kind];
         try {
@@ -2130,20 +2134,38 @@ async function syncChatsFromServer() {
             const snap = JSON.stringify(Array.isArray(server) ? server : []);
             if (snap === _chatSnap[kind]) continue; // unchanged since last seen
             _chatSnap[kind] = snap;
-            state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], state[cfg.current]);
+            const curId = state[cfg.current];
+            const prevCur = (state[cfg.store] || []).find(c => c.id === curId);
+            state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], curId);
+            const nextCur = (state[cfg.store] || []).find(c => c.id === curId);
+            if (curId && nextCur && nextCur !== prevCur) reopenCur.push(kind);
             changed = true;
         } catch {}
     }
     if (changed) renderHistory();
+    // Reopen after renderHistory so the sidebar's active row stays in sync.
+    reopenCur.forEach(kind => { try { loadConversation(kind, state[HIST[kind].current]); } catch {} });
 }
 
-// Server is the source of truth across devices, but keep the local copy of the
-// conversation currently open (it may hold messages not yet persisted) and any
-// local conversation the server doesn't know about yet (just started here).
+// Server is the source of truth across devices. Keep local versions only for
+// conversations the server doesn't know about yet (just started on this
+// desktop and not persisted). For the conversation currently open, adopt the
+// server version whenever it's actually different — that's how a message the
+// phone appended shows up on the PC without losing an in-flight desktop reply.
 function mergeConversations(local, server, curId) {
     const localById = new Map(local.map(c => [c.id, c]));
     const serverIds = new Set(server.map(c => c.id));
-    const merged = server.map(c => (c.id === curId && localById.has(curId)) ? localById.get(curId) : c);
+    const merged = server.map(c => {
+        if (c.id !== curId) return c;
+        const localCur = localById.get(curId);
+        if (!localCur) return c;
+        const localMsgs = (localCur.messages || []).length;
+        const serverMsgs = (c.messages || []).length;
+        // Server has fewer messages -> our local reply is not persisted yet;
+        // keep local so it doesn't get wiped by a mid-flight poll.
+        if (serverMsgs < localMsgs) return localCur;
+        return c;
+    });
     local.forEach(c => { if (!serverIds.has(c.id)) merged.push(c); });
     return merged;
 }
