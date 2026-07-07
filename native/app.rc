@@ -19,11 +19,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "zaalis"
             VALUE "FileDescription", "zaalis IDE"
-            VALUE "FileVersion", "1.0.13"
+            VALUE "FileVersion", "1.0.14"
             VALUE "InternalName", "zaalis"
             VALUE "OriginalFilename", "zaalis.exe"
             VALUE "ProductName", "zaalis IDE"
-            VALUE "ProductVersion", "1.0.13"
+            VALUE "ProductVersion", "1.0.14"
         END
     END
     BLOCK "VarFileInfo"

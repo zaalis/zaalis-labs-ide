@@ -107,16 +107,26 @@ function apiKeysStatus(user) {
   return st;
 }
 
+// users.json is consulted on every authenticated request (currentUser), so it
+// is cached in memory and re-read only when the file actually changed on disk.
+let _usersCache = null;
+let _usersMtimeMs = -1;
 function loadUsers() {
   try {
+    const st = fs.statSync(USERS_FILE);
+    if (_usersCache && st.mtimeMs === _usersMtimeMs) return _usersCache;
     let raw = fs.readFileSync(USERS_FILE, 'utf-8');
     if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // tolerate a UTF-8 BOM
     const d = JSON.parse(raw);
-    return Array.isArray(d) ? d : [d];                    // tolerate a single object
+    _usersCache = Array.isArray(d) ? d : [d];             // tolerate a single object
+    _usersMtimeMs = st.mtimeMs;
+    return _usersCache;
   } catch { return []; }
 }
 function saveUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  _usersCache = users;
+  try { _usersMtimeMs = fs.statSync(USERS_FILE).mtimeMs; } catch { _usersMtimeMs = -1; }
 }
 function hashPassword(password, salt) {
   return crypto.scryptSync(String(password), salt, 64).toString('hex');
@@ -520,7 +530,7 @@ app.get('/api/files', (req, res) => {
     }
 
     // Prevent directory traversal outside the base when no root is given
-    if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
+    if (!req.query.root && !isInsideBase(APP_DIR, fullPath)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -559,7 +569,7 @@ app.get('/api/file', (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    if (!req.query.root && !fullPath.startsWith(APP_DIR)) {
+    if (!req.query.root && !isInsideBase(APP_DIR, fullPath)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -617,7 +627,7 @@ app.post('/api/file', (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
 
-    if (!root && !fullPath.startsWith(APP_DIR)) {
+    if (!root && !isInsideBase(APP_DIR, fullPath)) {
       return res.status(403).json({ error: 'Access denied' });
     }
 
@@ -668,6 +678,327 @@ app.post('/api/exec', (req, res) => {
 // These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
 // are strictly read-only, bounded in output, and path-guarded to the project.
 
+// zaalis browser est un projet frere (meme auteur), installe par son propre
+// installateur Inno Setup a un chemin fixe et non configurable (DisableDirPage
+// dans installer.iss) : on peut donc le retrouver sans dependre d'un
+// raccourci que l'utilisateur pourrait deplacer ou renommer.
+const ZAALIS_BROWSER_EXE = process.env.LOCALAPPDATA
+  ? path.join(process.env.LOCALAPPDATA, 'Programs', 'zaalis browser', 'zaalis-browser.exe')
+  : null;
+const ZAALIS_BROWSER_PING = 'http://127.0.0.1:8715/zaalis/ping';
+const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+
+async function pingZaalisBrowser(timeoutMs) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const r = await fetch(ZAALIS_BROWSER_PING, { signal: ctrl.signal });
+    return r.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// S'assure que zaalis browser tourne, en le lancant si besoin (chemin fixe
+// ci-dessus). L'API locale du navigateur demarre des l'ouverture du process,
+// avant meme que la fenetre/WebView2 soit prete : on patiente donc un peu
+// apres le premier ping reussi pour laisser le premier onglet s'initialiser
+// (sinon une recherche envoyee trop tot est silencieusement ignoree).
+let launchingBrowser = null;
+async function ensureZaalisBrowserRunning() {
+  if (await pingZaalisBrowser(800)) return true;
+  if (launchingBrowser) return launchingBrowser;
+
+  launchingBrowser = (async () => {
+    if (!ZAALIS_BROWSER_EXE || !fs.existsSync(ZAALIS_BROWSER_EXE)) return false;
+    try {
+      const child = spawn(ZAALIS_BROWSER_EXE, [], { detached: true, stdio: 'ignore' });
+      child.unref();
+    } catch {
+      return false;
+    }
+    const deadline = Date.now() + 10000;
+    while (Date.now() < deadline) {
+      if (await pingZaalisBrowser(800)) {
+        await new Promise((r) => setTimeout(r, 700)); // laisse le premier onglet s'initialiser
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return false;
+  })();
+
+  try {
+    return await launchingBrowser;
+  } finally {
+    launchingBrowser = null;
+  }
+}
+
+function decodeHtmlEntities(value) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return String(value || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, ent) => {
+    const key = ent.toLowerCase();
+    if (key[0] === '#') {
+      const n = key[1] === 'x' ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return Object.prototype.hasOwnProperty.call(named, key) ? named[key] : m;
+  });
+}
+
+function stripHtml(value) {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|tr|br)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function safeHttpUrl(raw) {
+  try {
+    const u = new URL(String(raw || '').trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  const m = h.match(/^172\.(\d{1,2})\./);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 16 && n <= 31) return true;
+  }
+  return h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:');
+}
+
+function publicHttpUrl(raw) {
+  const url = safeHttpUrl(raw);
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (isPrivateHost(u.hostname)) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function searchPageUrl(query) {
+  return `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+}
+
+function hostnameLabel(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
+}
+
+function faviconApiUrl(rawUrl) {
+  const host = hostnameLabel(rawUrl);
+  return host ? `/api/favicon?domain=${encodeURIComponent(host)}` : '';
+}
+
+function usefulQuote(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  const firstSentence = clean.match(/^.{80,260}?[.!?](?:\s|$)/);
+  const picked = firstSentence ? firstSentence[0] : clean.slice(0, 190);
+  return picked.length < clean.length ? picked.replace(/[.,;:\s]+$/, '') + '...' : picked;
+}
+
+function resolveDuckUrl(href) {
+  const cleaned = decodeHtmlEntities(href).trim();
+  try {
+    const u = new URL(cleaned, 'https://duckduckgo.com');
+    const uddg = u.searchParams.get('uddg');
+    return publicHttpUrl(uddg || u.toString());
+  } catch {
+    return null;
+  }
+}
+
+function extractSearchResults(html, sourceQuery, limit) {
+  const out = [];
+  const seen = new Set();
+  const re = /<a\b([^>]*\bclass=(["'])[^"']*(?:result__a|result-link)[^"']*\2[^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html || '')) !== null && out.length < limit) {
+    const attrs = m[1] || '';
+    const hrefMatch = attrs.match(/\bhref=(["'])([^"']+)\1/i);
+    if (!hrefMatch) continue;
+    const url = resolveDuckUrl(hrefMatch[2]);
+    if (!url) continue;
+    const key = url.replace(/#.*$/, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const tail = String(html || '').slice(re.lastIndex, re.lastIndex + 1800);
+    const sn = tail.match(/class=(["'])[^"']*(?:result__snippet|result-snippet)[^"']*\1[^>]*>([\s\S]*?)<\/(?:a|div|td)>/i);
+    out.push({
+      title: stripHtml(m[3]).slice(0, 180) || url,
+      url,
+      host: hostnameLabel(url),
+      favicon: faviconApiUrl(url),
+      snippet: sn ? stripHtml(sn[2]).slice(0, 500) : '',
+      sourceQuery,
+    });
+  }
+  return out;
+}
+
+async function fetchWithTimeout(url, timeoutMs, options = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const { headers = {}, ...rest } = options;
+  try {
+    return await fetch(url, {
+      redirect: 'follow',
+      signal: ctrl.signal,
+      ...rest,
+      headers: {
+        'User-Agent': SEARCH_USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+        ...headers,
+      },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function webSearch(query, limit) {
+  const r = await fetchWithTimeout(searchPageUrl(query), 8000);
+  if (!r.ok) return [];
+  const html = await r.text();
+  return extractSearchResults(html, query, limit);
+}
+
+function pageTitle(html) {
+  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? stripHtml(m[1]).slice(0, 180) : '';
+}
+
+function metaDescription(html) {
+  const re = /<meta\b([^>]+)>/gi;
+  let m;
+  while ((m = re.exec(html || '')) !== null) {
+    const attrs = m[1] || '';
+    if (!/\bname=(["'])description\1/i.test(attrs) && !/\bproperty=(["'])og:description\1/i.test(attrs)) continue;
+    const c = attrs.match(/\bcontent=(["'])([\s\S]*?)\1/i);
+    if (c) return stripHtml(c[2]).slice(0, 400);
+  }
+  return '';
+}
+
+async function fetchPageExcerpt(url) {
+  const safe = publicHttpUrl(url);
+  if (!safe) return { error: 'URL non publique ignoree.' };
+  try {
+    const r = await fetchWithTimeout(safe, 9000);
+    const ct = String(r.headers.get('content-type') || '').toLowerCase();
+    const len = Number(r.headers.get('content-length') || 0);
+    if (!r.ok) return { error: `HTTP ${r.status}` };
+    if (len && len > 3 * 1024 * 1024) return { error: 'Page trop lourde pour le resume.' };
+    if (ct && !/text\/html|text\/plain|application\/xhtml|application\/xml/.test(ct)) {
+      return { error: `Type non texte (${ct.split(';')[0]}).` };
+    }
+    const html = await r.text();
+    return {
+      title: pageTitle(html),
+      description: metaDescription(html),
+      excerpt: stripHtml(html).slice(0, 3200),
+    };
+  } catch (e) {
+    return { error: e && e.name === 'AbortError' ? 'Timeout' : ((e && e.message) || 'Erreur lecture page') };
+  }
+}
+
+async function openInZaalisBrowser(targetUrl, { background = false, timeoutMs = 4000 } = {}) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
+  const running = await ensureZaalisBrowserRunning();
+  if (!running) {
+    return {
+      ok: false,
+      status: 503,
+      body: {
+        error: 'browser_unavailable',
+        message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
+      },
+    };
+  }
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const bg = background ? '&background=1' : '';
+    const r = await fetch(`http://127.0.0.1:8715/zaalis/newtab?url=${encodeURIComponent(url)}${bg}`, { signal: ctrl.signal });
+    const body = await r.json().catch(() => ({}));
+    if (body.error === 'offline_mode') {
+      return {
+        ok: false,
+        status: 409,
+        body: {
+          error: 'offline_mode',
+          message: body.message || 'Mode local securise actif : recherche impossible.',
+        },
+      };
+    }
+    if (!r.ok || body.error) return { ok: false, status: r.status || 502, body: { error: body.error || `browser HTTP ${r.status}` } };
+    return { ok: true, status: 200, body };
+  } catch (e) {
+    return {
+      ok: false,
+      status: 502,
+      body: {
+        error: e && e.name === 'AbortError' ? 'zaalis browser ne repond pas' : 'zaalis browser est indisponible',
+        detail: e && e.message,
+      },
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function deepSearchQueries(query) {
+  const base = String(query || '').replace(/\s+/g, ' ').trim();
+  const out = [base, `${base} official source`, `${base} documentation`, `${base} analysis`];
+  return Array.from(new Set(out)).filter(Boolean).slice(0, 4);
+}
+
+app.get('/api/favicon', async (req, res) => {
+  const domain = String(req.query.domain || '').trim().toLowerCase();
+  if (!/^[a-z0-9.-]{1,253}$/i.test(domain) || isPrivateHost(domain)) {
+    return res.status(400).json({ error: 'invalid domain' });
+  }
+  try {
+    const url = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
+    const r = await fetchWithTimeout(url, 6000, { headers: { Accept: 'image/png,image/*;q=0.8,*/*;q=0.5' } });
+    if (!r.ok) return res.status(r.status).end();
+    const bytes = Buffer.from(await r.arrayBuffer());
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.end(bytes);
+  } catch (e) {
+    res.status(502).json({ error: 'favicon unavailable', detail: e && e.message });
+  }
+});
+
 app.get('/api/browser-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'q is required' });
@@ -678,11 +1009,25 @@ app.get('/api/browser-search', async (req, res) => {
   const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
   const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
 
+  const running = await ensureZaalisBrowserRunning();
+  if (!running) {
+    return res.status(503).json({
+      error: 'browser_unavailable',
+      message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
+    });
+  }
+
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 2500);
+  const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
     const r = await fetch(url, { signal: ctrl.signal });
     const body = await r.json().catch(() => ({}));
+    if (body.error === 'offline_mode') {
+      return res.status(409).json({
+        error: 'offline_mode',
+        message: body.message || 'Mode local securise actif : recherche impossible.',
+      });
+    }
     if (!r.ok || body.error) {
       return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
     }
@@ -695,6 +1040,62 @@ app.get('/api/browser-search', async (req, res) => {
   } finally {
     clearTimeout(timer);
   }
+});
+
+app.get('/api/browser-open', async (req, res) => {
+  const url = safeHttpUrl(req.query.url);
+  if (!url) return res.status(400).json({ error: 'url is required' });
+  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
+  const r = await openInZaalisBrowser(url, { background });
+  if (!r.ok) return res.status(r.status).json(r.body);
+  res.json({ ok: true, url, browser: r.body });
+});
+
+app.post('/api/deep-search', async (req, res) => {
+  const query = String(req.body && req.body.query || '').trim();
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  const maxResults = Math.max(3, Math.min(12, Number(req.body.maxResults || 8)));
+  const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
+  const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
+
+  // First open the search page in zaalis browser. If secure local mode blocks it,
+  // do not perform server-side web requests behind the user's back.
+  const firstOpen = await openInZaalisBrowser(searchPageUrl(query), { background: false, timeoutMs: 5000 });
+  if (!firstOpen.ok) return res.status(firstOpen.status).json(firstOpen.body);
+
+  const searchedQueries = deepSearchQueries(query);
+  const all = [];
+  const seen = new Set();
+  for (const q of searchedQueries) {
+    try {
+      const results = await webSearch(q, Math.ceil(maxResults / 2) + 2);
+      for (const r of results) {
+        const key = r.url.replace(/#.*$/, '');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        all.push(r);
+        if (all.length >= maxResults) break;
+      }
+    } catch {}
+    if (all.length >= maxResults) break;
+  }
+
+  for (const result of all.slice(0, maxPages)) {
+    const page = await fetchPageExcerpt(result.url);
+    Object.assign(result, page);
+    result.host = result.host || hostnameLabel(result.url);
+    result.favicon = result.favicon || faviconApiUrl(result.url);
+    result.quote = usefulQuote(result.excerpt || result.description || result.snippet);
+  }
+
+  const opened = [{ url: searchPageUrl(query), kind: 'search', foreground: true }];
+  for (const result of all.slice(0, openTabs)) {
+    const openedTab = await openInZaalisBrowser(result.url, { background: true, timeoutMs: 4000 });
+    if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false });
+  }
+
+  res.json({ ok: true, query, searchedQueries, results: all, opened });
 });
 
 // Detect a CLI tool once (node/npm/git/rg). Cached promise so /doctor and the
@@ -1929,7 +2330,7 @@ app.post('/api/chat', async (req, res) => {
       const olModel = submodel || ollamaModel;
 
       // Estimate total tokens to pick an appropriate num_ctx.
-      // Rough estimate: 1 token â‰ˆ 4 chars.
+      // Rough estimate: 1 token = ~4 chars.
       const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
       const estimatedTokens = Math.ceil(totalChars / 4);
       // Pick num_ctx from fixed BUCKETS rather than a value that changes on every
@@ -2158,10 +2559,22 @@ app.get('/api/check-update', async (req, res) => {
 let downloadProgress = 0;
 let downloadedInstallerPath = null;
 
+// Only accept installer URLs from GitHub (where releases are published) so the
+// endpoint can't be used to download and launch an arbitrary binary.
+function isTrustedUpdateUrl(raw) {
+  try {
+    const u = new URL(String(raw || ''));
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return h === 'github.com' || h.endsWith('.github.com') || h.endsWith('.githubusercontent.com');
+  } catch { return false; }
+}
+
 app.post('/api/update/download', (req, res) => {
   try {
     const dlUrl = req.body.url;
     if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
+    if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
     const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
@@ -2398,13 +2811,9 @@ async function startOllamaIfNeeded() {
     path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
     'ollama',
   ];
-  // Only try executables that actually exist on disk (skip the bare 'ollama'
-  // fallback unless it's the only candidate, AND it resolves in PATH).
-  const exe = candidates.find((p) => {
-    if (p === 'ollama') return false; // skip bare name; checked below
-    return p && fs.existsSync(p);
-  });
-  if (!exe) return; // Ollama not installed -> silently skip
+  // Prefer the standard install path; otherwise fall back to `ollama` on the
+  // PATH (the 'error' handler below makes a missing binary harmless).
+  const exe = candidates.find((p) => p !== 'ollama' && p && fs.existsSync(p)) || 'ollama';
   try {
     const child = spawn(exe, ['serve'], {
       detached: true,
