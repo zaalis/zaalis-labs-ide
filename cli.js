@@ -76,6 +76,7 @@ const bold = (s) => (COLOR ? `\x1b[1m${s}\x1b[0m` : String(s));
 const green = FG(107);
 const yellow = FG(179);
 const gray = FG(246);
+const red = FG(203);
 
 // Visible length, ignoring ANSI escapes — needed to pad inside the box.
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
@@ -1035,10 +1036,11 @@ function describeAgentEvent(event) {
     case 'tool_started':
       return { status: agentToolLabel(event) };
     case 'tool_done': {
+      // No per-tool line here: the REPL loop accumulates tool_done events and
+      // prints one compact summary at the end of the turn (see renderToolSummary).
+      // `/show` then dumps the full outputs of the last batch on demand.
       const name = agentToolLabel(event);
-      const mark = event.error ? brand('✗') : (event.blocked ? dim('⊘') : brand('✓'));
-      const summary = String(event.summary || name).replace(/\n/g, ' ');
-      return { line: '  ' + mark + dim(' ' + summary), status: name };
+      return { status: name };
     }
     default:
       return {};
@@ -1297,6 +1299,7 @@ const SLASH = [
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
+  { name: 'show', category: 'misc', desc: 'afficher les sorties des derniers outils' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
   { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
@@ -1313,6 +1316,51 @@ const SLASH = [
 
 // Last reasoning text from the model, kept folded — `/think` expands it.
 let lastThinking = '';
+
+// Tool events from the last agent turn. The REPL prints a compact one-line
+// summary at the end of every turn (renderToolSummary); `/show` reveals the
+// full outputs of each tool from this batch.
+let lastToolBatch = [];
+let lastToolBatchElapsedMs = 0;
+
+// Compact one-line recap of every tool the agent ran during a turn.
+// Success:  › analyse • 5 commandes, 1 lecture (2.1s) · /show pour le détail
+// Failure:  › analyse • 4 commandes (1.4s) — 1 échec: run npm test   (red)
+function renderToolSummary(tools, elapsedMs) {
+  const list = Array.isArray(tools) ? tools.filter(Boolean) : [];
+  if (!list.length) return '';
+  const buckets = { run: 0, read: 0, look: 0, write: 0, task: 0, todo: 0, other: 0 };
+  const failed = [];
+  for (const t of list) {
+    const kind = String(t.tool || 'other').toLowerCase();
+    if (kind === 'run') buckets.run++;
+    else if (kind === 'read') buckets.read++;
+    else if (kind === 'glob' || kind === 'grep') buckets.look++;
+    else if (kind === 'edit' || kind === 'write') buckets.write++;
+    else if (kind === 'task') buckets.task++;
+    else if (kind === 'todo') buckets.todo++;
+    else buckets.other++;
+    if (t.error || t.blocked) failed.push(t);
+  }
+  const parts = [];
+  const push = (n, one, many) => { if (n) parts.push(`${n} ${n === 1 ? one : many}`); };
+  push(buckets.run, 'commande', 'commandes');
+  push(buckets.read + buckets.look, 'lecture', 'lectures');
+  push(buckets.write, 'écriture', 'écritures');
+  push(buckets.task, 'sous-agent', 'sous-agents');
+  push(buckets.todo, 'todo', 'todos');
+  push(buckets.other, 'action', 'actions');
+  const dur = elapsedMs > 0 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
+  const bullet = COLOR ? '›' : '>';
+  const body = `analyse • ${parts.join(', ')}${dur}`;
+  if (failed.length) {
+    const first = failed[0];
+    const cmd = agentToolLabel(first).replace(/\s+/g, ' ').slice(0, 50);
+    const suffix = ` — ${failed.length} ${failed.length === 1 ? 'échec' : 'échecs'}: ${cmd}`;
+    return red(`  ${bullet} ${body}${suffix}`) + '\n' + dim('    /show pour le détail');
+  }
+  return dim(`  ${bullet} ${body} · /show pour le détail`);
+}
 
 // Picker: choose source (provider or local model) → for a cloud provider,
 // choose the exact sub-model (Grok 4.3, Claude Opus 4.8, …) → choose the
@@ -1525,6 +1573,23 @@ async function runSlashCommand(ev, me) {
   if (name === 'think') {
     if (lastThinking) console.log('\n' + brand('💭 Réflexion') + '\n' + dim(lastThinking) + '\n');
     else console.log(dim('Aucune réflexion pour le dernier message.'));
+    return;
+  }
+  if (name === 'show') {
+    if (!lastToolBatch.length) { console.log(dim('Aucun outil pour le dernier message.')); return; }
+    console.log('');
+    for (const t of lastToolBatch) {
+      const failed = !!(t.error || t.blocked);
+      const label = agentToolLabel(t);
+      const mark = failed ? red('✗') : (t.blocked ? dim('⊘') : green('✓'));
+      console.log('  ' + mark + ' ' + bold(label));
+      const body = String(t.text || t.error || '').trim();
+      if (body) {
+        const capped = body.length > 4000 ? body.slice(0, 4000) + '\n… (tronqué)' : body;
+        console.log(dim(capped.split('\n').map((l) => '    ' + l).join('\n')));
+      }
+      console.log('');
+    }
     return;
   }
   if (name === 'clear') {
@@ -2324,15 +2389,20 @@ async function repl(opts = {}) {
     followTail = true; scrollOffset = 0;
     emit('\n');
     let stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)');
+    // Accumulate completed tool events for the compact end-of-turn summary
+    // (and for `/show`, which dumps their full outputs on demand).
+    const roundTools = [];
+    const roundStart = Date.now();
     const hooks = {
       stop: () => { if (stopWait) { stopWait(); stopWait = null; } },
       start: () => { if (!stopWait) stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)'); },
-      // Live agent events: completed tools/notes are logged permanently, the
-      // current activity drives the spinner label.
+      // Live agent events: assistant notes stay inline (they're the model
+      // thinking aloud), tool completions are silent until the recap.
       onEvent: (event) => {
         const d = describeAgentEvent(event);
         if (d.line) emit(d.line);
         if (d.status && stopWait && stopWait.setLabel) stopWait.setLabel(d.status);
+        if (event && event.type === 'tool_done') roundTools.push(event);
       },
     };
     // Keep the prompt active while the AI is answering: Enter queues one next
@@ -2360,6 +2430,14 @@ async function repl(opts = {}) {
       else lastThinking = '';
       if (!res.streamed && res.events && res.events.length) {
         for (const ev of res.events) console.log(dim('  ▸ ' + ev.replace(/\n/g, '\n    ')));
+      }
+      // Compact recap of the tools this turn used — one line by default,
+      // `/show` prints the details. Failure lines are tinted red.
+      lastToolBatch = roundTools;
+      lastToolBatchElapsedMs = Date.now() - roundStart;
+      if (roundTools.length) {
+        const recap = renderToolSummary(roundTools, lastToolBatchElapsedMs);
+        if (recap) emit(recap);
       }
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
