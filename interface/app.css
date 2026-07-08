@@ -1232,7 +1232,10 @@ details.ghost-tool-item[open]>summary .file-card-chevron{transform:rotate(180deg
 }
 .live-agent-activity>summary:hover{background:var(--bg-2,rgba(255,255,255,.04));}
 .live-agent-activity>summary:hover .live-agent-title{color:var(--text-1);}
-.live-agent-title{color:var(--text-2);font-weight:500;}
+.live-agent-title{color:var(--text-1);font-weight:500;}
+/* Failed tool row: keep the layout, tint name + badge red so errors read at a glance. */
+.ghost-tool-failed>summary .ghost-tool-name{color:var(--red,#f87171);}
+.ghost-tool-failed>summary .ghost-tool-badge{color:var(--red,#f87171);opacity:.9;}
 .live-agent-status{
     min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
     color:var(--text-3);font-size:12px;opacity:.72;

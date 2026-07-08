@@ -1065,7 +1065,7 @@ function toolRunDetailsHTML(results) {
         const name = toolDisplayName(r);
         const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
         const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
-        return `<details class="ghost-tool-item">
+        return `<details class="ghost-tool-item${failed ? ' ghost-tool-failed' : ''}">
             <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
             <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
         </details>`;
