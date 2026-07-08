@@ -188,6 +188,54 @@ function currentUser(req) {
   if (!userId) return null;
   return loadUsers().find((u) => u.id === userId) || null;
 }
+
+// ---------------------------------------------------------------------------
+// BROWSER BRIDGE — accès restreint pour zaalis browser (même machine).
+// Un secret partagé est écrit dans le dossier per-user stable (le même que
+// DATA_DIR en mode packagé). zaalis browser le lit sur disque et l'envoie via
+// l'en-tête x-zaalis-browser. Requêtes loopback uniquement (déjà garanti par
+// le middleware global) et limitées au chat — jamais fichiers/exec/tunnel.
+// Modèle de confiance identique au fichier `secret` : tout processus local du
+// même utilisateur peut le lire ; on n'expose rien de plus que ce que le
+// vault local permet déjà.
+// ---------------------------------------------------------------------------
+function browserBridgeDir() {
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'zaalis', 'server-data');
+}
+const BROWSER_SECRET_FILE = path.join(browserBridgeDir(), 'browser-secret');
+let BROWSER_SECRET;
+try {
+  BROWSER_SECRET = fs.readFileSync(BROWSER_SECRET_FILE, 'utf-8').trim();
+  if (!BROWSER_SECRET) throw new Error('empty');
+} catch {
+  BROWSER_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(BROWSER_SECRET_FILE, BROWSER_SECRET, { mode: 0o600 });
+  } catch {}
+}
+function browserUser(req) {
+  const header = String(req.headers['x-zaalis-browser'] || '');
+  if (!header || !safeEqual(header, BROWSER_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  // Compte le plus récemment connecté, sinon le premier créé.
+  return users.slice().sort((a, b) =>
+    String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''))
+  )[0];
+}
+// Le navigateur n'a accès qu'au chat (et à la liste des modèles locaux pour
+// remplir ses menus) — jamais aux fichiers, à l'exec ni aux clés.
+function browserAllowed(p) {
+  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models';
+}
 function chatsFile(userId, kind) {
   // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
   const k = kind === 'agents' ? 'agents' : 'chat';
@@ -336,6 +384,12 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !safeEqual(candidate, user.hash)) {
     return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
   }
+  // Mémorise la dernière connexion (utilisée par le pont zaalis browser).
+  try {
+    const users = loadUsers();
+    const i = users.findIndex((u) => u.id === user.id);
+    if (i >= 0) { users[i].lastLoginAt = new Date().toISOString(); saveUsers(users); }
+  } catch {}
   setSessionCookie(res, makeToken(user.id));
   res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
 });
@@ -369,6 +423,14 @@ app.use('/api', (req, res, next) => {
     if (!mobileAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
     req.user = mUser;
     req.isMobile = true;
+    return next();
+  }
+  // Pont zaalis browser : secret local partagé, endpoints chat uniquement.
+  const bUser = browserUser(req);
+  if (bUser) {
+    if (!browserAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour le navigateur.' });
+    req.user = bUser;
+    req.isBrowser = true;
     return next();
   }
   return res.status(401).json({ error: 'Authentification requise.' });
