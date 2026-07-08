@@ -320,10 +320,29 @@ ipcMain.handle('mac-speech-stop', async () => {
   return { ok: true };
 });
 
-app.on('before-quit', () => {
+let cookiesFlushed = false;
+app.on('before-quit', (event) => {
   isQuitting = true;
   stopSpeechProcess();
   stopServer();
+
+  // Chromium écrit les cookies persistants (dont zaalis_session) de façon
+  // différée. Sur un Cmd+Q / « Quitter » macOS, l'app peut se terminer avant
+  // que le cookie de session n'ait été committé sur disque : au relancement il
+  // manque et l'utilisateur doit se reconnecter. On force donc un flush du
+  // cookie store avant de laisser l'app quitter réellement.
+  if (cookiesFlushed) return;
+  event.preventDefault();
+  const done = () => {
+    cookiesFlushed = true;
+    app.quit();
+  };
+  const flush = session.defaultSession.cookies.flushStore();
+  // Ne jamais bloquer la fermeture indéfiniment si le flush traîne.
+  const safety = setTimeout(done, 1500);
+  Promise.resolve(flush)
+    .catch((error) => appendLog('zaalis-electron.err.log', `cookie flush error: ${error && error.stack ? error.stack : error}`))
+    .finally(() => { clearTimeout(safety); done(); });
 });
 app.on('window-all-closed', () => app.quit());
 
