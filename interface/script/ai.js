@@ -810,6 +810,18 @@ async function sendChat(input) {
             ? '\n\n[STYLE] Be thorough: consider edge cases, explain trade-offs, and verify with reads/searches when useful.'
             : '\n\n[STYLE] Sois approfondi : considère les cas limites, explique les compromis, et vérifie via lectures/recherches si utile.';
     }
+    // Pin this turn to its conversation. If the user switches to another chat
+    // (or opens another project) WHILE the AI is answering, the container gets
+    // wiped and state.chatHistory / currentConvId are replaced — without this
+    // binding the reply would land in a detached DOM node and corrupt the other
+    // conversation. We capture the id/project now and, on completion, either
+    // update the live view (still active) or persist straight to this
+    // conversation's stored messages (user navigated away).
+    if (!state.currentConvId) state.currentConvId = Date.now().toString();
+    const turnConvId = state.currentConvId;
+    const turnProject = projectLabel();
+    const turnProjectPath = state.projectRoot || null;
+
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
@@ -818,6 +830,8 @@ async function sendChat(input) {
     const body = addTypingMsg($('#chat-messages'), modelLabel);
     const liveActivity = createLiveAgentActivity($('#chat-messages'));
     let liveActivityFinished = false;
+    // True only while this turn's conversation is still the one on screen.
+    const turnStillActive = () => state.currentConvId === turnConvId && body.isConnected;
 
     // For local models, limit history to avoid overflowing the context window.
     // Keep only the last N turns so the system prompt + project context fit.
@@ -847,10 +861,49 @@ async function sendChat(input) {
             onEvent: (event) => liveActivity && liveActivity.onEvent(event)
         });
         stopThinking(body);
+        // Build the assistant's memory entry regardless of where it lands.
+        const responseText = data.error ? '' : (data.response || '');
+        const formatted = data.error ? '' : formatAIResponse(responseText);
+        const isImg = !data.error && formatted.includes('generated-image');
+        let assistantMemory = responseText;
+        if (isImg) {
+            const am = responseText.match(/!\[([^\]]*)\]/);
+            assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
+        }
+        if (!data.error && Array.isArray(data.toolResults) && data.toolResults.length) {
+            const toolMemory = data.toolResults
+                .map(t => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
+                .join('\n\n');
+            assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
+        }
+        if (!data.error && Array.isArray(data.todos) && data.todos.length) {
+            const todoMemory = data.todos
+                .map(t => `- [${t.status || 'pending'}] ${t.content || ''}`)
+                .join('\n');
+            assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
+        }
+
+        const active = turnStillActive();
         if (data.error) {
-            if (liveActivity) liveActivity.fail(data.error);
-            body.textContent = data.error;
-            body.classList.add('error');
+            if (active) {
+                if (liveActivity) liveActivity.fail(data.error);
+                body.textContent = data.error;
+                body.classList.add('error');
+            }
+        } else if (!active) {
+            // The user navigated away mid-turn: never touch the current view.
+            // Persist the reply straight to the conversation it belongs to so it
+            // is there when they come back, and record it in that conversation's
+            // memory only if it is still loaded elsewhere (rare) — otherwise the
+            // stored messages are the source of truth on next open.
+            completed = true;
+            const duration = Date.now() - t0;
+            const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
+            const entries = [
+                { type: 'user', label: lang === 'en' ? 'You' : 'Vous', text: displayMsg },
+                { type: 'ai', label: modelLabel, html: reasoning + formatted, text: responseText }
+            ];
+            appendMessagesToStoredConversation('chat', turnConvId, entries, { project: turnProject, projectPath: turnProjectPath });
         } else {
             completed = true;
             if (liveActivity) {
@@ -860,9 +913,6 @@ async function sendChat(input) {
             const duration = Date.now() - t0;
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
-            const responseText = data.response || '';
-            const formatted = formatAIResponse(responseText);
-            const isImg = formatted.includes('generated-image');
             // Generated image = single rectangle (instant); text = streamed word-by-word.
             body.classList.toggle('has-image', isImg);
             if (isImg) {
@@ -878,27 +928,10 @@ async function sendChat(input) {
 
             // Actions bloquées par le serveur (mode supervisé/semi) : demander
             // la permission à l'utilisateur puis les appliquer, comme Claude Code.
-            await applyBlockedAgentTools(data, $('#chat-messages'), lang);
+            // Skipped when the user switched away (nothing to approve in a hidden
+            // conversation, and it would target the wrong project root).
+            if (turnStillActive()) await applyBlockedAgentTools(data, $('#chat-messages'), lang);
 
-            // Update conversation memory + token meter. For images, keep a light
-            // placeholder in memory instead of the heavy base64 data URL.
-            let assistantMemory = responseText;
-            if (isImg) {
-                const am = responseText.match(/!\[([^\]]*)\]/);
-                assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
-            }
-            if (Array.isArray(data.toolResults) && data.toolResults.length) {
-                const toolMemory = data.toolResults
-                    .map(t => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
-                    .join('\n\n');
-                assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
-            }
-            if (Array.isArray(data.todos) && data.todos.length) {
-                const todoMemory = data.todos
-                    .map(t => `- [${t.status || 'pending'}] ${t.content || ''}`)
-                    .join('\n');
-                assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
-            }
             state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
             if (data.usage && data.usage.input != null) {
                 // Use actual token counts from the API when available.
@@ -910,12 +943,15 @@ async function sendChat(input) {
         }
     } catch (err) {
         stopThinking(body);
+        const active = turnStillActive();
         if (err && err.name === 'AbortError') {
             aborted = true;
-            if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
-            body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
-            restorePendingChatToInput();
-        } else {
+            if (active) {
+                if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
+                body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
+                restorePendingChatToInput();
+            }
+        } else if (active) {
             if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.');
             body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.';
             body.classList.add('error');
@@ -925,10 +961,47 @@ async function sendChat(input) {
         setChatBusy(false);
     }
 
-    saveConversation();
+    // Only save/scan the live DOM when this turn's conversation is on screen —
+    // otherwise saveConversation would overwrite whichever conversation the
+    // user switched to with a mix of the two.
+    if (turnStillActive()) saveConversation();
     if (completed && !aborted && pendingChatDraft) {
-        const next = takePendingChatDraft();
-        if (next) setTimeout(() => sendChat(next), 0);
+        if (turnStillActive()) {
+            const next = takePendingChatDraft();
+            if (next) setTimeout(() => sendChat(next), 0);
+        } else {
+            // Turn finished in the background: don't fire the queued message into
+            // whatever conversation is now on screen — hand it back to the input.
+            restorePendingChatToInput();
+        }
+    }
+}
+
+// Append ready-made message entries to a conversation's stored history without
+// going through the live DOM (used when a turn finishes after the user has
+// navigated to another conversation). Creates the conversation if needed.
+function appendMessagesToStoredConversation(kind, convId, entries, meta = {}) {
+    const cfg = HIST[kind];
+    if (!cfg || !convId || !Array.isArray(entries) || !entries.length) return;
+    let conv = (state[cfg.store] || []).find(c => c.id === convId);
+    if (!conv) {
+        const title = (entries.find(e => e.type === 'user')?.text || 'Conversation').slice(0, 40);
+        conv = {
+            id: convId, title, date: new Date().toLocaleDateString(),
+            project: meta.project || null, projectPath: meta.projectPath || null, messages: []
+        };
+        state[cfg.store].push(conv);
+    }
+    conv.messages = (conv.messages || []).concat(entries);
+    if (!conv.project && meta.project) conv.project = meta.project;
+    if (!conv.projectPath && meta.projectPath) conv.projectPath = meta.projectPath;
+    persistChats(kind);
+    // If the user has navigated back to this exact conversation, re-render it so
+    // the freshly-appended reply appears without needing another switch.
+    if (state[cfg.current] === convId && typeof loadConversation === 'function') {
+        loadConversation(kind, convId);
+    } else {
+        renderHistory();
     }
 }
 
@@ -1054,6 +1127,7 @@ function toolDisplayName(result) {
     if (tool === 'task') return `sous-agent ${input.title || ''}`.trim();
     if (tool === 'todo') return 'todo';
     if (tool === 'run') return `run ${input.command || ''}`.trim();
+    if (tool === 'browser') return `browser ${input.url || ''}`.trim();
     return result.summary || tool || 'outil';
 }
 function toolRunDetailsHTML(results) {

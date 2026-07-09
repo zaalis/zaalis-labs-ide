@@ -1082,7 +1082,7 @@ async function resolveReadRequests(response, systemPrompt, events, hooks, depth 
 function agentToolLabel(event) {
   const tool = event.tool || 'outil';
   const input = event.input || {};
-  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || '';
+  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || input.url || '';
   return hint ? `${tool} ${String(hint).replace(/\n/g, ' ').slice(0, 60)}` : tool;
 }
 

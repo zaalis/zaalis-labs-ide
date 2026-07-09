@@ -2231,6 +2231,14 @@ app.post('/api/agent-chat', async (req, res) => {
       }
     };
 
+    // The agent's `browser` tool previews a URL in the zaalis browser. Runs on
+    // the same machine as the server (both talk to localhost:8715), so opening
+    // server-side works identically for the desktop IDE and the CLI.
+    const openBrowser = async (url) => {
+      const r = await openInZaalisBrowser(url, { background: false });
+      return r.ok ? { ok: true } : { ok: false, error: r.body && (r.body.message || r.body.error) };
+    };
+
     const result = await runAgentTurn({
       root,
       model,
@@ -2244,6 +2252,7 @@ app.post('/api/agent-chat', async (req, res) => {
       language: b.language || 'fr',
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
+      openBrowser,
       emitEvent: wantsStream ? writeStreamEvent : undefined,
     });
     if (wantsStream) {

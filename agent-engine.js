@@ -171,10 +171,15 @@ full file content
 \`\`\`run
 npm test
 \`\`\`
+\`\`\`browser
+http://localhost:3000
+\`\`\`
 
 Workflow: understand before changing (read the relevant code first), make the smallest correct change, prefer edit over rewriting a whole file, keep paths relative. After a change, verify it when possible (run the project's tests/build if the user asked for or mentioned them) and report results honestly: if a command fails, quote the error and exit code — never claim success without evidence. Use todo only for multi-step work, keep exactly one in_progress item and update it as you go. Use task for focused read-only investigation.
 
 Context economy: read only the files you need, never re-read a file you just wrote or edited, do not repeat file contents or diffs in the visible answer, keep glob/grep max low unless the user asks for "everything" (then use a high max and say clearly if the result is truncated). If the content of a file you write itself contains \`\`\` fences, open and close its block with four backticks (\`\`\`\`html path=...).
+
+Previewing a website: when the user asks to open/preview a site you built or a running dev server, open its URL with a \`\`\`browser block — it opens in the zaalis browser (not the system browser). Give the exact URL: a static page can be opened with a local server you start via run (e.g. python3 -m http.server), and a dev server at its printed http://localhost:PORT. Do not use run "open"/"xdg-open"/"start" for this; use the browser tool.
 
 Answers: reply in the user's language, short and direct, leading with what you did or found; no preamble, no plan restating, no filler. When the user gives exact file names for a simple website or script, create exactly those files at the project root unless another folder is specified. For security reviews, audits, or dependency reports, ground every concrete claim in files you listed or read; never infer secrets, credentials, routes, middleware, or vulnerabilities from a filename/package/template alone — if evidence is missing, say it is not observed. Current permission mode: ${permissionMode || 'supervised'}.`;
   }
@@ -223,10 +228,15 @@ contenu complet
 \`\`\`run
 npm test
 \`\`\`
+\`\`\`browser
+http://localhost:3000
+\`\`\`
 
 Methode : comprends avant de modifier (lis d'abord le code concerne), fais le plus petit changement correct, prefere edit a la reecriture complete d'un fichier, chemins relatifs. Apres un changement, verifie quand c'est possible (lance les tests/le build du projet si l'utilisateur les demande ou les mentionne) et rends compte honnetement : si une commande echoue, cite l'erreur et le code de sortie — n'affirme jamais un succes sans preuve. Utilise todo seulement pour le travail en plusieurs etapes, garde exactement un item in_progress et mets-le a jour au fil de l'eau. Utilise task pour une investigation ciblee en lecture seule.
 
 Economie de contexte : lis uniquement les fichiers necessaires, ne relis jamais un fichier que tu viens d'ecrire ou de modifier, ne recopie pas le contenu des fichiers ni les diffs dans la reponse visible, garde des max bas pour glob/grep sauf si l'utilisateur demande "tout" (alors max eleve et signale clairement toute troncature). Si le contenu d'un fichier a ecrire contient lui-meme des fences \`\`\`, ouvre et ferme son bloc avec quatre backticks (\`\`\`\`html path=...).
+
+Previsualiser un site : quand l'utilisateur demande d'ouvrir/previsualiser un site que tu as construit ou un serveur de dev en cours, ouvre son URL avec un bloc \`\`\`browser — il s'ouvre dans le zaalis browser (pas le navigateur systeme). Donne l'URL exacte : une page statique peut etre servie par un serveur local lance via run (ex. python3 -m http.server), et un serveur de dev a son http://localhost:PORT affiche. N'utilise pas run "open"/"xdg-open"/"start" pour ca ; utilise l'outil browser.
 
 Reponses : reponds dans la langue de l'utilisateur, court et direct, en commencant par ce que tu as fait ou trouve ; pas de preambule, pas de plan recite, pas de remplissage. Quand l'utilisateur donne des noms de fichiers exacts pour un site simple ou un script, cree exactement ces fichiers a la racine du projet sauf s'il indique un autre dossier. Pour les revues de securite, audits ou rapports de dependances, fonde chaque affirmation concrete sur des fichiers listes ou lus ; n'infere jamais secrets, identifiants, routes, middlewares ou vulnerabilites depuis un simple nom de fichier/package/modele — si la preuve manque, dis que ce n'est pas observe. Mode de permission actuel : ${permissionMode || 'supervised'}.`;
 }
@@ -447,6 +457,18 @@ function extractToolRequests(text, root) {
       for (const command of commands) tools.push({ name: 'run', input: { command } });
       continue;
     }
+    // browser/open/preview: open a URL (a running dev server, a local page)
+    // in the zaalis browser so the user can preview a site the agent built.
+    // Require a real http(s) URL so a stray ```open code``` block isn't
+    // mistaken for a browser action.
+    if (/(^|\s)(browser|preview|open)(\s|$)/.test(low)) {
+      const kv = parseKeyValues(body);
+      const urlMatch = body.match(/https?:\/\/[^\s"'`)]+/i);
+      const url = (kv.url || (urlMatch && urlMatch[0]) || '').trim();
+      if (/^https?:\/\//i.test(url)) { tools.push({ name: 'browser', input: { url } }); continue; }
+      // No usable URL — leave the block for the visible answer / other handlers.
+      if (/(^|\s)(browser|preview)(\s|$)/.test(low)) continue;
+    }
     if (/(^|\s)glob(\s|$)/.test(low)) {
       const kv = parseKeyValues(body);
       const first = body.split(/\r?\n/).map((l) => l.trim()).find((l) => l && !/^[A-Za-z_-]+\s*:/.test(l));
@@ -490,17 +512,24 @@ function extractToolRequests(text, root) {
   return tools;
 }
 
-function isToolBlockInfo(info) {
+function isToolBlockInfo(info, body) {
   const low = String(info || '').toLowerCase();
-  return /(^|\s)(run|read|edit|glob|grep|todo|todowrite|task)(\s|$)/.test(low)
-    || /(?:path|file|filename)\s*[:=]/.test(low);
+  if (/(^|\s)(run|read|edit|glob|grep|todo|todowrite|task)(\s|$)/.test(low)) return true;
+  if (/(?:path|file|filename)\s*[:=]/.test(low)) return true;
+  // browser/preview/open only count as a tool block when they carry an http URL
+  // — matches what extractToolRequests actually consumes, so a plain ```open …```
+  // code fence is left in the visible answer.
+  if (/(^|\s)(browser|preview|open)(\s|$)/.test(low)) {
+    return /url\s*[:=]\s*https?:\/\//i.test(String(body || '')) || /https?:\/\//i.test(String(body || ''));
+  }
+  return false;
 }
 
 function stripToolBlocks(text) {
   const { lines, blocks } = extractFencedBlocks(text);
   const drop = new Set();
   for (const b of blocks) {
-    if (!isToolBlockInfo(b.info)) continue;
+    if (!isToolBlockInfo(b.info, b.body)) continue;
     for (let k = b.start; k <= b.end; k++) drop.add(k);
   }
   return lines.filter((_, idx) => !drop.has(idx)).join('\n')
@@ -548,6 +577,9 @@ function isDangerousCommand(cmd) {
 function mutationAllowed(toolName, permissionMode, input) {
   const mode = permissionMode || 'supervised';
   if (toolName === 'read' || toolName === 'glob' || toolName === 'grep' || toolName === 'todo' || toolName === 'task') return { allowed: true };
+  // Opening a preview URL is not a filesystem mutation. Allowed everywhere
+  // except the strictly read-only "plan" mode (which observes without acting).
+  if (toolName === 'browser') return mode === 'read-only' || mode === 'plan' ? { allowed: false, reason: `mode ${mode}` } : { allowed: true };
   if (mode === 'read-only' || mode === 'plan') return { allowed: false, reason: `mode ${mode}` };
   if (toolName === 'run' && isDangerousCommand(input && input.command) && mode !== 'bypass') return { allowed: false, reason: 'commande dangereuse bloquee' };
   if (mode === 'supervised') return { allowed: false, reason: 'validation requise' };
@@ -727,7 +759,7 @@ async function runSubAgentTask(input, ctx) {
   };
 }
 
-async function runTool(tool, { root, permissionMode, callModel, model, submodel, config, reasoningLevel, taskState, subAgentTimeoutMs }) {
+async function runTool(tool, { root, permissionMode, callModel, model, submodel, config, reasoningLevel, taskState, subAgentTimeoutMs, openBrowser }) {
   const name = tool.name;
   const input = tool.input || {};
   const decision = mutationAllowed(name, permissionMode, input);
@@ -849,6 +881,24 @@ async function runTool(tool, { root, permissionMode, callModel, model, submodel,
     fs.mkdirSync(path.dirname(full), { recursive: true });
     fs.writeFileSync(full, String(input.content || ''), 'utf8');
     return { name, summary: `write ${rel}`, text: `${rel} ecrit` };
+  }
+
+  if (name === 'browser') {
+    const url = String(input.url || '').trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return { name, error: true, summary: `browser url invalide`, text: `browser: URL invalide (http/https requis) : ${url}` };
+    }
+    if (typeof openBrowser !== 'function') {
+      return { name, error: true, summary: `browser indisponible`, text: `browser: ouverture indisponible dans ce contexte (${url})` };
+    }
+    try {
+      const r = await openBrowser(url);
+      if (r && r.ok) return { name, summary: `browser ${url}`, text: `Ouvert dans zaalis browser : ${url}` };
+      const reason = (r && (r.message || r.error)) || 'zaalis browser indisponible';
+      return { name, error: true, summary: `browser echec`, text: `browser: ${reason} (${url})` };
+    } catch (e) {
+      return { name, error: true, summary: `browser echec`, text: `browser: ${e.message || e} (${url})` };
+    }
   }
 
   if (name === 'run') {
@@ -991,6 +1041,7 @@ ${originalUserMessage}`;
           reasoningLevel: options.reasoningLevel,
           taskState,
           subAgentTimeoutMs: options.subAgentTimeoutMs,
+          openBrowser: options.openBrowser,
         });
         results.push(result);
         if (result.todos) todos = normalizeTodoList(result.todos);
