@@ -769,8 +769,8 @@ function takePendingAgentDraft() {
 function setChatBusy(on) {
     const btn = $('#send-btn');
     document.body.classList.toggle('ai-busy', !!on);
-    if (typeof renderProjectPanelHistory === 'function') renderProjectPanelHistory(activeKind());
-    else if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+    // La liste des conversations vit dans la barre laterale gauche.
+    if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
     if (!btn) return;
     btn.classList.toggle('stop', on);
     btn.innerHTML = on ? STOP_ICON : SEND_ICON;
@@ -2494,19 +2494,24 @@ function renderProjectPanelHistory(kind = activeKind()) {
 }
 
 function renderHistory() {
+    // La liste des conversations est desormais uniquement dans la barre
+    // laterale gauche (renderSidebarConversations). On la rafraichit donc ici,
+    // sur chaque evenement (sauvegarde, suppression, chargement, nouveau chat),
+    // pour remplacer l'ancien panneau « Historique » de droite qui a ete retire.
     if (!state.projectRoot) {
         if (typeof loadFileTree === 'function') {
-            loadFileTree();
+            loadFileTree();          // peuple la liste « sans projet » a gauche
+        } else if (typeof renderSidebarConversations === 'function') {
+            renderSidebarConversations();
         }
-        renderProjectPanelHistory('chat');
-        renderProjectPanelHistory('agents');
         return;
     }
     if (typeof initRecentProjects === 'function') {
         initRecentProjects();
     }
-    renderProjectPanelHistory('chat');
-    renderProjectPanelHistory('agents');
+    if (typeof renderSidebarConversations === 'function') {
+        renderSidebarConversations();
+    }
 }
 
 // Start a brand-new conversation for the given kind (in the current context).

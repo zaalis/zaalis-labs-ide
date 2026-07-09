@@ -379,16 +379,10 @@
                     </div>
                 </div>
 
-                <!-- Project chat history: shown only when a project is open -->
-                <div class="chat-history project-history" id="chat-history">
-                    <div class="history-label">
-                        <span data-i18n="history-header">Historique</span>
-                        <button class="new-chat-btn" id="new-chat-btn" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
-                    </div>
-                    <div class="history-list project-history-list" id="history-list">
-                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
-                    </div>
-                </div>
+                <!-- La liste des conversations vit uniquement dans la barre
+                     laterale gauche (section CONVERSATIONS). L'ancien bloc
+                     « Historique » en bas de ce panneau doublonnait cette liste
+                     et a ete retire. -->
             </div>
 
             <!-- ===== AGENTS VIEW ===== -->
@@ -602,16 +596,8 @@
                     </div>
                 </div>
 
-                <!-- Project agents history: shown only when a project is open -->
-                <div class="chat-history project-history">
-                    <div class="history-label">
-                        <span data-i18n="history-header">Historique</span>
-                        <button class="new-chat-btn" id="new-chat-btn-agents" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
-                    </div>
-                    <div class="history-list project-history-list" id="history-list-agents">
-                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
-                    </div>
-                </div>
+                <!-- Historique retire ici aussi : la liste des conversations
+                     Agents vit dans la barre laterale gauche. -->
 
             </div>
 
