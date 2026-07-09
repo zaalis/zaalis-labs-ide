@@ -30,6 +30,16 @@ app.commandLine.appendSwitch('disable-domain-reliability');
 app.commandLine.appendSwitch('disable-breakpad');
 app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,MediaRouter,OptimizationHints');
 
+// Le nom de l'app et le dossier userData DOIVENT être fixés avant l'événement
+// `ready` : le service réseau de Chromium (qui gère le magasin de cookies
+// persistants, écrit dans <userData>/Network/Cookies) s'initialise au `ready`.
+// S'ils étaient définis plus tard (dans whenReady().then()), le cookie de
+// session zaalis_session n'était jamais persisté sur disque — il se comportait
+// comme un cookie de session éphémère, d'où la reconnexion forcée à chaque
+// relancement de l'app, que le flush du store en sortie ne pouvait pas régler.
+app.setName('zaalis IDE');
+app.setPath('userData', path.join(app.getPath('appData'), 'zaalis', 'electron'));
+
 const DEFAULT_PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 const APP_ROOT = app.isPackaged ? path.join(process.resourcesPath, 'app') : __dirname;
 const BUNDLE_DIR = path.join(APP_ROOT, 'bundle');
@@ -372,9 +382,6 @@ function ensureZaalisSymlink() {
 }
 
 app.whenReady().then(async () => {
-  app.setName('zaalis IDE');
-  app.setPath('userData', path.join(app.getPath('appData'), 'zaalis', 'electron'));
-
   ensureZaalisSymlink();
 
   try {

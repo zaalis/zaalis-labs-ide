@@ -419,9 +419,12 @@
 .sidebar-stack.no-project .sidebar-conversations{flex:1 1 auto;}
 .sidebar-stack.no-project .sidebar-splitter,
 .sidebar-stack.no-project .sidebar-files{display:none;}
-.sidebar-stack.project-open .sidebar-conversations,
-.sidebar-stack.project-open .sidebar-splitter{display:none;}
-.sidebar-stack.project-open .sidebar-files{flex:1 1 auto;min-height:0;}
+/* Projet ouvert : on garde la « petite fenêtre » Conversations visible en haut
+   (elle est peuplée par renderSidebarConversations), le splitter, puis les
+   Fichiers en dessous. Avant, project-open masquait conversations + splitter,
+   ce qui coupait le panneau à l'ouverture d'un projet. */
+.sidebar-stack.project-open .sidebar-conversations{flex:0 0 34%;min-height:112px;}
+.sidebar-stack.project-open .sidebar-files{flex:1 1 auto;min-height:130px;}
 .sidebar-splitter{height:9px;flex:0 0 9px;position:relative;cursor:row-resize;background:var(--bg-1);}
 .sidebar-splitter::before{content:'';position:absolute;left:34px;right:34px;top:4px;height:1px;background:var(--border);transition:background .15s,box-shadow .15s;}
 .sidebar-splitter:hover::before,.sidebar-splitter.dragging::before{background:var(--accent);box-shadow:0 0 0 1px rgba(99,102,241,.2);}
