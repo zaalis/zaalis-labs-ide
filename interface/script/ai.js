@@ -876,6 +876,10 @@ async function sendChat(input) {
                 followScroll($('#chat-messages'));
             }
 
+            // Actions bloquées par le serveur (mode supervisé/semi) : demander
+            // la permission à l'utilisateur puis les appliquer, comme Claude Code.
+            await applyBlockedAgentTools(data, $('#chat-messages'), lang);
+
             // Update conversation memory + token meter. For images, keep a light
             // placeholder in memory instead of the heavy base64 data URL.
             let assistantMemory = responseText;
@@ -1482,6 +1486,109 @@ async function handleAIResponse(response, agentName, container) {
     }
 
     return { editErrors };
+}
+
+// Approbation supervisée (parité Claude Code) : en mode supervised/semi le
+// serveur bloque write/edit/run et renvoie chaque action bloquée avec son
+// input complet dans toolResults. On rejoue ici chaque action après accord
+// explicite de l'utilisateur — avant, ces actions étaient simplement perdues.
+async function applyBlockedAgentTools(data, out, lang) {
+    if (isReadOnlyMode() || !state.projectRoot) return;
+    const blocked = (Array.isArray(data && data.toolResults) ? data.toolResults : [])
+        .filter(r => r && r.blocked && ['write', 'edit', 'run'].includes(r.tool) && r.input);
+    if (!blocked.length) return;
+    let wroteAny = false;
+    const changes = [];
+    for (const r of blocked) {
+        const input = r.input || {};
+        if (r.tool === 'run') {
+            const cmd = String(input.command || '').trim();
+            if (!cmd) continue;
+            const dangerous = typeof isDangerousCommand === 'function' && isDangerousCommand(cmd);
+            const desc = dangerous
+                ? (lang === 'en' ? 'The agent wants to run a DANGEROUS command' : 'L\'agent veut exécuter une commande DANGEREUSE')
+                : (lang === 'en' ? 'The agent wants to run a command' : 'L\'agent veut exécuter une commande');
+            const approved = await requestApproval(desc, cmd);
+            if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); continue; }
+            const t0 = Date.now();
+            try {
+                const res = await fetch('/api/exec', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: cmd, cwd: state.projectRoot })
+                });
+                const execRes = await res.json().catch(() => ({}));
+                const duration = Math.round((Date.now() - t0) / 100) / 10;
+                if (!res.ok || execRes.error) {
+                    addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: execRes.error || ('HTTP ' + res.status), duration }), true);
+                } else {
+                    const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
+                    addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
+                }
+            } catch (err) {
+                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: err.message, duration: Math.round((Date.now() - t0) / 100) / 10 }), true);
+            }
+            continue;
+        }
+        const targetFile = String(input.path || '');
+        if (!targetFile) continue;
+        let content;
+        if (r.tool === 'write') {
+            content = String(input.content || '');
+        } else {
+            let current = null;
+            try {
+                const res = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=${encodeURIComponent(targetFile)}`);
+                const d = await res.json().catch(() => ({}));
+                if (res.ok && !d.error) current = d.content || '';
+            } catch {}
+            if (current === null) {
+                addMsg(out, 'system', null, `${lang === 'en' ? 'Edit failed' : 'Édition échouée'} — ${targetFile}: ${lang === 'en' ? 'file not found' : 'fichier introuvable'}`);
+                continue;
+            }
+            const isMarkdown = /\.(md|mdx)$/i.test(targetFile);
+            let working = current, failed = null;
+            for (const h of (input.hunks || [])) {
+                const rr = applyOneHunk(working, h.search || '', h.replace || '', isMarkdown);
+                if (!rr.ok) { failed = rr.error; break; }
+                working = rr.content;
+            }
+            if (failed) { addMsg(out, 'system', null, `${lang === 'en' ? 'Edit failed' : 'Édition échouée'} — ${targetFile}: ${failed}`); continue; }
+            if (working === current) continue;
+            content = working;
+        }
+        const desc = lang === 'en'
+            ? `The agent wants to ${r.tool === 'write' ? 'write' : 'edit'} ${targetFile}`
+            : `L'agent veut ${r.tool === 'write' ? 'écrire' : 'modifier'} ${targetFile}`;
+        const preview = r.tool === 'write'
+            ? content.slice(0, 500) + (content.length > 500 ? '\n...' : '')
+            : (input.hunks || []).map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n').slice(0, 500);
+        const approved = await requestApproval(desc, preview);
+        if (!approved) { addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusée.'); continue; }
+        try {
+            const res = await fetch('/api/file', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ root: state.projectRoot, path: targetFile, content })
+            });
+            const result = await res.json().catch(() => ({}));
+            if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
+            if (state.openFiles[targetFile]) {
+                state.openFiles[targetFile].content = content;
+                state.openFiles[targetFile].unsaved = false;
+            }
+            if (state.activeFile === targetFile) {
+                textarea.value = content;
+                updateGutter(content);
+                if (typeof renderHighlight === 'function') renderHighlight();
+                renderTabs();
+            }
+            changes.push({ tool: r.tool, input: r.tool === 'write' ? { path: targetFile, content } : { path: targetFile, hunks: input.hunks || [] } });
+            wroteAny = true;
+        } catch (err) {
+            addMsg(out, 'system', null, `${lang === 'en' ? 'Write error' : 'Erreur écriture'} ${targetFile}: ${err.message}`);
+        }
+    }
+    if (changes.length) addMsg(out, 'system', null, fileChangeDetailsHTML(changes), true);
+    if (wroteAny) await loadFileTree();
 }
 
 // When an ```edit block failed to apply (SEARCH not found / not unique), feed the

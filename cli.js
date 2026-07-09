@@ -954,6 +954,75 @@ async function applyTools(response, events) {
   return editErrors;
 }
 
+// Rejoue les actions bloquees par le serveur en mode supervise/semi apres
+// validation explicite de l'utilisateur (parite IDE / Claude Code). Chaque
+// tool_done bloque porte son input complet (path/hunks/content/command).
+async function applyBlockedAgentTools(tools) {
+  const perm = currentPermission().id;
+  if (perm === 'plan') return;
+  const blocked = (Array.isArray(tools) ? tools : [])
+    .filter((t) => t && t.blocked && ['write', 'edit', 'run'].includes(t.tool) && t.input);
+  for (const t of blocked) {
+    const input = t.input || {};
+    if (t.tool === 'run') {
+      const cmd = String(input.command || '').trim();
+      if (!cmd) continue;
+      const dangerous = isDangerousCommand(cmd);
+      if (!(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
+        console.log(dim(`  ⊘ Commande refusee: ${cmd}`));
+        continue;
+      }
+      try {
+        const out = await apiPost('/api/exec', { command: cmd, cwd: projectRoot() });
+        const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
+        console.log(dim(`  ✓ Commande executee: ${cmd}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
+      } catch (e) {
+        console.log(red(`  ✗ Commande echouee: ${cmd} (${e.message})`));
+      }
+      continue;
+    }
+    const rel = String(input.path || '');
+    if (!rel) continue;
+    let content;
+    if (t.tool === 'write') {
+      content = String(input.content || '');
+      if (!(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
+        console.log(dim(`  ⊘ Ecriture refusee: ${rel}`));
+        continue;
+      }
+    } else {
+      let current = '';
+      try {
+        const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=${encodeURIComponent(rel)}`);
+        current = d.content || '';
+      } catch (e) {
+        console.log(red(`  ✗ Edition echouee: ${rel} (${e.message})`));
+        continue;
+      }
+      let next = current;
+      let failed = null;
+      for (const h of (input.hunks || [])) {
+        const r = applyOneHunk(next, h.search || '', h.replace || '');
+        if (!r.ok) { failed = r.error; break; }
+        next = r.content;
+      }
+      if (failed) { console.log(red(`  ✗ Edition echouee: ${rel} (${failed})`)); continue; }
+      if (next === current) continue;
+      if (!(await confirmAction(`Modifier ${rel}`, (input.hunks || []).map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
+        console.log(dim(`  ⊘ Modification refusee: ${rel}`));
+        continue;
+      }
+      content = next;
+    }
+    try {
+      await apiPost('/api/file', { root: projectRoot(), path: rel, content });
+      console.log(dim(`  ✓ Fichier ${t.tool === 'write' ? 'ecrit' : 'modifie'}: ${rel}`));
+    } catch (e) {
+      console.log(red(`  ✗ Ecriture echouee: ${rel} (${e.message})`));
+    }
+  }
+}
+
 async function callChat(message, systemPrompt, hist) {
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
@@ -2439,6 +2508,9 @@ async function repl(opts = {}) {
         const recap = renderToolSummary(roundTools, lastToolBatchElapsedMs);
         if (recap) emit(recap);
       }
+      // Actions bloquees par le serveur (supervise/semi) : demander la
+      // permission puis les appliquer, comme Claude Code.
+      try { await applyBlockedAgentTools(roundTools); } catch {}
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
     }
