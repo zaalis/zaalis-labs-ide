@@ -316,12 +316,12 @@ function renderMarkdown(src) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Reveal `text` word-by-word into `el` (live typing effect), then replace it
-// with the final rendered HTML. Used for the chat reply and the lead synthesis.
+// Reveal `text` in bounded batches, then replace it with the final rendered
+// HTML. The model response is already complete at this point, so this is only
+// a visual effect and must never add a noticeable delay to a long answer.
 async function streamInto(el, text, finalHTML, signal, scrollEl) {
     const words = String(text).split(/(\s+)/);
-    // Reveal several words at a time for long answers so it never feels sluggish.
-    const chunk = words.length > 400 ? 4 : (words.length > 150 ? 2 : 1);
+    const chunk = Math.max(1, Math.ceil(words.length / 120));
     let acc = '';
     el.classList.add('md');
     for (let i = 0; i < words.length; i += chunk) {
@@ -364,10 +364,25 @@ document.addEventListener('click', e => {
     const img = e.target.closest && e.target.closest('.generated-image');
     if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
 });
+// Web links inside AI/system answers open in zaalis browser, so source links
+// from /deep-search stay in the same browsing workspace.
+document.addEventListener('click', async e => {
+    const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
+    if (!a || !a.closest('#chat-messages, #agents-log')) return;
+    const href = a.href;
+    if (!href) return;
+    e.preventDefault();
+    try {
+        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}`);
+        if (!r.ok) throw new Error('browser-open failed');
+    } catch {
+        window.open(href, '_blank', 'noopener,noreferrer');
+    }
+});
 
 function formatAIResponse(text) {
     const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
 
     if (isImageGen) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
@@ -391,8 +406,8 @@ function formatAIResponse(text) {
 }
 
 function isMaxReasoning() {
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const { model, submodel } = reasoningContext();
+    const modes = reasoningModes(model, submodel);
     return state.reasoningLevel === (modes.length - 1);
 }
 
@@ -472,6 +487,7 @@ async function readAgentEventStream(res, onEvent) {
         const clean = line.trim();
         if (!clean) return;
         let event = null;
+        let report = '';
         try {
             event = JSON.parse(clean);
         } catch {
@@ -516,13 +532,15 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             submodel,
             message,
             root: state.projectRoot,
-            permissionMode: state.permissionMode,
+            permissionMode: options.permissionMode || state.permissionMode,
             language: state.language || 'fr',
             config: safeConfig,
             reasoningLevel: state.reasoningLevel,
             images,
             history,
-            stream: wantsStream
+            stream: wantsStream,
+            useBrain: !!options.useBrain,
+            computerControl: !!options.computerControl
         }),
         signal
     });
@@ -754,8 +772,8 @@ function takePendingAgentDraft() {
 function setChatBusy(on) {
     const btn = $('#send-btn');
     document.body.classList.toggle('ai-busy', !!on);
-    if (typeof renderProjectPanelHistory === 'function') renderProjectPanelHistory(activeKind());
-    else if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+    // La liste des conversations vit dans la barre laterale gauche.
+    if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
     if (!btn) return;
     btn.classList.toggle('stop', on);
     btn.innerHTML = on ? STOP_ICON : SEND_ICON;
@@ -795,12 +813,43 @@ async function sendChat(input) {
             ? '\n\n[STYLE] Be thorough: consider edge cases, explain trade-offs, and verify with reads/searches when useful.'
             : '\n\n[STYLE] Sois approfondi : considère les cas limites, explique les compromis, et vérifie via lectures/recherches si utile.';
     }
+    // Pin this turn to its conversation. If the user switches to another chat
+    // (or opens another project) WHILE the AI is answering, the container gets
+    // wiped and state.chatHistory / currentConvId are replaced — without this
+    // binding the reply would land in a detached DOM node and corrupt the other
+    // conversation. We capture the id/project now and, on completion, either
+    // update the live view (still active) or persist straight to this
+    // conversation's stored messages (user navigated away).
+    if (!state.currentConvId) state.currentConvId = Date.now().toString();
+    const turnConvId = state.currentConvId;
+    const turnProject = projectLabel();
+    const turnProjectPath = state.projectRoot || null;
+
+    // A desktop request without the explicit mode would make the model answer
+    // normally but with no computer tool. State that cause in the chat instead
+    // of letting it look like a model failure.
+    const desktopRequest = /\b(ouvre|ouvrir|lance|lancer|active|activer|ecris|ecrire|tape|taper|clique|cliquer|cherche|chercher|recherche|open|launch|type|click|search)\b/i.test(message);
+    if (desktopRequest && !state.computerControlEnabled) {
+        addMsg($('#chat-messages'), 'system', null, lang === 'en'
+            ? 'PC control is inactive: this request will not be able to operate Notes or Chrome. Enable “PC control” in the attachment menu, then retry.'
+            : 'Contrôle PC inactif : cette demande ne pourra pas agir dans Notes ou Chrome. Active « Contrôle PC » dans le menu de pièces jointes, puis relance la demande.');
+    }
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
-    const liveActivity = createLiveAgentActivity($('#chat-messages'));
-    let liveActivityFinished = false;
+    // The response status remains the only spinner. The activity row below it
+    // carries the model notes and tool events in real time.
     const body = addTypingMsg($('#chat-messages'), modelLabel);
+    const liveActivity = createLiveAgentActivity($('#chat-messages'), Date.now(), (status) => {
+        if (typeof setThinkingStatus === 'function') setThinkingStatus(body, status);
+    }, body);
+    // Save the submitted message immediately. If the IDE closes while the
+    // agent is still working, reopening the chat shows the original request,
+    // never a transient loading bubble or malformed partial response.
+    saveConversation();
+    let liveActivityFinished = false;
+    // True only while this turn's conversation is still the one on screen.
+    const turnStillActive = () => state.currentConvId === turnConvId && body.isConnected;
 
     // For local models, limit history to avoid overflowing the context window.
     // Keep only the last N turns so the system prompt + project context fit.
@@ -827,13 +876,59 @@ async function sendChat(input) {
     setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            onEvent: (event) => {
+                handleAutomationEvent(event);
+                if (liveActivity) liveActivity.onEvent(event);
+            },
+            useBrain: !!state.useBrainChat,
+            computerControl: !!state.computerControlEnabled
         });
         stopThinking(body);
+        const terminalResult = Array.isArray(data.toolResults) && data.toolResults.find((item) => item && item.terminalSessionId);
+        if (terminalResult) attachIntegratedTerminal(terminalResult.terminalSessionId).catch(() => {});
+        // Build the assistant's memory entry regardless of where it lands.
+        const responseText = data.error ? '' : (data.response || '');
+        const formatted = data.error ? '' : formatAIResponse(responseText);
+        const isImg = !data.error && formatted.includes('generated-image');
+        let assistantMemory = responseText;
+        if (isImg) {
+            const am = responseText.match(/!\[([^\]]*)\]/);
+            assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
+        }
+        if (!data.error && Array.isArray(data.toolResults) && data.toolResults.length) {
+            const toolMemory = data.toolResults
+                .map(t => `[${t?.tool || 'outil'}] ${t?.summary || ''}\n${String(t?.text || '').slice(0, 4000)}`)
+                .join('\n\n');
+            assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
+        }
+        if (!data.error && Array.isArray(data.todos) && data.todos.length) {
+            const todoMemory = data.todos
+                .map(t => `- [${t.status || 'pending'}] ${t.content || ''}`)
+                .join('\n');
+            assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
+        }
+
+        const active = turnStillActive();
         if (data.error) {
-            if (liveActivity) liveActivity.fail(data.error);
-            body.textContent = data.error;
-            body.classList.add('error');
+            if (active) {
+                if (liveActivity) liveActivity.fail(data.error);
+                body.textContent = data.error;
+                body.classList.add('error');
+            }
+        } else if (!active) {
+            // The user navigated away mid-turn: never touch the current view.
+            // Persist the reply straight to the conversation it belongs to so it
+            // is there when they come back, and record it in that conversation's
+            // memory only if it is still loaded elsewhere (rare) — otherwise the
+            // stored messages are the source of truth on next open.
+            completed = true;
+            const duration = Date.now() - t0;
+            const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
+            const entries = [
+                { type: 'user', label: lang === 'en' ? 'You' : 'Vous', text: displayMsg },
+                { type: 'ai', label: modelLabel, html: reasoning + formatted, text: responseText }
+            ];
+            appendMessagesToStoredConversation('chat', turnConvId, entries, { project: turnProject, projectPath: turnProjectPath });
         } else {
             completed = true;
             if (liveActivity) {
@@ -843,9 +938,6 @@ async function sendChat(input) {
             const duration = Date.now() - t0;
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
-            const responseText = data.response || '';
-            const formatted = formatAIResponse(responseText);
-            const isImg = formatted.includes('generated-image');
             // Generated image = single rectangle (instant); text = streamed word-by-word.
             body.classList.toggle('has-image', isImg);
             if (isImg) {
@@ -854,30 +946,12 @@ async function sendChat(input) {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
                 await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
             }
-            if (!liveActivity && Array.isArray(data.toolResults) && data.toolResults.length) {
-                body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
-                followScroll($('#chat-messages'));
-            }
+            // Actions bloquées par le serveur (mode supervisé/semi) : demander
+            // la permission à l'utilisateur puis les appliquer, comme Claude Code.
+            // Skipped when the user switched away (nothing to approve in a hidden
+            // conversation, and it would target the wrong project root).
+            if (turnStillActive()) await applyBlockedAgentTools(data, $('#chat-messages'), lang);
 
-            // Update conversation memory + token meter. For images, keep a light
-            // placeholder in memory instead of the heavy base64 data URL.
-            let assistantMemory = responseText;
-            if (isImg) {
-                const am = responseText.match(/!\[([^\]]*)\]/);
-                assistantMemory = am && am[1] ? `[Image générée : ${am[1]}]` : '[Image générée]';
-            }
-            if (Array.isArray(data.toolResults) && data.toolResults.length) {
-                const toolMemory = data.toolResults
-                    .map(t => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
-                    .join('\n\n');
-                assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
-            }
-            if (Array.isArray(data.todos) && data.todos.length) {
-                const todoMemory = data.todos
-                    .map(t => `- [${t.status || 'pending'}] ${t.content || ''}`)
-                    .join('\n');
-                assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
-            }
             state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
             if (data.usage && data.usage.input != null) {
                 // Use actual token counts from the API when available.
@@ -889,12 +963,15 @@ async function sendChat(input) {
         }
     } catch (err) {
         stopThinking(body);
+        const active = turnStillActive();
         if (err && err.name === 'AbortError') {
             aborted = true;
-            if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
-            body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
-            restorePendingChatToInput();
-        } else {
+            if (active) {
+                if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
+                body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
+                restorePendingChatToInput();
+            }
+        } else if (active) {
             if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.');
             body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.';
             body.classList.add('error');
@@ -902,12 +979,52 @@ async function sendChat(input) {
     } finally {
         chatAbort = null;
         setChatBusy(false);
+        // Le contrôle PC est un mode explicite et persistant. Une tâche
+        // terminée ferme sa session/overlay, mais le mode reste armé pour la
+        // demande suivante jusqu'à ce que l'utilisateur le désactive ou stoppe.
     }
 
-    saveConversation();
+    // Only save/scan the live DOM when this turn's conversation is on screen —
+    // otherwise saveConversation would overwrite whichever conversation the
+    // user switched to with a mix of the two.
+    if (turnStillActive()) saveConversation();
     if (completed && !aborted && pendingChatDraft) {
-        const next = takePendingChatDraft();
-        if (next) setTimeout(() => sendChat(next), 0);
+        if (turnStillActive()) {
+            const next = takePendingChatDraft();
+            if (next) setTimeout(() => sendChat(next), 0);
+        } else {
+            // Turn finished in the background: don't fire the queued message into
+            // whatever conversation is now on screen — hand it back to the input.
+            restorePendingChatToInput();
+        }
+    }
+}
+
+// Append ready-made message entries to a conversation's stored history without
+// going through the live DOM (used when a turn finishes after the user has
+// navigated to another conversation). Creates the conversation if needed.
+function appendMessagesToStoredConversation(kind, convId, entries, meta = {}) {
+    const cfg = HIST[kind];
+    if (!cfg || !convId || !Array.isArray(entries) || !entries.length) return;
+    let conv = (state[cfg.store] || []).find(c => c.id === convId);
+    if (!conv) {
+        const title = (entries.find(e => e.type === 'user')?.text || 'Conversation').slice(0, 40);
+        conv = {
+            id: convId, title, date: new Date().toLocaleDateString(),
+            project: meta.project || null, projectPath: meta.projectPath || null, messages: []
+        };
+        state[cfg.store].push(conv);
+    }
+    conv.messages = (conv.messages || []).concat(entries);
+    if (!conv.project && meta.project) conv.project = meta.project;
+    if (!conv.projectPath && meta.projectPath) conv.projectPath = meta.projectPath;
+    persistChats(kind);
+    // If the user has navigated back to this exact conversation, re-render it so
+    // the freshly-appended reply appears without needing another switch.
+    if (state[cfg.current] === convId && typeof loadConversation === 'function') {
+        loadConversation(kind, convId);
+    } else {
+        renderHistory();
     }
 }
 
@@ -1012,6 +1129,18 @@ function commandCardHTML(cmd, output, opts = {}) {
     return `<details class="file-card tool-card command-card"><summary>${icon}<span class="file-card-name">${escapeHTML(title)}</span><span class="tool-badge">${escapeHTML(badge)}</span>${chevron}</summary><div class="file-card-body tool-card-body"><pre class="tool-pre">${escapeHTML(text)}</pre></div></details>`;
 }
 
+function commandFailure(execRes) {
+    if (!execRes) return '';
+    const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
+    const details = [];
+    if (text) details.push(text);
+    if (execRes.timedOut) details.push(`Timeout après ${Math.round((execRes.timeoutMs || 0) / 1000)}s`);
+    else if (Number(execRes.exitCode) !== 0) details.push(`[exit code ${execRes.exitCode}]`);
+    if (execRes.outputTruncated) details.push('[sortie tronquée à 10 Mo]');
+    if (execRes.error) details.push(execRes.error);
+    return details.join('\n') || 'Commande échouée.';
+}
+
 function agentToolCardHTML(result) {
     const lang = state.language || 'fr';
     const failed = !!(result && (result.error || result.blocked));
@@ -1033,6 +1162,9 @@ function toolDisplayName(result) {
     if (tool === 'task') return `sous-agent ${input.title || ''}`.trim();
     if (tool === 'todo') return 'todo';
     if (tool === 'run') return `run ${input.command || ''}`.trim();
+    if (tool === 'browser') return `browser ${input.url || ''}`.trim();
+    if (tool === 'image_search') return `image_search ${input.query || ''}`.trim();
+    if (tool === 'image_download') return `image_download ${input.path || ''}`.trim();
     return result.summary || tool || 'outil';
 }
 function toolRunDetailsHTML(results) {
@@ -1048,7 +1180,7 @@ function toolRunDetailsHTML(results) {
         const name = toolDisplayName(r);
         const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
         const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
-        return `<details class="ghost-tool-item">
+        return `<details class="ghost-tool-item${failed ? ' ghost-tool-failed' : ''}">
             <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
             <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
         </details>`;
@@ -1106,33 +1238,84 @@ function liveToolResultHTML(result) {
     return toolRunDetailsHTML([result]);
 }
 
-function createLiveAgentActivity(container) {
+// A single collapsed gray "command executed" row for the live timeline (one per
+// tool). Reuses the same ghost-tool styling as the collapsed end summary.
+function liveStepHTML(result, id) {
+    const lang = state.language || 'fr';
+    const tool = String(result && result.tool || '').toLowerCase();
+    const failed = !!(result && (result.error || result.blocked));
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    const idAttr = id ? ` data-live-tool-id="${escapeHTML(String(id))}"` : '';
+    if (tool === 'edit' || tool === 'write') {
+        const input = result.input || {};
+        const kind = tool === 'edit' ? (lang === 'en' ? 'Modified' : 'Modifie') : (lang === 'en' ? 'Written' : 'Ecrit');
+        const inner = tool === 'edit'
+            ? diffCardHTML(input.path || '', input.hunks || [])
+            : `<pre class="ghost-tool-pre">${escapeHTML(String(input.content || '') || '(vide)')}</pre>`;
+        return `<details class="ghost-tool-item ghost-file-change"${idAttr}>
+            <summary><span class="ghost-tool-name">${escapeHTML(kind)} ${escapeHTML(input.path || '')}</span>${chevron}</summary>
+            <div class="ghost-tool-nested">${inner}</div>
+        </details>`;
+    }
+    const name = toolDisplayName(result);
+    const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (result.tool || 'outil');
+    const text = result.text ? String(result.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
+    return `<details class="ghost-tool-item${failed ? ' ghost-tool-failed' : ''}"${idAttr}>
+        <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
+        <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
+    </details>`;
+}
+
+function createLiveAgentActivity(container, startedAt = Date.now(), onStatus = null, statusBody = null) {
     if (!container) return null;
     const lang = state.language || 'fr';
-    const startedAt = Date.now();
     const body = addMsg(container, 'ai', null, '', true);
     const msg = body.closest('.msg');
     if (msg) msg.classList.add('live-agent-msg');
     body.classList.add('live-agent-body', 'live-agent-active');
-    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
-    body.innerHTML = `
-        <details class="ghost-tool-group live-agent-activity" open>
-            <summary>
-                <span class="ghost-chevron">${chevron}</span>
-                <span class="live-agent-title">${lang === 'en' ? 'Analyzing' : 'Analyse en cours'}</span>
-                <span class="live-agent-status">${lang === 'en' ? 'Preparing context' : 'Preparation du contexte'}</span>
-            </summary>
-            <div class="ghost-tool-body live-agent-tools"></div>
-        </details>`;
-    const details = body.querySelector('.live-agent-activity');
-    const titleEl = body.querySelector('.live-agent-title');
-    const statusEl = body.querySelector('.live-agent-status');
-    const toolsEl = body.querySelector('.live-agent-tools');
+    // While the model works we show a LIVE timeline (not collapsed): its prose
+    // ("assistant_note") renders in white so you can watch it think, while each
+    // executed command is a collapsed gray ghost row you can expand. Only when
+    // the turn ends does finish() fold the whole thing into the compact
+    // "Analyse terminee en Xs" summary (unchanged end state).
+    body.innerHTML = '<div class="live-agent-stream"><div class="live-agent-timeline"></div></div>';
+    const timelineEl = body.querySelector('.live-agent-timeline');
+    const statusMsg = statusBody && statusBody.closest('.msg');
     let seenActivity = 0;
 
+    // During streaming, keep the provider label at the top of the answer while
+    // the active status follows the latest visible note or tool row. The final
+    // answer is restored to its normal position on finish.
+    let statusHost = null;
+    const placeStatusAtEnd = () => {
+        if (!msg || !statusMsg || !statusBody || msg.parentNode !== statusMsg.parentNode) return;
+        if (!statusHost) {
+            statusHost = document.createElement('div');
+            statusHost.className = 'live-agent-status-host msg-ai';
+        }
+        msg.after(statusHost);
+        statusHost.appendChild(statusBody);
+    };
+    const restoreFinalOrder = () => {
+        if (!statusMsg || !statusBody) return;
+        statusMsg.appendChild(statusBody);
+        if (statusHost) {
+            statusHost.remove();
+            statusHost = null;
+        }
+    };
+    placeStatusAtEnd();
+
     const setStatus = (text) => {
-        if (!statusEl || !text) return;
-        statusEl.textContent = text;
+        if (text && typeof onStatus === 'function') onStatus(text);
+    };
+    const statusForTool = (tool) => {
+        const name = String(tool || '').toLowerCase();
+        if (['run', 'command', 'shell'].includes(name)) return lang === 'en' ? 'Running the command' : 'Exécution de la commande';
+        if (['edit', 'write', 'image_download'].includes(name)) return lang === 'en' ? 'Reviewing changes' : 'Contrôle des modifications';
+        if (name === 'image_search') return lang === 'en' ? 'Searching images' : 'Recherche d’images';
+        if (['read', 'list', 'search', 'glob', 'grep'].includes(name)) return lang === 'en' ? 'Reading results' : 'Lecture des résultats';
+        return lang === 'en' ? 'Organizing information' : 'Organisation des informations';
     };
     const pendingHTML = (event) => {
         const id = String(event.id || '');
@@ -1146,40 +1329,79 @@ function createLiveAgentActivity(container) {
     };
     const replacePending = (event, html) => {
         const id = String(event.id || '');
-        const existing = id ? toolsEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
+        const existing = id ? timelineEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
         if (existing) existing.outerHTML = html;
-        else toolsEl.insertAdjacentHTML('beforeend', html);
+        else timelineEl.insertAdjacentHTML('beforeend', html);
+        followScroll(container);
+    };
+    // Fold the live timeline into the final collapsed summary. `inner` is the
+    // body HTML, `title`/`statusText` the summary line. Matches the previous
+    // end-of-turn layout exactly so persistence and styling are unchanged.
+    const collapseInto = (title, statusText, inner) => {
+        restoreFinalOrder();
+        const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+        body.classList.remove('live-agent-active');
+        body.innerHTML = `
+            <details class="ghost-tool-group live-agent-activity">
+                <summary>
+                    <span class="ghost-chevron">${chevron}</span>
+                    <span class="live-agent-title">${escapeHTML(title)}</span>
+                    <span class="live-agent-status">${escapeHTML(statusText)}</span>
+                </summary>
+                <div class="ghost-tool-body live-agent-tools">${inner}</div>
+            </details>`;
         followScroll(container);
     };
 
     return {
         onEvent(event) {
             if (!event || !event.type) return;
-            if (event.type === 'phase' || event.type === 'model_start') {
-                setStatus(event.label || (lang === 'en' ? 'Thinking' : 'Reflexion'));
+            if (event.type === 'phase') {
+                setStatus(lang === 'en' ? 'Analyzing the request' : 'Analyse de la demande');
+                return;
+            }
+            if (event.type === 'model_start') {
+                setStatus(lang === 'en' ? 'Waiting for the model action' : 'Attente de l’action du modèle');
+                return;
+            }
+            if (event.type === 'model_wait') {
+                const seconds = Math.max(1, Math.round(Number(event.elapsedMs || 0) / 1000));
+                setStatus(lang === 'en' ? `Waiting for the model (${seconds}s)` : `Attente du modèle (${seconds}s)`);
+                return;
+            }
+            if (event.type === 'final_response') {
+                setStatus(lang === 'en' ? 'Generating the final response' : 'Génération de la réponse finale');
+                return;
+            }
+            if (event.type === 'agent_log') {
+                const note = String(event.message || '').trim();
+                if (note) {
+                    seenActivity++;
+                    const level = event.level === 'warn' ? ' live-agent-warn' : '';
+                    timelineEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre live-agent-log${level}">${escapeHTML(note)}</pre>`);
+                    followScroll(container);
+                }
                 return;
             }
             if (event.type === 'tool_batch') {
-                const count = Number(event.count || 0);
-                setStatus(lang === 'en'
-                    ? `${count} ${count === 1 ? 'tool' : 'tools'} planned`
-                    : `${count} ${pluralFr(count, 'outil prevu', 'outils prevus')}`);
+                setStatus(lang === 'en' ? 'Organizing information' : 'Organisation des informations');
                 return;
             }
             if (event.type === 'assistant_note') {
                 const note = String(event.text || '').trim();
                 if (note) {
                     seenActivity++;
-                    toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(note)}</div>`);
-                    setStatus(lang === 'en' ? 'Planning tools' : 'Preparation des outils');
+                    // The model talking mid-turn: visible, white, markdown-rendered.
+                    timelineEl.insertAdjacentHTML('beforeend', `<div class="live-agent-say md">${renderMarkdown(note)}</div>`);
+                    setStatus(lang === 'en' ? 'Finding the best approach' : 'Recherche de la meilleure approche');
                     followScroll(container);
                 }
                 return;
             }
             if (event.type === 'tool_started') {
                 seenActivity++;
-                toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
-                setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
+                timelineEl.insertAdjacentHTML('beforeend', pendingHTML(event));
+                setStatus(statusForTool(event.tool));
                 followScroll(container);
                 return;
             }
@@ -1196,8 +1418,8 @@ function createLiveAgentActivity(container) {
                     events: event.events,
                     subToolResults: event.subToolResults,
                 };
-                replacePending(event, liveToolResultHTML(result));
-                setStatus(event.summary || toolDisplayName(result));
+                replacePending(event, liveStepHTML(result, event.id));
+                setStatus(lang === 'en' ? 'Checking the response' : 'Vérification de la réponse');
                 return;
             }
             if (event.type === 'error') {
@@ -1207,31 +1429,24 @@ function createLiveAgentActivity(container) {
         finish(data) {
             const results = Array.isArray(data && data.toolResults) ? data.toolResults : [];
             if (!results.length && !seenActivity) {
+                restoreFinalOrder();
                 if (msg) msg.remove();
                 return;
             }
-            if (titleEl) {
-                titleEl.textContent = lang === 'en'
-                    ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
-                    : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
-            }
-            setStatus(results.length
+            const title = lang === 'en'
+                ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
+                : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
+            const statusText = results.length
                 ? (lang === 'en' ? `${results.length} steps` : `${results.length} ${pluralFr(results.length, 'etape', 'etapes')}`)
-                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
-            const html = agentToolResultsHTML(results);
-            toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
-            if (details) details.removeAttribute('open');
-            body.classList.remove('live-agent-active');
-            followScroll(container);
+                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute');
+            const inner = agentToolResultsHTML(results) || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            collapseInto(title, statusText, inner);
         },
         fail(error) {
             seenActivity++;
-            if (titleEl) titleEl.textContent = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
-            setStatus(error || (lang === 'en' ? 'Agent error' : 'Erreur agent'));
-            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
-            body.classList.remove('live-agent-active');
-            if (details) details.removeAttribute('open');
-            followScroll(container);
+            const title = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
+            collapseInto(title, String(error || (lang === 'en' ? 'Agent error' : 'Erreur agent')),
+                `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
         }
     };
 }
@@ -1450,8 +1665,8 @@ async function handleAIResponse(response, agentName, container) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const execRes = await res.json();
             const duration = Math.round((Date.now() - t0) / 100) / 10;
-            if (execRes.error) {
-                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: execRes.error, duration }), true);
+            if (execRes.error || execRes.timedOut || Number(execRes.exitCode) !== 0) {
+                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: commandFailure(execRes), duration }), true);
             } else {
                 const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
                 addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
@@ -1463,6 +1678,139 @@ async function handleAIResponse(response, agentName, container) {
     }
 
     return { editErrors };
+}
+
+// Approbation supervisée (parité Claude Code) : en mode supervised/semi le
+// serveur bloque write/edit/run/image_download et renvoie chaque action bloquée avec son
+// input complet dans toolResults. On rejoue ici chaque action après accord
+// explicite de l'utilisateur — avant, ces actions étaient simplement perdues.
+async function applyBlockedAgentTools(data, out, lang) {
+    if (isReadOnlyMode() || !state.projectRoot) return;
+    const blocked = (Array.isArray(data && data.toolResults) ? data.toolResults : [])
+        .filter(r => r && r.blocked && ['write', 'edit', 'run', 'image_download'].includes(r.tool) && r.input);
+    if (!blocked.length) return;
+    let wroteAny = false;
+    const changes = [];
+    for (const r of blocked) {
+        const input = r.input || {};
+        if (r.tool === 'image_download') {
+            const id = String(input.id || '').trim();
+            const target = String(input.path || '').trim();
+            if (!id || !target) continue;
+            const desc = lang === 'en'
+                ? `The agent wants to download an open-licensed image to ${target}`
+                : `L'agent veut télécharger une image sous licence ouverte dans ${target}`;
+            const approved = await requestApproval(desc, `Résultat : ${id}\nDestination : ${target}`);
+            if (!approved) {
+                addMsg(out, 'system', null, lang === 'en' ? 'Image download refused.' : 'Téléchargement de l’image refusé.');
+                continue;
+            }
+            try {
+                const res = await fetch('/api/agent-image-download', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ root: state.projectRoot, id, path: target })
+                });
+                const result = await res.json().catch(() => ({}));
+                if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
+                const details = [
+                    lang === 'en' ? `Image downloaded: ${result.path || target}` : `Image téléchargée : ${result.path || target}`,
+                    result.attributionPath ? (lang === 'en' ? `Attribution: ${result.attributionPath}` : `Attribution : ${result.attributionPath}`) : ''
+                ].filter(Boolean).join('\n');
+                addMsg(out, 'system', null, details);
+                wroteAny = true;
+            } catch (err) {
+                addMsg(out, 'system', null, `${lang === 'en' ? 'Image download error' : 'Erreur de téléchargement de l’image'} ${target}: ${err.message}`);
+            }
+            continue;
+        }
+        if (r.tool === 'run') {
+            const cmd = String(input.command || '').trim();
+            if (!cmd) continue;
+            const dangerous = typeof isDangerousCommand === 'function' && isDangerousCommand(cmd);
+            const desc = dangerous
+                ? (lang === 'en' ? 'The agent wants to run a DANGEROUS command' : 'L\'agent veut exécuter une commande DANGEREUSE')
+                : (lang === 'en' ? 'The agent wants to run a command' : 'L\'agent veut exécuter une commande');
+            const approved = await requestApproval(desc, cmd);
+            if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); continue; }
+            const t0 = Date.now();
+            try {
+                const res = await fetch('/api/exec', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ command: cmd, cwd: state.projectRoot })
+                });
+                const execRes = await res.json().catch(() => ({}));
+                const duration = Math.round((Date.now() - t0) / 100) / 10;
+                if (!res.ok || execRes.error || execRes.timedOut || Number(execRes.exitCode) !== 0) {
+                    addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: commandFailure(execRes) || ('HTTP ' + res.status), duration }), true);
+                } else {
+                    const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
+                    addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
+                }
+            } catch (err) {
+                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: err.message, duration: Math.round((Date.now() - t0) / 100) / 10 }), true);
+            }
+            continue;
+        }
+        const targetFile = String(input.path || '');
+        if (!targetFile) continue;
+        let content;
+        if (r.tool === 'write') {
+            content = String(input.content || '');
+        } else {
+            let current = null;
+            try {
+                const res = await fetch(`/api/file?root=${encodeURIComponent(state.projectRoot)}&path=${encodeURIComponent(targetFile)}`);
+                const d = await res.json().catch(() => ({}));
+                if (res.ok && !d.error) current = d.content || '';
+            } catch {}
+            if (current === null) {
+                addMsg(out, 'system', null, `${lang === 'en' ? 'Edit failed' : 'Édition échouée'} — ${targetFile}: ${lang === 'en' ? 'file not found' : 'fichier introuvable'}`);
+                continue;
+            }
+            const isMarkdown = /\.(md|mdx)$/i.test(targetFile);
+            let working = current, failed = null;
+            for (const h of (input.hunks || [])) {
+                const rr = applyOneHunk(working, h.search || '', h.replace || '', isMarkdown);
+                if (!rr.ok) { failed = rr.error; break; }
+                working = rr.content;
+            }
+            if (failed) { addMsg(out, 'system', null, `${lang === 'en' ? 'Edit failed' : 'Édition échouée'} — ${targetFile}: ${failed}`); continue; }
+            if (working === current) continue;
+            content = working;
+        }
+        const desc = lang === 'en'
+            ? `The agent wants to ${r.tool === 'write' ? 'write' : 'edit'} ${targetFile}`
+            : `L'agent veut ${r.tool === 'write' ? 'écrire' : 'modifier'} ${targetFile}`;
+        const preview = r.tool === 'write'
+            ? content.slice(0, 500) + (content.length > 500 ? '\n...' : '')
+            : (input.hunks || []).map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n').slice(0, 500);
+        const approved = await requestApproval(desc, preview);
+        if (!approved) { addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusée.'); continue; }
+        try {
+            const res = await fetch('/api/file', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ root: state.projectRoot, path: targetFile, content })
+            });
+            const result = await res.json().catch(() => ({}));
+            if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
+            if (state.openFiles[targetFile]) {
+                state.openFiles[targetFile].content = content;
+                state.openFiles[targetFile].unsaved = false;
+            }
+            if (state.activeFile === targetFile) {
+                textarea.value = content;
+                updateGutter(content);
+                if (typeof renderHighlight === 'function') renderHighlight();
+                renderTabs();
+            }
+            changes.push({ tool: r.tool, input: r.tool === 'write' ? { path: targetFile, content } : { path: targetFile, hunks: input.hunks || [] } });
+            wroteAny = true;
+        } catch (err) {
+            addMsg(out, 'system', null, `${lang === 'en' ? 'Write error' : 'Erreur écriture'} ${targetFile}: ${err.message}`);
+        }
+    }
+    if (changes.length) addMsg(out, 'system', null, fileChangeDetailsHTML(changes), true);
+    if (wroteAny) await loadFileTree();
 }
 
 // When an ```edit block failed to apply (SEARCH not found / not unique), feed the
@@ -1654,9 +2002,12 @@ function acceptSlash() {
 
 // Decide whether a typed line is a command or a normal message.
 function handleChatSubmit() {
-    const text = slashInput.value.trim();
+    let text = slashInput.value.trim();
     if (!text) return;
     closeSlash();
+    // Raccourcis façon Claude Code : `!commande` = /run, `# note` = /remember.
+    if (text.startsWith('!') && text.length > 1) text = '/run ' + text.slice(1).trim();
+    else if (/^#\s+\S/.test(text)) text = '/remember ' + text.replace(/^#\s+/, '');
     if (text.startsWith('/')) {
         if (chatAbort) {
             const lang = state.language || 'fr';
@@ -1673,11 +2024,15 @@ function handleChatSubmit() {
         return;
     }
     if (chatAbort) {
-        if (queuePendingChat(text)) resetInput(slashInput);
+        if (queuePendingChat(text)) {
+            resetInput(slashInput);
+            continueVoiceAfterSubmit('chat-input');
+        }
         return;
     }
     sendChat(createChatDraft(text));
     resetInput(slashInput);
+    continueVoiceAfterSubmit('chat-input');
 }
 
 // Show/hide the menu as the user types a "/command" (no space yet).
@@ -1705,7 +2060,7 @@ $('#chat-input').addEventListener('keydown', e => {
 });
 $('#send-btn').addEventListener('click', () => {
     // While the AI is generating, the button is a "stop" circle -> cancel.
-    if (chatAbort) { chatAbort.abort(); return; }
+    if (chatAbort) { stopAutomationWork(); chatAbort.abort(); return; }
     handleChatSubmit();
 });
 
@@ -1802,8 +2157,10 @@ async function sendAgentTask(input) {
     let context = '';
     let completedCount = 0;
 
-    // Run worker agents sequentially — each only contributes to the shared context.
-    for (const { agent, role, submodel } of workers) {
+    // Workers are isolated read-only investigations. Run them in parallel: they
+    // use the same server-side agent/tool loop as Chat and CLI, but cannot edit
+    // files or execute commands. Only the lead can propose mutations.
+    const workerReports = await Promise.all(workers.map(async ({ agent, role, submodel }) => {
         const card = $(`.agent-card[data-agent="${agent}"]`);
         card.classList.add('working');
         const badge = card.querySelector('.agent-badge');
@@ -1820,21 +2177,19 @@ async function sendAgentTask(input) {
 
         const isLocalAgent = agent === 'local' || agent === 'gguf';
         const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(isLocalAgent, modelIdentity(agent, submodel, lang))}${projCtx}`;
-        const fullMessage = context
-            ? (lang === 'en'
-                ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}`
-                : `[Contexte des agents precedents]:\n${context}\n\n[Tache utilisateur]: ${task}`)
-            : task;
+        const fullMessage = lang === 'en'
+            ? `[Role: ${roleLabel}]\n[User task]: ${task}\n\nInvestigate independently. Use read/search tools, report evidence and recommendations. Do not modify files or run commands.`
+            : `[Rôle : ${roleLabel}]\n[Tâche utilisateur] : ${task}\n\nEnquête indépendamment. Utilise les outils de lecture/recherche, rends des preuves et recommandations. Ne modifie aucun fichier et n'exécute aucune commande.`;
 
         try {
-            const data = await callAI(agent, submodel, fullMessage, systemPrompt, taskImages);
+        const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], { permissionMode: 'read-only', useBrain: !!state.useBrainAgents });
             if (data.error) {
                 statusText.textContent = lang === 'en' ? 'error' : 'erreur';
                 statusText.classList.add('err');
             } else {
                 statusText.textContent = TRANSLATIONS[lang]['lead-thinking-done'];
                 statusText.classList.add('ok');
-                context += `\n[${labels[agent]} (${roleLabel})]: ${data.response}\n`;
+                report = `[${labels[agent]} (${roleLabel})]: ${data.response || '(aucun rapport)'}`;
             }
         } catch (err) {
             statusText.textContent = lang === 'en' ? 'connection error' : 'erreur de connexion';
@@ -1848,7 +2203,9 @@ async function sendAgentTask(input) {
         completedCount++;
         teamProgress.textContent = `${completedCount}/${workers.length}`;
         followScroll(agentsLog);
-    }
+        return report;
+    }));
+    context = workerReports.filter(Boolean).join('\n\n');
 
     // Workers done — stop the animation, keep their statuses for a collapsed recap.
     stopWave(waveCanvas);
@@ -1891,7 +2248,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     startThinking(streamTarget);
 
     try {
-        const data = await callAI(leadAgent.agent, leadAgent.submodel, leadMessage, leadSystemPrompt, taskImages);
+        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], { useBrain: !!state.useBrainAgents });
         stopThinking(streamTarget);
         if (data.error) {
             streamTarget.textContent = data.error;
@@ -1903,19 +2260,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             } else {
                 await streamInto(streamTarget, data.response, formatted, null, agentsLog);
             }
-            const applied = await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
-            if (applied && applied.editErrors && applied.editErrors.length) {
-                await resolveEditRetries(applied.editErrors, leadAgent.agent, leadAgent.submodel, leadIsLocal, lang, 0, {
-                    container: '#agents-log',
-                    history: [
-                        { role: 'user', content: leadMessage },
-                        { role: 'assistant', content: data.response }
-                    ],
-                    modelLabel: labels[leadAgent.agent],
-                    persistToChat: false,
-                    saveKind: 'agents'
-                });
-            }
+            await applyBlockedAgentTools(data, agentsLog, lang);
         }
     } catch (err) {
         stopThinking(streamTarget);
@@ -1944,11 +2289,15 @@ function handleAgentsSubmit() {
     const text = input.value.trim();
     if (!text) return;
     if (agentTaskRunning) {
-        if (queuePendingAgent(text)) resetInput(input);
+        if (queuePendingAgent(text)) {
+            resetInput(input);
+            continueVoiceAfterSubmit('agents-input');
+        }
         return;
     }
     sendAgentTask(text);
     resetInput(input);
+    continueVoiceAfterSubmit('agents-input');
 }
 $('#agents-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -1983,24 +2332,46 @@ function projectLabel() {
     return parts[parts.length - 1] || null;
 }
 
+const PERSISTED_MSG_CLASSES = [
+    'deep-search-host',
+    'has-image',
+    'max-reasoning-text'
+];
+function persistedBodyClasses(body) {
+    if (!body) return [];
+    return PERSISTED_MSG_CLASSES.filter((cls) => body.classList.contains(cls));
+}
+function shouldPersistRichHTML(body, entry) {
+    if (!body || entry.type === 'user') return false;
+    return body.classList.contains('deep-search-host') ||
+        body.classList.contains('has-image') ||
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+}
+
 function saveConversation(kind = 'chat') {
     const cfg = HIST[kind];
     const data = [];
     $(cfg.container).querySelectorAll('.msg').forEach(m => {
         const label = m.querySelector('.msg-label');
         const body = m.querySelector('.msg-body');
+        // Loading UI is not conversation content. Keeping it would turn an
+        // interrupted request into a bogus assistant message after reopening.
+        if (body && (body.classList.contains('thinking') || body.classList.contains('live-agent-active'))) return;
         const img = body && body.querySelector('.generated-image');
         const entry = {
             label: label ? label.textContent : null,
             text: body ? body.textContent : '',
             type: m.classList.contains('msg-system') ? 'system' : m.classList.contains('msg-user') ? 'user' : 'ai'
         };
+        const classes = persistedBodyClasses(body);
+        if (classes.length) entry.bodyClasses = classes;
+        if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
         data.push(entry);
     });
 
-    if (data.length <= 1) return; // only the default system message
+    if (!data.some(entry => entry.type === 'user')) return; // only placeholder UI
 
     const title = data.find(d => d.type === 'user')?.text?.substring(0, 40) || 'Conversation';
     const project = projectLabel();          // folder name (mobile groups by it)
@@ -2030,22 +2401,37 @@ function saveConversation(kind = 'chat') {
 // Last server snapshot per kind — drives the live history sync below so we only
 // re-render when conversations actually changed (and ignore our own writes).
 const _chatSnap = { chat: '', agents: '' };
+const _chatWrites = { chat: Promise.resolve(), agents: Promise.resolve() };
+const _chatWritePending = { chat: false, agents: false };
 
-// Save a kind's conversations to the server (debounced, per kind).
-const _persistTimers = {};
+// Save a kind's conversations to the server immediately. A sent request must
+// survive a close/relaunch even if the app is quit right after submitting it.
 function persistChats(kind = 'chat') {
     const cfg = HIST[kind];
-    clearTimeout(_persistTimers[kind]);
-    _persistTimers[kind] = setTimeout(() => {
-        // Our own write becomes the next expected server state — don't let the
-        // live sync treat it as an external change and re-render needlessly.
-        _chatSnap[kind] = JSON.stringify(state[cfg.store] || []);
-        fetch('/api/chats', {
+    // Our own write becomes the next expected server state — don't let the
+    // live sync treat it as an external change and re-render needlessly.
+    const snapshot = JSON.stringify(state[cfg.store] || []);
+    _chatSnap[kind] = snapshot;
+    _chatWritePending[kind] = true;
+    // Serialize writes and capture the state now. This prevents an older,
+    // delayed save from restoring a deleted conversation. Do not use fetch
+    // keepalive: browsers cap its body near 64 KiB, while saved chats can be
+    // much larger (images and long model replies).
+    const write = _chatWrites[kind].catch(() => {}).then(async () => {
+        const res = await fetch('/api/chats', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ kind, conversations: state[cfg.store] })
-        }).catch(() => {});
-    }, 400);
+            body: JSON.stringify({ kind, conversations: JSON.parse(snapshot) })
+        });
+        if (!res.ok) throw new Error(`Sauvegarde des conversations impossible (HTTP ${res.status}).`);
+        _chatSnap[kind] = snapshot;
+    });
+    _chatWrites[kind] = write;
+    write.finally(() => {
+        // A newer queued write still owns the pending flag.
+        if (_chatWrites[kind] === write) _chatWritePending[kind] = false;
+    }).catch(() => {});
+    return write;
 }
 
 // Load both histories (chat + agents) from the server.
@@ -2084,8 +2470,13 @@ async function syncChatsFromServer() {
     if (document.hidden) return;
     if (chatAbort) return; // never mutate the stores while a request is in flight
     let changed = false;
+    // Kinds whose currently-open conversation was replaced by a newer server
+    // version (typically because the phone remote appended a message to it).
+    // We re-render its container after the merge so the new messages appear.
+    const reopenCur = [];
     for (const kind of ['chat', 'agents']) {
         const cfg = HIST[kind];
+        if (_chatWritePending[kind]) continue;
         try {
             const res = await fetch('/api/chats?kind=' + kind);
             if (!res.ok) continue;
@@ -2093,20 +2484,38 @@ async function syncChatsFromServer() {
             const snap = JSON.stringify(Array.isArray(server) ? server : []);
             if (snap === _chatSnap[kind]) continue; // unchanged since last seen
             _chatSnap[kind] = snap;
-            state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], state[cfg.current]);
+            const curId = state[cfg.current];
+            const prevCur = (state[cfg.store] || []).find(c => c.id === curId);
+            state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], curId);
+            const nextCur = (state[cfg.store] || []).find(c => c.id === curId);
+            if (curId && nextCur && nextCur !== prevCur) reopenCur.push(kind);
             changed = true;
         } catch {}
     }
     if (changed) renderHistory();
+    // Reopen after renderHistory so the sidebar's active row stays in sync.
+    reopenCur.forEach(kind => { try { loadConversation(kind, state[HIST[kind].current]); } catch {} });
 }
 
-// Server is the source of truth across devices, but keep the local copy of the
-// conversation currently open (it may hold messages not yet persisted) and any
-// local conversation the server doesn't know about yet (just started here).
+// Server is the source of truth across devices. Keep local versions only for
+// conversations the server doesn't know about yet (just started on this
+// desktop and not persisted). For the conversation currently open, adopt the
+// server version whenever it's actually different — that's how a message the
+// phone appended shows up on the PC without losing an in-flight desktop reply.
 function mergeConversations(local, server, curId) {
     const localById = new Map(local.map(c => [c.id, c]));
     const serverIds = new Set(server.map(c => c.id));
-    const merged = server.map(c => (c.id === curId && localById.has(curId)) ? localById.get(curId) : c);
+    const merged = server.map(c => {
+        if (c.id !== curId) return c;
+        const localCur = localById.get(curId);
+        if (!localCur) return c;
+        const localMsgs = (localCur.messages || []).length;
+        const serverMsgs = (c.messages || []).length;
+        // Server has fewer messages -> our local reply is not persisted yet;
+        // keep local so it doesn't get wiped by a mid-flight poll.
+        if (serverMsgs < localMsgs) return localCur;
+        return c;
+    });
     local.forEach(c => { if (!serverIds.has(c.id)) merged.push(c); });
     return merged;
 }
@@ -2125,8 +2534,12 @@ function loadConversation(kind, id) {
     const container = $(cfg.container);
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
-        const body = addMsg(container, m.type, m.label, m.text || '');
-        if (m.image && m.image.url) {
+        const hasRichHtml = m.html && m.type !== 'user';
+        const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
+            if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
+        });
+        if (!hasRichHtml && m.image && m.image.url) {
             body.innerHTML = imageBubble(m.image.url, m.image.alt || '');
             body.classList.add('has-image');
         }
@@ -2246,19 +2659,24 @@ function renderProjectPanelHistory(kind = activeKind()) {
 }
 
 function renderHistory() {
+    // La liste des conversations est desormais uniquement dans la barre
+    // laterale gauche (renderSidebarConversations). On la rafraichit donc ici,
+    // sur chaque evenement (sauvegarde, suppression, chargement, nouveau chat),
+    // pour remplacer l'ancien panneau « Historique » de droite qui a ete retire.
     if (!state.projectRoot) {
         if (typeof loadFileTree === 'function') {
-            loadFileTree();
+            loadFileTree();          // peuple la liste « sans projet » a gauche
+        } else if (typeof renderSidebarConversations === 'function') {
+            renderSidebarConversations();
         }
-        renderProjectPanelHistory('chat');
-        renderProjectPanelHistory('agents');
         return;
     }
     if (typeof initRecentProjects === 'function') {
         initRecentProjects();
     }
-    renderProjectPanelHistory('chat');
-    renderProjectPanelHistory('agents');
+    if (typeof renderSidebarConversations === 'function') {
+        renderSidebarConversations();
+    }
 }
 
 // Start a brand-new conversation for the given kind (in the current context).
@@ -2285,13 +2703,19 @@ async function deleteConversation(kind, id) {
     });
     if (!ok) return;
 
+    const previous = state[cfg.store];
     state[cfg.store] = state[cfg.store].filter(c => c.id !== id);
     if (state[cfg.current] === id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
     }
-    persistChats(kind);
+    try {
+        await persistChats(kind);
+    } catch (err) {
+        state[cfg.store] = previous;
+        showToast('Conversations', err.message || 'La suppression n’a pas pu être enregistrée.', { icon: '!' });
+    }
     renderHistory();
 }
 
@@ -2439,6 +2863,32 @@ function setupAttachMenu(btnId, menuId) {
             menu.classList.remove('open');
         });
     });
+    const brainToggle = menu.querySelector('[data-brain-toggle]');
+    if (brainToggle) brainToggle.addEventListener('click', async () => {
+        const key = brainToggle.dataset.brainToggle === 'agents' ? 'useBrainAgents' : 'useBrainChat';
+        const next = !state[key];
+        if (next) {
+            try {
+                const res = await fetch('/api/brain-mcp');
+                const status = await res.json();
+                if (!res.ok || status.state !== 'connected' || !status.enabled) throw new Error(status.detail || 'MCP indisponible');
+            } catch (err) {
+                const lang = state.language || 'fr';
+                showToast('Zaalis Brain', lang === 'en' ? 'Connect it first in Settings → MCP.' : 'Connectez-le d’abord dans Paramètres → MCP.', { icon: '!' });
+                return;
+            }
+        }
+        state[key] = next;
+        brainToggle.classList.toggle('active', next);
+        brainToggle.setAttribute('aria-pressed', String(next));
+        menu.classList.remove('open');
+    });
+    const computerToggle = menu.querySelector('[data-computer-toggle]');
+    if (computerToggle) computerToggle.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await setComputerControlEnabled(!state.computerControlEnabled);
+        menu.classList.remove('open');
+    });
 }
 setupAttachMenu('chat-attach-btn', 'chat-attach-menu');
 setupAttachMenu('agents-attach-btn', 'agents-attach-menu');
@@ -2453,6 +2903,43 @@ if (attachInput) attachInput.addEventListener('change', e => {
     e.target.value = '';
 });
 
+// Drag-and-drop and paste images/files straight onto a composer — a reliable
+// alternative to the "+" menu's native picker (which some sandboxes block).
+function setupComposerDropPaste(inputSel) {
+    const input = $(inputSel);
+    const area = input && input.closest('.chat-input-area');
+    if (!area) return;
+    const addFiles = (files) => {
+        const list = [...(files || [])].filter(Boolean);
+        if (list.length) list.forEach(addAttachment);
+        return list.length;
+    };
+    ['dragenter', 'dragover'].forEach(evt => area.addEventListener(evt, e => {
+        if (!e.dataTransfer || ![...(e.dataTransfer.types || [])].includes('Files')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        area.classList.add('drag-hover');
+    }));
+    ['dragleave', 'dragend'].forEach(evt => area.addEventListener(evt, e => {
+        if (e.target === area) area.classList.remove('drag-hover');
+    }));
+    area.addEventListener('drop', e => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        area.classList.remove('drag-hover');
+        addFiles(e.dataTransfer.files);
+    });
+    // Paste an image from the clipboard (screenshot, copied file).
+    if (input) input.addEventListener('paste', e => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        const files = [...items].filter(it => it.kind === 'file').map(it => it.getAsFile()).filter(Boolean);
+        if (files.length) { e.preventDefault(); addFiles(files); }
+    });
+}
+setupComposerDropPaste('#chat-input');
+setupComposerDropPaste('#agents-input');
+
 // --- Vision (image) compatibility per model (from official provider docs) ---
 function isVisionCompatible(model, submodel) {
     const s = (submodel || '').toLowerCase();
@@ -2461,8 +2948,8 @@ function isVisionCompatible(model, submodel) {
         case 'claude': return true;                 // Claude 3/3.5/3.7/4.x: vision
         case 'codex':                               // OpenAI: vision except the *-mini reasoning models
             return !(s.includes('o3-mini') || s.includes('o1-mini'));
-        case 'grok':  return s.includes('grok-4');  // xAI: Grok 4 has vision, Grok 3 does not
-        case 'mistral': return s.includes('pixtral'); // Mistral: only Pixtral models have vision
+        case 'grok':  return s === 'grok-4.5' || s === 'grok-4.3' || s === 'grok-build-0.1';
+        case 'mistral': return !s.includes('codestral');
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default: return false;
@@ -2506,46 +2993,51 @@ function updateAttachAvailability() {
     }
 }
 
-const REASONING_MODES = {
-    codex: [
-        { label: 'HIGH', effort: 'high' },
-        { label: 'MED', effort: 'medium' },
-        { label: 'LOW', effort: 'low' },
-        { label: 'OFF', effort: 'none' }
-    ],
-    claude: [
-        { label: 'MAX', budget: 8192 },
-        { label: 'HIGH', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gemini: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    grok: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'OFF', budget: 0 }
-    ],
-    mistral: [
-        { label: 'ON', budget: 1 },
-        { label: 'OFF', budget: 0 }
-    ],
+const REASONING_PRESETS = {
+    none: ['OFF'],
+    offLowMedHigh: ['HIGH', 'MED', 'LOW', 'OFF'],
+    lowMedHigh: ['HIGH', 'MED', 'LOW'],
+    offLowMedHighXhigh: ['XHIGH', 'HIGH', 'MED', 'LOW', 'OFF'],
+    offLowMedHighXhighMax: ['MAX', 'XHIGH', 'HIGH', 'MED', 'LOW', 'OFF'],
+    lowMedHighXhigh: ['XHIGH', 'HIGH', 'MED', 'LOW'],
+    lowMedHighXhighMax: ['MAX', 'XHIGH', 'HIGH', 'MED', 'LOW'],
+    minimalLowMedHigh: ['HIGH', 'MED', 'LOW', 'MIN'],
+    offHigh: ['HIGH', 'OFF'],
     local: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
+        'MAX', 'MED', 'OFF'
     ],
     gguf: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
+        'MAX', 'MED', 'OFF'
     ]
 };
+
+function reasoningModes(model, submodel) {
+    const s = String(submodel || '').toLowerCase();
+    let labels = null;
+    if (model === 'codex') {
+        if (s.startsWith('gpt-5.6')) labels = REASONING_PRESETS.offLowMedHighXhighMax;
+        else if (/^gpt-5\.(5|4|2)/.test(s)) labels = REASONING_PRESETS.offLowMedHighXhigh;
+        else if (s.startsWith('gpt-5.1')) labels = REASONING_PRESETS.offLowMedHigh;
+        else if (/^(o1|o3-mini)/.test(s)) labels = REASONING_PRESETS.lowMedHigh;
+    } else if (model === 'claude') {
+        if (s === 'claude-fable-5') labels = REASONING_PRESETS.lowMedHighXhighMax;
+        else if (s === 'claude-opus-4-8' || s === 'claude-sonnet-5') labels = REASONING_PRESETS.offLowMedHighXhighMax;
+        else if (s === 'claude-haiku-4-5') labels = ['MAX', 'HIGH', 'MED', 'LOW', 'OFF'];
+    } else if (model === 'gemini') {
+        if (s === 'gemini-3.1-pro-preview' || s === 'gemini-2.5-pro') labels = REASONING_PRESETS.lowMedHigh;
+        else if (s.startsWith('gemini-3')) labels = REASONING_PRESETS.minimalLowMedHigh;
+        else if (s.startsWith('gemini-2.5')) labels = REASONING_PRESETS.offLowMedHigh;
+    } else if (model === 'grok') {
+        if (s === 'grok-4.5') labels = REASONING_PRESETS.lowMedHigh;
+        else if (s === 'grok-4.3') labels = REASONING_PRESETS.offLowMedHigh;
+        else if (s === 'grok-4.20-multi-agent-0309') labels = REASONING_PRESETS.lowMedHighXhigh;
+    } else if (model === 'mistral') {
+        if (s === 'mistral-medium-3-5' || s === 'mistral-small-latest') labels = REASONING_PRESETS.offHigh;
+    } else if (model === 'local' || model === 'gguf') {
+        labels = REASONING_PRESETS[model];
+    }
+    return (labels || REASONING_PRESETS.none).map(label => ({ label }));
+}
 
 // Determine which agent acts as the lead (chef de projet) right now.
 function currentLeadAgent() {
@@ -2577,14 +3069,12 @@ function reasoningContext() {
 }
 
 function isReasoningCompatible(model, submodel) {
-    if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
-    // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
-    if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
+    if (model === 'codex' && (/^gpt-5\.(6|5|4|2|1)/.test(submodel) || /^(o1|o3-mini)/.test(submodel))) return true;
+    if (model === 'claude' && ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'].includes(submodel)) return true;
+    if (model === 'gemini' && (submodel.startsWith('gemini-3') || submodel.startsWith('gemini-2.5'))) return true;
     if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
-    // Grok 4.x reasoning models reason natively and reject reasoning_effort,
-    // so there is no controllable budget to expose — keep the slider locked.
-    if (model === 'mistral' && submodel.includes('magistral')) return true; // Magistral = reasoning model
+    if (model === 'grok' && ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309'].includes(submodel)) return true;
+    if (model === 'mistral' && ['mistral-medium-3-5', 'mistral-small-latest'].includes(submodel)) return true;
     return false;
 }
 
@@ -2593,8 +3083,8 @@ function updateSliderVisuals() {
     if (!sliderBar) return;
     const handle = sliderBar.querySelector('.slider-handle');
     const notches = sliderBar.querySelectorAll('.slider-notch');
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const { model, submodel } = reasoningContext();
+    const modes = reasoningModes(model, submodel);
 
     const totalLevels = modes.length;
     const currentLevel = state.reasoningLevel;
@@ -2621,7 +3111,7 @@ function checkReasoningCompatibility() {
     if (!sliderBar) return;
     
     const compatible = isReasoningCompatible(model, submodel);
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const modes = reasoningModes(model, submodel);
     const track = sliderBar.querySelector('.slider-track');
     const handle = sliderBar.querySelector('.slider-handle');
 
@@ -2692,8 +3182,8 @@ function initReasoningSlider() {
         const notch = e.target.closest('.slider-notch');
         if (notch) {
             const level = parseInt(notch.dataset.level);
-            const model = reasoningContext().model;
-            const modes = REASONING_MODES[model] || REASONING_MODES.local;
+            const { model, submodel } = reasoningContext();
+            const modes = reasoningModes(model, submodel);
             const totalLevels = modes.length;
             const targetPercentage = (1 - (level / (totalLevels - 1))) * 100;
             handle.style.top = targetPercentage + '%';
@@ -2720,8 +3210,8 @@ function initReasoningSlider() {
         const percentage = yPercent * 100;
         handle.style.top = percentage + '%';
 
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
+        const { model, submodel } = reasoningContext();
+        const modes = reasoningModes(model, submodel);
         const totalLevels = modes.length;
         
         let snapLevel = 0;
@@ -2757,8 +3247,8 @@ function initReasoningSlider() {
         yPercent = Math.max(0, Math.min(1, yPercent));
         const percentage = yPercent * 100;
 
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
+        const { model, submodel } = reasoningContext();
+        const modes = reasoningModes(model, submodel);
         const totalLevels = modes.length;
 
         let level = 0;
@@ -2781,10 +3271,113 @@ function initReasoningSlider() {
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
+const voiceControllers = new Map();
+function continueVoiceAfterSubmit(textareaId) {
+    const controller = voiceControllers.get(textareaId);
+    if (controller && typeof controller.afterSubmit === 'function') controller.afterSubmit();
+}
+
+function setupMacNativeVoiceRecognition(btn, textarea) {
+    const nativeSpeech = window.zaalisNative && window.zaalisNative.speech;
+    if (!nativeSpeech || typeof nativeSpeech.start !== 'function' || typeof nativeSpeech.stop !== 'function') return false;
+
+    let engineState = 'inactive';
+    let baseText = '';
+    let detachNativeEvents = null;
+
+    if (typeof nativeSpeech.supported === 'function') {
+        nativeSpeech.supported().then((supported) => {
+            if (!supported) btn.style.display = 'none';
+        }).catch(() => {});
+    }
+
+    function setRecording(active, starting) {
+        btn.classList.toggle('recording', !!active);
+        textarea.classList.toggle('recording-text', !!active);
+        if (starting) btn.title = state.language === 'en' ? 'Starting voice dictation...' : 'Démarrage de la dictée vocale...';
+        else if (active) btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
+        else btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
+    }
+
+    function applyTranscript(text) {
+        const transcript = String(text || '').trim();
+        const separator = (baseText && !baseText.endsWith(' ') && transcript) ? ' ' : '';
+        textarea.value = baseText ? `${baseText}${separator}${transcript}` : transcript;
+        autoGrow(textarea);
+        textarea.dispatchEvent(new Event('input'));
+    }
+
+    function cleanupState() {
+        engineState = 'inactive';
+        setRecording(false, false);
+    }
+
+    detachNativeEvents = nativeSpeech.onEvent((event) => {
+        if (!event || engineState === 'inactive') return;
+        if (event.status === 'ready') {
+            engineState = 'active';
+            setRecording(true, false);
+        } else if (event.status === 'transcript') {
+            applyTranscript(event.text);
+        } else if (event.status === 'error') {
+            console.error('Speech recognition error:', event.error);
+            cleanupState();
+        } else if (event.status === 'end') {
+            cleanupState();
+        }
+    });
+
+    async function startRecording() {
+        if (engineState !== 'inactive') return;
+        engineState = 'starting';
+        baseText = textarea.value;
+        setRecording(true, true);
+        try {
+            const language = state.language === 'en' ? 'en-US' : 'fr-FR';
+            const result = await nativeSpeech.start(language);
+            if (!result || !result.ok) throw new Error((result && result.error) || 'speech-start-failed');
+        } catch (err) {
+            console.error('Failed to start speech recognition:', err);
+            cleanupState();
+        }
+    }
+
+    async function stopRecording() {
+        if (engineState !== 'active' && engineState !== 'starting') return;
+        engineState = 'stopping';
+        try {
+            await nativeSpeech.stop();
+        } catch (err) {
+            console.error('Failed to stop speech recognition:', err);
+            cleanupState();
+        }
+    }
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (engineState === 'active' || engineState === 'starting') {
+            stopRecording();
+        } else if (engineState === 'inactive') {
+            startRecording();
+        }
+    });
+
+    window.addEventListener('beforeunload', () => {
+        if (detachNativeEvents) detachNativeEvents();
+        if (engineState !== 'inactive') nativeSpeech.stop().catch(() => {});
+    });
+
+    return true;
+}
+
 function setupVoiceRecognition(btnId, textareaId) {
     const btn = $('#' + btnId);
     const textarea = $('#' + textareaId);
     if (!btn || !textarea) return;
+
+    if (window.zaalisNative && window.zaalisNative.platform === 'darwin' && setupMacNativeVoiceRecognition(btn, textarea)) {
+        return;
+    }
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SpeechRecognition) {
@@ -2799,15 +3392,20 @@ function setupVoiceRecognition(btnId, textareaId) {
     // Track state: 'inactive' | 'starting' | 'active' | 'stopping'
     let engineState = 'inactive';
     let baseText = '';
+    let desiredActive = false;
+    let ignoreResults = false;
+    let restartTimer = null;
 
     recognition.onstart = () => {
         engineState = 'active';
+        ignoreResults = false;
         btn.classList.add('recording');
         textarea.classList.add('recording-text');
         btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
     };
 
     recognition.onresult = (event) => {
+        if (ignoreResults) return;
         let sessionTranscript = '';
         for (let i = 0; i < event.results.length; ++i) {
             sessionTranscript += event.results[i][0].transcript;
@@ -2822,11 +3420,20 @@ function setupVoiceRecognition(btnId, textareaId) {
     };
 
     recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        cleanupState();
+        if (event.error !== 'aborted' && event.error !== 'no-speech') console.error("Speech recognition error:", event.error);
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') desiredActive = false;
+        if (!desiredActive) cleanupState();
     };
 
     recognition.onend = () => {
+        engineState = 'inactive';
+        if (desiredActive) {
+            btn.classList.add('recording');
+            textarea.classList.add('recording-text');
+            clearTimeout(restartTimer);
+            restartTimer = setTimeout(startEngine, 140);
+            return;
+        }
         cleanupState();
     };
 
@@ -2837,7 +3444,7 @@ function setupVoiceRecognition(btnId, textareaId) {
         btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
     }
 
-    function startRecording() {
+    function startEngine() {
         if (engineState !== 'inactive') return;
         engineState = 'starting';
         baseText = textarea.value;
@@ -2846,12 +3453,21 @@ function setupVoiceRecognition(btnId, textareaId) {
             recognition.start();
         } catch (err) {
             console.error("Failed to start speech recognition:", err);
+            desiredActive = false;
             cleanupState();
         }
     }
 
+    function startRecording() {
+        desiredActive = true;
+        startEngine();
+    }
+
     function stopRecording() {
         if (engineState !== 'active' && engineState !== 'starting') return;
+        desiredActive = false;
+        ignoreResults = true;
+        clearTimeout(restartTimer);
         engineState = 'stopping';
         try {
             recognition.stop();
@@ -2869,8 +3485,194 @@ function setupVoiceRecognition(btnId, textareaId) {
             startRecording();
         }
     });
+
+    // Sending a dictated message commits the current transcript, clears the
+    // composer and immediately starts a fresh recognition session. The mic
+    // therefore remains visibly active without re-inserting the text that was
+    // just sent (Web Speech results are cumulative within one session).
+    voiceControllers.set(textareaId, {
+        afterSubmit() {
+            baseText = '';
+            if (!desiredActive) return;
+            ignoreResults = true;
+            if (engineState === 'active' || engineState === 'starting') {
+                engineState = 'stopping';
+                try { recognition.stop(); }
+                catch {
+                    engineState = 'inactive';
+                    clearTimeout(restartTimer);
+                    restartTimer = setTimeout(startEngine, 140);
+                }
+            } else if (engineState === 'inactive') {
+                clearTimeout(restartTimer);
+                restartTimer = setTimeout(startEngine, 140);
+            }
+        }
+    });
 }
 
 // Initialize Voice Recognition
 setupVoiceRecognition('chat-voice-btn', 'chat-input');
 setupVoiceRecognition('agents-voice-btn', 'agents-input');
+
+// ==========================================================
+//  WINDOWS COMPUTER CONTROL + INTEGRATED TERMINAL
+// ==========================================================
+let automationPoll = null;
+let automationQuestionOpen = false;
+let terminalSessionId = null;
+let terminalStream = null;
+let terminalSessionOrigin = null;
+
+function syncComputerControlButton() {
+    const btn = $('[data-computer-toggle]');
+    if (!btn) return;
+    const active = !!state.computerControlEnabled;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+    const label = btn.querySelector('span:last-child');
+    if (label) label.textContent = active ? 'Contrôle PC actif' : 'Contrôle PC';
+}
+
+function computerPermissionMessage(result) {
+    if (!result) return 'Le contrôle PC ne répond pas. Redémarrez zaalis IDE puis réessayez.';
+    if (result.error === 'helper-missing') return 'Le composant natif de contrôle est absent. Réinstallez la dernière version de zaalis IDE.';
+    if (result.error && result.error !== 'accessibility-denied' && result.error !== 'screen-recording-denied') return `Contrôle PC indisponible : ${result.error}`;
+    const missing = [];
+    if (!result.accessibility) missing.push('Accessibilité');
+    if (!result.screenRecording) missing.push('Enregistrement de l’écran');
+    if (!missing.length) return 'Les autorisations du contrôle PC sont vérifiées. Relancez zaalis IDE puis réessayez.';
+    return `Autorisez ${missing.join(' et ')} pour zaalis IDE dans les réglages Linux, puis rouvrez l’application.`;
+}
+
+async function setComputerControlEnabled(enabled) {
+    const btn = $('[data-computer-toggle]');
+    if (!enabled) { state.computerControlEnabled = false; syncComputerControlButton(); return; }
+    if (btn) btn.disabled = true;
+    try {
+        // Check the Linux desktop-control capability on every activation.
+        // A valid desktop-session status
+        // immediately enables the control without a second confirmation.
+        const response = await fetch('/api/automation/permissions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        const permissions = await response.json().catch(() => null);
+        if (!response.ok || !permissions || !permissions.ok || !permissions.accessibility || !permissions.screenRecording) {
+            throw new Error(computerPermissionMessage(permissions));
+        }
+        state.computerControlEnabled = true;
+        showToast('Contrôle PC prêt', 'L’IA pourra observer l’écran et agir pour la prochaine tâche.', { icon: '✦', duration: 3500 });
+    } catch (err) {
+        state.computerControlEnabled = false;
+        showToast('Contrôle PC indisponible', err.message || 'Le composant de contrôle est indisponible.', { icon: '!', duration: 6500 });
+    } finally { if (btn) btn.disabled = false; syncComputerControlButton(); }
+}
+
+async function answerAutomationQuestion(snapshot) {
+    if (automationQuestionOpen || !snapshot || !snapshot.question || !snapshot.id) return;
+    automationQuestionOpen = true;
+    const choices = snapshot.question.options || [];
+    const detail = choices.length ? choices.join(' · ') : 'Autoriser pour continuer, ou refuser pour arrêter cette action.';
+    const approved = await requestApproval(snapshot.question.question, detail);
+    const answer = approved ? (choices[0] || 'Autoriser') : (choices.find(v => /refus|non|deny/i.test(v)) || 'Refuser');
+    try { await fetch(`/api/automation/${encodeURIComponent(snapshot.id)}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }) }); }
+    catch {}
+    automationQuestionOpen = false;
+}
+
+async function refreshAutomationStatus() {
+    if (!state.automationTaskId) return;
+    try {
+        const response = await fetch('/api/automation/status');
+        const snapshot = await response.json();
+        if (!snapshot.active || ['stopped', 'completed', 'failed'].includes(snapshot.state)) {
+            state.automationTaskId = null;
+            if (automationPoll) { clearInterval(automationPoll); automationPoll = null; }
+            return;
+        }
+        if (snapshot.state === 'waiting_user') answerAutomationQuestion(snapshot);
+    } catch {}
+}
+
+function handleAutomationEvent(event) {
+    if (!event || event.type !== 'automation' || !event.session) return;
+    state.automationTaskId = event.session.id;
+    if (automationPoll) clearInterval(automationPoll);
+    automationPoll = setInterval(refreshAutomationStatus, 650);
+    refreshAutomationStatus();
+}
+
+async function stopAutomationWork() {
+    try { await fetch('/api/automation/stop', { method: 'POST' }); } catch {}
+    state.automationTaskId = null;
+    // Stopping the current task must not silently revoke the explicit computer
+    // permission. Keeping it armed lets the user retry after a provider timeout.
+    if (automationPoll) { clearInterval(automationPoll); automationPoll = null; }
+    syncComputerControlButton();
+}
+
+syncComputerControlButton();
+
+function appendTerminalOutput(value) {
+    const output = $('#terminal-output');
+    if (!output) return;
+    output.textContent = (output.textContent + cleanTerminalOutput(value)).slice(-512 * 1024);
+    output.scrollTop = output.scrollHeight;
+}
+
+function cleanTerminalOutput(value) {
+    // A preformatted DOM node does not interpret terminal control codes; hide
+    // SGR, bracketed-paste and title sequences so prompts remain readable.
+    return String(value || '')
+        .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\r(?!\n)/g, '');
+}
+
+async function attachIntegratedTerminal(id) {
+    if (!id) return;
+    terminalSessionId = id;
+    const panel = $('#integrated-terminal');
+    panel.classList.remove('hidden');
+    if (terminalStream) terminalStream.close();
+    const snap = await fetch(`/api/terminal/sessions/${encodeURIComponent(id)}`).then(r => r.json());
+    terminalSessionOrigin = snap.origin || 'agent';
+    $('#terminal-cwd').textContent = snap.cwd || '';
+    $('#terminal-output').textContent = cleanTerminalOutput(snap.output);
+    terminalStream = new EventSource(`/api/terminal/sessions/${encodeURIComponent(id)}/stream`);
+    terminalStream.addEventListener('snapshot', (e) => { try { const data = JSON.parse(e.data); $('#terminal-cwd').textContent = data.cwd || ''; $('#terminal-output').textContent = cleanTerminalOutput(data.output); } catch {} });
+    terminalStream.addEventListener('data', (e) => { try { appendTerminalOutput(JSON.parse(e.data)); } catch { appendTerminalOutput(e.data); } });
+    terminalStream.addEventListener('exit', () => appendTerminalOutput('\n[terminal fermé]\n'));
+    $('#terminal-input').focus();
+}
+
+async function openIntegratedTerminal() {
+    const created = await fetch('/api/terminal/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: state.projectRoot }) }).then(r => r.json());
+    if (!created || created.error) throw new Error((created && created.error) || 'Terminal indisponible');
+    await attachIntegratedTerminal(created.id);
+}
+
+const terminalInput = $('#terminal-input');
+if (terminalInput) terminalInput.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    if (!terminalSessionId) { try { await openIntegratedTerminal(); } catch (err) { showToast('Terminal', err.message, { icon: '!' }); return; } }
+    const value = terminalInput.value;
+    terminalInput.value = '';
+    await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}/input`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: value + '\r' }) });
+});
+const terminalCloseBtn = $('#terminal-close-btn');
+if (terminalCloseBtn) terminalCloseBtn.addEventListener('click', async () => {
+    if (terminalStream) { terminalStream.close(); terminalStream = null; }
+    if (terminalSessionId) try { await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}`, { method: 'DELETE' }); } catch {}
+    terminalSessionId = null; terminalSessionOrigin = null; $('#integrated-terminal').classList.add('hidden');
+});
+document.addEventListener('terminal-profile-changed', async () => {
+    if (terminalSessionOrigin !== 'user' || !terminalSessionId) return;
+    const oldId = terminalSessionId;
+    if (terminalStream) { terminalStream.close(); terminalStream = null; }
+    terminalSessionId = null;
+    terminalSessionOrigin = null;
+    try { await fetch(`/api/terminal/sessions/${encodeURIComponent(oldId)}`, { method: 'DELETE' }); } catch {}
+    try { await openIntegratedTerminal(); } catch (err) { showToast('Terminal', err.message || 'Terminal indisponible', { icon: '!' }); }
+});
+const openTerminalBtn = $('#open-integrated-terminal');
+if (openTerminalBtn) openTerminalBtn.addEventListener('click', () => openIntegratedTerminal().catch((err) => showToast('Terminal', err.message || 'Terminal indisponible', { icon: '!' })));

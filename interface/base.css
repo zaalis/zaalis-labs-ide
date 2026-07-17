@@ -28,7 +28,6 @@
     --font-mono: 'JetBrains Mono','Fira Code',monospace;
     --topbar-h: 40px;
 }
-
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 html,body{height:100%;overflow:hidden;}
 body{font-family:var(--font-sans);font-size:13px;color:var(--text-0);background:var(--bg-0);-webkit-font-smoothing:antialiased;}
@@ -231,11 +230,14 @@ input,select,textarea{font-family:inherit;color:inherit;}
 @keyframes cursor-blink{50%{opacity:0;}}
 .msg-body.error{color:var(--red);border-color:rgba(239,68,68,0.2);background:rgba(239,68,68,0.05);}
 
-/* Thinking indicator: spinning wheel + cycling status text (chat + lead agent) */
+/* Thinking indicator: one cycling status line with a subtle three-dot wave. */
 .msg-body.thinking,.lead-response.thinking{display:flex;align-items:center;gap:8px;color:var(--text-2);font-style:italic;}
-.thinking-spinner{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;}
 .thinking-text{font-size:12px;}
-@keyframes spin{to{transform:rotate(360deg);}}
+.thinking-dots{display:inline-flex;align-items:center;gap:3px;height:14px;flex-shrink:0;}
+.thinking-dots i{width:4px;height:4px;border-radius:50%;background:currentColor;animation:thinking-dot-jump 1s ease-in-out infinite;}
+.thinking-dots i:nth-child(2){animation-delay:.15s;}
+.thinking-dots i:nth-child(3){animation-delay:.3s;}
+@keyframes thinking-dot-jump{0%,60%,100%{opacity:.35;transform:translateY(0);}30%{opacity:1;transform:translateY(-3px);}}
 
 /* Thinking Process Accordion */
 .thinking-details {
@@ -614,6 +616,11 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .slash-item .slash-desc { font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-input-area:focus-within {
     border-color: var(--accent);
+}
+/* Drag an image/file over the composer: highlight it as a drop target. */
+.chat-input-area.drag-hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent) inset;
 }
 .chat-input-area textarea {
     width: 100%;

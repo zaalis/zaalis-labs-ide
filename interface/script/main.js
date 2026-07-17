@@ -3,6 +3,7 @@
 const SETTINGS_SECTION_TITLES = {
     general: 'settings-general-title',
     api: 'settings-api-keys-title',
+    mcp: 'MCP',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
     hardware: 'settings-hardware-title',
@@ -24,7 +25,7 @@ function setSettingsSection(section) {
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
         title.dataset.i18n = i18nKey;
-        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
+        title.textContent = i18nKey === 'MCP' ? 'MCP' : ((TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent);
     }
 }
 
@@ -50,17 +51,87 @@ function applyAppearance() {
 // IDs of the settings <select> elements that should render as rounded custom
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
-    'settings-lang-select', 'gguf-variant-select', 'gguf-ngl-select',
+    'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
+function normalizeGgufVariant(value) {
+    return value === 'rocm' || value === 'vulkan' || value === 'cpu' ? value : '';
+}
+
 function initSettingsCustomSelects() {
     if (_settingsSelectsReady) return;
     if (typeof createCustomSelect !== 'function') return;
     SETTINGS_SELECT_IDS.forEach(id => { if ($('#' + id)) createCustomSelect(id, { dropDown: true }); });
     _settingsSelectsReady = true;
+}
+
+function sharedHardwareConfigPayload() {
+    const c = state.config || {};
+    return {
+        ollamaUrl: (c.ollamaUrl || 'http://127.0.0.1:11434').trim(),
+        ollamaModel: c.ollamaModel || 'qwen3:8b',
+        ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
+        ggufVariant: normalizeGgufVariant(c.ggufVariant),
+        ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
+        terminalProfile: c.terminalProfile || 'system'
+    };
+}
+
+function applySharedHardwareConfig(config) {
+    if (!config || typeof config !== 'object') return;
+    const c = state.config || {};
+    if ('ollamaUrl' in config) c.ollamaUrl = String(config.ollamaUrl || '').trim() || 'http://127.0.0.1:11434';
+    if ('ollamaModel' in config) c.ollamaModel = String(config.ollamaModel || '').trim() || 'qwen3:8b';
+    if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 8192);
+    if ('ggufVariant' in config) c.ggufVariant = normalizeGgufVariant(String(config.ggufVariant || '').trim().toLowerCase());
+    if ('ggufGpuLayers' in config) {
+        const raw = config.ggufGpuLayers;
+        c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
+    }
+    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || 'system');
+}
+
+function populateTerminalProfiles(profiles) {
+    const select = $('#settings-terminal-profile');
+    if (!select || !Array.isArray(profiles)) return;
+    select.replaceChildren(...profiles.map((profile) => {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = profile.label + (profile.available ? '' : ' (non installé)');
+        option.disabled = !profile.available;
+        return option;
+    }));
+    const saved = state.config.terminalProfile || 'system';
+    state.config.terminalProfile = select.querySelector(`option[value="${saved}"]:not(:disabled)`) ? saved : 'system';
+    select.value = state.config.terminalProfile;
+}
+
+async function syncSharedHardwareConfig() {
+    try {
+        await fetch('/api/config', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: sharedHardwareConfigPayload() })
+        });
+    } catch {}
+}
+
+async function loadSharedHardwareConfig() {
+    try {
+        const res = await fetch('/api/config');
+        if (!res.ok) return;
+        const data = await res.json();
+        populateTerminalProfiles(data.terminalProfiles);
+        if (data && data.configured && data.config) {
+            applySharedHardwareConfig(data.config);
+            saveState();
+        } else {
+            await syncSharedHardwareConfig();
+        }
+    } catch {}
 }
 
 // Push the current config values into the settings controls, then refresh the
@@ -74,7 +145,8 @@ function populateSettingsControls() {
         el.dispatchEvent(new Event('change')); // refresh custom-select display
     };
     setVal('settings-lang-select', state.language || 'fr');
-    setVal('gguf-variant-select', c.ggufVariant || '');
+    setVal('settings-terminal-profile', c.terminalProfile || 'system');
+    setVal('gguf-variant-select', normalizeGgufVariant(c.ggufVariant));
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
     setVal('settings-theme-select', c.theme || 'dark');
@@ -160,6 +232,28 @@ async function migrateLegacyApiKeys() {
 async function refreshSecureSettings() {
     await migrateLegacyApiKeys();
     await loadApiKeyStatus();
+    await loadBrainMcpStatus();
+}
+
+let brainMcpWasConfigured = false;
+function setBrainMcpStatus(status) {
+    const el = $('#brain-mcp-status');
+    if (!el) return;
+    const stateName = status && status.state;
+    el.textContent = stateName === 'connected' ? '● Connecté' : stateName === 'error' ? '● Erreur' : '● Déconnecté';
+    el.style.color = stateName === 'connected' ? 'var(--green)' : stateName === 'error' ? 'var(--red)' : 'var(--text-2)';
+}
+async function loadBrainMcpStatus() {
+    try {
+        const res = await fetch('/api/brain-mcp');
+        const status = await res.json();
+        brainMcpWasConfigured = !!status.configured;
+        setBrainMcpStatus(status);
+        const enabled = $('#brain-mcp-enabled'); if (enabled) enabled.checked = !!status.enabled;
+        const endpoint = $('#brain-mcp-endpoint'); if (endpoint && status.endpoint) endpoint.value = status.endpoint;
+        const token = $('#brain-mcp-token'); if (token && status.configured) token.placeholder = 'Jeton enregistré (coller pour le remplacer)';
+        return status;
+    } catch { setBrainMcpStatus({ state: 'error' }); return null; }
 }
 
 API_KEY_FIELDS.forEach(provider => {
@@ -176,7 +270,10 @@ $('#save-btn').addEventListener('click', async () => {
     const settingsLang = $('#settings-lang-select');
     if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
     const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
+    if (variantSelect) state.config.ggufVariant = normalizeGgufVariant(variantSelect.value);
+    const previousTerminalProfile = state.config.terminalProfile || 'system';
+    const terminalProfile = $('#settings-terminal-profile');
+    if (terminalProfile && terminalProfile.value) state.config.terminalProfile = terminalProfile.value;
     const ollamaUrlInput = $('#ollama-url');
     state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
@@ -210,6 +307,16 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
+        await syncSharedHardwareConfig();
+        if (state.config.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
+        const brainEnabled = !!$('#brain-mcp-enabled')?.checked;
+        const brainEndpoint = ($('#brain-mcp-endpoint')?.value || '').trim();
+        const brainToken = ($('#brain-mcp-token')?.value || '').trim();
+        if (brainEnabled || brainEndpoint || brainToken || brainMcpWasConfigured) {
+            const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: brainEnabled, endpoint: brainEndpoint || undefined, token: brainToken || undefined }) });
+            if (!brainRes.ok) { const body = await brainRes.json().catch(() => ({})); throw new Error(body.error || 'brain-mcp'); }
+            setBrainMcpStatus(await brainRes.json());
+        }
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
                 method: 'PUT',
@@ -679,11 +786,13 @@ async function loadGgufModels() {
         if (!res.ok) return;
         const data = await res.json();
         state.config.ggufModels = (data.models || []).map(m => m.name);
+        const normalizedVariant = normalizeGgufVariant(state.config.ggufVariant);
+        if (state.config.ggufVariant !== normalizedVariant) state.config.ggufVariant = normalizedVariant;
         saveState();
         const st = $('#gguf-engine-status');
         if (st) {
             const v = (data.variant || 'cpu').toUpperCase();
-            const selected = state.config.ggufVariant ? state.config.ggufVariant.toUpperCase() : v;
+            const selected = normalizedVariant ? normalizedVariant.toUpperCase() : v;
             st.textContent = (state.language === 'en' ? 'Engine: ' : 'Moteur : ') + selected + (data.running ? ' • ON' : '');
         }
         const detected = $('#gguf-detected-variant');
@@ -1114,22 +1223,31 @@ async function installGgufFromCatalog(repo, file, card) {
     pfill.style.width = '0%';
     ptext.textContent = lang === 'en' ? 'Starting...' : 'Demarrage...';
 
-    const controller = new AbortController();
     prog.querySelectorAll('.cat-cancel').forEach(b => b.remove());
     const cancel = document.createElement('button');
     cancel.className = 'cat-cancel'; cancel.type = 'button';
     cancel.textContent = lang === 'en' ? 'Cancel' : 'Annuler';
-    cancel.addEventListener('click', () => controller.abort());
+    cancel.disabled = true;
     prog.appendChild(cancel);
 
     try {
         const qs = 'repo=' + encodeURIComponent(repo) + '&file=' + encodeURIComponent(file);
-        const res = await fetch('/api/gguf-pull?' + qs, { signal: controller.signal });
+        const res = await fetch('/api/gguf-pull?' + qs);
         if (!res.ok || !res.body) throw new Error('HTTP ' + res.status);
         const reader = res.body.getReader();
         const dec = new TextDecoder();
-        let buf = '', installedName = '';
+        let buf = '', installedName = '', taskId = '';
         const mb = n => (n / 1e6).toFixed(0);
+        cancel.addEventListener('click', async () => {
+            if (!taskId) return;
+            cancel.disabled = true;
+            cancel.textContent = lang === 'en' ? 'Canceling...' : 'Annulation...';
+            await fetch('/api/gguf-pull-cancel', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: taskId })
+            }).catch(() => {});
+        });
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
@@ -1138,6 +1256,10 @@ async function installGgufFromCatalog(repo, file, card) {
             for (const line of lines) {
                 if (!line.trim()) continue;
                 let o; try { o = JSON.parse(line); } catch { continue; }
+                if (o.id && !taskId) {
+                    taskId = o.id;
+                    cancel.disabled = false;
+                }
                 if (o.status === 'downloading' && o.total) {
                     const pct = Math.round((o.completed || 0) / o.total * 100);
                     pfill.style.width = pct + '%';
@@ -1146,6 +1268,8 @@ async function installGgufFromCatalog(repo, file, card) {
                     installedName = o.name || ggufFileName(file);
                     pfill.style.width = '100%';
                     ptext.textContent = lang === 'en' ? 'Installed' : 'Installe';
+                } else if (o.status === 'canceled') {
+                    throw new DOMException('Canceled', 'AbortError');
                 } else if (o.status === 'error') {
                     throw new Error(o.error || 'download failed');
                 }
@@ -1161,9 +1285,8 @@ async function installGgufFromCatalog(repo, file, card) {
         cancel.remove();
         prog.style.display = 'none';
         pfill.style.width = '0%';
-        if (!(e && e.name === 'AbortError')) {
-            ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
-        }
+        if (e && e.name === 'AbortError') ptext.textContent = lang === 'en' ? 'Canceled' : 'Annule';
+        else ptext.textContent = (lang === 'en' ? 'Error: ' : 'Erreur : ') + e.message;
         setCardActions(card, card.dataset.name);
     }
 }
@@ -1425,6 +1548,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
@@ -1466,7 +1590,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');
-    _set('#gguf-variant-select', state.config.ggufVariant || '');
+    _set('#gguf-variant-select', normalizeGgufVariant(state.config.ggufVariant));
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
@@ -1615,7 +1739,7 @@ function openLoaderConfig(name) {
     if (num) num.value = ctx;
     if (hint) hint.textContent = _fmtCtx(ctx);
     const gpu = $('#ml-gpu-select'); if (gpu) gpu.value = state.config.ggufGpuLayers || '';
-    const variant = $('#ml-variant-select'); if (variant) variant.value = state.config.ggufVariant || '';
+    const variant = $('#ml-variant-select'); if (variant) variant.value = normalizeGgufVariant(state.config.ggufVariant);
 
     // Activate the config tab.
     $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'config'));
@@ -1650,13 +1774,14 @@ async function loadLoaderModel() {
     const lang = state.language || 'fr';
     const ctx = clampGgufCtx($('#ml-ctx-num').value);
     const gpuLayers = $('#ml-gpu-select') ? $('#ml-gpu-select').value : '';
-    const variant = $('#ml-variant-select') ? $('#ml-variant-select').value : '';
+    const variant = $('#ml-variant-select') ? normalizeGgufVariant($('#ml-variant-select').value) : '';
 
     // Persist the chosen options so the chat path reuses the same engine state.
     state.config.ggufCtx = ctx;
     state.config.ggufGpuLayers = gpuLayers;
     state.config.ggufVariant = variant;
     saveState();
+    await syncSharedHardwareConfig();
     const ggufCtxInput = $('#gguf-ctx-input'); if (ggufCtxInput) ggufCtxInput.value = ctx;
 
     const btn = $('#ml-load-btn'), prog = $('#ml-progress'), fill = $('#ml-progress-fill');

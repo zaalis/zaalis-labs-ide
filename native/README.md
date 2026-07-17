@@ -22,3 +22,7 @@ and exposes `zaalis` plus `zaalis-ide` in the terminal. The graphical IDE is
 now a real Electron application and does not require Chrome, Chromium, Edge, or
 Brave to be installed separately.
 Windows installer files are intentionally not kept in this Linux package folder.
+
+The package also bundles the Linux `node-pty` addon used by the integrated
+terminal and declares the AT-SPI, screenshot, OCR, keyboard and pointer tools
+used by the opt-in desktop-control feature.

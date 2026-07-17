@@ -88,6 +88,9 @@ async function main() {
 
   copyFile(path.join(sourceDist, 'zaalis-server'), path.join(bundleDir, 'zaalis-server'));
   copyFile(path.join(sourceDist, 'bin', 'zaalis'), path.join(bundleDir, 'bin', 'zaalis'));
+  if (fs.existsSync(path.join(sourceDist, 'node_modules'))) {
+    copyDir(path.join(sourceDist, 'node_modules'), path.join(bundleDir, 'node_modules'));
+  }
   copyDir(path.join(sourceDist, 'interface'), path.join(bundleDir, 'interface'));
   if (fs.existsSync(path.join(sourceDist, 'image'))) {
     copyDir(path.join(sourceDist, 'image'), path.join(bundleDir, 'image'));

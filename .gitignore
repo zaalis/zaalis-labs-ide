@@ -15,6 +15,9 @@ server-data/
 native/dist/
 native/dist-linux*/
 native/.electron-cache/
+native/.electron-build/
+native/linux-node-runtime/
+native/linux-node-pty/
 native/installer/
 !native/installer/
 native/installer/*.tar.gz

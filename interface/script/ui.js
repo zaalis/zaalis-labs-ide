@@ -8,7 +8,6 @@ const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', g
 function applyModelColor() {
     modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
 }
-
 // Pretty short name for the dropdown (full tag stays in the option's value).
 // ex: "hf.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF:Q4_K_M" -> "Qwen2.5-Coder-7B (Q4_K_M)"
 function prettyModelLabel(full) {
@@ -49,6 +48,24 @@ function updateSubmodelDropdown() {
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
+}
+
+// Keep a durable, low-key trace when a conversation changes model. It is a
+// system message, so it stays visually gray and never enters the AI context.
+function recordChatModelChange(previousModel, previousSubmodel) {
+    const nextModel = modelSelect.value;
+    const nextSubmodel = submodelSelect.value;
+    if (!previousSubmodel || (previousModel === nextModel && previousSubmodel === nextSubmodel)) return;
+    const container = $('#chat-messages');
+    if (!container || !state.currentConvId || !container.querySelector('.msg-user')) return;
+    const labelFor = (provider, submodel) => submodelLabelFor(provider, submodel) || submodel || provider;
+    const lang = state.language || 'fr';
+    const message = lang === 'en'
+        ? `Model changed: ${labelFor(previousModel, previousSubmodel)} → ${labelFor(nextModel, nextSubmodel)}`
+        : `Modèle changé : ${labelFor(previousModel, previousSubmodel)} → ${labelFor(nextModel, nextSubmodel)}`;
+    addMsg(container, 'system', null, message);
+    saveConversation();
+    if (typeof followScroll === 'function') followScroll(container);
 }
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
@@ -111,6 +128,8 @@ function maybeWarnSmallLocalModel() {
 }
 
 modelSelect.addEventListener('change', () => {
+    const previousModel = state.config.aiModel;
+    const previousSubmodel = state.config.aiSubmodel;
     state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
     
@@ -131,8 +150,11 @@ modelSelect.addEventListener('change', () => {
     applyModelColor();
     updateTokenMeter();
     maybeWarnSmallLocalModel();
+    recordChatModelChange(previousModel, previousSubmodel);
 });
 submodelSelect.addEventListener('change', () => {
+    const previousModel = state.config.aiModel;
+    const previousSubmodel = state.config.aiSubmodel;
     state.config.aiSubmodel = submodelSelect.value;
     saveState();
 
@@ -140,6 +162,7 @@ submodelSelect.addEventListener('change', () => {
     updateAttachAvailability();
     updateTokenMeter();
     maybeWarnSmallLocalModel();
+    recordChatModelChange(previousModel, previousSubmodel);
 });
 
 // In agents mode the reasoning slider tracks the lead agent, so re-check it
@@ -156,6 +179,23 @@ $$('.agent-check, .agent-role-select, .agent-model-select').forEach(el => {
 // ==========================================================
 const projectDropdown = $('#project-dropdown');
 
+function positionProjectDropdown() {
+    if (!projectDropdown || !projectDropdown.classList.contains('open')) return;
+    const anchor = $('#project-btn') || $('.sidebar-project');
+    if (!anchor) return;
+
+    const rect = anchor.getBoundingClientRect();
+    const gutter = 12;
+    const preferredWidth = Math.min(560, window.innerWidth - (gutter * 2));
+    const left = Math.max(gutter, Math.min(rect.left + 8, window.innerWidth - preferredWidth - gutter));
+    const top = Math.min(rect.bottom + 8, window.innerHeight - 120);
+
+    projectDropdown.style.left = `${left}px`;
+    projectDropdown.style.top = `${top}px`;
+    projectDropdown.style.width = `${Math.max(280, Math.min(preferredWidth, window.innerWidth - left - gutter))}px`;
+    projectDropdown.style.maxHeight = `${Math.max(160, window.innerHeight - top - gutter)}px`;
+}
+
 $('#project-btn').addEventListener('click', e => {
     e.stopPropagation();
     const willOpen = !projectDropdown.classList.contains('open');
@@ -163,12 +203,15 @@ $('#project-btn').addEventListener('click', e => {
     // history shows up even when no project was auto-reopened at startup.
     if (willOpen) initRecentProjects();
     projectDropdown.classList.toggle('open');
+    positionProjectDropdown();
 });
 
 document.addEventListener('click', () => {
     projectDropdown.classList.remove('open');
     $('#profile-popup').classList.remove('open');
 });
+
+window.addEventListener('resize', positionProjectDropdown);
 
 $('#open-project-btn').addEventListener('click', async e => {
     e.stopPropagation();
@@ -216,11 +259,12 @@ $('#project-path-input').addEventListener('keydown', e => {
 });
 
 function removeRecentProject(path) {
-    let recent = getRecentProjects().filter(p => p !== path);
+    const removed = normalizeProjectPath(path);
+    let recent = getRecentProjects().filter(p => normalizeProjectPath(p) !== removed);
     localStorage.setItem('zaalis-recent', JSON.stringify(recent));
     syncRecentProjects(recent);
     initRecentProjects();
-    if (state.projectRoot === path) {
+    if (normalizeProjectPath(state.projectRoot) === removed) {
         clearProject();
     }
 }
@@ -250,13 +294,14 @@ function initRecentProjects() {
     }
     container.innerHTML = '';
     recent.forEach(p => {
-        const folderName = p.split(/[\\/]/).pop();
+        const projectPath = String(p || '').replace(/[\\/]+$/, '');
+        const folderName = projectPath.split(/[\\/]/).pop();
         
         // Row container
         const projectRow = document.createElement('div');
         projectRow.className = 'project-dropdown-row';
-        projectRow.title = p;
-        if (state.projectRoot === p) projectRow.classList.add('active');
+        projectRow.title = projectPath;
+        if (normalizeProjectPath(state.projectRoot) === normalizeProjectPath(projectPath)) projectRow.classList.add('active');
         
         // Chevron button
         const chev = document.createElement('button');
@@ -278,7 +323,7 @@ function initRecentProjects() {
                 return;
             }
             projectDropdown.classList.remove('open');
-            openProject(p, true);
+            openProject(projectPath, true);
         });
 
         // Pencil button (Nouveau chat)
@@ -290,7 +335,7 @@ function initRecentProjects() {
         pencilBtn.addEventListener('click', async e => {
             e.stopPropagation();
             projectDropdown.classList.remove('open');
-            await openProject(p, true);
+            await openProject(projectPath, true);
             const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
             if (typeof newConversation === 'function') {
                 newConversation(kind);
@@ -311,7 +356,7 @@ function initRecentProjects() {
                 danger: true
             });
             if (ok) {
-                removeRecentProject(p);
+                removeRecentProject(projectPath);
             }
         });
 
@@ -338,7 +383,7 @@ function initRecentProjects() {
 
         // Load nested chats
         const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
-        const projectConvs = conversationsForProject(p, folderName, kind);
+        const projectConvs = conversationsForProject(projectPath, folderName, kind);
 
         if (projectConvs.length === 0) {
             chatsContainer.innerHTML = `<div class="dropdown-chat-empty">${lang === 'fr' ? 'Aucune conversation' : 'No conversations'}</div>`;
@@ -359,7 +404,7 @@ function initRecentProjects() {
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
                     projectDropdown.classList.remove('open');
-                    openProject(p, false);
+                    openProject(projectPath, false);
                     if (typeof loadConversation === 'function') {
                         loadConversation(kind, conv.id);
                     }
@@ -372,10 +417,13 @@ function initRecentProjects() {
 }
 
 async function openProject(rootPath, isNew) {
-    const switchingProject = state.projectRoot && state.projectRoot !== rootPath;
+    const cleanRoot = String(rootPath || '').trim().replace(/[\\/]+$/, '');
+    if (!cleanRoot) return;
+    const switchingProject = state.projectRoot && normalizeProjectPath(state.projectRoot) !== normalizeProjectPath(cleanRoot);
 
-    state.projectRoot = rootPath;
-    if (isNew) addRecentProject(rootPath);
+    state.projectRoot = cleanRoot;
+    state.lastProjectRoot = cleanRoot;
+    if (isNew) addRecentProject(cleanRoot);
 
     // Switching to a DIFFERENT project must drop the previous project's open
     // tabs/editor and force the AI context (project tree) to be re-injected on
@@ -394,7 +442,7 @@ async function openProject(rootPath, isNew) {
     // Retire le data-i18n : sinon updateLanguage() (changement de langue) réécrit
     // l'étiquette à « Aucun projet » alors qu'un projet est bien ouvert.
     nameEl.removeAttribute('data-i18n');
-    nameEl.textContent = rootPath.split(/[\\/]/).pop();
+    nameEl.textContent = cleanRoot.split(/[\\/]/).pop();
     await loadFileTree();
     initRecentProjects();
 }
@@ -1218,7 +1266,8 @@ function showAuthOverlay() {
 
 // Reopen the last project once the user is authenticated.
 function openSavedProject() {
-    if (state.projectRoot) openProject(state.projectRoot, false);
+    const savedProject = state.projectRoot || (state.config.reopenLastProject ? state.lastProjectRoot : null);
+    if (savedProject) openProject(savedProject, false);
 }
 
 function setupAuth() {

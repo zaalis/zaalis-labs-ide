@@ -47,3 +47,7 @@ CLI:
 ./resources/app/bundle/bin/zaalis
 ./resources/app/bundle/bin/zaalis "analyse le dossier"
 ```
+
+Le `.deb` inclut les dépendances du terminal PTY, de la capture/OCR et du
+contrôle de bureau Linux. Sous Wayland, la distribution peut appliquer des
+restrictions de sécurité supplémentaires aux outils d'automatisation globale.

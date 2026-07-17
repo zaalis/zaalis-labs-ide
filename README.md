@@ -1,38 +1,43 @@
 # zaalis IDE Linux
 
-Package portable Linux x64.
+Application Electron Linux x64 autonome avec serveur local, CLI, terminal PTY
+et contrôle du poste Linux optionnel.
 
-Build depuis Windows:
+## Construire depuis Windows
 
 ```bat
 native\build_linux.bat
 ```
 
-Sortie:
+Sorties :
 
 ```text
 native\installer\zaalis-linux-x64.tar.gz
 native\installer\zaalis-linux-x64.deb
 ```
 
-Installation sur Linux:
+## Installer et lancer
 
-Double-cliquez sur `zaalis-linux-x64.deb`, puis installez avec l'application
-logiciels de votre distribution.
-
-Lancement portable:
+Double-cliquez sur `zaalis-linux-x64.deb`, puis installez-le avec l'application
+logiciels de votre distribution. Le paquet expose ensuite :
 
 ```sh
-mkdir -p zaalis-linux
-tar -xzf zaalis-linux-x64.tar.gz -C zaalis-linux
-cd zaalis-linux
-chmod +x zaalis-server bin/zaalis zaalis-ide.sh
-./zaalis-ide.sh
+zaalis
+zaalis ide
+zaalis-ide
 ```
 
-CLI:
+Le raccourci `zaalis IDE` ouvre Chromium embarqué ; aucun navigateur externe
+n'est requis. Le `.deb` installe aussi les composants AT-SPI, capture/OCR,
+clavier/souris et terminal PTY nécessaires aux fonctions correspondantes.
 
-```sh
-./bin/zaalis
-./bin/zaalis "analyse le dossier"
-```
+## Licence et copyright
+
+Copyright © 2026 Bryan Boquel / zaalis. Tous droits réservés.
+
+zaalis Labs IDE appartient à Bryan Boquel / zaalis. Les droits d'utilisation,
+de modification, de contribution, de redistribution, d'usage commercial et de
+marque sont régis par [LICENSE](LICENSE) et [NOTICE](NOTICE).
+
+Aucun droit de propriété n'est transféré par l'accès, le clonage,
+l'utilisation, la modification ou la contribution à ce dépôt.
