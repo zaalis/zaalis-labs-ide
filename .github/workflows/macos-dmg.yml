@@ -34,7 +34,17 @@ jobs:
         run: npm install
 
       - name: Build macOS DMGs
-        run: sh native/build_macos_dmg.sh
+        run: |
+          set -o pipefail
+          sh native/build_macos_dmg.sh 2>&1 | tee native/macos-build.log
+
+      - name: Upload macOS build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaalis-macos-build-log
+          path: native/macos-build.log
+          if-no-files-found: error
 
       - name: Upload DMGs as artifacts
         uses: actions/upload-artifact@v4
