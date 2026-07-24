@@ -49,7 +49,9 @@ jobs:
       - name: Surface macOS build failure
         if: failure()
         run: |
-          echo "::error title=macOS DMG build failed::$(tail -n 30 native/macos-build.log | tr '\n' ' ')"
+          details="$(grep -Ein 'error|failed|not found|cannot|unsupported|fatal' native/macos-build.log | tail -n 25 || true)"
+          if [ -z "$details" ]; then details="$(tail -n 120 native/macos-build.log)"; fi
+          echo "::error title=macOS DMG build failed::$(printf '%s' "$details" | tr '\n' ' ')"
 
       - name: Upload DMGs as artifacts
         uses: actions/upload-artifact@v4
