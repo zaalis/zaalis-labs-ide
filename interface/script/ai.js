@@ -332,7 +332,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // Reveal `text` in bounded batches, then replace it with the final rendered
 // HTML. The model response is already complete at this point, so this is only
 // a visual effect and must never add a noticeable delay to a long answer.
-async function streamInto(el, text, finalHTML, signal, scrollEl) {
+async function streamInto(el, text, finalHTML, signal, scrollEl, onProgress) {
     text = String(text);
     el.classList.add('md');
     // Final render is computed exactly once (never re-parsed per frame).
@@ -345,6 +345,7 @@ async function streamInto(el, text, finalHTML, signal, scrollEl) {
     // costly and annoying — and (b) hard-cap the number of parse/reflow frames.
     if (signal && signal.aborted || text.length > 4000) {
         el.innerHTML = done;
+        if (typeof onProgress === 'function') onProgress(text, true);
         if (scrollEl) followScroll(scrollEl);
         return;
     }
@@ -357,10 +358,12 @@ async function streamInto(el, text, finalHTML, signal, scrollEl) {
         if (signal && signal.aborted) break;
         acc += words.slice(i, i + chunk).join('');
         el.innerHTML = renderMarkdown(acc);
+        if (typeof onProgress === 'function') onProgress(acc, false);
         if (scrollEl) followScroll(scrollEl);
         await sleep(13);
     }
     el.innerHTML = done;
+    if (typeof onProgress === 'function') onProgress(text, true);
     if (scrollEl) followScroll(scrollEl);
 }
 
@@ -937,6 +940,13 @@ async function sendChat(input) {
         }
     }
 
+    // Reflect the prompt immediately. Exact provider usage is applied as soon
+    // as it arrives; until then the rendered response advances the output
+    // estimate so the meter never stays frozen during a turn.
+    const contextTokensBeforeTurn = state.contextTokens || state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+    state.contextTokens = contextTokensBeforeTurn + estimateTokens(aiMessage);
+    updateTokenMeter();
+
     const t0 = Date.now();
     const controller = new AbortController();
     chatAbort = controller;
@@ -1011,11 +1021,24 @@ async function sendChat(input) {
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
             // Generated image = single rectangle (instant); text = streamed word-by-word.
             body.classList.toggle('has-image', isImg);
+            const providerInputTokens = Number(data.usage && data.usage.input);
+            const providerOutputTokens = Number(data.usage && data.usage.output);
+            const liveInputTokens = Number.isFinite(providerInputTokens)
+                ? Math.max(0, providerInputTokens)
+                : contextTokensBeforeTurn + estimateTokens(aiMessage);
+            const updateLiveTokens = (visibleText, final) => {
+                const output = final && Number.isFinite(providerOutputTokens)
+                    ? Math.max(0, providerOutputTokens)
+                    : estimateTokens(visibleText);
+                state.contextTokens = liveInputTokens + output;
+                updateTokenMeter();
+            };
             if (isImg) {
                 body.innerHTML = reasoning + formatted;
+                updateLiveTokens(responseText, true);
             } else {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
-                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
+                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'), updateLiveTokens);
             }
             // Actions bloquées par le serveur (mode supervisé/semi) : demander
             // la permission à l'utilisateur puis les appliquer, comme Claude Code.
@@ -1041,6 +1064,8 @@ async function sendChat(input) {
         }
     } catch (err) {
         stopThinking(body);
+        state.contextTokens = contextTokensBeforeTurn;
+        updateTokenMeter();
         const active = turnStillActive();
         if (err && err.name === 'AbortError') {
             aborted = true;
