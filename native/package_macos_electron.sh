@@ -49,7 +49,7 @@ if command -v swiftc >/dev/null 2>&1; then
     "$ROOT/native/macos_speech_transcriber.swift" \
     -o "$APP_RES/macos-speech-transcriber"
   swiftc -target "$SWIFT_TARGET" -O \
-    -framework Foundation -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework ImageIO -framework ScreenCaptureKit -framework Carbon \
+    -framework Foundation -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework ImageIO -framework ScreenCaptureKit -framework Carbon -framework Vision \
     "$ROOT/native/macos_computer_bridge.swift" \
     -o "$APP_RES/macos-computer-bridge"
 else
