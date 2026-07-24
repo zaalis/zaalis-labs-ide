@@ -212,6 +212,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .msg-label.codex{color:#3b82f6;}                 /* GPT : bleu */
 .msg-label.claude{color:#f97316;}                /* Claude : orange */
 .msg-label.grok{color:#9ca3af;}                  /* Grok : gris */
+.msg-label.kimi{color:#38bdf8;}                  /* Kimi / Moonshot AI */
 .msg-label.ollama{color:#fafafa;}                /* Ollama : blanc */
 /* Gemini : dégradé bleu -> violet */
 .msg-label.gemini{
@@ -231,11 +232,14 @@ input,select,textarea{font-family:inherit;color:inherit;}
 @keyframes cursor-blink{50%{opacity:0;}}
 .msg-body.error{color:var(--red);border-color:rgba(239,68,68,0.2);background:rgba(239,68,68,0.05);}
 
-/* Thinking indicator: spinning wheel + cycling status text (chat + lead agent) */
+/* Thinking indicator: one cycling status line with a subtle three-dot wave. */
 .msg-body.thinking,.lead-response.thinking{display:flex;align-items:center;gap:8px;color:var(--text-2);font-style:italic;}
-.thinking-spinner{width:14px;height:14px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;flex-shrink:0;}
 .thinking-text{font-size:12px;}
-@keyframes spin{to{transform:rotate(360deg);}}
+.thinking-dots{display:inline-flex;align-items:center;gap:3px;height:14px;flex-shrink:0;}
+.thinking-dots i{width:4px;height:4px;border-radius:50%;background:currentColor;animation:thinking-dot-jump 1s ease-in-out infinite;}
+.thinking-dots i:nth-child(2){animation-delay:.15s;}
+.thinking-dots i:nth-child(3){animation-delay:.3s;}
+@keyframes thinking-dot-jump{0%,60%,100%{opacity:.35;transform:translateY(0);}30%{opacity:1;transform:translateY(-3px);}}
 
 /* Thinking Process Accordion */
 .thinking-details {
@@ -502,6 +506,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 #ai-model option[value="gemini"]{color:#7c6cf0;}
 #ai-model option[value="grok"]{color:#9ca3af;}
 #ai-model option[value="mistral"]{color:#f59e0b;}
+#ai-model option[value="kimi"]{color:#38bdf8;}
 #ai-model option[value="local"]{color:#fafafa;}
 #ai-model option[value="gguf"]{color:#34d399;}
 /* Agent names match their AI color */
@@ -509,6 +514,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .agent-card[data-agent="claude"] .agent-name{color:#f97316;}
 .agent-card[data-agent="grok"] .agent-name{color:#9ca3af;}
 .agent-card[data-agent="mistral"] .agent-name{background:linear-gradient(90deg,#facc15,#f97316);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.agent-card[data-agent="kimi"] .agent-name{color:#38bdf8;}
 .agent-card[data-agent="local"] .agent-name{color:#fafafa;}
 .agent-card[data-agent="gguf"] .agent-name{color:#34d399;}
 .agent-card[data-agent="gemini"] .agent-name{background:linear-gradient(90deg,#4285f4,#a855f7);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
@@ -614,6 +620,11 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .slash-item .slash-desc { font-size: 11px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-input-area:focus-within {
     border-color: var(--accent);
+}
+/* Drag an image/file over the composer: highlight it as a drop target. */
+.chat-input-area.drag-hover {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent) inset;
 }
 .chat-input-area textarea {
     width: 100%;
@@ -803,6 +814,28 @@ input,select,textarea{font-family:inherit;color:inherit;}
 }
 .mode-item.active[data-perm="auto"] .mode-item-title {
     color: var(--orange);
+}
+/* Unrestricted mode — clearly flagged as dangerous (red). */
+.mode-select-btn.danger {
+    color: #ef4444 !important;
+    border-color: rgba(239, 68, 68, 0.45) !important;
+    background: rgba(239, 68, 68, 0.10) !important;
+}
+.mode-select-btn.danger:hover {
+    background: rgba(239, 68, 68, 0.18) !important;
+}
+.mode-item-danger .mode-item-title {
+    color: #ef4444;
+}
+.mode-item-danger .mode-item-title::after {
+    content: " ⚠";
+    font-size: 10px;
+}
+.mode-item.active[data-perm="bypass"] {
+    background: rgba(239, 68, 68, 0.16);
+}
+.mode-item.active[data-perm="bypass"] .mode-item-title {
+    color: #ef4444;
 }
 
 /* Labeled topbar button (e.g. Installer des modèles) */

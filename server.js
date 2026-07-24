@@ -3,8 +3,26 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const net = require('net');
 const { exec, execFile, spawn } = require('child_process');
-const { runAgentTurn } = require('./agent-engine');
+const { EventEmitter } = require('events');
+const { runAgentTurn, TOOL_CATALOG, COMPUTER_FUNCTION_TOOL, nativeComputerCallsAsText } = require('./agent-engine');
+const brainMcp = require('./brain-mcp-client');
+const { AutomationManager } = require('./automation-manager');
+const { TerminalManager } = require('./terminal-manager');
+const { buildKimiPayload, parseKimiResponse } = require('./kimi-provider');
+const responseIntegrity = require('./response-integrity');
+const { ExecutionBroker } = require('./execution-broker');
+const { SessionStore } = require('./session-store');
+const { ApprovalStore, normaliseRules, evaluate: evaluatePermission } = require('./permission-policy');
+const securityPipeline = require('./security-pipeline');
+const { profile: agentProfile } = require('./agent-profiles');
+const { openAIFunctionTools, anthropicTools, geminiTools } = require('./tool-registry');
+const skillsRegistry = require('./skills-registry');
+const languageService = require('./language-service');
+const mcpRegistry = require('./mcp-registry');
+const projectInspector = require('./project-inspector');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -12,11 +30,19 @@ try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
+const automationManager = new AutomationManager({
+  bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '',
+  bridgeSecret: process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || '',
+});
+const terminalManager = new TerminalManager();
+const approvalStore = new ApprovalStore();
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
 // snapshot, so we use the folder next to the executable instead.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+const COMMAND_TIMEOUT_MS = Math.max(30_000, Number(process.env.ZAALIS_COMMAND_TIMEOUT_MS) || 10 * 60_000);
+const MAX_COMMAND_OUTPUT = 10 * 1024 * 1024;
 let APP_VERSION = '0.0.0';
 try {
   APP_VERSION = require('./package.json').version || APP_VERSION;
@@ -36,6 +62,9 @@ try {
 // stable per-user location that survives app updates and reinstalls
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() {
+  // Useful for isolated diagnostics/tests; normal desktop installs never set
+  // this and therefore always use the durable per-user location below.
+  if (process.env.ZAALIS_DATA_DIR) return path.resolve(process.env.ZAALIS_DATA_DIR);
   // When packaged with pkg, the executable can live in a read-only install
   // location. Keep accounts/chats/session secret in a stable per-user folder.
   if (process.pkg) {
@@ -68,6 +97,12 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
 const COOKIE_NAME = 'zaalis_session';
+const sessionStore = new SessionStore({ dataDir: DATA_DIR });
+const executionBroker = new ExecutionBroker({
+  // An explicit development escape hatch is useful on unsupported platforms,
+  // but production builds remain fail-closed when no isolation backend exists.
+  requireSandbox: process.env.ZAALIS_ALLOW_UNSANDBOXED !== '1',
+});
 
 // One-time migration: copy data from the old location (next to the exe)
 // so existing accounts and chats are kept.
@@ -92,7 +127,7 @@ try {
 // API key vault — keys are encrypted at rest (AES-256-GCM) with a key derived
 // from the local install secret, stored per user and never sent back in clear.
 // ---------------------------------------------------------------------------
-const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
 
 function encryptSecret(plain) {
@@ -231,10 +266,12 @@ function browserUser(req) {
     String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''))
   )[0];
 }
-// Le navigateur n'a accès qu'au chat (et à la liste des modèles locaux pour
-// remplir ses menus) — jamais aux fichiers, à l'exec ni aux clés.
+// Le navigateur n'a accès qu'au chat, à la liste des modèles locaux (pour
+// remplir ses menus) et aux briques vocales locales (STT/TTS du mode vocal) —
+// jamais aux fichiers, à l'exec ni aux clés.
 function browserAllowed(p) {
-  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models';
+  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models' ||
+         p === '/stt' || p === '/tts' || p === '/voice-status' || p === '/voice-options';
 }
 function chatsFile(userId, kind) {
   // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
@@ -242,12 +279,22 @@ function chatsFile(userId, kind) {
   return path.join(CHATS_DIR, `${userId}__${k}.json`);
 }
 
+function writeJsonAtomic(file, value) {
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  fs.renameSync(temp, file);
+}
+
 const SHARED_CONFIG_DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'qwen3:8b',
   ggufCtx: 8192,
   ggufVariant: '',
-  ggufGpuLayers: ''
+  ggufGpuLayers: '',
+  // Personal preferences applied to every model request. This is deliberately
+  // bounded: it is a preference field, not an unbounded prompt transport.
+  customSystemInstructions: '',
+  toolPermissions: { allow: [], ask: [], deny: [] }
 };
 const GGUF_VARIANTS = new Set(['', 'metal', 'cpu']);
 
@@ -279,11 +326,48 @@ function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
       ? ''
       : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
   }
+  if ('customSystemInstructions' in src) {
+    out.customSystemInstructions = String(src.customSystemInstructions || '').trim().slice(0, 12000);
+  }
+  if ('toolPermissions' in src) out.toolPermissions = normaliseRules(src.toolPermissions);
+  else out.toolPermissions = normaliseRules(out.toolPermissions);
   return out;
 }
 
 function sharedConfigForUser(user) {
   return sanitizeSharedConfig(user && user.sharedConfig);
+}
+
+function mergeCustomSystemInstructions(systemPrompt, config) {
+  const custom = String(config && config.customSystemInstructions || '').trim().slice(0, 12000);
+  if (!custom) return systemPrompt || '';
+  // Keep the product's safety, permission and tool boundaries authoritative.
+  // The user text is still sent as system context so tone and working style
+  // are consistent across providers.
+  return `${systemPrompt || ''}\n\n[USER PREFERENCES]\nApply these preferences when they do not conflict with higher-priority safety, security, permission, or tool-use rules:\n${custom}`;
+}
+function brainMcpForUser(user) {
+  const saved = user && user.brainMcp;
+  if (!saved || !saved.enabled) return null;
+  // A malformed or legacy encrypted value must never make the settings screen
+  // unavailable. Treat it as a disconnected Brain configuration instead.
+  try {
+    return brainMcp.validateConfig({ endpoint: saved.endpoint, token: saved.token ? decryptSecret(saved.token) : '' });
+  } catch {
+    return null;
+  }
+}
+function mcpServersForUser(user) {
+  const servers = Array.isArray(user && user.mcpServers) ? user.mcpServers : [];
+  return servers.map((saved) => {
+    const base = mcpRegistry.normaliseServer(saved);
+    if (!base) return null;
+    return { ...base, token: saved.token ? decryptSecret(saved.token) : '' };
+  }).filter(Boolean);
+}
+function mcpServerForUser(user, id) {
+  const wanted = mcpRegistry.safeId(id);
+  return mcpServersForUser(user).find((server) => server.id === wanted && server.enabled) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,9 +493,24 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
+// Used by the Electron launcher to avoid reusing an old server left behind by
+// a previous IDE installation. Keep it public and deliberately content-free.
+app.get('/api/health', (_req, res) => {
+  // Electron uses this revision to make sure it never attaches a freshly
+  // installed UI to a server process left behind by an older installation.
+  res.json({ ok: true, apiRevision: 'desktop-launcher-v2', version: APP_VERSION });
+});
+
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
+// Electron's dock is not a web client and therefore cannot carry a user cookie.
+// Its random per-launch bridge secret is the only accepted credential here.
+app.post('/api/automation/stop-bridge', async (req, res) => {
+  if (!process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || req.headers['x-zaalis-computer'] !== process.env.ZAALIS_COMPUTER_BRIDGE_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  await automationManager.stop(undefined, 'Arrêt demandé depuis le dock macOS.');
+  res.json({ ok: true });
+});
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
   const user = currentUser(req);
@@ -434,6 +533,81 @@ app.use('/api', (req, res, next) => {
     return next();
   }
   return res.status(401).json({ error: 'Authentification requise.' });
+});
+
+// ---------------------------------------------------------------------------
+// MACOS COMPUTER CONTROL API
+// ---------------------------------------------------------------------------
+app.get('/api/automation/status', (req, res) => {
+  const active = automationManager.active;
+  if (active && active.userId !== req.user.id) return res.status(409).json({ active: true, state: 'busy' });
+  res.json(automationManager.snapshot(active));
+});
+
+app.post('/api/automation/permissions', async (req, res) => {
+  if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+  const result = await automationManager.bridge({ action: 'request_permissions' });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+app.post('/api/automation/stop', async (req, res) => {
+  const active = automationManager.active;
+  if (active && active.userId !== req.user.id) return res.status(403).json({ error: 'Cette tâche appartient à un autre utilisateur.' });
+  res.json(await automationManager.stop(active, 'Arrêt demandé dans l’IDE.'));
+});
+
+app.post('/api/automation/:id/answer', async (req, res) => {
+  try { res.json(await automationManager.answer(req.user.id, String(req.params.id || ''), req.body && req.body.answer)); }
+  catch (err) { res.status(409).json({ error: err.message }); }
+});
+
+// Persistent, interactive terminal sessions for the IDE. They are scoped to a
+// logged-in user and only bind to the project folder selected by that user.
+app.post('/api/terminal/sessions', (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
+    const cwd = resolveBase((req.body && req.body.cwd) || APP_DIR);
+    const session = terminalManager.create({ userId: req.user.id, cwd });
+    res.json(terminalManager.snapshot(session));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  res.json(terminalManager.snapshot(session));
+});
+
+app.get('/api/terminal/sessions/:id/stream', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive');
+  const write = (event, value) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`); } catch {} };
+  write('snapshot', terminalManager.snapshot(session));
+  const onData = (data) => write('data', data);
+  const onExit = (data) => { write('exit', data); try { res.end(); } catch {} };
+  session.events.on('data', onData); session.events.once('exit', onExit);
+  req.on('close', () => { session.events.removeListener('data', onData); session.events.removeListener('exit', onExit); });
+});
+
+app.post('/api/terminal/sessions/:id/input', (req, res) => {
+  try {
+    const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+    if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+    terminalManager.write(session, String(req.body && req.body.data || '').slice(0, 16000)); res.json({ ok: true });
+  } catch (err) { res.status(409).json({ error: err.message }); }
+});
+
+app.post('/api/terminal/sessions/:id/resize', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.resize(session, req.body && req.body.cols, req.body && req.body.rows); res.json({ ok: true });
+});
+
+app.delete('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.close(session); res.json({ ok: true });
 });
 
 // Update profile
@@ -476,13 +650,95 @@ app.put('/api/config', (req, res) => {
   }
 });
 
+// The Zaalis Brain bearer token stays encrypted on this server. It is never
+// returned to the browser/CLI; only this local process speaks MCP with Brain.
+app.get('/api/brain-mcp', async (req, res) => {
+  const saved = req.user && req.user.brainMcp;
+  const config = brainMcpForUser(req.user);
+  if (!config) return res.json({ configured: !!(saved && saved.endpoint && saved.token), enabled: !!(saved && saved.enabled), state: 'disconnected', detail: 'Configuration MCP Zaalis Brain absente.' });
+  try {
+    const result = await brainMcp.check(config);
+    res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint: saved.endpoint });
+  } catch (err) {
+    res.json({ configured: true, enabled: true, state: 'error', detail: err.message, endpoint: saved.endpoint });
+  }
+});
+
+app.put('/api/brain-mcp', async (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+    const body = req.body || {}, users = loadUsers(), index = users.findIndex((u) => u.id === req.user.id);
+    if (index < 0) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    const current = users[index].brainMcp || {};
+    const enabled = body.enabled === undefined ? !!current.enabled : !!body.enabled;
+    const endpoint = body.endpoint === undefined ? String(current.endpoint || '') : String(body.endpoint || '').trim();
+    const suppliedToken = body.token === undefined ? '' : String(body.token || '').trim();
+    const token = suppliedToken || (current.token ? decryptSecret(current.token) : '');
+    if (enabled && !brainMcp.validateConfig({ endpoint, token })) return res.status(400).json({ error: 'Route ou jeton MCP Zaalis Brain invalide.' });
+    users[index].brainMcp = { enabled, endpoint, token: token ? encryptSecret(token) : '' };
+    saveUsers(users);
+    if (!enabled) return res.json({ configured: !!(endpoint && token), enabled: false, state: 'disconnected', detail: 'MCP Zaalis Brain désactivé dans l’IDE.' });
+    try {
+      const result = await brainMcp.check(brainMcpForUser(users[index]));
+      res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint });
+    } catch (err) {
+      // The configuration was saved successfully even when the local Brain
+      // service is offline. Returning a normal status prevents this optional
+      // integration from blocking API-key or general settings saves.
+      res.json({ configured: true, enabled: true, state: 'error', detail: err.message || 'Connexion MCP Zaalis Brain impossible.', endpoint });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message || 'Configuration MCP Zaalis Brain impossible.' });
+  }
+});
+
+// Generic MCP servers. Tokens remain encrypted in users.json and are never
+// returned to a browser/CLI; only this loopback server speaks MCP.
+app.get('/api/mcp', async (req, res) => {
+  const rows = mcpServersForUser(req.user).map((server) => ({ id: server.id, name: server.name, endpoint: server.endpoint, enabled: server.enabled, allow: server.allow, deny: server.deny }));
+  res.json({ servers: rows });
+});
+
+app.put('/api/mcp', (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+    const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers.slice(0, 20) : [];
+    const current = new Map((Array.isArray(req.user.mcpServers) ? req.user.mcpServers : []).map((item) => [item.id, item]));
+    const servers = [];
+    for (const item of incoming) {
+      const server = mcpRegistry.normaliseServer(item); if (!server) return res.status(400).json({ error: 'Configuration MCP invalide.' });
+      const supplied = String(item.token || '').trim(); const previous = current.get(server.id);
+      servers.push({ ...server, token: supplied ? encryptSecret(supplied) : (previous && previous.token || '') });
+    }
+    const users = loadUsers(); const index = users.findIndex((user) => user.id === req.user.id);
+    if (index < 0) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+    users[index].mcpServers = servers; saveUsers(users);
+    res.json({ servers: servers.map(({ token, ...server }) => server) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/mcp/:id/tools', async (req, res) => {
+  try {
+    const server = mcpServerForUser(req.user, req.params.id);
+    if (!server) return res.status(404).json({ error: 'Serveur MCP introuvable ou désactivé.' });
+    const tools = await mcpRegistry.tools(server);
+    res.json({ server: { id: server.id, name: server.name }, tools: tools.filter((tool) => tool && mcpRegistry.allowed(server, tool.name)).map((tool) => ({ name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema || tool.input_schema || {} })) });
+  } catch (err) { res.status(502).json({ error: err.message }); }
+});
+
 
 // ---------------------------------------------------------------------------
 // API KEYS API (protected) — write-only vault with masked read-back
 // ---------------------------------------------------------------------------
 // GET  /api/keys -> { keys: { openai: { set, last4 }, ... } }   (never the key)
+// A mobile session reaches the API over an internet-facing tunnel, so it only
+// gets the boolean presence flag — never the last4 fragment of a key.
 app.get('/api/keys', (req, res) => {
-  res.json({ keys: apiKeysStatus(req.user) });
+  const status = apiKeysStatus(req.user);
+  if (req.isMobile) {
+    for (const p of Object.keys(status)) status[p] = { set: !!status[p].set, last4: '' };
+  }
+  res.json({ keys: status });
 });
 
 // PUT /api/keys  { keys: { openai: 'sk-...', anthropic: null, ... } }
@@ -525,11 +781,277 @@ app.get('/api/chats', (req, res) => {
 app.put('/api/chats', (req, res) => {
   try {
     const conversations = (req.body && req.body.conversations) || [];
-    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(conversations, null, 2));
+    if (!Array.isArray(conversations)) return res.status(400).json({ error: 'Conversations invalides.' });
+    writeJsonAtomic(chatsFile(req.user.id, req.body && req.body.kind), conversations);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// DURABLE AGENT SESSIONS — SQLite index + append-only JSONL logs
+// ---------------------------------------------------------------------------
+app.get('/api/agent-sessions', (req, res) => {
+  try {
+    res.json({ sessions: sessionStore.list({
+      userId: req.user.id,
+      cwd: req.query.root ? resolveBase(req.query.root) : '',
+      includeArchived: req.query.archived === 'true',
+      query: req.query.query || '',
+      limit: req.query.limit,
+    }) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/agent-sessions', (req, res) => {
+  try {
+    const body = req.body || {};
+    const session = sessionStore.create({ userId: req.user.id, cwd: resolveBase(body.root || body.cwd), title: body.title, model: body.model, submodel: body.submodel });
+    res.status(201).json({ session });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.get('/api/agent-sessions/:id', (req, res) => {
+  const session = sessionStore.get(req.params.id, req.user.id);
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.json({ session, events: sessionStore.events(session.id, req.user.id) || [] });
+});
+
+app.patch('/api/agent-sessions/:id', (req, res) => {
+  const session = sessionStore.update(req.params.id, req.user.id, req.body || {});
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.json({ session });
+});
+
+app.post('/api/agent-sessions/:id/fork', (req, res) => {
+  const session = sessionStore.fork(req.params.id, req.user.id, { title: req.body && req.body.title });
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.status(201).json({ session });
+});
+
+app.get('/api/agent-sessions/:id/export', (req, res) => {
+  const exported = sessionStore.export(req.params.id, req.user.id);
+  if (!exported) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.setHeader('Content-Disposition', `attachment; filename="${exported.session.id}.json"`);
+  res.json(exported);
+});
+
+// ---------------------------------------------------------------------------
+// PROJECT SKILLS + LANGUAGE SERVICE
+// ---------------------------------------------------------------------------
+app.get('/api/skills', (req, res) => {
+  try {
+    const root = resolveBase(req.query.root);
+    res.json({ skills: skillsRegistry.discover(root).map(({ instructions, ...skill }) => skill) });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.get('/api/lsp/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || ''); const root = resolveBase(req.query.root);
+    if (action === 'symbols') return res.json({ symbols: languageService.symbols({ root, file: req.query.path }) });
+    if (action === 'diagnostics') return res.json({ diagnostics: languageService.diagnostics({ root, file: req.query.path }) });
+    if (action === 'references') return res.json({ references: languageService.references({ root, symbol: req.query.symbol, limit: req.query.limit }) });
+    if (action === 'definition') return res.json({ definition: languageService.definition({ root, symbol: req.query.symbol }) });
+    if (action === 'rename') return res.json({ plan: languageService.renamePlan({ root, symbol: req.query.symbol, replacement: req.query.replacement }) });
+    return res.status(404).json({ error: 'Action LSP inconnue.' });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Exhaustive project inspection is separate from the convenience glob/grep
+// routes: it never silently truncates the whole result set, exposes every
+// exclusion, and lets callers resume with a cursor.
+app.get('/api/audit/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || '').toLowerCase();
+    if (!['inventory', 'glob', 'grep'].includes(action)) return res.status(404).json({ error: 'Action audit inconnue.' });
+    const root = resolveBase(req.query.root);
+    if (action === 'grep' && !String(req.query.pattern || '')) return res.status(400).json({ error: 'Le motif grep est requis.' });
+    const result = projectInspector[action]({
+      root, pattern: req.query.pattern, includeIgnored: req.query.includeIgnored === 'true',
+      cursor: req.query.cursor, limit: req.query.limit,
+    });
+    res.json({ action, ...result });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// ---------------------------------------------------------------------------
+// SECURITY REVIEW WORKSPACE — durable job + real-time staged progress
+// ---------------------------------------------------------------------------
+const securityReviews = new Map();
+const SECURITY_REVIEW_STAGES = Object.freeze([
+  { id: 'preparing', label: 'Préparation de la revue', profile: 'explorer' },
+  { id: 'mapping_attack_surface', label: 'Cartographie de la surface d’attaque', profile: 'secrets' },
+  { id: 'reviewing_code', label: 'Revue du code', profile: 'source_to_sink' },
+  { id: 'validating_findings', label: 'Validation des constats', profile: 'validator' },
+  { id: 'tracing_impact', label: 'Traçage de l’impact', profile: 'dependencies' },
+  { id: 'building_report', label: 'Construction du rapport', profile: 'verifier' },
+]);
+
+function reviewSnapshot(review) {
+  const result = review.report ? {
+    summary: review.report.summary,
+    scope: review.report.scope,
+    threatModel: review.report.threatModel,
+    findings: (review.report.findings || []).slice(0, 300),
+    dependencies: review.report.dependencies,
+    scanners: review.report.scanners,
+    generatedAt: review.report.generatedAt,
+  } : null;
+  return {
+    id: review.id, sessionId: review.sessionId, root: review.root, workflow: review.workflow,
+    status: review.status, stage: review.stage, startedAt: review.startedAt, completedAt: review.completedAt || null,
+    stages: SECURITY_REVIEW_STAGES.map((stage) => ({ ...stage, status: review.stageStatus[stage.id] || 'pending' })),
+    agents: Object.values(review.agents), result, error: review.error || null,
+  };
+}
+
+function publishSecurityReview(review, event) {
+  const payload = { id: `security_event_${crypto.randomUUID()}`, ts: Date.now(), ...event };
+  review.events.push(payload); if (review.events.length > 400) review.events.shift();
+  review.emitter.emit('review', payload);
+  try { sessionStore.append(review.sessionId, { type: 'security_review_event', reviewId: review.id, event: payload }); } catch {}
+}
+
+function sleepReview(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function reviewActivity(stage, profile, phase, report) {
+  const total = report && report.summary ? Number(report.summary.total || 0) : 0;
+  const high = report && report.summary ? Number(report.summary.high || 0) : 0;
+  const noun = total > 1 ? 'constats' : 'constat';
+  if (phase === 'started') return `${profile.label} démarre : ${stage.label.toLowerCase()}.`;
+  if (phase === 'completed') {
+    if (stage.id === 'mapping_attack_surface') return `${profile.label} a cartographié le périmètre et identifié ${total} ${noun} candidat(s).`;
+    if (stage.id === 'validating_findings') return `${profile.label} a vérifié les preuves et le contexte des ${total} ${noun}.`;
+    if (stage.id === 'tracing_impact') return `${profile.label} a enrichi l’impact et la remédiation de chaque constat.`;
+    if (stage.id === 'building_report') return `${profile.label} a finalisé le rapport${high ? ` (${high} de sévérité élevée)` : ''}.`;
+    return `${profile.label} a terminé : ${stage.label.toLowerCase()}.`;
+  }
+  return `${profile.label} traite ${stage.label.toLowerCase()}.`;
+}
+function findingsForProfile(report, profile) {
+  const findings = report && Array.isArray(report.findings) ? report.findings : [];
+  if (profile === 'secrets') return findings.filter((item) => String(item.rule).startsWith('secret.'));
+  if (profile === 'source_to_sink') return findings.filter((item) => /child_process|eval|sql|path/.test(String(item.rule)));
+  if (profile === 'dependencies') return Object.keys(report && report.dependencies && report.dependencies.direct || {}).map((name) => ({ rule: 'dependency.inventory', file: 'package.json', message: name }));
+  return findings;
+}
+
+async function runSecurityReview(review) {
+  review.status = 'running';
+  publishSecurityReview(review, { type: 'status', status: review.status, activity: 'La revue sécurité démarre et prépare le périmètre du projet.', snapshot: reviewSnapshot(review) });
+  try {
+    // The local scanner is only a baseline. Every deep stage below delegates
+    // to the real agent loop, which must read files and use its tools.
+    review.report = securityPipeline.scan({ root: review.root, mode: review.workflow, includeIgnored: review.workflow === 'deep' });
+    for (const stage of SECURITY_REVIEW_STAGES) {
+      if (review.cancelRequested) throw Object.assign(new Error('Revue annulée.'), { code: 'cancelled' });
+      review.stage = stage.id; review.stageStatus[stage.id] = 'active';
+      const profile = agentProfile(stage.profile);
+      // A profile may participate in more than one phase (the explorer first
+      // prepares the scope, then maps attack surface). Keep each sub-agent
+      // visible as its own completed unit instead of overwriting it.
+      const agentId = `security-${stage.id}`;
+      review.agents[agentId] = { id: agentId, profile: stage.profile, label: profile.label, tools: profile.tools, status: 'running', findings: 0, stage: stage.id };
+      publishSecurityReview(review, { type: 'stage', stage: stage.id, status: 'active', agent: review.agents[agentId], activity: reviewActivity(stage, profile, 'started', review.report), snapshot: reviewSnapshot(review) });
+      if (!review.callModel) throw new Error('Modèle requis pour une revue sécurité approfondie.');
+      const baseline = (review.report.findings || []).slice(0, 80).map((f) => `${f.id} ${f.severity} ${f.file}:${f.line} ${f.message}`).join('\n');
+      const mission = `Revue sécurité, étape: ${stage.label}. Lis les fichiers pertinents avec les outils avant toute conclusion. Analyse uniquement le périmètre sécurité. Les constats locaux suivants sont des CANDIDATS, pas des vulnérabilités confirmées:\n${baseline || '(aucun candidat)'}.\nRends un rapport concis avec preuves fichier:ligne, constats à confirmer/écarter, impact, remédiation proposée et test éventuel. Ne modifie aucun fichier.`;
+      const agentResult = await runAgentTurn({ root: review.root, sessionId: review.sessionId, turnId: `security_${review.id}_${stage.id}`, agentId, model: review.model, submodel: review.submodel, message: mission, config: review.config, reasoningLevel: review.reasoningLevel, permissionMode: review.permissionMode, language: 'fr', callModel: review.callModel, securityPipeline, projectInspector, languageService, executionBroker, emitEvent: (event) => publishSecurityReview(review, { type: 'agent_event', stage: stage.id, agent: agentId, activity: `${profile.label} · ${event.type}`, detail: event, snapshot: reviewSnapshot(review) }) });
+      review.agents[agentId] = { ...review.agents[agentId], toolsUsed: (agentResult.toolResults || []).map((item) => item.tool), report: String(agentResult.response || '').slice(0, 5000), findings: (agentResult.toolResults || []).length };
+      // The local baseline stays candidate-only. A model report can recommend
+      // confirmation, but no regex hit is promoted automatically.
+      if (stage.id === 'tracing_impact') for (const finding of review.report.findings) {
+        finding.impact = finding.impact || 'À confirmer dans le chemin d’attaque indiqué par les agents.';
+        finding.remediation = finding.remediation || 'Correctif proposé dans le rapport des agents ; appliquer uniquement après validation.';
+      }
+      if (stage.id === 'building_report') review.report.markdown = securityPipeline.toMarkdown(review.report);
+      const reviewed = findingsForProfile(review.report, stage.profile);
+      review.agents[agentId] = { ...review.agents[agentId], status: 'completed', findings: reviewed.length };
+      review.stageStatus[stage.id] = 'completed';
+      publishSecurityReview(review, { type: 'stage', stage: stage.id, status: 'completed', agent: review.agents[agentId], activity: reviewActivity(stage, profile, 'completed', review.report), snapshot: reviewSnapshot(review) });
+    }
+    review.status = 'completed'; review.completedAt = new Date().toISOString();
+    const summary = review.report && review.report.summary || {};
+    publishSecurityReview(review, { type: 'completed', status: review.status, activity: `Review terminée : ${summary.total || 0} constat(s), dont ${summary.high || 0} élevé(s) et ${summary.medium || 0} moyen(s).`, snapshot: reviewSnapshot(review) });
+  } catch (error) {
+    review.status = error && error.code === 'cancelled' ? 'cancelled' : 'failed';
+    review.error = review.status === 'failed' ? (error.message || String(error)) : null;
+    review.completedAt = new Date().toISOString();
+    if (review.stage && review.stageStatus[review.stage] === 'active') review.stageStatus[review.stage] = review.status;
+    publishSecurityReview(review, { type: review.status, status: review.status, error: review.error, activity: review.status === 'cancelled' ? 'La revue sécurité a été annulée.' : `La revue sécurité a échoué : ${review.error}`, snapshot: reviewSnapshot(review) });
+  } finally {
+    setTimeout(() => securityReviews.delete(review.id), 30 * 60_000).unref();
+  }
+}
+
+function createSecurityReview({ userId, root, workflow = 'deep', model, submodel, callModel, config, reasoningLevel, permissionMode }) {
+  if (!model) throw new Error('Modèle requis pour une revue sécurité approfondie.');
+  const session = sessionStore.create({ userId, cwd: root, title: `Review sécurité · ${workflow}`, model, submodel });
+  const review = { id: `security_review_${crypto.randomUUID()}`, userId, sessionId: session.id, root, workflow, status: 'starting', stage: 'preparing', stageStatus: {}, agents: {}, events: [], emitter: new EventEmitter(), startedAt: new Date().toISOString(), completedAt: null, cancelRequested: false, report: null, error: null, model, submodel, callModel, config: config || {}, reasoningLevel: Number(reasoningLevel || 0), permissionMode: permissionMode || 'supervised' };
+  securityReviews.set(review.id, review);
+  publishSecurityReview(review, { type: 'created', activity: 'Revue IA approfondie créée.', snapshot: reviewSnapshot(review) });
+  setImmediate(() => { runSecurityReview(review); });
+  return review;
+}
+
+app.post('/api/security/reviews', (req, res) => {
+  try {
+    const body = req.body || {}; const workflow = String(body.workflow || 'scan').toLowerCase();
+    if (body.source !== 'slash') return res.status(403).json({ error: 'La revue sécurité est disponible uniquement via une commande slash.' });
+    if (!['diff', 'scan', 'deep'].includes(workflow)) return res.status(400).json({ error: 'Workflow de revue invalide.' });
+    const root = resolveBase(body.root || body.projectRoot);
+    const model = String(body.model || ''); const submodel = String(body.submodel || '');
+    if (!model) return res.status(400).json({ error: 'Sélectionnez un modèle pour la revue approfondie.' });
+    const cookie = req.headers.cookie || '';
+    const callModel = async (payload) => fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(payload) });
+    const review = createSecurityReview({ userId: req.user.id, root, workflow, model, submodel, callModel, config: { ...sharedConfigForUser(req.user), ...(body.config && typeof body.config === 'object' ? body.config : {}) }, reasoningLevel: body.reasoningLevel, permissionMode: body.permissionMode });
+    res.status(202).json({ review: reviewSnapshot(review) });
+  } catch (error) { res.status(400).json({ error: error.message || String(error) }); }
+});
+
+app.get('/api/security/reviews/:id', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).json({ error: 'Review sécurité introuvable.' });
+  res.json({ review: reviewSnapshot(review), events: review.events });
+});
+
+app.get('/api/security/reviews/:id/stream', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive');
+  const send = (event) => { try { res.write(`event: review\ndata: ${JSON.stringify(event)}\n\n`); } catch {} };
+  send({ type: 'snapshot', snapshot: reviewSnapshot(review) });
+  const listener = (event) => send(event);
+  review.emitter.on('review', listener);
+  req.on('close', () => review.emitter.removeListener('review', listener));
+});
+
+app.post('/api/security/reviews/:id/cancel', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).json({ error: 'Review sécurité introuvable.' });
+  if (['completed', 'failed', 'cancelled'].includes(review.status)) return res.json({ review: reviewSnapshot(review) });
+  review.cancelRequested = true;
+  review.status = 'cancelling';
+  publishSecurityReview(review, { type: 'cancelling', status: 'cancelling', snapshot: reviewSnapshot(review) });
+  res.json({ review: reviewSnapshot(review) });
+});
+
+// ---------------------------------------------------------------------------
+// SECURITY PIPELINE — deterministic local baseline, JSON and SARIF output
+// ---------------------------------------------------------------------------
+app.post('/api/security/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || '').toLowerCase();
+    if (!['diff', 'scan', 'deep', 'validate', 'fix', 'report'].includes(action)) return res.status(404).json({ error: 'Workflow sécurité inconnu.' });
+    const body = req.body || {};
+    if (body.source !== 'slash') return res.status(403).json({ error: 'Le scan sécurité est disponible uniquement via une commande slash.' });
+    const root = resolveBase(body.root || body.projectRoot);
+    let report = securityPipeline.scan({ root, mode: action, includeIgnored: action === 'deep' || body.includeIgnored === true });
+    if (action === 'validate') report = securityPipeline.validate(report, body.findingIds || []);
+    const output = action === 'fix' ? securityPipeline.fixPlan(report, body.findingIds || []) : (body.format === 'sarif' ? report.sarif : (body.format === 'markdown' ? report.markdown : report));
+    res.json({ report: output, summary: report.summary, generatedAt: report.generatedAt, workflow: action });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -724,6 +1246,137 @@ app.post('/api/file', (req, res) => {
   }
 });
 
+// Replays a supervised image_download after the IDE or CLI has shown its
+// approval prompt. The id is valid only for a recent image_search result, so
+// this endpoint never acts as a general-purpose URL downloader.
+app.post('/api/agent-image-download', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.id || !body.path) return res.status(400).json({ error: 'id and path are required' });
+    const result = await downloadProjectImage({
+      id: body.id,
+      path: body.path,
+      root: resolveBase(body.root || body.projectRoot),
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+function approvedProjectFile(root, relative) {
+  const base = fs.realpathSync(resolveBase(root));
+  const value = String(relative || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!value || value.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Chemin de projet invalide.');
+  const full = path.resolve(base, value);
+  if (!isInsideBase(base, full)) throw new Error('Chemin hors projet refusé.');
+  // Existing symlinks are refused: approving project/foo must never overwrite
+  // a target outside the project through a link created between two turns.
+  let cursor = base;
+  for (const part of value.split('/')) {
+    cursor = path.join(cursor, part);
+    try { if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('Lien symbolique refusé.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return { base, full, relative: value };
+}
+
+function atomicProjectWrite(full, content) {
+  fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
+  const temp = `${full}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, String(content || ''), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temp, full);
+}
+
+function approvedEdit(content, hunks) {
+  let next = String(content || '');
+  for (const hunk of (Array.isArray(hunks) ? hunks : [])) {
+    const search = String(hunk && hunk.search || ''); const replace = String(hunk && hunk.replace || '');
+    if (!search) throw new Error('SEARCH vide refusé.');
+    const first = next.indexOf(search); const last = next.lastIndexOf(search);
+    if (first < 0) throw new Error('SEARCH introuvable.');
+    if (first !== last) throw new Error('SEARCH apparaît plusieurs fois.');
+    next = next.slice(0, first) + replace + next.slice(first + search.length);
+  }
+  return next;
+}
+
+function approvedGitCommand(input) {
+  const value = input && typeof input === 'object' ? input : {};
+  const quote = (item) => `'${String(item || '').replace(/'/g, "'\\''")}'`;
+  const action = String(value.action || '');
+  const branch = String(value.branch || '');
+  if (action === 'branch_create' && branch) return { command: `git switch -c ${quote(branch)}`, network: false };
+  if (action === 'worktree_create' && branch) {
+    const safeName = branch.replace(/[^A-Za-z0-9._-]/g, '-');
+    return { command: `mkdir -p .zaalis/worktrees && git worktree add ${quote(`.zaalis/worktrees/${safeName}`)} -b ${quote(branch)}`, network: false };
+  }
+  if (action === 'commit' && value.message && Array.isArray(value.paths) && value.paths.length) return { command: `git add -- ${value.paths.map(quote).join(' ')} && git commit -m ${quote(value.message)}`, network: false };
+  if (action === 'push' && branch) return { command: `git push ${quote(value.remote || 'origin')} ${quote(branch)}`, network: true };
+  throw new Error('Action Git approuvée invalide.');
+}
+
+function approvedGitPush(root, input) {
+  const remote = String(input && input.remote || 'origin');
+  const branch = String(input && input.branch || '');
+  if (!/^[A-Za-z0-9._/-]{1,80}$/.test(remote) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch)) throw new Error('Remote ou branche Git invalide.');
+  // This is a deliberately narrow privileged bridge: the exact remote and
+  // branch were bound to a single-use user approval, and no shell is invoked.
+  // It may access Git/SSH/Keychain credentials already configured by the user,
+  // something the general sandbox intentionally cannot do.
+  const env = {
+    PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
+    HOME: os.homedir(),
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    GIT_TERMINAL_PROMPT: '0',
+    ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}),
+  };
+  return new Promise((resolve) => {
+    let stdout = ''; let stderr = ''; let settled = false; let timedOut = false;
+    const done = (extra = {}) => {
+      if (settled) return; settled = true;
+      resolve({ stdout: stdout.slice(0, MAX_COMMAND_OUTPUT), stderr: stderr.slice(0, MAX_COMMAND_OUTPUT), timedOut, ...extra });
+    };
+    let child;
+    try { child = spawn('git', ['-C', root, 'push', remote, branch], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); } catch (error) { done({ exitCode: 1, error: error.message }); return; }
+    const append = (which, chunk) => { if (which === 'out') stdout += String(chunk); else stderr += String(chunk); };
+    child.stdout.on('data', (chunk) => append('out', chunk)); child.stderr.on('data', (chunk) => append('err', chunk));
+    const timer = setTimeout(() => { timedOut = true; try { child.kill('SIGTERM'); } catch {} }, Math.min(COMMAND_TIMEOUT_MS, 120_000));
+    child.on('error', (error) => { clearTimeout(timer); done({ exitCode: 1, error: error.message }); });
+    child.on('close', (exitCode) => { clearTimeout(timer); done({ exitCode: exitCode == null ? 1 : exitCode }); });
+  });
+}
+
+// Single-use approvals are bound to a user, session, call and exact JSON
+// input. This endpoint is the only supervised replay path; direct /api/file
+// and /api/exec calls cannot turn a policy deny into an approval.
+app.post('/api/agent-approval/execute', async (req, res) => {
+  try {
+    const body = req.body || {}; const tool = String(body.tool || '').toLowerCase(); const input = body.input && typeof body.input === 'object' ? body.input : {};
+    const valid = approvalStore.consume({ approvalId: body.approvalId, token: body.token, sessionId: body.sessionId, callId: body.callId, tool, input, userId: req.user.id });
+    if (!valid.ok) return res.status(403).json({ error: valid.reason, code: 'approval_required' });
+    const policy = evaluatePermission({ tool, input, mode: 'auto', rules: valid.context.rules });
+    if (policy.decision === 'deny') return res.status(403).json({ error: policy.reason, code: 'permission_denied' });
+    const root = valid.context.root;
+    let result;
+    if (tool === 'run') {
+      result = await executionBroker.run({ command: String(input.command || ''), root, write: input.write !== false, network: input.network === true });
+    } else if (tool === 'git_write') {
+      const git = approvedGitCommand(input);
+      result = input.action === 'push'
+        ? await approvedGitPush(root, input)
+        : await executionBroker.run({ command: git.command, root, write: true, network: git.network });
+    } else if (tool === 'write') {
+      result = executionBroker.writeFile({ root, path: input.path, content: input.content });
+    } else if (tool === 'edit') {
+      result = executionBroker.editFile({ root, path: input.path, hunks: input.hunks });
+    } else if (tool === 'image_download') {
+      result = { success: true, ...(await downloadProjectImage({ id: input.id, path: input.path, root })) };
+    } else return res.status(400).json({ error: 'Outil non approuvable.' });
+    approvalStore.prune();
+    res.json(result);
+  } catch (err) { res.status(400).json({ error: err.message || String(err), code: 'tool_failure' }); }
+});
+
 // ---------------------------------------------------------------------------
 // EXEC API
 // ---------------------------------------------------------------------------
@@ -747,26 +1400,54 @@ function execEnv() {
   return { ...process.env, PATH: merged.join(':') };
 }
 
-// POST /api/exec  { command, cwd }
-// macOS builds execute commands through the system POSIX shell.
-app.post('/api/exec', (req, res) => {
-  try {
-    const { command, cwd } = req.body;
-    if (!command) return res.status(400).json({ error: 'command is required' });
-
-    const execCwd = cwd || APP_DIR;
-
-    execFile('/bin/sh', ['-lc', command], {
-      cwd: execCwd,
-      timeout: 30000,
-      maxBuffer: 1024 * 1024 * 5,
-      env: execEnv()
-    }, (err, stdout, stderr) => {
-      if (err && !stdout && !stderr) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({ stdout: stdout || '', stderr: stderr || '' });
+function runShellCommand(command, cwd) {
+  return new Promise((resolve) => {
+    let stdout = '', stderr = '', timedOut = false, outputTruncated = false, settled = false;
+    const child = spawn('/bin/sh', ['-lc', command], {
+      cwd, env: execEnv(), detached: process.platform !== 'win32', windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const append = (current, chunk) => {
+      const text = chunk.toString();
+      const remaining = MAX_COMMAND_OUTPUT - Buffer.byteLength(current);
+      if (remaining <= 0) { outputTruncated = true; return current; }
+      if (Buffer.byteLength(text) > remaining) { outputTruncated = true; return current + Buffer.from(text).subarray(0, remaining).toString(); }
+      return current + text;
+    };
+    const stop = () => {
+      if (!child.pid) return;
+      if (process.platform === 'win32') child.kill('SIGTERM');
+      else { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); } }
+      setTimeout(() => {
+        if (child.exitCode != null) return;
+        if (process.platform === 'win32') child.kill('SIGKILL');
+        else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+      }, 5000).unref();
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, COMMAND_TIMEOUT_MS);
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, stdout, stderr, timedOut, outputTruncated, timeoutMs: COMMAND_TIMEOUT_MS });
+    };
+    child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk); });
+    child.once('error', (error) => finish({ exitCode: 1, error: error.message }));
+    child.once('close', (code, signal) => finish({ exitCode: timedOut ? 124 : (Number.isInteger(code) ? code : 1), signal, error: '' }));
+  });
+}
+
+// POST /api/exec  { command, cwd }. Always returns the exit status: a command
+// that writes an error must never be presented to the user or an AI as success.
+app.post('/api/exec', async (req, res) => {
+  const { command, cwd, write, network } = req.body || {};
+  if (!command) return res.status(400).json({ error: 'command is required' });
+  try {
+    res.json(await executionBroker.run({
+      command: String(command), root: resolveBase(cwd || APP_DIR),
+      write: write !== false, network: network === true,
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1011,6 +1692,384 @@ async function webSearch(query, limit) {
   if (!r.ok) return [];
   const html = await r.text();
   return extractSearchResults(html, query, limit);
+}
+
+// ---------------------------------------------------------------------------
+// OPEN-LICENSED IMAGE SEARCH + LOCAL ASSET DOWNLOAD
+// ---------------------------------------------------------------------------
+// The cache deliberately contains only results that our server just received
+// from Openverse or Wikimedia Commons. image_download accepts an opaque result
+// id rather than an arbitrary URL, which keeps the SSRF and licensing boundary
+// on the server instead of trusting model-generated URLs.
+const IMAGE_SEARCH_TTL_MS = 30 * 60 * 1000;
+const MAX_CACHED_IMAGE_RESULTS = 480;
+const MAX_IMAGE_DOWNLOAD_BYTES = 12 * 1024 * 1024;
+const imageSearchResults = new Map();
+
+const IMAGE_TYPE_BY_MIME = Object.freeze({
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/avif': 'avif',
+});
+
+function compactImageText(value, max = 500) {
+  return stripHtml(String(value || ''))
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+function imageFileType(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^image\//, '').replace(/^\./, '');
+  if (raw === 'jpeg' || raw === 'jpg') return 'jpg';
+  return ['png', 'webp', 'gif', 'avif'].includes(raw) ? raw : '';
+}
+
+function imageFileTypeFromUrl(rawUrl) {
+  try {
+    const pathname = new URL(rawUrl).pathname;
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    return imageFileType(match && match[1]);
+  } catch {
+    return '';
+  }
+}
+
+function imageMimeFromBytes(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 12) return '';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (bytes.subarray(4, 8).toString('ascii') === 'ftyp' && /^(avif|avis)$/i.test(bytes.subarray(8, 12).toString('ascii'))) return 'image/avif';
+  return '';
+}
+
+function allowedImageDestinationType(relativePath) {
+  return imageFileType(path.extname(relativePath));
+}
+
+function cacheImageSearchResult(result) {
+  const now = Date.now();
+  for (const [key, cached] of imageSearchResults) {
+    if (!cached || cached.expiresAt <= now) imageSearchResults.delete(key);
+  }
+  while (imageSearchResults.size >= MAX_CACHED_IMAGE_RESULTS) {
+    const oldest = imageSearchResults.keys().next().value;
+    if (!oldest) break;
+    imageSearchResults.delete(oldest);
+  }
+  const record = { ...result, expiresAt: now + IMAGE_SEARCH_TTL_MS };
+  imageSearchResults.set(record.id, record);
+  return {
+    id: record.id,
+    title: record.title,
+    imageUrl: record.imageUrl,
+    thumb: record.thumb,
+    sourcePage: record.sourcePage,
+    license: record.license,
+    licenseUrl: record.licenseUrl,
+    attribution: record.attribution,
+    width: record.width,
+    height: record.height,
+    fileType: record.fileType,
+    provider: record.provider,
+  };
+}
+
+function normaliseOpenverseImage(row) {
+  const imageUrl = publicHttpUrl(row && row.url);
+  const sourcePage = publicHttpUrl(row && row.foreign_landing_url) || publicHttpUrl(row && row.detail_url);
+  const fileType = imageFileType(row && row.filetype) || imageFileTypeFromUrl(imageUrl);
+  const licenseKey = String(row && row.license || '').toLowerCase();
+  if (!imageUrl || !sourcePage || !fileType || !['cc0', 'pdm', 'by', 'by-sa'].includes(licenseKey)) return null;
+  const title = compactImageText(row.title || 'Image Openverse', 180);
+  const creator = compactImageText(row.creator, 180);
+  return {
+    id: `ov:${row.id}`,
+    imageUrl,
+    thumb: publicHttpUrl(row.thumbnail) || imageUrl,
+    sourcePage,
+    license: compactImageText(`${String(row.license || '').toUpperCase()}${row.license_version ? ' ' + row.license_version : ''}`, 80),
+    licenseUrl: publicHttpUrl(row.license_url),
+    attribution: compactImageText(row.attribution || [title, creator].filter(Boolean).join(' — ')),
+    title,
+    creator,
+    width: Number(row.width) || undefined,
+    height: Number(row.height) || undefined,
+    fileType,
+    provider: 'Openverse',
+  };
+}
+
+async function searchOpenverseImages(query, limit) {
+  const url = new URL('https://api.openverse.org/v1/images/');
+  url.searchParams.set('q', query);
+  url.searchParams.set('page_size', String(Math.min(Math.max(limit * 2, 8), 24)));
+  // Exclude NC/ND works so a generated website is not accidentally given an
+  // asset that cannot be adapted or used commercially.
+  url.searchParams.set('license', 'cc0,pdm,by,by-sa');
+  url.searchParams.set('mature', 'false');
+  const response = await fetchWithTimeout(url.toString(), 9000, { headers: { Accept: 'application/json' } });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return (Array.isArray(payload && payload.results) ? payload.results : [])
+    .map(normaliseOpenverseImage)
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normaliseWikimediaImage(page) {
+  const info = page && Array.isArray(page.imageinfo) ? page.imageinfo[0] : null;
+  if (!info) return null;
+  const imageUrl = publicHttpUrl(info.thumburl) || (Number(info.size) <= MAX_IMAGE_DOWNLOAD_BYTES ? publicHttpUrl(info.url) : null);
+  const sourcePage = publicHttpUrl(info.descriptionurl);
+  const fileType = imageFileType(info.mime) || imageFileTypeFromUrl(imageUrl);
+  const meta = info.extmetadata || {};
+  const license = compactImageText((meta.LicenseShortName && meta.LicenseShortName.value) || (meta.License && meta.License.value) || (meta.UsageTerms && meta.UsageTerms.value), 100);
+  if (!imageUrl || !sourcePage || !fileType || !license) return null;
+  const title = compactImageText(String(page.title || 'Image Wikimedia Commons').replace(/^File:/i, ''), 180);
+  const creator = compactImageText(meta.Artist && meta.Artist.value, 180);
+  const attribution = compactImageText((meta.Attribution && meta.Attribution.value) || [title, creator].filter(Boolean).join(' — '));
+  return {
+    id: `commons:${page.pageid}`,
+    imageUrl,
+    thumb: publicHttpUrl(info.thumburl) || imageUrl,
+    sourcePage,
+    license,
+    licenseUrl: publicHttpUrl(meta.LicenseUrl && meta.LicenseUrl.value),
+    attribution,
+    title,
+    creator,
+    width: Number(info.thumbwidth || info.width) || undefined,
+    height: Number(info.thumbheight || info.height) || undefined,
+    fileType,
+    provider: 'Wikimedia Commons',
+  };
+}
+
+async function searchWikimediaImages(query, limit) {
+  const url = new URL('https://commons.wikimedia.org/w/api.php');
+  url.searchParams.set('action', 'query');
+  url.searchParams.set('generator', 'search');
+  url.searchParams.set('gsrsearch', query);
+  url.searchParams.set('gsrnamespace', '6');
+  url.searchParams.set('gsrlimit', String(Math.min(Math.max(limit * 2, 8), 24)));
+  url.searchParams.set('prop', 'imageinfo');
+  url.searchParams.set('iiprop', 'url|mime|size|extmetadata');
+  // The thumbnail is a web-appropriate asset; originals on Commons often
+  // exceed practical website and download limits.
+  url.searchParams.set('iiurlwidth', '1440');
+  url.searchParams.set('format', 'json');
+  const response = await fetchWithTimeout(url.toString(), 9000, { headers: { Accept: 'application/json' } });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return Object.values(payload && payload.query && payload.query.pages || {})
+    .map(normaliseWikimediaImage)
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+async function searchOpenLicensedImages(query, limit = 8) {
+  const cleanQuery = String(query || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const max = Math.min(Math.max(Number(limit) || 8, 1), 12);
+  if (!cleanQuery) return [];
+  const settled = await Promise.allSettled([
+    searchOpenverseImages(cleanQuery, max),
+    searchWikimediaImages(cleanQuery, max),
+  ]);
+  const candidates = settled.flatMap((entry) => entry.status === 'fulfilled' ? entry.value : []);
+  const seen = new Set();
+  const results = [];
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate.imageUrl)) continue;
+    seen.add(candidate.imageUrl);
+    results.push(cacheImageSearchResult(candidate));
+    if (results.length >= max) break;
+  }
+  return results;
+}
+
+function isPrivateIpAddress(address) {
+  const value = String(address || '').toLowerCase();
+  const family = net.isIP(value);
+  if (family === 4) {
+    const [a, b] = value.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && (b === 0 || b === 168)) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51) || (a === 203 && b === 0);
+  }
+  if (family === 6) {
+    const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateIpAddress(mapped[1]);
+    return value === '::' || value === '::1' || value.startsWith('fc') || value.startsWith('fd') ||
+      value.startsWith('fe80:') || value.startsWith('ff') || value.startsWith('2001:db8');
+  }
+  return true;
+}
+
+async function assertPublicImageTarget(rawUrl) {
+  const safe = publicHttpUrl(rawUrl);
+  if (!safe) throw new Error('URL image non publique ou invalide.');
+  const host = new URL(safe).hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host)) {
+    if (isPrivateIpAddress(host)) throw new Error('Hôte image privé bloqué.');
+    return safe;
+  }
+  let addresses;
+  try {
+    addresses = await dns.lookup(host, { all: true, verbatim: true });
+  } catch {
+    throw new Error('Hôte image introuvable.');
+  }
+  if (!addresses.length || addresses.some((entry) => isPrivateIpAddress(entry.address))) {
+    throw new Error('Hôte image non public bloqué.');
+  }
+  return safe;
+}
+
+async function readImageResponseBytes(response) {
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_DOWNLOAD_BYTES) {
+    throw new Error(`Image trop lourde (maximum ${Math.round(MAX_IMAGE_DOWNLOAD_BYTES / 1024 / 1024)} Mo).`);
+  }
+  if (!response.body) throw new Error('Réponse image vide.');
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_IMAGE_DOWNLOAD_BYTES) {
+      try { await reader.cancel(); } catch {}
+      throw new Error(`Image trop lourde (maximum ${Math.round(MAX_IMAGE_DOWNLOAD_BYTES / 1024 / 1024)} Mo).`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function fetchPublicImageBytes(rawUrl) {
+  let target = publicHttpUrl(rawUrl);
+  if (!target) throw new Error('URL image non publique ou invalide.');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    for (let redirectCount = 0; redirectCount <= 4; redirectCount++) {
+      target = await assertPublicImageTarget(target);
+      const response = await fetch(target, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': SEARCH_USER_AGENT,
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) throw new Error('Redirection image invalide.');
+        target = publicHttpUrl(new URL(location, target).toString());
+        if (!target) throw new Error('Redirection vers une URL non publique bloquée.');
+        continue;
+      }
+      if (!response.ok) throw new Error(`Téléchargement image HTTP ${response.status}.`);
+      const bytes = await readImageResponseBytes(response);
+      const mime = imageMimeFromBytes(bytes);
+      if (!IMAGE_TYPE_BY_MIME[mime]) throw new Error('Le fichier téléchargé n’est pas une image raster prise en charge.');
+      const declaredMime = String(response.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+      if (declaredMime.startsWith('image/') && IMAGE_TYPE_BY_MIME[declaredMime] && declaredMime !== mime) {
+        throw new Error('Le type MIME déclaré ne correspond pas au contenu image.');
+      }
+      return { bytes, mime };
+    }
+    throw new Error('Trop de redirections image.');
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error('Téléchargement image expiré.');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normaliseImageDestination(root, requestedPath) {
+  const base = path.resolve(root);
+  let relative = String(requestedPath || '').trim().replace(/^['"`]+|['"`]+$/g, '').replace(/\\/g, '/');
+  if (!relative || relative.startsWith('/') || /^[A-Za-z]:\//.test(relative)) throw new Error('Chemin image relatif requis.');
+  const parts = relative.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) throw new Error('Chemin image invalide.');
+  relative = parts.join('/');
+  if (!allowedImageDestinationType(relative)) throw new Error('L’image doit avoir une extension .jpg, .png, .webp, .gif ou .avif.');
+  const full = path.resolve(base, relative);
+  if (!isInsideBase(base, full)) throw new Error('Chemin image hors projet refusé.');
+  return { base, relative, full };
+}
+
+function ensureSafeImageDestination(destination) {
+  const baseReal = fs.realpathSync(destination.base);
+  fs.mkdirSync(path.dirname(destination.full), { recursive: true });
+  const parentReal = fs.realpathSync(path.dirname(destination.full));
+  if (!isInsideBase(baseReal, parentReal)) throw new Error('Dossier image hors projet refusé.');
+  if (fs.existsSync(destination.full) && fs.lstatSync(destination.full).isSymbolicLink()) {
+    throw new Error('Lien symbolique image refusé.');
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[|\\{}()[\]^$+*?.]/g, '\\$&');
+}
+
+function writeImageAttribution(destination, record) {
+  const directory = path.posix.dirname(destination.relative);
+  const relativePath = directory === '.' ? 'ATTRIBUTIONS.md' : `${directory}/ATTRIBUTIONS.md`;
+  const fullPath = path.resolve(destination.base, relativePath);
+  if (!isInsideBase(destination.base, fullPath)) throw new Error('Chemin d’attribution hors projet refusé.');
+  if (fs.existsSync(fullPath) && fs.lstatSync(fullPath).isSymbolicLink()) throw new Error('Lien symbolique d’attribution refusé.');
+  const start = `<!-- zaalis-image:${destination.relative.replace(/--/g, '-') } -->`;
+  const end = '<!-- /zaalis-image -->';
+  const lines = [
+    start,
+    `Image : ${compactImageText(record.title || destination.relative, 180)}`,
+    `Source : ${record.sourcePage || record.imageUrl}`,
+    `Licence : ${compactImageText(record.license || 'non précisée', 120)}${record.licenseUrl ? ` — ${record.licenseUrl}` : ''}`,
+    `Attribution : ${compactImageText(record.attribution || record.creator || 'voir la page source', 500)}`,
+    end,
+  ];
+  const block = lines.join('\n');
+  let current = '';
+  try { current = fs.readFileSync(fullPath, 'utf8'); } catch {}
+  const existingBlock = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}`, 'g');
+  const next = existingBlock.test(current)
+    ? current.replace(existingBlock, block)
+    : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}# Image attributions\n\n${block}\n`;
+  fs.writeFileSync(fullPath, next, 'utf8');
+  return relativePath;
+}
+
+async function downloadProjectImage({ id, path: requestedPath, root }) {
+  const record = imageSearchResults.get(String(id || ''));
+  if (!record || record.expiresAt <= Date.now()) {
+    if (record) imageSearchResults.delete(String(id || ''));
+    throw new Error('Résultat image expiré : relance image_search avant le téléchargement.');
+  }
+  const destination = normaliseImageDestination(root, requestedPath);
+  const { bytes, mime } = await fetchPublicImageBytes(record.imageUrl);
+  const expectedType = allowedImageDestinationType(destination.relative);
+  if (IMAGE_TYPE_BY_MIME[mime] !== expectedType) {
+    throw new Error(`Extension ${path.extname(destination.relative)} incompatible avec l’image ${IMAGE_TYPE_BY_MIME[mime]}.`);
+  }
+  ensureSafeImageDestination(destination);
+  fs.writeFileSync(destination.full, bytes);
+  const attributionPath = writeImageAttribution(destination, record);
+  return { path: destination.relative, bytes: bytes.length, mime, attributionPath };
 }
 
 function pageTitle(html) {
@@ -1563,7 +2622,9 @@ app.get('/api/ollama-models', async (req, res) => {
     const models = (data.models || []).map((m) => m.name).filter(Boolean);
     res.json({ models });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // Ollama is optional. An unavailable local runtime must not look like an
+    // IDE server failure in DevTools, nor flood the console while polling.
+    res.json({ models: [], unavailable: true });
   }
 });
 
@@ -2000,7 +3061,7 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
     const variant = requestedVariant;
     const startVariant = async (v) => {
       const exe = await ensureEngineBinary(v);
-      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx), '--jinja'];
       // CPU mode must not offload layers, even when the macOS binary includes Metal.
       if (v === 'cpu') args.push('-ngl', '0');
       else if (ngl > 0) args.push('-ngl', String(ngl));
@@ -2078,6 +3139,280 @@ app.post('/api/gguf-load', async (req, res) => {
 app.post('/api/gguf-unload', async (req, res) => {
   try { await stopEngine(); res.json({ success: true }); }
   catch (e) { res.status(500).json({ error: (e && e.message) || String(e) }); }
+});
+
+// ---------------------------------------------------------------------------
+// VOICE — briques locales du mode vocal du navigateur.
+// Sur macOS, le transcripteur Speech est inclus dans l'application : ni
+// Homebrew ni téléchargement d'un modèle n'est requis. Whisper reste un
+// secours pour les anciennes installations et les autres plateformes.
+// La synthèse repose sur les voix macOS déjà disponibles, ou Piper ailleurs.
+// ---------------------------------------------------------------------------
+const VOICE_DIR = path.join(DATA_DIR, 'voice');
+const WHISPER_MODEL_FILE = 'ggml-small.bin';        // plan Intel : whisper small
+const WHISPER_MODEL_URL =
+  'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/' + WHISPER_MODEL_FILE;
+
+// Cherche un exécutable : d'abord dans DATA_DIR/voice (dépôt manuel), puis
+// dans les emplacements Homebrew/usuels, puis via PATH.
+function findVoiceBinary(names) {
+  const dirs = [
+    VOICE_DIR,
+    '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin',
+    path.join(os.homedir(), '.local', 'bin'),
+  ];
+  for (const n of names) {
+    const inVoice = findExeRecursive(VOICE_DIR, n);
+    if (inVoice) return inVoice;
+    for (const d of dirs) {
+      const p = path.join(d, n);
+      try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
+    }
+  }
+  return null;
+}
+function whisperBinary() { return findVoiceBinary(['whisper-cli', 'whisper-cpp']); }
+function piperBinary()   { return findVoiceBinary(['piper']); }
+function whisperModelPath() { return path.join(VOICE_DIR, WHISPER_MODEL_FILE); }
+
+function macSpeechHelper() {
+  if (process.platform !== 'darwin') return null;
+  // Dans l'application empaquetée, le serveur est dans Resources/app/bundle
+  // et le binaire Speech est placé dans Resources/app. Le second chemin rend
+  // aussi le lancement depuis une arborescence de développement tolérant.
+  const candidates = [
+    path.join(APP_DIR, '..', 'macos-speech-transcriber'),
+    path.join(APP_DIR, 'macos-speech-transcriber'),
+    path.join(APP_DIR, 'native', 'macos-speech-transcriber'),
+  ];
+  for (const candidate of candidates) {
+    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
+  }
+  return null;
+}
+
+function macSpeechLocale(language) {
+  const lang = String(language || '').toLowerCase();
+  if (lang === 'fr') return 'fr-FR';
+  if (lang === 'en') return 'en-US';
+  return /^[a-z]{2}(?:-[a-z]{2})?$/i.test(lang) ? lang : 'fr-FR';
+}
+
+function transcribeWithMacSpeech(helper, wav, language) {
+  return new Promise((resolve, reject) => {
+    execFile(helper, ['--file', wav, '--language', macSpeechLocale(language)], {
+      timeout: 120000,
+      maxBuffer: 4 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      const events = String(stdout || '').split(/\r?\n/).map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+      const transcript = events.reverse().find((event) => event.status === 'transcript' && event.text);
+      if (transcript) return resolve(String(transcript.text).replace(/\s+/g, ' ').trim());
+      const eventError = events.find((event) => event.status === 'error' && event.error);
+      const reason = (eventError && eventError.error) || String(stderr || '').trim() ||
+        (err && err.message) || 'speech-transcription-failed';
+      reject(new Error(reason));
+    });
+  });
+}
+
+// Téléchargement (unique) du modèle whisper, dans l'esprit des pulls gguf.
+let whisperPull = null;   // { status, completed, total, error }
+function startWhisperModelPull() {
+  if (whisperPull && whisperPull.status === 'downloading') return whisperPull;
+  if (fs.existsSync(whisperModelPath())) return { status: 'success' };
+  whisperPull = { status: 'downloading', completed: 0, total: 0, error: '' };
+  const tmp = whisperModelPath() + '.part';
+  ensureDir(VOICE_DIR);
+  downloadTo(WHISPER_MODEL_URL, tmp, (rec, tot) => {
+    whisperPull.completed = rec; whisperPull.total = tot;
+  }).then(() => {
+    fs.renameSync(tmp, whisperModelPath());
+    whisperPull.status = 'success';
+  }).catch((e) => {
+    whisperPull.status = 'error';
+    whisperPull.error = (e && e.message) || String(e);
+    try { fs.unlinkSync(tmp); } catch {}
+  });
+  return whisperPull;
+}
+
+// Première voix française installée pour `say` (fallback voix système sinon).
+let _sayVoice = null;
+function macSayVoice() {
+  if (_sayVoice !== null) return _sayVoice;
+  _sayVoice = '';
+  try {
+    const out = execSyncSafe('say -v ? 2>/dev/null || true');
+    for (const line of String(out).split('\n')) {
+      if (/fr_FR|fr-FR/.test(line)) { _sayVoice = line.trim().split(/\s{2,}|\s(?=fr)/)[0].trim(); break; }
+    }
+  } catch {}
+  return _sayVoice;
+}
+
+// Six voix françaises présentes par défaut sur les versions récentes de
+// macOS. Le catalogue reste stable dans les réglages ; les voix réellement
+// installées sont marquées disponibles afin de retomber sans erreur sur la
+// voix système si une variante a été retirée par Apple.
+const MAC_VOICE_CATALOG = [
+  { id: 'amelie', name: 'Amélie', label: 'Amélie', gender: 'female' },
+  { id: 'flo', name: 'Flo (Français (Canada))', label: 'Flo', gender: 'female' },
+  { id: 'sandy', name: 'Sandy (Français (France))', label: 'Sandy', gender: 'female' },
+  { id: 'thomas', name: 'Thomas', label: 'Thomas', gender: 'male' },
+  { id: 'jacques', name: 'Jacques', label: 'Jacques', gender: 'male' },
+  { id: 'eddy', name: 'Eddy (Français (France))', label: 'Eddy', gender: 'male' },
+];
+
+let _macVoices = null;
+function macInstalledVoices() {
+  if (_macVoices) return _macVoices;
+  _macVoices = new Set();
+  if (process.platform !== 'darwin') return _macVoices;
+  try {
+    const out = execSyncSafe('say -v ? 2>/dev/null || true');
+    for (const line of String(out).split('\n')) {
+      const match = line.match(/^(.*?)\s+fr_(?:FR|CA)\s+#/);
+      if (match) _macVoices.add(match[1].trim());
+    }
+  } catch {}
+  return _macVoices;
+}
+
+function macVoiceOptions() {
+  const installed = macInstalledVoices();
+  return MAC_VOICE_CATALOG.map((voice) => ({
+    id: voice.id, label: voice.label, gender: voice.gender,
+    available: installed.has(voice.name),
+  }));
+}
+
+function macVoiceName(selection) {
+  const wanted = MAC_VOICE_CATALOG.find((voice) => voice.id === String(selection || ''));
+  if (wanted && macInstalledVoices().has(wanted.name)) return wanted.name;
+  return macSayVoice();
+}
+// Voix Piper française : premier fichier *.onnx contenant "fr" dans voice/.
+function piperVoicePath() {
+  try {
+    const files = fs.readdirSync(VOICE_DIR).filter((f) => f.endsWith('.onnx'));
+    return files.length
+      ? path.join(VOICE_DIR, files.find((f) => /(^|[-_])fr/i.test(f)) || files[0])
+      : null;
+  } catch { return null; }
+}
+
+function voiceStatusSnapshot() {
+  const macSpeech = macSpeechHelper();
+  const bin = whisperBinary();
+  const model = fs.existsSync(whisperModelPath());
+  const pull = whisperPull && whisperPull.status === 'downloading' ? {
+    downloading: true, completed: whisperPull.completed, total: whisperPull.total,
+  } : null;
+  const piper = piperBinary();
+  const piperVoice = piper ? piperVoicePath() : null;
+  return {
+    stt: {
+      ready: !!macSpeech || !!(bin && model),
+      engine: macSpeech ? 'macos-speech' : (bin ? 'whisper' : 'none'),
+      binary: !!(macSpeech || bin), model, pull,
+      hint: macSpeech ? '' : (bin ? (model ? '' : 'Modèle vocal en cours d\'installation…')
+                                      : 'La reconnaissance vocale sera disponible après la mise à jour de zaalis labs IDE.'),
+    },
+    tts: {
+      ready: process.platform === 'darwin' || !!(piper && piperVoice),
+      engine: (piper && piperVoice) ? 'piper' : (process.platform === 'darwin' ? 'say' : 'none'),
+      voices: process.platform === 'darwin' ? macVoiceOptions() : [],
+    },
+  };
+}
+
+// GET /api/voice-status -> état des briques vocales ; lance le téléchargement
+// du modèle whisper si le binaire est là mais pas le modèle.
+app.get('/api/voice-status', (req, res) => {
+  try {
+    if (!macSpeechHelper() && whisperBinary() && !fs.existsSync(whisperModelPath())) startWhisperModelPull();
+    res.json(voiceStatusSnapshot());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/voice-options -> six voix proposées au navigateur avec leur état.
+app.get('/api/voice-options', (_req, res) => {
+  res.json({ voices: process.platform === 'darwin' ? macVoiceOptions() : [] });
+});
+
+// POST /api/stt { audio: <base64 WAV 16 kHz mono>, language? } -> { text }
+app.post('/api/stt', async (req, res) => {
+  const macSpeech = macSpeechHelper();
+  const bin = whisperBinary();
+  if (!macSpeech && !bin) return res.status(409).json({ error: 'stt-unavailable', hint: 'Mettez à jour zaalis labs IDE pour activer la reconnaissance vocale.' });
+  if (!macSpeech && !fs.existsSync(whisperModelPath())) {
+    const pull = startWhisperModelPull();
+    return res.status(409).json({ error: 'model-downloading',
+      completed: pull.completed || 0, total: pull.total || 0 });
+  }
+  const b64 = String((req.body && req.body.audio) || '');
+  if (!b64) return res.status(400).json({ error: 'audio requis' });
+  const lang = /^[a-z]{2}$/.test(String(req.body.language || '')) ? req.body.language : 'fr';
+  ensureDir(VOICE_DIR);
+  const wav = path.join(VOICE_DIR, 'stt-' + process.pid + '-' + Date.now() + '.wav');
+  try {
+    fs.writeFileSync(wav, Buffer.from(b64, 'base64'));
+    let text;
+    if (macSpeech) {
+      text = await transcribeWithMacSpeech(macSpeech, wav, lang);
+    } else {
+      text = await new Promise((resolve, reject) => {
+        execFile(bin, [
+          '-m', whisperModelPath(), '-f', wav, '-l', lang,
+          '-nt', '-np', '-t', String(Math.max(2, Math.min(8, os.cpus().length - 1))),
+        ], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+          if (err) reject(err); else resolve(String(stdout || ''));
+        });
+      });
+    }
+    res.json({ text: String(text).replace(/\s+/g, ' ').trim() });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || String(e) });
+  } finally {
+    try { fs.unlinkSync(wav); } catch {}
+  }
+});
+
+// POST /api/tts { text } -> { audio: <base64 WAV> }
+// Piper (voix neurale) si installé avec une voix, sinon `say` macOS.
+app.post('/api/tts', async (req, res) => {
+  const text = String((req.body && req.body.text) || '').trim().slice(0, 1200);
+  if (!text) return res.status(400).json({ error: 'text requis' });
+  ensureDir(VOICE_DIR);
+  const out = path.join(VOICE_DIR, 'tts-' + process.pid + '-' + Date.now() + '.wav');
+  const { execFile } = require('child_process');
+  const run = (cmd, args, input) => new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { timeout: 60000 }, (err) => err ? reject(err) : resolve());
+    if (input != null && child.stdin) { child.stdin.write(input); child.stdin.end(); }
+  });
+  try {
+    const piper = piperBinary();
+    const voice = piper ? piperVoicePath() : null;
+    if (piper && voice) {
+      await run(piper, ['--model', voice, '--output_file', out], text);
+    } else if (process.platform === 'darwin') {
+      const args = ['-o', out, '--data-format=LEI16@22050'];
+      const v = macVoiceName(req.body && req.body.voice);
+      if (v) args.push('-v', v);
+      args.push(text);
+      await run('/usr/bin/say', args);
+    } else {
+      return res.status(409).json({ error: 'tts-missing', hint: 'Installez Piper (binaire + voix .onnx dans le dossier voice).' });
+    }
+    const audio = fs.readFileSync(out).toString('base64');
+    res.json({ audio });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || String(e) });
+  } finally {
+    try { fs.unlinkSync(out); } catch {}
+  }
 });
 
 // POST /api/gguf-delete { name }
@@ -2163,9 +3498,14 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // Shared Claude-Code-style loop used by both the Windows app and the CLI.
 // It keeps the provider dispatch in /api/chat, but centralizes project context
 // and local tools here so every client sees the same files and behavior.
+app.get('/api/agent-tools', (req, res) => {
+  res.json({ protocol: 'zaalis.tool.v1', tools: TOOL_CATALOG });
+});
+
 app.post('/api/agent-chat', async (req, res) => {
   let wantsStream = false;
   let streamOpen = false;
+  let computerSession = null;
   const openStream = (status = 200) => {
     if (streamOpen) return;
     streamOpen = true;
@@ -2200,13 +3540,40 @@ app.post('/api/agent-chat', async (req, res) => {
     if (!model || !message.trim()) {
       return respondError(400, 'model and message are required');
     }
+    const computerControl = b.computerControl === true;
+    if (computerControl && req.isBrowser) return respondError(403, 'Le contrôle du Mac est indisponible depuis Zaalis Browser.');
+    if (computerControl && !['codex', 'claude', 'gemini', 'grok', 'mistral', 'kimi', 'local', 'gguf'].includes(String(model))) {
+      return respondError(400, 'Le contrôle du Mac est indisponible pour ce modèle.');
+    }
 
     const root = resolveBase(b.root || b.projectRoot);
+    const existingSession = b.sessionId ? sessionStore.get(String(b.sessionId), req.user.id) : null;
+    const agentSession = existingSession || sessionStore.create({
+      userId: req.user.id,
+      cwd: root,
+      title: String(message).replace(/\s+/g, ' ').trim().slice(0, 120),
+      model,
+      submodel: b.submodel,
+    });
+    const turnId = `turn_${crypto.randomUUID()}`;
+    const suppliedRules = b.config && b.config.toolPermissions;
+    const runtimeConfig = {
+      ...sharedConfigForUser(req.user),
+      ...(b.config && typeof b.config === 'object' ? b.config : {}),
+      // The server is the authoritative enforcement point. A client may
+      // narrow its own session rules, but malformed rules never reach tools.
+      toolPermissions: normaliseRules(suppliedRules || sharedConfigForUser(req.user).toolPermissions),
+    };
+    runtimeConfig.customSystemInstructions = sharedConfigForUser(req.user).customSystemInstructions;
+    sessionStore.append(agentSession.id, { type: 'message', role: 'user', turnId, content: message });
     const cookie = req.headers.cookie || '';
     const callModel = async (payload) => {
       const requestedTimeout = parseInt(payload.timeoutMs, 10);
+      // A deep security audit carries a very large context and legitimately
+      // needs several minutes. The old 120s ceiling silently overrode the
+      // engine's own budget and killed healthy calls mid-report.
       const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-        ? Math.max(1000, Math.min(requestedTimeout, 120000))
+        ? Math.max(1000, Math.min(requestedTimeout, 300000))
         : 0;
       const ac = timeoutMs ? new AbortController() : null;
       const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
@@ -2238,13 +3605,44 @@ app.post('/api/agent-chat', async (req, res) => {
       const r = await openInZaalisBrowser(url, { background: false });
       return r.ok ? { ok: true } : { ok: false, error: r.body && (r.body.message || r.body.error) };
     };
+    const imageDownload = ({ id, path: imagePath }) => downloadProjectImage({ id, path: imagePath, root });
+    const configuredMcpServers = mcpServersForUser(req.user).filter((server) => server.enabled);
+    const agentMessage = configuredMcpServers.length
+      ? `${message}\n\n[MCP CONFIGURÉS]\nUtilise l’outil mcp uniquement si nécessaire. Serveurs disponibles : ${configuredMcpServers.map((server) => `${server.id} (${server.name})`).join(', ')}. Demande tools/list mentalement via le contexte ou appelle seulement un outil dont le nom a été confirmé.`
+      : message;
+    const webFetch = async (url, maxChars = 12000) => {
+      const target = new URL(String(url));
+      if (target.protocol !== 'https:' || !target.hostname || target.username || target.password) throw new Error('Seules les URLs HTTPS publiques sont autorisées.');
+      const addresses = await dns.lookup(target.hostname, { all: true });
+      const privateAddress = (address) => {
+        if (net.isIP(address) === 4) return /^(?:10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.)/.test(address);
+        const low = String(address).toLowerCase(); return low === '::1' || low.startsWith('fc') || low.startsWith('fd') || low.startsWith('fe80:');
+      };
+      if (!addresses.length || addresses.some((row) => privateAddress(row.address))) throw new Error('Adresse privée ou locale refusée.');
+      const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(15_000), headers: { 'User-Agent': 'zaalis-security-fetch/1.0' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, Math.max(100, Math.min(Number(maxChars) || 12000, 50000)));
+    };
+    if (computerControl) {
+      computerSession = await automationManager.start({ userId: req.user.id, permissionMode: b.permissionMode || 'supervised' });
+      if (wantsStream) writeStreamEvent({ type: 'automation', session: automationManager.snapshot(computerSession) });
+    }
 
+    const emitAgentEvent = (event) => {
+      sessionStore.append(agentSession.id, { type: 'agent_event', turnId, event });
+      // Internal events (per-round model transcripts) are persisted for
+      // post-mortem but never streamed: they are diagnostics, not UI.
+      if (wantsStream && !(event && event.internal)) writeStreamEvent(event);
+    };
     const result = await runAgentTurn({
       root,
+      sessionId: agentSession.id,
+      turnId,
+      agentId: String(b.agentId || 'lead').slice(0, 128),
       model,
       submodel: b.submodel,
-      message,
-      config: b.config || {},
+      message: agentMessage,
+      config: runtimeConfig,
       reasoningLevel: b.reasoningLevel,
       images: Array.isArray(b.images) ? b.images : [],
       history: Array.isArray(b.history) ? b.history : [],
@@ -2253,8 +3651,40 @@ app.post('/api/agent-chat', async (req, res) => {
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
       openBrowser,
-      emitEvent: wantsStream ? writeStreamEvent : undefined,
+      imageSearch: searchOpenLicensedImages,
+      imageDownload,
+      brainMcp: b.useBrain === true && brainMcpForUser(req.user)
+        ? { callTool: (tool, args) => brainMcp.callTool(brainMcpForUser(req.user), tool, args) }
+        : null,
+      mcpRegistry: {
+        callTool: (serverId, tool, args) => {
+          const server = mcpServerForUser(req.user, serverId);
+          if (!server) throw new Error('Serveur MCP non configuré ou désactivé.');
+          return mcpRegistry.call(server, tool, args);
+        },
+      },
+      languageService,
+      projectInspector,
+      computerControl: computerControl ? automationManager : null,
+      computerSession,
+      executionBroker,
+      securityPipeline,
+      webFetch,
+      emitEvent: emitAgentEvent,
     });
+    for (const toolResult of (Array.isArray(result.toolResults) ? result.toolResults : [])) {
+      if (!toolResult || toolResult.code !== 'approval_required' || toolResult.terminal || !toolResult.callId) continue;
+      toolResult.approval = approvalStore.issue({
+        sessionId: agentSession.id,
+        callId: toolResult.callId,
+        tool: toolResult.tool,
+        input: toolResult.input,
+        userId: req.user.id,
+        context: { root, rules: runtimeConfig.toolPermissions },
+      });
+    }
+    sessionStore.append(agentSession.id, { type: 'message', role: 'assistant', turnId, content: result.response || '', toolResults: result.toolResults || [] });
+    if (computerSession) await automationManager.complete(computerSession);
     if (wantsStream) {
       writeStreamEvent({ type: 'done', result });
       try { res.end(); } catch {}
@@ -2262,6 +3692,7 @@ app.post('/api/agent-chat', async (req, res) => {
       res.json(result);
     }
   } catch (err) {
+    if (computerSession) await automationManager.stop(computerSession, 'Tâche interrompue par une erreur.');
     if (wantsStream) {
       openStream(res.headersSent ? 200 : 500);
       try { res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n'); } catch {}
@@ -2272,6 +3703,47 @@ app.post('/api/agent-chat', async (req, res) => {
   }
 });
 
+function boundedReasoningLevel(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+}
+
+function pickReasoningValue(values, level) {
+  if (!Array.isArray(values) || !values.length) return undefined;
+  return values[Math.min(boundedReasoningLevel(level), values.length - 1)];
+}
+
+function openAIReasoningEffort(modelName, level) {
+  if (/^gpt-5\.6/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high', 'xhigh', 'max'], level);
+  if (/^gpt-5\.(5|4|2)/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high', 'xhigh'], level);
+  if (/^gpt-5\.1/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high'], level);
+  if (/^(o1|o3-mini)/.test(modelName)) return pickReasoningValue(['low', 'medium', 'high'], level);
+  return undefined;
+}
+
+function xaiReasoningEffort(modelName, level) {
+  if (modelName === 'grok-4.5') return pickReasoningValue(['low', 'medium', 'high'], level);
+  if (modelName === 'grok-4.3') return pickReasoningValue(['none', 'low', 'medium', 'high'], level);
+  if (modelName === 'grok-4.20-multi-agent-0309') return pickReasoningValue(['low', 'medium', 'high', 'xhigh'], level);
+  return undefined;
+}
+
+function parseMistralContent(content) {
+  if (typeof content === 'string') return { text: content, thinking: '' };
+  if (!Array.isArray(content)) return { text: '', thinking: '' };
+  const text = [], thinking = [];
+  for (const chunk of content) {
+    if (!chunk || typeof chunk !== 'object') continue;
+    if (chunk.type === 'text' && typeof chunk.text === 'string') text.push(chunk.text);
+    if (chunk.type === 'thinking') {
+      if (typeof chunk.thinking === 'string') thinking.push(chunk.thinking);
+      const pieces = Array.isArray(chunk.thinking) ? chunk.thinking : [];
+      for (const piece of pieces) if (piece && typeof piece.text === 'string') thinking.push(piece.text);
+    }
+  }
+  return { text: text.join(''), thinking: thinking.join('\n') };
+}
+
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 app.post('/api/chat', async (req, res) => {
@@ -2280,7 +3752,15 @@ app.post('/api/chat', async (req, res) => {
     const images = Array.isArray(req.body.images) ? req.body.images : [];
     // Prior conversation turns (memory). Each: { role: 'user'|'assistant', content: string }
     const history = Array.isArray(req.body.history)
-      ? req.body.history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+      ? req.body.history
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.role === 'assistant' && typeof m.reasoning_content === 'string'
+              ? { reasoning_content: m.reasoning_content }
+              : {}),
+          }))
       : [];
     if (!model || !message) {
       return res.status(400).json({ error: 'model and message are required' });
@@ -2288,20 +3768,35 @@ app.post('/api/chat', async (req, res) => {
 
     // API keys come from the encrypted per-user vault. Keys still sent by an
     // older client (pre-1.0.9 localStorage) are accepted as a fallback only.
-    const keys = { ...(config?.keys || {}), ...userApiKeys(req.user) };
-    const ollamaUrl = config?.ollamaUrl || 'http://127.0.0.1:11434';
-    const ollamaModel = config?.ollamaModel || 'llama3';
+    const runtimeConfig = { ...sharedConfigForUser(req.user), ...(config && typeof config === 'object' ? config : {}) };
+    // A saved preference is authoritative. This prevents an arbitrary web
+    // client from silently supplying a different persistent instruction set.
+    runtimeConfig.customSystemInstructions = sharedConfigForUser(req.user).customSystemInstructions;
+    const effectiveSystemPrompt = mergeCustomSystemInstructions(systemPrompt, runtimeConfig);
+    const keys = { ...(runtimeConfig.keys || {}), ...userApiKeys(req.user) };
+    const ollamaUrl = runtimeConfig.ollamaUrl || 'http://127.0.0.1:11434';
+    const ollamaModel = runtimeConfig.ollamaModel || 'llama3';
+    // Native calls are preferred by every capable provider. The text protocol
+    // remains a compatibility fallback for older/local models.
+    const useNativeTools = req.body.nativeTools === true || req.body.computerTools === true;
+    const computerOnlyTools = req.body.computerTools === true;
+    const providerTools = () => openAIFunctionTools({ computerOnly: computerOnlyTools });
 
     let responseText = '';
     let thinkingText = '';
     let usage = null;
+    let nativeToolCalls = [];
+    // Why the provider stopped. Without it, an answer cut at the token ceiling
+    // is indistinguishable from a finished one — every surface then treats a
+    // truncated security report as complete.
+    let finishReason = '';
 
     // ----- OpenAI (Codex) -----
     if (model === 'codex') {
       if (!keys.openai) return res.json({ response: '[OpenAI] Aucune cle API configuree.' });
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
       for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
@@ -2313,13 +3808,15 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
-      const payload = { model: submodel || 'gpt-5.5', messages };
-
-      const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
-      if (isReasoningModel && reasoningLevel !== undefined) {
-        const efforts = ['low', 'low', 'medium', 'high'];
-        payload.reasoning_effort = efforts[reasoningLevel] || 'medium';
+      const openAIModel = submodel || 'gpt-5.6-sol';
+      const payload = { model: openAIModel, messages, max_completion_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+      if (useNativeTools) {
+        payload.tools = providerTools();
+        payload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+        payload.parallel_tool_calls = !computerOnlyTools;
       }
+      const openAIEffort = openAIReasoningEffort(openAIModel, reasoningLevel);
+      if (openAIEffort) payload.reasoning_effort = openAIEffort;
 
       const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -2330,7 +3827,10 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify(payload),
       });
 
-      responseText = data.choices?.[0]?.message?.content || '';
+      const openAIMessage = data.choices?.[0]?.message || {};
+      responseText = openAIMessage.content || '';
+      nativeToolCalls = Array.isArray(openAIMessage.tool_calls) ? openAIMessage.tool_calls : [];
+      finishReason = data.choices?.[0]?.finish_reason || '';
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
@@ -2350,20 +3850,32 @@ app.post('/api/chat', async (req, res) => {
       claudeMessages.push({ role: 'user', content: claudeContent });
 
       const body = {
-        model: submodel || 'claude-3-5-sonnet',
+        model: submodel || 'claude-fable-5',
         max_tokens: 4096,
         messages: claudeMessages,
       };
-      if (systemPrompt) body.system = systemPrompt;
+      if (effectiveSystemPrompt) body.system = effectiveSystemPrompt;
+      if (useNativeTools) {
+        body.tools = anthropicTools({ computerOnly: computerOnlyTools });
+        body.tool_choice = { type: req.body.computerToolChoice === 'any' ? 'any' : 'auto' };
+      }
 
-      const isThinkingModel = submodel && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('fable'));
-      if (isThinkingModel && reasoningLevel !== undefined && reasoningLevel > 0) {
-        const budgets = [0, 1024, 2048, 4096, 8192];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          body.max_tokens = 10000; // Increase max tokens when thinking is enabled
-          body.thinking = { type: 'enabled', budget_tokens: budget };
-        }
+      const claudeModel = body.model;
+      const claudeLevel = boundedReasoningLevel(reasoningLevel);
+      if (claudeModel === 'claude-fable-5') {
+        body.thinking = { type: 'adaptive', display: 'summarized' };
+        body.output_config = { effort: pickReasoningValue(['low', 'medium', 'high', 'xhigh', 'max'], claudeLevel) };
+        body.max_tokens = 16000;
+      } else if (claudeModel === 'claude-opus-4-8' || claudeModel === 'claude-sonnet-5') {
+        if (claudeLevel > 0) {
+          body.thinking = { type: 'adaptive', display: 'summarized' };
+          body.output_config = { effort: pickReasoningValue(['low', 'low', 'medium', 'high', 'xhigh', 'max'], claudeLevel) };
+          body.max_tokens = 16000;
+        } else body.thinking = { type: 'disabled' };
+      } else if (claudeModel === 'claude-haiku-4-5' && claudeLevel > 0) {
+        const budget = pickReasoningValue([0, 1024, 2048, 4096, 8192], claudeLevel);
+        body.max_tokens = 16000;
+        body.thinking = { type: 'enabled', budget_tokens: budget };
       }
 
       const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
@@ -2378,7 +3890,9 @@ app.post('/api/chat', async (req, res) => {
 
       // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
       responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+      nativeToolCalls = (data.content || []).filter((c) => c.type === 'tool_use');
       thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
+      finishReason = data.stop_reason || '';
       if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
     }
 
@@ -2386,7 +3900,7 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'gemini') {
       if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
 
-      const modelName = submodel || 'gemini-2.5-flash';
+      const modelName = submodel || 'gemini-3.5-flash';
 
       const parts = [{ text: message }];
       images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
@@ -2396,19 +3910,33 @@ app.post('/api/chat', async (req, res) => {
       contents.push({ role: 'user', parts });
 
       const payload = { contents };
-      if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
+      if (effectiveSystemPrompt) payload.system_instruction = { parts: [{ text: effectiveSystemPrompt }] };
+      if (useNativeTools) {
+        payload.tools = geminiTools({ computerOnly: computerOnlyTools });
+        const geminiMode = req.body.computerToolChoice === 'any' ? 'ANY' : 'AUTO';
+        payload.toolConfig = { functionCallingConfig: {
+          mode: geminiMode,
+          ...(geminiMode === 'ANY' ? { allowedFunctionNames: ['computer'] } : {}),
+        } };
+      }
 
-      // Native thinking is supported by Gemini 2.5 / 3.x. The thinkingConfig
-      // MUST be nested inside generationConfig — placing it at the payload root
-      // makes the Gemini REST API reject the request (400 INVALID_ARGUMENT),
-      // which this server then surfaces as a 500.
-      const geminiSupportsThinking = /(^|[^a-z])(2\.5|3)/.test(modelName) || modelName.includes('thinking');
-      if (reasoningLevel !== undefined && reasoningLevel > 0 && geminiSupportsThinking) {
-        const budgets = [0, 1024, 2048, 4096];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          payload.generationConfig = { ...(payload.generationConfig || {}), thinkingConfig: { thinkingBudget: budget } };
-        }
+      const geminiLevel = boundedReasoningLevel(reasoningLevel);
+      if (modelName.startsWith('gemini-3')) {
+        const levels = modelName === 'gemini-3.1-pro-preview'
+          ? ['low', 'medium', 'high']
+          : ['minimal', 'low', 'medium', 'high'];
+        payload.generationConfig = {
+          ...(payload.generationConfig || {}),
+          thinkingConfig: { thinkingLevel: pickReasoningValue(levels, geminiLevel), includeThoughts: true },
+        };
+      } else if (modelName.startsWith('gemini-2.5')) {
+        const budgets = modelName === 'gemini-2.5-pro'
+          ? [1024, 8192, 24576]
+          : [0, 1024, 8192, 24576];
+        payload.generationConfig = {
+          ...(payload.generationConfig || {}),
+          thinkingConfig: { thinkingBudget: pickReasoningValue(budgets, geminiLevel), includeThoughts: true },
+        };
       }
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
@@ -2418,7 +3946,11 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify(payload),
       });
 
-      responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+      const geminiParts = data.candidates?.[0]?.content?.parts || [];
+      responseText = geminiParts.filter((p) => !p.thought && !p.functionCall).map((p) => p.text || '').join('');
+      nativeToolCalls = geminiParts.filter((p) => p.functionCall);
+      thinkingText = geminiParts.filter((p) => p.thought).map((p) => p.text || '').join('\n');
+      finishReason = data.candidates?.[0]?.finishReason || '';
       if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
     }
 
@@ -2426,13 +3958,12 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'grok') {
       if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
 
-      const isImageModel = submodel && (submodel === 'grok-2-image-gen' || submodel === 'grok-image-gen');
+      const isImageModel = submodel && (submodel === 'grok-imagine-image-quality' || submodel === 'grok-imagine-image');
 
       if (isImageModel) {
-        const grokModelName = submodel === 'grok-2-image-gen' ? 'grok-imagine-image-pro' : 'grok-imagine-image';
         const grokPayload = {
           prompt: message,
-          model: grokModelName,
+          model: submodel,
           n: 1,
           response_format: 'b64_json'
         };
@@ -2446,17 +3977,19 @@ app.post('/api/chat', async (req, res) => {
           body: JSON.stringify(grokPayload),
         });
 
-        const b64 = data.data?.[0]?.b64_json;
+        const generatedImage = data.data?.[0];
+        const b64 = generatedImage?.b64_json;
         if (b64) {
           // Use the user's prompt as the image title (sanitized for markdown).
           const title = String(message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
-          responseText = `![${title}](data:image/png;base64,${b64})`;
+          const mime = typeof generatedImage.mime_type === 'string' ? generatedImage.mime_type : 'image/jpeg';
+          responseText = `![${title}](data:${mime};base64,${b64})`;
         } else {
           responseText = "Erreur: Aucune image n'a été générée par l'API.";
         }
       } else {
         const messages = [];
-        if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+        if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
         for (const h of history) messages.push({ role: h.role, content: h.content });
         messages.push({
           role: 'user',
@@ -2468,11 +4001,15 @@ app.post('/api/chat', async (req, res) => {
             : message,
         });
 
-        // The grok-4.x reasoning models reason natively and REJECT the
-        // reasoning_effort parameter ("does not support parameter reasoningEffort").
-        // Only the small grok-3-mini-style models accept it, and none are in our
-        // catalog, so we never send it.
-        const grokPayload = { model: submodel || 'grok-4.3', messages };
+        const grokModel = submodel || 'grok-4.5';
+        const grokPayload = { model: grokModel, messages, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+        if (useNativeTools) {
+          grokPayload.tools = providerTools();
+          grokPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+          grokPayload.parallel_tool_calls = !computerOnlyTools;
+        }
+        const grokEffort = xaiReasoningEffort(grokModel, reasoningLevel);
+        if (grokEffort) grokPayload.reasoning_effort = grokEffort;
 
         const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
           method: 'POST',
@@ -2483,7 +4020,11 @@ app.post('/api/chat', async (req, res) => {
           body: JSON.stringify(grokPayload),
         });
 
-        responseText = data.choices?.[0]?.message?.content || '';
+        const grokMessage = data.choices?.[0]?.message || {};
+        responseText = grokMessage.content || '';
+        nativeToolCalls = Array.isArray(grokMessage.tool_calls) ? grokMessage.tool_calls : [];
+        thinkingText = grokMessage.reasoning_content || '';
+        finishReason = data.choices?.[0]?.finish_reason || '';
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
       }
     }
@@ -2493,7 +4034,7 @@ app.post('/api/chat', async (req, res) => {
       if (!keys.mistral) return res.json({ response: '[Mistral] Aucune cle API configuree.' });
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
       for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
@@ -2505,24 +4046,90 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
+      const mistralModel = submodel || 'mistral-medium-3-5';
+      const mistralPayload = { model: mistralModel, messages, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+      if (useNativeTools) {
+        mistralPayload.tools = providerTools();
+        mistralPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'any' : 'auto';
+        // Desktop steps depend on the previous result (activate, observe,
+        // interact), so ask for one ordered call at a time.
+        mistralPayload.parallel_tool_calls = !computerOnlyTools;
+      }
+      if (mistralModel === 'mistral-medium-3-5' || mistralModel === 'mistral-small-latest') {
+        mistralPayload.reasoning_effort = pickReasoningValue(['none', 'high'], reasoningLevel);
+      }
+
       const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${keys.mistral}`,
         },
-        body: JSON.stringify({ model: submodel || 'mistral-large-latest', messages }),
+        body: JSON.stringify(mistralPayload),
       });
 
-      responseText = data.choices?.[0]?.message?.content || '';
+      const mistralMessage = data.choices?.[0]?.message || {};
+      const mistralContent = parseMistralContent(mistralMessage.content);
+      responseText = mistralContent.text;
+      nativeToolCalls = Array.isArray(mistralMessage.tool_calls) ? mistralMessage.tool_calls : [];
+      thinkingText = mistralContent.thinking;
+      finishReason = data.choices?.[0]?.finish_reason || '';
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+    }
+
+    // ----- Moonshot AI (Kimi) -----
+    else if (model === 'kimi') {
+      if (!keys.moonshot) return res.json({ response: '[Kimi] Aucune cle API Moonshot configuree.' });
+
+      const messages = [];
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
+      for (const h of history) messages.push({
+        role: h.role,
+        content: h.content,
+        ...(h.role === 'assistant' && h.reasoning_content ? { reasoning_content: h.reasoning_content } : {}),
+      });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
+            ]
+          : message,
+      });
+
+      const kimiModel = submodel || 'kimi-k3';
+      const kimiPayload = buildKimiPayload({
+        model: kimiModel,
+        messages,
+        reasoningLevel,
+        tools: useNativeTools ? providerTools() : undefined,
+        requireTool: req.body.computerToolChoice === 'any',
+        maxTokens: responseIntegrity.MAX_OUTPUT_TOKENS,
+      });
+
+      const data = await fetchJSON('https://api.moonshot.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.moonshot}`,
+        },
+        body: JSON.stringify(kimiPayload),
+      });
+
+      const kimiResult = parseKimiResponse(data);
+      responseText = kimiResult.content;
+      nativeToolCalls = Array.isArray(kimiResult.toolCalls) ? kimiResult.toolCalls : [];
+      thinkingText = kimiResult.thinking;
+      finishReason = kimiResult.finishReason || '';
+      usage = kimiResult.usage;
     }
 
     // ----- Ollama (Local) -----
     else if (model === 'local') {
       const messages = [];
-      if (systemPrompt) {
-        messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) {
+        messages.push({ role: 'system', content: effectiveSystemPrompt });
       }
       for (const h of history) {
         messages.push({ role: h.role, content: h.content });
@@ -2558,6 +4165,7 @@ app.post('/api/chat', async (req, res) => {
         options: { num_ctx: numCtx, num_predict: Math.max(512, numPredict) },
         keep_alive: '10m'
       };
+      if (useNativeTools) ollamaBody.tools = providerTools();
 
       // Abort if Ollama takes longer than 5 minutes.
       const ollamaAC = new AbortController();
@@ -2572,6 +4180,8 @@ app.post('/api/chat', async (req, res) => {
         clearTimeout(ollamaTimeout);
 
         responseText = data.message?.content || '';
+        nativeToolCalls = Array.isArray(data.message?.tool_calls) ? data.message.tool_calls : [];
+        finishReason = data.done_reason || '';
 
         // deepseek-r1 etc. embed reasoning inside <think>...</think>.
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
@@ -2579,8 +4189,8 @@ app.post('/api/chat', async (req, res) => {
 
         // Strip system prompt echo — some models regurgitate the instructions.
         // Detect and remove if the response starts with a large chunk of the system prompt.
-        if (systemPrompt && responseText.length > 0) {
-          const sysNorm = systemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
+        if (effectiveSystemPrompt && responseText.length > 0) {
+          const sysNorm = effectiveSystemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
           const resNorm = responseText.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
           if (resNorm.startsWith(sysNorm.slice(0, 80))) {
             // Find where the echo ends and keep only the original content.
@@ -2592,7 +4202,7 @@ app.post('/api/chat', async (req, res) => {
               const lines = responseText.split('\n');
               let cut = 0;
               for (let i = 0; i < lines.length && i < 30; i++) {
-                if (systemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
+                if (effectiveSystemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
                 else break;
               }
               if (cut > 0) responseText = lines.slice(cut).join('\n').trim();
@@ -2628,21 +4238,30 @@ app.post('/api/chat', async (req, res) => {
       }
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
       for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({ role: 'user', content: message });
 
       const ggufAC = new AbortController();
       const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
       try {
+        const ggufBody = { model: 'local', messages, stream: false, temperature: 0.7, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+        if (useNativeTools) {
+          ggufBody.tools = providerTools();
+          ggufBody.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+          ggufBody.parallel_tool_calls = !computerOnlyTools;
+        }
         const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify(ggufBody),
           signal: ggufAC.signal,
         });
         clearTimeout(ggufTimeout);
-        responseText = data.choices?.[0]?.message?.content || '';
+        const ggufMessage = data.choices?.[0]?.message || {};
+        responseText = ggufMessage.content || '';
+        nativeToolCalls = Array.isArray(ggufMessage.tool_calls) ? ggufMessage.tool_calls : [];
+        finishReason = data.choices?.[0]?.finish_reason || '';
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
         if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
@@ -2660,7 +4279,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Final safety net: strip any response that begins with the anti-leak marker
     // or echoes the system instructions (applies to ALL providers).
-    if (systemPrompt && responseText) {
+    if (effectiveSystemPrompt && responseText) {
       const markers = ['[REGLE ABSOLUE]', '[ABSOLUTE RULE]', 'Tu es un agent de code', 'You are a coding agent', 'Tu es un assistant de code', 'You are a coding assistant'];
       for (const mk of markers) {
         if (responseText.startsWith(mk)) {
@@ -2674,7 +4293,22 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
+    // Integrity metadata travels with every answer so the three surfaces
+    // (desktop chat, agent loop, CLI) apply the same rule instead of each
+    // trusting the raw text. The text itself is returned untouched: the agent
+    // loop still has to parse tool calls out of it.
+    const integrity = responseIntegrity.analyzeAnswer(responseText);
+    const truncated = responseIntegrity.isTruncated(finishReason);
+    res.json({
+      response: responseText,
+      thinking: thinkingText || undefined,
+      usage: usage || undefined,
+      toolCalls: nativeToolCalls.length ? nativeToolCalls : undefined,
+      finishReason: finishReason || undefined,
+      truncated: truncated || undefined,
+      degenerate: integrity.degenerate || undefined,
+      degenerateReason: integrity.degenerate ? integrity.reason : undefined,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

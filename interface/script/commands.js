@@ -27,6 +27,7 @@ const SLASH_COMMANDS = [
     // review (read-only)
     { name: 'review',          category: 'review', fr: 'Revue du diff Git (aucune modification)', en: 'Review the Git diff (no edits)' },
     { name: 'security-review', category: 'review', fr: 'Revue de sécurité du diff Git',          en: 'Security review of the Git diff' },
+    { name: 'security', category: 'review', fr: 'Pipeline sécurité (diff, scan, deep, validate, fix, report)', en: 'Security pipeline (diff, scan, deep, validate, fix, report)', usage: '[diff|scan|deep|validate|fix|report]' },
 
     // context / diagnostics
     { name: 'context', category: 'context', fr: 'Affiche le contexte courant',        en: 'Show the current context' },
@@ -57,8 +58,8 @@ const SLASH_COMMANDS = [
     { name: 'resume',      category: 'misc', fr: 'Reprendre une session',    en: 'Resume a session',      stub: true },
     { name: 'session',     category: 'misc', fr: 'Gestion de session',       en: 'Session management',    stub: true },
     { name: 'tasks',       category: 'misc', fr: 'Liste de tâches',          en: 'Task list',             stub: true },
-    { name: 'skills',      category: 'misc', fr: 'Compétences disponibles',  en: 'Available skills',      stub: true },
-    { name: 'mcp',         category: 'misc', fr: 'Serveurs MCP',             en: 'MCP servers',           stub: true },
+    { name: 'skills',      category: 'misc', fr: 'Compétences du projet',  en: 'Project skills' },
+    { name: 'mcp',         category: 'misc', fr: 'Serveurs MCP configurés', en: 'Configured MCP servers' },
     { name: 'theme',       category: 'mode', fr: 'Changer le thème (sombre/clair)', en: 'Change the theme (dark/light)', usage: '[dark|light]' },
     { name: 'keybindings', category: 'misc', fr: 'Raccourcis clavier',       en: 'Keyboard shortcuts',    stub: true },
     { name: 'vim',         category: 'misc', fr: 'Mode Vim',                 en: 'Vim mode',              stub: true },
@@ -505,12 +506,15 @@ SLASH_HANDLERS.run = async (arg, out, lang) => {
         return;
     }
     const dangerous = isDangerousCommand(cmd);
-    const needAsk = dangerous ? state.permissionMode !== 'bypass'
-                              : state.permissionMode !== 'auto' && state.permissionMode !== 'bypass';
+    // Commands run freely on every mode; only a DANGEROUS command or one that
+    // reads/writes a secret file (.env, keys) still asks — and even those run
+    // without a prompt in the unrestricted (bypass) mode.
+    const touchesSecret = /(?:^|[\s"'=<>|(])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|[^\s"']+\.(?:pem|key|pfx|p12|keystore|jks|ppk))(?=$|[\s"'/<>|)])/i.test(cmd);
+    const needAsk = (dangerous || touchesSecret) && state.permissionMode !== 'bypass';
     if (needAsk) {
         const ok = await requestApproval(
             dangerous ? (lang === 'en' ? 'Run this DANGEROUS command?' : 'Exécuter cette commande DANGEREUSE ?')
-                      : (lang === 'en' ? 'Run this command?' : 'Exécuter cette commande ?'),
+                      : (lang === 'en' ? 'Run a command touching a secret file?' : 'Exécuter une commande touchant un fichier sensible ?'),
             cmd);
         if (!ok) { _sysMsg(out, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); return; }
     }
@@ -519,6 +523,16 @@ SLASH_HANDLERS.run = async (arg, out, lang) => {
         const res = await _postJSON('/api/exec', { command: cmd, cwd: state.projectRoot });
         const text = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim();
         const dur = Math.round((Date.now() - t0) / 100) / 10;
+        if (res.error || res.timedOut || Number(res.exitCode) !== 0) {
+            const error = typeof commandFailure === 'function'
+                ? commandFailure(res)
+                : (res.error || `[exit code ${res.exitCode}]`);
+            const html = (typeof commandCardHTML === 'function')
+                ? commandCardHTML(cmd, '', { lang, error, duration: dur })
+                : _toolCard(lang === 'en' ? 'Command' : 'Commande', lang === 'en' ? 'error' : 'erreur', `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(error)}</pre>`, false);
+            _sysHTML(out, html);
+            return;
+        }
         const html = (typeof commandCardHTML === 'function')
             ? commandCardHTML(cmd, text, { lang, duration: dur })
             : _toolCard(lang === 'en' ? 'Command' : 'Commande', `ok · ${dur}s`, `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(text || (lang === 'en' ? '(no output)' : '(aucune sortie)'))}</pre>`, false);
@@ -625,10 +639,41 @@ SLASH_HANDLERS.plan = async (arg, out, lang) => {
 
 SLASH_HANDLERS.permissions = async (arg, out, lang) => {
     const mode = (arg || '').trim().toLowerCase();
+    const ruleMatch = String(arg || '').trim().match(/^(allow|ask|deny)\s+(.+)$/i);
+    if (ruleMatch) {
+        const bucket = ruleMatch[1].toLowerCase();
+        const rule = ruleMatch[2].trim();
+        if (!/^[A-Za-z]+(?:\([^\n()]+\))?$/.test(rule)) {
+            _sysMsg(out, lang === 'en' ? 'Invalid rule. Example: allow Bash(npm test:*)' : 'Règle invalide. Exemple : allow Bash(npm test:*)');
+            return;
+        }
+        state.config.toolPermissions = state.config.toolPermissions || { allow: [], ask: [], deny: [] };
+        const list = state.config.toolPermissions[bucket] || (state.config.toolPermissions[bucket] = []);
+        if (!list.includes(rule)) list.push(rule);
+        if (typeof saveState === 'function') saveState();
+        _sysMsg(out, `${bucket} → ${rule}`);
+        return;
+    }
+    if (mode === 'rules' || mode === 'list') {
+        const rules = state.config.toolPermissions || { allow: [], ask: [], deny: [] };
+        const rows = [
+            ['allow', (rules.allow || []).join(', ') || '—'],
+            ['ask', (rules.ask || []).join(', ') || '—'],
+            ['deny', (rules.deny || []).join(', ') || '—']
+        ];
+        _sysHTML(out, _toolCard(lang === 'en' ? 'Tool rules' : 'Règles outils', null, _kvRows(rows) + `<div class="tool-more">/permissions allow Bash(npm test:*) · /permissions deny Bash(rm -rf*)</div>`));
+        return;
+    }
+    if (mode === 'rules reset') {
+        state.config.toolPermissions = { allow: [], ask: [], deny: [] };
+        if (typeof saveState === 'function') saveState();
+        _sysMsg(out, lang === 'en' ? 'Tool rules cleared.' : 'Règles outils effacées.');
+        return;
+    }
     if (!mode) {
         const rows = PERMISSION_MODES.map((m) => [m === state.permissionMode ? '→ ' + m : m, permissionLabel(m, lang)]);
         _sysHTML(out, _toolCard(lang === 'en' ? 'Permission modes' : 'Modes de permission', permissionLabel(state.permissionMode, lang),
-            _kvRows(rows) + `<div class="tool-more">${lang === 'en' ? 'Usage: /permissions <mode>' : 'Usage : /permissions <mode>'}</div>`));
+            _kvRows(rows) + `<div class="tool-more">${lang === 'en' ? 'Usage: /permissions <mode> · /permissions rules' : 'Usage : /permissions <mode> · /permissions rules'}</div>`));
         return;
     }
     if (!PERMISSION_MODES.includes(mode)) {
@@ -794,17 +839,61 @@ SLASH_HANDLERS.review = async (arg, out, lang) => {
 
 SLASH_HANDLERS['security-review'] = async (arg, out, lang) => {
     if (!_needProject(out, lang)) return;
-    const data = await _getJSON(`/api/gitdiff?root=${encodeURIComponent(state.projectRoot)}`);
-    if (!data.available) { _sysMsg(out, lang === 'en' ? 'git is not installed.' : 'git n’est pas installé.'); return; }
-    if (!data.repo) { _sysMsg(out, lang === 'en' ? 'Not a Git repository.' : 'Pas un dépôt Git.'); return; }
-    const diff = [data.staged, data.unstaged].filter(Boolean).join('\n').slice(0, 40000);
-    if (!diff.trim()) { _sysMsg(out, lang === 'en' ? 'No changes to review.' : 'Aucune modification à relire.'); return; }
-    const sys = lang === 'en'
-        ? 'You are a security reviewer. Review ONLY the provided git diff for: secrets/credentials, injection (SQL/command/path traversal), unsafe eval, auth/session issues, insecure storage, dangerous shell commands. Do NOT propose edit/write/run blocks. Format: Findings with severity and file:line, then a short summary.'
-        : 'Tu es un relecteur sécurité. Relis UNIQUEMENT le diff git fourni pour : secrets/identifiants, injections (SQL/commande/traversée de chemin), eval dangereux, problèmes d’auth/session, stockage non sécurisé, commandes shell dangereuses. NE PROPOSE PAS de blocs edit/write/run. Format : Constats avec sévérité et fichier:ligne, puis résumé court.';
-    const user = (lang === 'en' ? 'Security-review this diff:\n\n' : 'Relis ce diff côté sécurité :\n\n') + '```diff\n' + diff + '\n```';
-    _sysMsg(out, lang === 'en' ? 'Security review (read-only)…' : 'Revue de sécurité (lecture seule)…');
-    await _aiReadOnly(sys, user, lang === 'en' ? 'Security' : 'Sécurité');
+    const requested = String(arg || '').trim().toLowerCase();
+    const workflow = ['diff', 'scan', 'deep'].includes(requested) ? requested : 'diff';
+    await openSecurityReview({ workflow });
+    _sysMsg(out, lang === 'en'
+        ? `Security review started in the central workspace (${workflow}).`
+        : `Review sécurité lancée dans l’espace central (${workflow}).`);
+};
+
+SLASH_HANDLERS.security = async (arg, out, lang) => {
+    if (!_needProject(out, lang)) return;
+    const workflow = String(arg || 'scan').trim().toLowerCase();
+    if (!['diff', 'scan', 'deep', 'validate', 'fix', 'report'].includes(workflow)) {
+        _sysMsg(out, lang === 'en' ? 'Usage: /security diff|scan|deep|validate|fix|report' : 'Usage : /security diff|scan|deep|validate|fix|report');
+        return;
+    }
+    if (['diff', 'scan', 'deep'].includes(workflow)) {
+        await openSecurityReview({ workflow });
+        _sysMsg(out, lang === 'en'
+            ? `Security ${workflow} started in the central workspace.`
+            : `Sécurité ${workflow} lancée dans l’espace central.`);
+        return;
+    }
+    _sysMsg(out, lang === 'en' ? `Security ${workflow} in progress…` : `Sécurité ${workflow} en cours…`);
+    const res = await fetch(`/api/security/${encodeURIComponent(workflow)}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ root: state.projectRoot, source: 'slash', format: workflow === 'report' ? 'sarif' : 'json' })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) { _sysMsg(out, data.error || `HTTP ${res.status}`); return; }
+    const summary = data.summary || {};
+    const rows = [
+        [lang === 'en' ? 'Findings' : 'Constats', String(summary.total || 0)],
+        [lang === 'en' ? 'High' : 'Haute sévérité', String(summary.high || 0)],
+        [lang === 'en' ? 'Medium' : 'Moyenne', String(summary.medium || 0)],
+        [lang === 'en' ? 'Generated' : 'Généré', data.generatedAt || '—']
+    ];
+    let body = _kvRows(rows);
+    const findings = data.report && data.report.findings;
+    if (Array.isArray(findings) && findings.length) {
+        body += '<div class="tool-more">' + findings.slice(0, 25).map((item) => _esc(`${String(item.severity || '').toUpperCase()} ${item.file}:${item.line} — ${item.message}`)).join('<br>') + '</div>';
+    }
+    _sysHTML(out, _toolCard(`Security · ${workflow}`, null, body));
+};
+
+SLASH_HANDLERS.skills = async (arg, out, lang) => {
+    if (!_needProject(out, lang)) return;
+    const data = await _getJSON(`/api/skills?root=${encodeURIComponent(state.projectRoot)}`);
+    const rows = (data.skills || []).map((skill) => [skill.id, `${skill.name}${skill.version ? ' · v' + skill.version : ''}${skill.description ? ' — ' + skill.description : ''}`]);
+    _sysHTML(out, _toolCard(lang === 'en' ? 'Project skills' : 'Compétences du projet', String(rows.length), _kvRows(rows.length ? rows : [['—', lang === 'en' ? 'No SKILL.md found.' : 'Aucun SKILL.md trouvé.']])));
+};
+
+SLASH_HANDLERS.mcp = async (arg, out, lang) => {
+    const data = await _getJSON('/api/mcp');
+    const rows = (data.servers || []).map((server) => [server.id, `${server.name} · ${server.enabled ? (lang === 'en' ? 'enabled' : 'actif') : (lang === 'en' ? 'disabled' : 'désactivé')}`]);
+    _sysHTML(out, _toolCard(lang === 'en' ? 'MCP servers' : 'Serveurs MCP', String(rows.length), _kvRows(rows.length ? rows : [['—', lang === 'en' ? 'No generic MCP server configured.' : 'Aucun serveur MCP générique configuré.']])));
 };
 
 // ---- Dispatcher -----------------------------------------------------------

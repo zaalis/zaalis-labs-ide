@@ -23,6 +23,10 @@ if ! command -v hdiutil >/dev/null 2>&1; then
 fi
 
 STAGE="${TMPDIR:-/tmp}/zaalis-dmg-stage-$$"
+cleanup() {
+  rm -rf "$STAGE"
+}
+trap cleanup EXIT HUP INT TERM
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
@@ -33,18 +37,31 @@ ln -s /Applications "$STAGE/Applications"
 mkdir -p "$(dirname "$OUT")"
 rm -f "$OUT"
 
-# Ad-hoc sign the app so Gatekeeper does not refuse it on first launch.
+# Sign the app so Gatekeeper does not refuse it on first launch. Prefer the
+# persistent identity from ZAALIS_CODESIGN_ID (see package_macos_electron.sh)
+# so TCC approvals survive updates; fall back to ad-hoc.
 if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$STAGE/$(basename "$APP")" >/dev/null 2>&1 || true
+  codesign --force --deep --sign "${ZAALIS_CODESIGN_ID:--}" "$STAGE/$(basename "$APP")" >/dev/null 2>&1 || true
 fi
 
+create_status=0
 hdiutil create \
   -volname "$VOLNAME" \
   -srcfolder "$STAGE" \
   -fs HFS+ \
   -format UDZO \
   -ov \
-  "$OUT"
+  "$OUT" || create_status=$?
 
-rm -rf "$STAGE"
+# A file named .dmg is not necessarily a mountable disk image.  Do not report
+# success until macOS verifies the image it has just created.
+hdiutil verify "$OUT" >/dev/null || {
+  echo "ERROR: hdiutil could not create a valid DMG (create exit code: $create_status)." >&2
+  exit 1
+}
+if [ "$create_status" -ne 0 ]; then
+  # On some macOS versions hdiutil can return a late non-zero status after it
+  # has finished a valid compressed image. Verification above is authoritative.
+  echo "WARNING: hdiutil create exited $create_status, but the generated DMG verified successfully." >&2
+fi
 echo "DMG written to $OUT"

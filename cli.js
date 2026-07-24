@@ -20,6 +20,7 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const { spawn, spawnSync } = require('child_process');
+const { loadCookie: loadKeychainCookie, saveCookie: saveKeychainCookie, clearCookie: clearKeychainCookie } = require('./credential-store');
 
 // ---------------------------------------------------------------------------
 // Constants & paths
@@ -270,11 +271,34 @@ function requestStream(method, pathname, { body, cookie, onEvent } = {}) {
 // Session persistence
 // ---------------------------------------------------------------------------
 function loadSession() {
-  try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8')); } catch { return {}; }
+  let loaded = {};
+  try { loaded = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8')); } catch {}
+  // Migrate a legacy plaintext cookie into the macOS Keychain on first use.
+  const keychainCookie = loadKeychainCookie();
+  if (keychainCookie) loaded.cookie = keychainCookie;
+  else if (process.platform === 'darwin' && loaded.cookie) {
+    const legacy = loaded.cookie;
+    // Keep a legacy cookie in memory if Keychain is unavailable, rather than
+    // silently signing the user out on the next launch.
+    if (saveKeychainCookie(legacy)) {
+      delete loaded.cookie;
+      try { fs.writeFileSync(SESSION_FILE, JSON.stringify(loaded, null, 2), { mode: 0o600 }); } catch {}
+      loaded.cookie = legacy;
+    }
+  }
+  return loaded;
 }
 function saveSession(s) {
-  try { fs.mkdirSync(CFG_DIR, { recursive: true }); } catch {}
-  fs.writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2));
+  try { fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(CFG_DIR, 0o700); } catch {}
+  const next = { ...(s || {}) };
+  if (process.platform === 'darwin' && next.cookie) {
+    saveKeychainCookie(next.cookie);
+    delete next.cookie;
+  }
+  const temp = `${SESSION_FILE}.${process.pid}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
+  fs.renameSync(temp, SESSION_FILE);
+  try { fs.chmodSync(SESSION_FILE, 0o600); } catch {}
 }
 let session = loadSession();
 // session = { cookie, email, pseudo, model, submodel }
@@ -431,26 +455,35 @@ async function ensureAuth() {
 // first; the first entry of each list is that provider's default.
 // ---------------------------------------------------------------------------
 const SUBMODELS = {
-  codex:  ['gpt-5.5', 'gpt-5.4', 'gpt-5.1-codex', 'gpt-5.1', 'gpt-4.5', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
-  claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3-7-sonnet', 'claude-3-5-sonnet', 'claude-3-5-haiku'],
-  gemini: ['gemini-3.5-flash', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-  grok:   ['grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-2-image-gen', 'grok-image-gen'],
-  mistral:['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest'],
+  codex:  ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
+  claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+  gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+  grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
+  mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+  kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
 };
+if (Object.prototype.hasOwnProperty.call(SUBMODELS, session.model)
+    && !SUBMODELS[session.model].includes(session.submodel)) {
+  session.submodel = SUBMODELS[session.model][0];
+  saveSession(session);
+}
 const MODEL_LABELS = {
-  'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.1-codex': 'GPT-5.1 Codex', 'gpt-5.1': 'GPT-5.1',
-  'gpt-4.5': 'GPT-4.5', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
+  'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
+  'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
+  'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
   'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-  'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-4-6': 'Claude Sonnet 4.6',
-  'claude-haiku-4-5': 'Claude Haiku 4.5', 'claude-3-7-sonnet': 'Claude Sonnet 3.7',
-  'claude-3-5-sonnet': 'Claude Sonnet 3.5', 'claude-3-5-haiku': 'Claude Haiku 3.5',
-  'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro': 'Gemini 3.1 Pro', 'gemini-3-flash': 'Gemini 3 Flash',
-  'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash',
-  'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
+  'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5', 'claude-haiku-4-5': 'Claude Haiku 4.5',
+  'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
+  'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
+  'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
+  'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
   'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-  'grok-build-0.1': 'Grok Build 0.1', 'grok-2-image-gen': 'Grok 2 Image', 'grok-image-gen': 'Grok Image',
-  'mistral-large-latest': 'Mistral Large', 'mistral-medium-latest': 'Mistral Medium',
-  'mistral-small-latest': 'Mistral Small', 'codestral-latest': 'Codestral', 'pixtral-large-latest': 'Pixtral Large',
+  'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
+  'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
+  'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
+  'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
+  'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
+  'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6',
 };
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
@@ -460,6 +493,7 @@ const CLOUD = [
   { id: 'gemini',  label: 'Gemini',       keyName: 'google',    submodel: SUBMODELS.gemini[0] },
   { id: 'grok',    label: 'Grok',         keyName: 'grok',      submodel: SUBMODELS.grok[0] },
   { id: 'mistral', label: 'Mistral',      keyName: 'mistral',   submodel: SUBMODELS.mistral[0] },
+  { id: 'kimi',    label: 'Kimi (Moonshot AI)', keyName: 'moonshot', submodel: SUBMODELS.kimi[0] },
 ];
 
 async function gatherModels() {
@@ -605,6 +639,34 @@ function restoreConversation() {
     history.push(...d.history);
     return d;
   } catch { return null; }
+}
+
+function restoreHistoryFromEvents(events) {
+  const rows = Array.isArray(events) ? events : [];
+  const restored = [];
+  for (const event of rows) {
+    if (!event || event.type !== 'message' || !['user', 'assistant'].includes(event.role)) continue;
+    const content = String(event.content || '');
+    if (content) restored.push({ role: event.role, content });
+  }
+  history.length = 0;
+  history.push(...restored.slice(-80));
+  return history.length;
+}
+
+async function restoreDurableSession(id) {
+  let sessionId = String(id || session.agentSessionId || '').trim();
+  if (!sessionId) {
+    const list = await apiGet(`/api/agent-sessions?root=${encodeURIComponent(projectRoot())}&limit=1`);
+    sessionId = list.sessions && list.sessions[0] && list.sessions[0].id || '';
+  }
+  if (!sessionId) return null;
+  const data = await apiGet(`/api/agent-sessions/${encodeURIComponent(sessionId)}`);
+  const count = restoreHistoryFromEvents(data.events);
+  session.agentSessionId = data.session.id;
+  if (data.session.model) { session.model = data.session.model; session.submodel = data.session.submodel; }
+  saveSession(session);
+  return { session: data.session, count };
 }
 
 function isLocalModel(model) {
@@ -856,8 +918,22 @@ function isDangerousCommand(cmd) {
   ].some((re) => re.test(c));
 }
 
+// Real secret-bearing files (mirrors the server SECRET_FILE guard) — NOT
+// ordinary source. Used to force a confirmation before touching a secret file.
+function isSecretFilePath(p) {
+  return /(?:^|[\\/])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials(?:\.(?:json|ya?ml))?|client_secret[^\\/]*\.json|service[-_]?account[^\\/]*\.json|[^\\/]*\.(?:pem|key|pfx|p12|keystore|jks|asc|ppk))$/i
+    .test(String(p || '').replace(/\\/g, '/'));
+}
+function commandTouchesSecretFile(cmd) {
+  return /(?:^|[\s"'=<>|(])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|[^\s"']+\.(?:pem|key|pfx|p12|keystore|jks|ppk))(?=$|[\s"'/<>|)])/i
+    .test(String(cmd || ''));
+}
+
 async function confirmAction(desc, detail) {
-  if (currentPermission().id === 'auto' && !/DANGEREUSE/i.test(desc)) return true;
+  const permId = currentPermission().id;
+  // Unrestricted mode never asks; autonomous mode asks only for dangerous ones.
+  if (permId === 'bypass') return true;
+  if (permId === 'auto' && !/DANGEREUSE/i.test(desc)) return true;
   if (!process.stdin.isTTY) return false;
   const wasRaw = !!(process.stdin.isTTY && process.stdin.isRaw);
   // This drops to a plain (non-raw) readline prompt, which owns stdin/stdout
@@ -909,7 +985,7 @@ async function applyTools(response, events) {
       continue;
     }
     if (next === current) continue;
-    if (perm === 'supervised' && !(await confirmAction(`Modifier ${rel}`, hunks.map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
+    if ((perm === 'supervised' || (isSecretFilePath(rel) && perm !== 'bypass')) && !(await confirmAction(`Modifier ${rel}`, hunks.map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
       events.push(`Modification refusee: ${rel}`);
       continue;
     }
@@ -923,7 +999,7 @@ async function applyTools(response, events) {
   }
 
   for (const { path: rel, content } of fileBlocks) {
-    if (perm === 'supervised' && !(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
+    if ((perm === 'supervised' || (isSecretFilePath(rel) && perm !== 'bypass')) && !(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
       events.push(`Ecriture refusee: ${rel}`);
       continue;
     }
@@ -937,7 +1013,9 @@ async function applyTools(response, events) {
 
   for (const cmd of commands) {
     const dangerous = isDangerousCommand(cmd);
-    const needAsk = dangerous || perm === 'supervised' || perm === 'semi';
+    // Commands run freely on every mode; only a dangerous command or one that
+    // touches a secret file still asks, and bypass never asks.
+    const needAsk = (dangerous || commandTouchesSecretFile(cmd)) && perm !== 'bypass';
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
       events.push(`Commande refusee: ${cmd}`);
       continue;
@@ -956,14 +1034,30 @@ async function applyTools(response, events) {
 
 // Rejoue les actions bloquees par le serveur en mode supervise/semi apres
 // validation explicite de l'utilisateur (parite IDE / Claude Code). Chaque
-// tool_done bloque porte son input complet (path/hunks/content/command).
+// tool_done bloque porte son input complet (path/hunks/content/command/image).
 async function applyBlockedAgentTools(tools) {
   const perm = currentPermission().id;
   if (perm === 'plan') return;
   const blocked = (Array.isArray(tools) ? tools : [])
-    .filter((t) => t && t.blocked && ['write', 'edit', 'run'].includes(t.tool) && t.input);
+    .filter((t) => t && t.blocked && t.code === 'approval_required' && !t.terminal && t.approval && ['write', 'edit', 'run', 'git_write', 'image_download'].includes(t.tool) && t.input);
   for (const t of blocked) {
     const input = t.input || {};
+    if (t.tool === 'image_download') {
+      const id = String(input.id || '').trim();
+      const target = String(input.path || '').trim();
+      if (!id || !target) continue;
+      if (!(await confirmAction(`Telecharger une image dans ${target}`, `Resultat: ${id}\nDestination: ${target}`))) {
+        console.log(dim(`  ⊘ Telechargement image refuse: ${target}`));
+        continue;
+      }
+      try {
+        const result = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
+        console.log(dim(`  ✓ Image telechargee: ${result.path || target}${result.attributionPath ? `\n    Attribution: ${result.attributionPath}` : ''}`));
+      } catch (e) {
+        console.log(red(`  ✗ Telechargement image echoue: ${target} (${e.message})`));
+      }
+      continue;
+    }
     if (t.tool === 'run') {
       const cmd = String(input.command || '').trim();
       if (!cmd) continue;
@@ -973,12 +1067,25 @@ async function applyBlockedAgentTools(tools) {
         continue;
       }
       try {
-        const out = await apiPost('/api/exec', { command: cmd, cwd: projectRoot() });
+        const out = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
         const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
         console.log(dim(`  ✓ Commande executee: ${cmd}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
       } catch (e) {
         console.log(red(`  ✗ Commande echouee: ${cmd} (${e.message})`));
       }
+      continue;
+    }
+    if (t.tool === 'git_write') {
+      const detail = input.action === 'push'
+        ? `git push ${input.remote || 'origin'} ${input.branch || ''}`
+        : `git ${input.action || ''} ${input.branch || input.message || ''}`;
+      if (!(await confirmAction('Executer une opération Git', detail))) { console.log(dim(`  ⊘ Opération Git refusée: ${detail}`)); continue; }
+      try {
+        const out = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
+        const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
+        if (out.error || out.timedOut || Number(out.exitCode) !== 0) throw new Error(out.error || `exit ${out.exitCode}`);
+        console.log(dim(`  ✓ ${detail}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
+      } catch (e) { console.log(red(`  ✗ Opération Git échouée: ${detail} (${e.message})`)); }
       continue;
     }
     const rel = String(input.path || '');
@@ -1015,7 +1122,7 @@ async function applyBlockedAgentTools(tools) {
       content = next;
     }
     try {
-      await apiPost('/api/file', { root: projectRoot(), path: rel, content });
+      await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
       console.log(dim(`  ✓ Fichier ${t.tool === 'write' ? 'ecrit' : 'modifie'}: ${rel}`));
     } catch (e) {
       console.log(red(`  ✗ Ecriture echouee: ${rel} (${e.message})`));
@@ -1030,16 +1137,33 @@ async function callChat(message, systemPrompt, hist) {
     submodel: session.submodel || undefined,
     message,
     systemPrompt,
-    config: runtimeConfig,
+    config: { ...runtimeConfig, toolPermissions: session.toolPermissions || runtimeConfig.toolPermissions || { allow: [], ask: [], deny: [] } },
     history: (hist || history).slice(-20),
     reasoningLevel: currentEffort().level,
   };
   const r = await authed('POST', '/api/chat', body);
   if (r.status === 401) return { error: 'Session expirée — relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
-  const text = cleanModelText((r.json && r.json.response) || '');
-  return { text, thinking: cleanModelText(r.json && r.json.thinking), usage: r.json && r.json.usage };
+  const payload = r.json || {};
+  // Same rule as the desktop chat and the agent loop: the server decides
+  // (response-integrity.js), the CLI only reacts. A degenerate answer is never
+  // printed, a truncated one is printed with a warning.
+  if (payload.degenerate) {
+    return { text: '', error: `Réponse écartée : ${INTEGRITY_REASONS[payload.degenerateReason] || INTEGRITY_REASONS.no_content}. Rien d’exploitable n’a été produit — relancez, éventuellement avec un autre modèle.` };
+  }
+  let text = cleanModelText(payload.response || '');
+  if (payload.truncated && text) {
+    text += '\n\nNote : le fournisseur a coupé cette réponse à la limite de jetons, elle est donc incomplète. Demandez la suite pour obtenir la fin.';
+  }
+  return { text, thinking: cleanModelText(payload.thinking), usage: payload.usage };
 }
+
+const INTEGRITY_REASONS = {
+  structure_only: 'le modèle a produit une structure de liste sans contenu',
+  no_content: 'le modèle n’a produit aucun contenu exploitable',
+  no_prose: 'le modèle a produit de la mise en forme sans texte',
+  repetition: 'le modèle a répété la même ligne en boucle',
+};
 
 async function resolveReadRequests(response, systemPrompt, events, hooks, depth = 0) {
   if (depth >= 3) return { texts: [], thinking: '' };
@@ -1099,8 +1223,10 @@ function describeAgentEvent(event) {
       return { status: `${n} ${n === 1 ? 'outil prévu' : 'outils prévus'}` };
     }
     case 'assistant_note': {
+      // The model (or engine narrator) thinking out loud: normal white text,
+      // like Claude Code — only the tool rows stay dim.
       const note = String(event.text || '').trim();
-      return note ? { line: dim('  ▸ ' + note.replace(/\n/g, '\n    ')) } : {};
+      return note ? { line: '  ' + note.replace(/\n/g, '\n  ') } : {};
     }
     case 'tool_started':
       return { status: agentToolLabel(event) };
@@ -1131,10 +1257,13 @@ async function sendChat(message, hooks = {}) {
     root: projectRoot(),
     permissionMode: currentPermission().id,
     language: 'fr',
-    config: runtimeConfig,
+    config: { ...runtimeConfig, toolPermissions: session.toolPermissions || runtimeConfig.toolPermissions || { allow: [], ask: [], deny: [] } },
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
     stream: true,
+    useBrain: !!session.useBrain,
+    sessionId: session.agentSessionId || undefined,
+    nativeTools: true,
   };
   const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
@@ -1144,6 +1273,10 @@ async function sendChat(message, hooks = {}) {
 
   history.push({ role: 'user', content: effectiveMessage });
   const json = r.json || {};
+  if (json.sessionId && json.sessionId !== session.agentSessionId) {
+    session.agentSessionId = json.sessionId;
+    saveSession(session);
+  }
   const toolMemory = Array.isArray(json.toolResults) && json.toolResults.length
     ? '\n\n[Outils utilises]\n' + json.toolResults
         .map((t) => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
@@ -1155,33 +1288,61 @@ async function sendChat(message, hooks = {}) {
         .join('\n')
     : '';
   const text = cleanModelText(json.response || '');
-  history.push({ role: 'assistant', content: text + toolMemory + todoMemory });
+  history.push({
+    role: 'assistant',
+    content: text + toolMemory + todoMemory,
+    ...(json.reasoning_content ? { reasoning_content: cleanModelText(json.reasoning_content) } : {}),
+  });
   persistConversation();
 
   return {
     text: text || '(action effectuee)',
     thinking: cleanModelText(json.thinking || ''),
     events: Array.isArray(json.events) ? json.events : [],
+    toolResults: Array.isArray(json.toolResults) ? json.toolResults : [],
     streamed: !!(onEvent && r.streamed),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Effort / reasoning — mirrors the IDE's REASONING_MODES per model family.
-// `level` is the index sent to the server (0 = off, higher = more thinking).
+// Effort / reasoning — model-specific because each official API exposes a
+// different set of levels (and some reasoning models cannot turn it off).
 // ---------------------------------------------------------------------------
-const EFFORT = {
-  claude:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }, { label: 'MAX', level: 4 }],
-  gemini:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
-  grok:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
-  codex:   [{ label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }],
-  mistral: [{ label: 'OFF', level: 0 }, { label: 'ON', level: 1 }],
-  local:   [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
-  gguf:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
-};
-function effortListFor(modelId) { return EFFORT[modelId] || EFFORT.local; }
+function effortLevels(labels) { return labels.map((label, level) => ({ label, level })); }
+function effortListFor(modelId, submodel = session.submodel || '') {
+  const s = String(submodel).toLowerCase();
+  if (modelId === 'codex') {
+    if (s.startsWith('gpt-5.6')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
+    if (/^gpt-5\.(5|4|2)/.test(s)) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH']);
+    if (s.startsWith('gpt-5.1')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
+    if (/^(o1|o3-mini)/.test(s)) return effortLevels(['LOW', 'MED', 'HIGH']);
+  }
+  if (modelId === 'claude') {
+    if (s === 'claude-fable-5') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
+    if (s === 'claude-opus-4-8' || s === 'claude-sonnet-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
+    if (s === 'claude-haiku-4-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'MAX']);
+  }
+  if (modelId === 'gemini') {
+    if (s === 'gemini-3.1-pro-preview' || s === 'gemini-2.5-pro') return effortLevels(['LOW', 'MED', 'HIGH']);
+    if (s.startsWith('gemini-3')) return effortLevels(['MIN', 'LOW', 'MED', 'HIGH']);
+    if (s.startsWith('gemini-2.5')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
+  }
+  if (modelId === 'grok') {
+    if (s === 'grok-4.5') return effortLevels(['LOW', 'MED', 'HIGH']);
+    if (s === 'grok-4.3') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
+    if (s === 'grok-4.20-multi-agent-0309') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH']);
+  }
+  if (modelId === 'mistral' && (s === 'mistral-medium-3-5' || s === 'mistral-small-latest')) return effortLevels(['OFF', 'HIGH']);
+  if (modelId === 'kimi') {
+    if (s === 'kimi-k3') return effortLevels(['LOW', 'HIGH', 'MAX']);
+    if (s === 'kimi-k2.6') return effortLevels(['OFF', 'HIGH']);
+    if (s === 'kimi-k2.7-code' || s === 'kimi-k2.7-code-highspeed') return effortLevels(['MAX']);
+  }
+  if (modelId === 'local' || modelId === 'gguf') return effortLevels(['OFF', 'MED', 'MAX']);
+  return effortLevels(['OFF']);
+}
 function currentEffort() {
-  const list = effortListFor(session.model || 'claude');
+  const list = effortListFor(session.model || 'claude', session.submodel);
   return list.find((e) => e.level === session.reasoningLevel)
     || list.find((e) => e.label === 'MED') || list[Math.floor(list.length / 2)] || list[0];
 }
@@ -1192,10 +1353,11 @@ function currentEffort() {
 // the IDE's PERMISSION_LABELS (state.js).
 // ---------------------------------------------------------------------------
 const PERMISSIONS = [
-  { id: 'plan',       label: 'Plan',      paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
-  { id: 'supervised', label: 'Supervisé', paint: (s) => brand(s),  desc: 'demande avant chaque action' },
-  { id: 'semi',       label: 'Semi-auto', paint: (s) => brand(s),  desc: 'fichiers auto, commandes validées' },
-  { id: 'auto',       label: 'Autonome',  paint: (s) => yellow(s), desc: 'agit sans demander' },
+  { id: 'plan',       label: 'Plan',            paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
+  { id: 'supervised', label: 'Supervisé',       paint: (s) => brand(s),  desc: 'commandes libres, écritures de fichiers validées' },
+  { id: 'semi',       label: 'Semi-auto',       paint: (s) => brand(s),  desc: 'large autonomie, seul le sensible est validé' },
+  { id: 'auto',       label: 'Autonome',        paint: (s) => yellow(s), desc: 'agit sans demander' },
+  { id: 'bypass',     label: 'Aucune restriction', paint: (s) => red(s), desc: 'accès aux secrets (.env), zéro validation — danger' },
 ];
 function currentPermission() {
   return PERMISSIONS.find((p) => p.id === session.permissionMode) || PERMISSIONS[1];
@@ -1346,6 +1508,7 @@ const SLASH = [
   { name: 'files', category: 'tools', desc: 'lister les fichiers du projet' },
   { name: 'review', category: 'review', desc: 'revue du diff Git' },
   { name: 'security-review', category: 'review', desc: 'revue securite du diff' },
+  { name: 'security', category: 'review', desc: 'pipeline securite (diff|scan|deep|validate|report)', usage: '[diff|scan|deep|validate|report]' },
   { name: 'context', category: 'context', desc: 'afficher le contexte courant' },
   { name: 'status', category: 'context', desc: 'etat du CLI et du projet' },
   { name: 'doctor', category: 'context', desc: 'verifier l environnement' },
@@ -1355,7 +1518,7 @@ const SLASH = [
   { name: 'summary', category: 'context', desc: 'resumer la session' },
   { name: 'memory', category: 'context', desc: 'afficher ZAALIS.md / AGENTS.md' },
   { name: 'plan', category: 'mode', desc: 'mode plan sans modification' },
-  { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto]' },
+  { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto|bypass]' },
   { name: 'model', category: 'mode', desc: 'changer de modele', usage: '[modele]', args: true },
   { name: 'models', category: 'mode', desc: 'lister les modeles' },
   { name: 'effort', category: 'mode', desc: 'niveau de raisonnement' },
@@ -1363,7 +1526,7 @@ const SLASH = [
   { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
   { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
   { name: 'remember', category: 'project', desc: 'ajouter une note a ZAALIS.md', usage: '<note>', args: true },
-  { name: 'resume', category: 'project', desc: 'reprendre la derniere session de ce dossier' },
+  { name: 'resume', category: 'project', desc: 'reprendre une session durable', usage: '[id]' },
   { name: 'export', category: 'project', desc: 'exporter la session' },
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
@@ -1371,10 +1534,10 @@ const SLASH = [
   { name: 'show', category: 'misc', desc: 'afficher les sorties des derniers outils' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
-  { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
+  { name: 'session', category: 'project', desc: 'list|new|rename|fork|archive|search', usage: '<action> [argument]' },
   { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
-  { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
-  { name: 'mcp', category: 'soon', desc: 'serveurs MCP', stub: true },
+  { name: 'skills', category: 'project', desc: 'competences disponibles dans le projet' },
+  { name: 'mcp', category: 'mode', desc: 'activer Zaalis Brain MCP', usage: '[on|off|status]' },
   { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
   { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
   { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
@@ -1465,7 +1628,7 @@ async function rawPickModel() {
   }
 
   // Final step — reasoning effort for the chosen model
-  const list = effortListFor(model);
+  const list = effortListFor(model, submodel);
   const med = list.findIndex((e) => e.label === 'MED');
   const def = med >= 0 ? med : Math.floor(list.length / 2);
   const ei = await rawSelect({
@@ -1482,7 +1645,7 @@ async function rawPickModel() {
 
 // Arrow-key effort picker for the current model.
 async function pickEffort() {
-  const list = effortListFor(session.model || 'claude');
+  const list = effortListFor(session.model || 'claude', session.submodel);
   const items = list.map((e) => ({ label: e.label, level: e.level }));
   const cur = list.findIndex((e) => e.level === currentEffort().level);
   const idx = await rawSelect({
@@ -1662,7 +1825,9 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'clear') {
-    history.length = 0; lastThinking = ''; transcript.length = 0; persistConversation();
+    // Preserve the durable server-side transcript; the next prompt starts a
+    // fresh session instead of appending to a cleared local display.
+    history.length = 0; lastThinking = ''; transcript.length = 0; delete session.agentSessionId; saveSession(session); persistConversation();
     emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
     return;
   }
@@ -1678,12 +1843,35 @@ async function runSlashCommand(ev, me) {
       ['permission', currentPermission().label],
       ['effort', currentEffort().label],
       ['style', session.responseStyle || 'normal'],
+      ['zaalis brain', session.useBrain ? 'actif' : 'inactif'],
       ['messages', String(history.length)],
     ]);
     return;
   }
   if (name === 'permissions') {
+    const ruleMatch = String(arg || '').trim().match(/^(allow|ask|deny)\s+(.+)$/i);
+    if (ruleMatch) {
+      const bucket = ruleMatch[1].toLowerCase();
+      const rule = ruleMatch[2].trim();
+      if (!/^[A-Za-z]+(?:\([^\n()]+\))?$/.test(rule)) { console.log(brand('✗ ') + 'Règle invalide. Exemple : allow Bash(npm test:*)'); return; }
+      session.toolPermissions = session.toolPermissions || { allow: [], ask: [], deny: [] };
+      const list = session.toolPermissions[bucket] || (session.toolPermissions[bucket] = []);
+      if (!list.includes(rule)) list.push(rule);
+      saveSession(session);
+      console.log(green('✓ ') + `${bucket} → ${rule}`);
+      return;
+    }
     const mode = arg.toLowerCase();
+    if (mode === 'rules' || mode === 'list') {
+      const rules = session.toolPermissions || { allow: [], ask: [], deny: [] };
+      printRows('Règles outils', [['allow', (rules.allow || []).join(', ') || '—'], ['ask', (rules.ask || []).join(', ') || '—'], ['deny', (rules.deny || []).join(', ') || '—']]);
+      return;
+    }
+    if (mode === 'rules reset') {
+      session.toolPermissions = { allow: [], ask: [], deny: [] }; saveSession(session);
+      console.log(green('✓ ') + 'Règles outils effacées.');
+      return;
+    }
     if (!mode) {
       printRows('Permissions', PERMISSIONS.map((p) => [p.id === currentPermission().id ? '-> ' + p.id : p.id, p.label]));
       return;
@@ -1696,6 +1884,35 @@ async function runSlashCommand(ev, me) {
   if (name === 'plan') {
     session.permissionMode = 'plan'; saveSession(session);
     console.log(green('✓ ') + 'Mode Plan active : lectures et propositions, sans modifications.');
+    return;
+  }
+  if (name === 'mcp') {
+    const mode = String(arg || '').trim().toLowerCase();
+    if (mode === 'servers' || mode === 'list') {
+      try {
+        const data = await apiGet('/api/mcp');
+        const rows = (data.servers || []).map((server) => [server.id, `${server.name} · ${server.enabled ? 'actif' : 'désactivé'} · ${server.endpoint}`]);
+        printRows('Serveurs MCP', rows.length ? rows : [['—', 'Aucun serveur MCP générique configuré.']]);
+      } catch (error) { console.log(brand('✗ ') + error.message); }
+      return;
+    }
+    if (!mode || mode === 'status') {
+      try {
+        const r = await authed('GET', '/api/brain-mcp');
+        const d = r.json || {};
+        printRows('Zaalis Brain MCP', [['usage CLI', session.useBrain ? 'actif' : 'inactif'], ['route', d.endpoint || '—'], ['etat', d.detail || d.state || 'inconnu']]);
+      } catch { console.log(brand('✗ ') + 'Impossible de vérifier Zaalis Brain MCP.'); }
+      return;
+    }
+    if (mode !== 'on' && mode !== 'off') { console.log(dim('Usage: /mcp on | off | status')); return; }
+    if (mode === 'on') {
+      try {
+        const r = await authed('GET', '/api/brain-mcp'); const d = r.json || {};
+        if (r.status !== 200 || d.state !== 'connected' || !d.enabled) throw new Error(d.detail || 'MCP non connecté');
+      } catch (err) { console.log(brand('✗ ') + (err.message || 'Configurez Zaalis Brain dans Paramètres → MCP.')); return; }
+    }
+    session.useBrain = mode === 'on'; saveSession(session);
+    console.log(green('✓ ') + `Zaalis Brain MCP ${session.useBrain ? 'activé' : 'désactivé'} pour les prochains messages.`);
     return;
   }
   if (name === 'fast' || name === 'deep') {
@@ -1765,7 +1982,9 @@ async function runSlashCommand(ev, me) {
   if (name === 'run') {
     if (!arg) { console.log(dim('Usage: /run <commande>')); return; }
     const dangerous = isDangerousCommand(arg);
-    const needAsk = dangerous || ['supervised', 'semi'].includes(currentPermission().id);
+    // Commands run freely; only a dangerous one or one touching a secret file
+    // asks — and bypass never asks.
+    const needAsk = (dangerous || commandTouchesSecretFile(arg)) && currentPermission().id !== 'bypass';
     if (currentPermission().id === 'plan') { console.log(dim('Mode Plan: commande bloquee.')); return; }
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, arg))) return;
     const d = await apiPost('/api/exec', { command: arg, cwd: projectRoot() });
@@ -1786,6 +2005,14 @@ async function runSlashCommand(ev, me) {
       } catch {}
     }
     console.log(dim('Aucun ZAALIS.md / AGENTS.md trouve.'));
+    return;
+  }
+  if (name === 'skills') {
+    try {
+      const data = await apiGet(`/api/skills?root=${encodeURIComponent(projectRoot())}`);
+      const rows = (data.skills || []).map((skill) => [skill.id, `${skill.name}${skill.version ? ' · v' + skill.version : ''}${skill.description ? ' — ' + skill.description : ''}`]);
+      printRows('Skills du projet', rows.length ? rows : [['—', 'Aucun SKILL.md trouvé dans .zaalis/skills ou skills.']]);
+    } catch (error) { console.log(brand('✗ ') + error.message); }
     return;
   }
   if (name === 'init') {
@@ -1811,18 +2038,90 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'resume') {
+    try {
+      const restored = await restoreDurableSession(arg);
+      if (restored) {
+        console.log(green('✓ ') + `Session restaurée : ${Math.ceil(restored.count / 2)} échange(s) — ${restored.session.title}. Modèle : ${currentModelLabel()}`);
+        return;
+      }
+    } catch (error) { console.log(dim(`Reprise durable indisponible : ${error.message}`)); }
     const d = restoreConversation();
-    if (!d) { console.log(dim('Aucune session sauvegardee pour ce dossier.')); return; }
+    if (!d) { console.log(dim('Aucune session sauvegardée pour ce dossier.')); return; }
     const when = new Date(d.savedAt || Date.now()).toLocaleString();
     if (d.model) { session.model = d.model; session.submodel = d.submodel; saveSession(session); }
-    console.log(green('✓ ') + `Session restauree : ${Math.ceil(history.length / 2)} echange(s) (${when}). Modele : ${currentModelLabel()}`);
+    console.log(green('✓ ') + `Session locale restaurée : ${Math.ceil(history.length / 2)} échange(s) (${when}).`);
     return;
   }
   if (name === 'export') {
+    if (session.agentSessionId) {
+      try {
+        const data = await apiGet(`/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}/export`);
+        const file = path.join(projectRoot(), `zaalis-session-${session.agentSessionId}.json`);
+        fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+        console.log(green('✓ ') + `Export JSONL : ${file}`);
+        return;
+      } catch {}
+    }
     const file = path.join(projectRoot(), `zaalis-cli-${Date.now()}.md`);
     const md = history.map((h) => `**${h.role}**\n\n${h.content}\n`).join('\n---\n\n');
     fs.writeFileSync(file, md, 'utf-8');
     console.log(green('✓ ') + `Export : ${file}`);
+    return;
+  }
+  if (name === 'session') {
+    const [action = 'list', ...rest] = parseArgs(arg);
+    const value = rest.join(' ').trim();
+    if (action === 'list' || action === 'search') {
+      const query = action === 'search' ? value : '';
+      const data = await apiGet(`/api/agent-sessions?root=${encodeURIComponent(projectRoot())}&query=${encodeURIComponent(query)}&archived=${action === 'archived'}&limit=100`);
+      const rows = (data.sessions || []).map((item) => [item.id === session.agentSessionId ? '→ ' + item.id.slice(0, 18) : item.id.slice(0, 20), `${item.title} · ${new Date(item.updatedAt).toLocaleString()}${item.status === 'archived' ? ' · archivée' : ''}`]);
+      printRows('Conversations', rows.length ? rows : [['—', 'Aucune conversation']]);
+      return;
+    }
+    if (action === 'new') {
+      const data = await apiPost('/api/agent-sessions', { root: projectRoot(), title: value || 'Nouvelle conversation', model: session.model, submodel: session.submodel });
+      session.agentSessionId = data.session.id; history.length = 0; saveSession(session);
+      console.log(green('✓ ') + `Nouvelle session : ${data.session.id}`); return;
+    }
+    if (!session.agentSessionId) { console.log(dim('Aucune session active. Utilisez /session new ou /resume.')); return; }
+    if (action === 'rename') {
+      if (!value) { console.log(dim('Usage : /session rename <titre>')); return; }
+      const r = await authed('PATCH', `/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}`, { title: value });
+      if (r.status !== 200) throw new Error((r.json && r.json.error) || `HTTP ${r.status}`);
+      console.log(green('✓ ') + `Session renommée : ${r.json.session.title}`); return;
+    }
+    if (action === 'fork') {
+      const data = await apiPost(`/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}/fork`, { title: value || undefined });
+      session.agentSessionId = data.session.id; await restoreDurableSession(data.session.id); console.log(green('✓ ') + `Branche créée : ${data.session.id}`); return;
+    }
+    if (action === 'archive') {
+      const r = await authed('PATCH', `/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}`, { status: 'archived' });
+      if (r.status !== 200) throw new Error((r.json && r.json.error) || `HTTP ${r.status}`);
+      delete session.agentSessionId; saveSession(session); console.log(green('✓ ') + 'Session archivée.'); return;
+    }
+    console.log(dim('Usage : /session list|new [titre]|rename <titre>|fork [titre]|archive|search <texte>'));
+    return;
+  }
+  if (name === 'security') {
+    const workflow = (arg || 'scan').trim().toLowerCase();
+    if (!['diff', 'scan', 'deep', 'validate', 'fix', 'report'].includes(workflow)) { console.log(dim('Usage : /security diff|scan|deep|validate|fix|report')); return; }
+    const data = await apiPost(`/api/security/${workflow}`, { root: projectRoot(), source: 'slash', format: workflow === 'report' ? 'sarif' : 'json' });
+    const summary = data.summary || {};
+    printRows(`Sécurité · ${workflow}`, [['constats', String(summary.total || 0)], ['haute sévérité', String(summary.high || 0)], ['moyenne', String(summary.medium || 0)], ['généré', data.generatedAt || '—']]);
+    if (workflow === 'report') {
+      const file = path.join(projectRoot(), `zaalis-security-${Date.now()}.sarif`);
+      fs.writeFileSync(file, JSON.stringify(data.report, null, 2), { mode: 0o600 });
+      console.log(green('✓ ') + `SARIF : ${file}`);
+      const markdown = await apiPost('/api/security/report', { root: projectRoot(), source: 'slash', format: 'markdown' });
+      const markdownFile = file.replace(/\.sarif$/, '.md');
+      fs.writeFileSync(markdownFile, String(markdown.report || ''), { mode: 0o600 });
+      console.log(green('✓ ') + `Markdown : ${markdownFile}`);
+    } else if (workflow === 'fix') {
+      const changes = data.report && data.report.changes || [];
+      console.log(dim(`${changes.length} correctif(s) proposés : utilisez l’agent avec edit/write pour les appliquer après approbation.`));
+    } else if (data.report && Array.isArray(data.report.findings)) {
+      data.report.findings.slice(0, 30).forEach((item) => console.log(`  ${item.severity.toUpperCase()} ${item.file}:${item.line} — ${item.message}`));
+    }
     return;
   }
   if (name === 'summary') {
@@ -1838,12 +2137,12 @@ async function runSlashCommand(ev, me) {
     const recent = history.slice(-4);
     const data = await callChat('Resume ce contexte en moins de 250 mots, en gardant fichiers, decisions et faits importants:\n\n' + older.map((h) => `${h.role}: ${h.content}`).join('\n'), 'Tu compactes un historique de conversation.', []);
     if (data.error) console.log(brand('✗ ') + data.error);
-    else { history.length = 0; history.push({ role: 'user', content: '[Resume du contexte precedent] ' + data.text }, ...recent); console.log(green('✓ ') + 'Contexte compacte.'); }
+    else { history.length = 0; history.push({ role: 'user', content: '[Resume du contexte precedent] ' + data.text }, ...recent); persistConversation(); console.log(green('✓ ') + 'Contexte compacte.'); }
     return;
   }
   if (name === 'reset') {
     if (!(await confirmAction('Reinitialiser la session CLI locale', 'Efface le contexte courant, le style de reponse et le mode de permission. La connexion est conservee.'))) return;
-    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; saveSession(session);
+    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; delete session.agentSessionId; persistConversation(); saveSession(session);
     console.log(green('✓ ') + 'Session CLI reinitialisee.');
     return;
   }
@@ -2510,7 +2809,7 @@ async function repl(opts = {}) {
       }
       // Actions bloquees par le serveur (supervise/semi) : demander la
       // permission puis les appliquer, comme Claude Code.
-      try { await applyBlockedAgentTools(roundTools); } catch {}
+      try { await applyBlockedAgentTools(res.toolResults || roundTools); } catch {}
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
     }
@@ -2689,7 +2988,7 @@ async function main() {
   if (!(await ensureServer())) { console.error(brand('✗ ') + 'Impossible de joindre le serveur zaalis.'); process.exit(1); }
 
   if (cmd === 'login') { process.exit((await login({ register: argv.includes('--register') })) ? 0 : 1); }
-  if (cmd === 'logout') { await request('POST', '/api/auth/logout'); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
+  if (cmd === 'logout') { await request('POST', '/api/auth/logout'); clearKeychainCookie(); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
 
   // Work out whether this is a one-shot or the interactive REPL.
   const subcommand = cmd === 'models' || cmd === 'pull';

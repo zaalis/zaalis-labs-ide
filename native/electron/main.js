@@ -6,7 +6,14 @@ const http = require('http');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
+
+// A second launch must focus the existing window instead of spawning another
+// local server.  This is deliberately acquired before `ready`, as required by
+// Electron on macOS.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) app.quit();
 
 function configureLinuxSandbox() {
   if (process.platform !== 'linux') return;
@@ -49,12 +56,22 @@ const ICON_PATH = path.join(BUNDLE_DIR, 'image', process.platform === 'darwin' ?
 const SPEECH_HELPER_PATH = app.isPackaged
   ? path.join(APP_ROOT, 'macos-speech-transcriber')
   : path.join(APP_ROOT, '..', 'macos-speech-transcriber');
+const COMPUTER_HELPER_PATH = app.isPackaged
+  ? path.join(APP_ROOT, 'macos-computer-bridge')
+  : path.join(APP_ROOT, '..', 'macos-computer-bridge');
 
 let serverProcess = null;
 let mainWindow = null;
 let serverOwnedByApp = false;
 let isQuitting = false;
 let speechProcess = null;
+let computerBridge = null;
+let computerBridgePort = 0;
+let computerStopRequested = false;
+let overlayWindows = [];
+let controlDock = null;
+const computerBridgeSecret = crypto.randomBytes(32).toString('hex');
+let computerHelperBuild = null;
 
 function logDir() {
   const dir = path.join(app.getPath('userData'), 'logs');
@@ -77,12 +94,19 @@ function healthCheck(port, timeoutMs = 800) {
     const req = http.request({
       host: '127.0.0.1',
       port,
-      path: '/api/auth/me',
+      path: '/api/health',
       method: 'GET',
       timeout: timeoutMs,
     }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const health = JSON.parse(body);
+          resolve(res.statusCode === 200 && health && health.ok === true && health.apiRevision === 'desktop-launcher-v2');
+        } catch { resolve(false); }
+      });
     });
     req.on('timeout', () => {
       req.destroy();
@@ -104,18 +128,6 @@ function canListen(port) {
   });
 }
 
-function getFreePort() {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.once('listening', () => {
-      const address = server.address();
-      server.close(() => resolve(address.port));
-    });
-    server.listen(0, '127.0.0.1');
-  });
-}
-
 async function pickPort() {
   if (await healthCheck(DEFAULT_PORT)) {
     return { port: DEFAULT_PORT, reuseExisting: true };
@@ -123,7 +135,10 @@ async function pickPort() {
   if (await canListen(DEFAULT_PORT)) {
     return { port: DEFAULT_PORT, reuseExisting: false };
   }
-  return { port: await getFreePort(), reuseExisting: false };
+  // The server provides the IDE's local API, so it cannot be replaced with a
+  // file:// index.html page.  Do not, however, silently start a second server
+  // on a random port: that hides stale processes and breaks the bundled CLI.
+  throw new Error(`Le port local ${DEFAULT_PORT} est déjà utilisé par une autre application. Quittez cette application, puis relancez zaalis IDE.`);
 }
 
 async function startServer(port, reuseExisting) {
@@ -146,6 +161,8 @@ async function startServer(port, reuseExisting) {
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
+      ZAALIS_COMPUTER_BRIDGE_URL: computerBridgePort ? `http://127.0.0.1:${computerBridgePort}` : '',
+      ZAALIS_COMPUTER_BRIDGE_SECRET: computerBridgeSecret,
     },
     stdio: ['ignore', out, err],
     detached: false,
@@ -174,6 +191,165 @@ async function startServer(port, reuseExisting) {
     await wait(250);
   }
   throw new Error('zaalis-server did not become ready in time.');
+}
+
+async function ensureComputerHelper() {
+  if (process.platform !== 'darwin') return '';
+  // The helper runs from a stable userData path so the TCC-visible location
+  // survives reinstalls, but its content must follow the packaged binary:
+  // pinning the first-ever copy forever kept shipping old helper bugs (e.g.
+  // the accessibility preflight gate) after every application update. TCC
+  // attributes Accessibility/Screen Recording to the responsible process —
+  // the application — so refreshing the helper does not drop the approval.
+  const stableHelper = path.join(app.getPath('userData'), 'macos-computer-bridge-stable');
+  if (app.isPackaged) {
+    try {
+      if (fs.existsSync(COMPUTER_HELPER_PATH)) {
+        const bundled = fs.readFileSync(COMPUTER_HELPER_PATH);
+        const stale = !fs.existsSync(stableHelper)
+          || crypto.createHash('sha256').update(bundled).digest('hex')
+            !== crypto.createHash('sha256').update(fs.readFileSync(stableHelper)).digest('hex');
+        if (stale) {
+          // Write-then-rename: a helper instance currently executing keeps
+          // its old inode instead of having its image rewritten underneath.
+          const next = `${stableHelper}.next`;
+          fs.writeFileSync(next, bundled, { mode: 0o755 });
+          fs.renameSync(next, stableHelper);
+        }
+      }
+      if (fs.existsSync(stableHelper)) return stableHelper;
+    } catch {}
+    return '';
+  }
+  if (fs.existsSync(COMPUTER_HELPER_PATH)) return COMPUTER_HELPER_PATH;
+  if (computerHelperBuild) return computerHelperBuild;
+  const source = path.join(__dirname, '..', 'macos_computer_bridge.swift');
+  const output = path.join(app.getPath('userData'), 'macos-computer-bridge');
+  computerHelperBuild = new Promise((resolve) => {
+    if (!fs.existsSync(source)) return resolve('');
+    const child = spawn('xcrun', ['swiftc', '-O', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ApplicationServices', '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'ScreenCaptureKit', source, '-o', output], { stdio: 'ignore' });
+    child.once('error', () => resolve(''));
+    child.once('close', (code) => resolve(code === 0 && fs.existsSync(output) ? output : ''));
+  });
+  return computerHelperBuild;
+}
+
+async function runComputerHelper(payload) {
+  const helperPath = await ensureComputerHelper();
+  return new Promise((resolve) => {
+    if (process.platform !== 'darwin') return resolve({ ok: false, error: 'unsupported-platform' });
+    if (!helperPath) return resolve({ ok: false, error: 'helper-missing' });
+    const child = spawn(helperPath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '', settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish({ ok: false, error: 'computer-timeout' }); }, 20_000);
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
+    child.once('error', (err) => { clearTimeout(timer); finish({ ok: false, error: err.message }); });
+    child.once('close', () => {
+      clearTimeout(timer);
+      try { finish(JSON.parse(stdout.trim() || '{}')); }
+      catch { finish({ ok: false, error: stderr.trim() || 'invalid-helper-response' }); }
+    });
+    try { child.stdin.end(JSON.stringify(payload) + '\n'); }
+    catch { clearTimeout(timer); finish({ ok: false, error: 'computer-helper-write-failed' }); }
+  });
+}
+
+// TCC (the macOS privacy service) evaluates the Electron application and the
+// native input/capture helper independently.  Query both in the main process
+// so the renderer gets a truthful, actionable result instead of treating a
+// pending macOS prompt as a generic permission failure.
+async function computerPermissionStatus(prompt = false) {
+  if (process.platform !== 'darwin') return { ok: false, error: 'unsupported-platform' };
+  let appAccessibility = false;
+  let appScreenRecording = 'unknown';
+  // The native helper, not Electron, performs the capture and input events.
+  // Do not trigger a second app-level TCC prompt here: it would be revoked on
+  // every ad-hoc application rebuild while adding no capability.
+  try { appAccessibility = systemPreferences.isTrustedAccessibilityClient(false); } catch {}
+  try { appScreenRecording = systemPreferences.getMediaAccessStatus('screen'); } catch {}
+  const helper = await runComputerHelper({ action: prompt ? 'request_permissions' : 'status' });
+  if (!helper || !helper.ok) return { ok: false, error: helper && helper.error || 'helper-unavailable', appAccessibility, appScreenRecording };
+  return {
+    ...helper,
+    // The helper is the process which actually captures the screen and posts
+    // events, therefore its two values are the safety gate.
+    appAccessibility,
+    appScreenRecording,
+    helperAccessibility: !!helper.accessibility,
+    helperScreenRecording: !!helper.screenRecording,
+  };
+}
+
+function overlayHTML() {
+  return `<!doctype html><html><head><style>
+    html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;pointer-events:none}
+    .edge{position:fixed;inset:0;border:28px solid transparent;border-image:linear-gradient(135deg,rgba(120,62,222,.58),rgba(173,87,255,.16),rgba(91,34,175,.54)) 1;filter:blur(2px);opacity:.9;animation:breathe 5.5s ease-in-out infinite}
+    .mist{position:fixed;inset:-25%;background:radial-gradient(ellipse at 15% 20%,rgba(157,89,255,.28),transparent 32%),radial-gradient(ellipse at 80% 84%,rgba(102,45,210,.28),transparent 38%);filter:blur(20px);animation:drift 12s ease-in-out infinite alternate}
+    @keyframes breathe{50%{opacity:.55;filter:blur(5px)}}@keyframes drift{to{transform:translate3d(3%, -2%, 0) scale(1.06)}}
+  </style></head><body><div class="edge"></div><div class="mist"></div></body></html>`;
+}
+
+function dockHTML() {
+  return `<!doctype html><html><head><style>
+    html,body{margin:0;height:100%;overflow:hidden;background:transparent;font-family:-apple-system,BlinkMacSystemFont,sans-serif}.dock{box-sizing:border-box;height:54px;display:flex;align-items:center;gap:12px;padding:0 13px;border:1px solid rgba(214,187,255,.36);border-radius:18px;background:rgba(24,14,42,.88);box-shadow:0 16px 42px rgba(39,10,78,.45);color:#f4ecff;backdrop-filter:blur(18px)}.pulse{width:9px;height:9px;border-radius:50%;background:#b36cff;box-shadow:0 0 13px #b36cff;animation:pulse 1.6s ease-in-out infinite}.label{font-size:12px;font-weight:650;white-space:nowrap}.stop{border:0;border-radius:11px;background:#db3d56;color:white;padding:8px 12px;font-weight:700;font-size:12px;cursor:pointer}.stop:hover{background:#f05068}@keyframes pulse{50%{transform:scale(.6);opacity:.45}}
+  </style></head><body><div class="dock"><span class="pulse"></span><span class="label">L’IA travaille sur ce Mac</span><button class="stop" onclick="window.zaalisNative.computer.stop()">Arrêter le travail</button></div></body></html>`;
+}
+
+function showComputerOverlay() {
+  if (process.platform !== 'darwin' || overlayWindows.length) return;
+  for (const display of require('electron').screen.getAllDisplays()) {
+    const win = new BrowserWindow({ x: display.bounds.x, y: display.bounds.y, width: display.bounds.width, height: display.bounds.height, transparent: true, frame: false, resizable: false, focusable: false, skipTaskbar: true, alwaysOnTop: true, hasShadow: false, webPreferences: { contextIsolation: true, nodeIntegration: false } });
+    win.setIgnoreMouseEvents(true, { forward: true });
+    win.setAlwaysOnTop(true, 'screen-saver');
+    win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(overlayHTML())}`);
+    overlayWindows.push(win);
+  }
+  const primary = require('electron').screen.getPrimaryDisplay().workArea;
+  controlDock = new BrowserWindow({ width: 320, height: 58, x: Math.round(primary.x + (primary.width - 320) / 2), y: primary.y + primary.height - 92, transparent: true, frame: false, resizable: false, alwaysOnTop: true, skipTaskbar: true, webPreferences: { contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, 'preload.js') } });
+  controlDock.setAlwaysOnTop(true, 'screen-saver');
+  controlDock.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(dockHTML())}`);
+  controlDock.on('closed', () => { controlDock = null; });
+}
+
+function hideComputerOverlay() {
+  for (const win of overlayWindows.splice(0)) { try { if (!win.isDestroyed()) win.close(); } catch {} }
+  try { if (controlDock && !controlDock.isDestroyed()) controlDock.close(); } catch {}
+  controlDock = null;
+}
+
+function requestServerAutomationStop() {
+  computerStopRequested = true;
+  hideComputerOverlay();
+  const req = http.request({ host: '127.0.0.1', port: DEFAULT_PORT, path: '/api/automation/stop-bridge', method: 'POST', headers: { 'x-zaalis-computer': computerBridgeSecret, 'Content-Length': '0' } });
+  req.on('error', () => {}); req.end();
+}
+
+async function startComputerBridge() {
+  if (computerBridge) return computerBridgePort;
+  computerBridge = http.createServer(async (req, res) => {
+    if (req.headers['x-zaalis-computer'] !== computerBridgeSecret) { res.writeHead(403); return res.end(); }
+    const chunks = [];
+    for await (const chunk of req) { chunks.push(chunk); if (Buffer.concat(chunks).length > 12 * 1024 * 1024) { res.writeHead(413); return res.end(); } }
+    let body = {};
+    try { body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}; } catch { res.writeHead(400); return res.end(JSON.stringify({ ok: false, error: 'invalid-json' })); }
+    if (req.method === 'GET' && req.url === '/status') body = { action: 'status' };
+    let result;
+    if (body.action === 'overlay_start') { computerStopRequested = false; showComputerOverlay(); result = { ok: true }; }
+    else if (body.action === 'overlay_stop') { hideComputerOverlay(); result = { ok: true }; }
+    else if (body.action === 'cancel_status') result = { ok: true, stopped: computerStopRequested };
+    else if (computerStopRequested) result = { ok: false, error: 'stopped' };
+    else result = await runComputerHelper(body);
+    res.writeHead(result.ok === false ? 409 : 200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(result));
+  });
+  await new Promise((resolve, reject) => { computerBridge.once('error', reject); computerBridge.listen(0, '127.0.0.1', () => resolve()); });
+  computerBridgePort = computerBridge.address().port;
+  return computerBridgePort;
 }
 
 function createWindow(port) {
@@ -330,10 +506,19 @@ ipcMain.handle('mac-speech-stop', async () => {
   return { ok: true };
 });
 
+ipcMain.handle('mac-computer-status', async () => computerPermissionStatus(false));
+ipcMain.handle('mac-computer-request-permissions', async () => computerPermissionStatus(true));
+ipcMain.handle('computer-dock-stop', async () => {
+  requestServerAutomationStop();
+  return { ok: true };
+});
+
 let cookiesFlushed = false;
 app.on('before-quit', (event) => {
   isQuitting = true;
   stopSpeechProcess();
+  hideComputerOverlay();
+  try { computerBridge && computerBridge.close(); } catch {}
   stopServer();
 
   // Chromium écrit les cookies persistants (dont zaalis_session) de façon
@@ -355,6 +540,13 @@ app.on('before-quit', (event) => {
     .finally(() => { clearTimeout(safety); done(); });
 });
 app.on('window-all-closed', () => app.quit());
+
+app.on('second-instance', () => {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+});
 
 // On macOS, expose the `zaalis` CLI in the shell PATH by symlinking it into
 // /usr/local/bin (if writable) or ~/.local/bin. The tar.gz installer already
@@ -382,9 +574,11 @@ function ensureZaalisSymlink() {
 }
 
 app.whenReady().then(async () => {
+  if (!gotSingleInstanceLock) return;
   ensureZaalisSymlink();
 
   try {
+    await startComputerBridge();
     const { port, reuseExisting } = await pickPort();
     await startServer(port, reuseExisting);
     createWindow(port);

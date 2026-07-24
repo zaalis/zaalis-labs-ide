@@ -82,6 +82,55 @@ final class SpeechTranscriber {
     }
 }
 
+// Transcrit un WAV déjà capturé par zaalis Browser. Cela évite de dépendre de
+// whisper.cpp/Homebrew : l'application utilise le service Speech intégré à
+// macOS, avec la même autorisation utilisateur que la dictée de l'IDE.
+final class FileSpeechTranscriber {
+    private let recognizer: SFSpeechRecognizer
+    private var task: SFSpeechRecognitionTask?
+
+    init?(language: String) {
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)), recognizer.isAvailable else {
+            emit(["status": "error", "error": "recognizer-unavailable"])
+            return nil
+        }
+        self.recognizer = recognizer
+    }
+
+    func start(filePath: String) {
+        guard FileManager.default.fileExists(atPath: filePath) else {
+            emit(["status": "error", "error": "audio-file-missing"])
+            exit(2)
+        }
+
+        SFSpeechRecognizer.requestAuthorization { status in
+            guard status == .authorized else {
+                emit(["status": "error", "error": "speech-denied"])
+                exit(3)
+            }
+
+            DispatchQueue.main.async {
+                let request = SFSpeechURLRecognitionRequest(url: URL(fileURLWithPath: filePath))
+                request.shouldReportPartialResults = false
+                self.task = self.recognizer.recognitionTask(with: request) { result, error in
+                    if let result = result {
+                        emit([
+                            "status": "transcript",
+                            "text": result.bestTranscription.formattedString,
+                            "final": result.isFinal
+                        ])
+                        if result.isFinal { exit(0) }
+                    }
+                    if let error = error {
+                        emit(["status": "error", "error": String(describing: error)])
+                        exit(4)
+                    }
+                }
+            }
+        }
+    }
+}
+
 private func requestMicrophoneAccess(_ completion: @escaping (Bool) -> Void) {
     if #available(macOS 14.0, *) {
         AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
@@ -107,22 +156,33 @@ private func emit(_ payload: [String: Any]) {
     fflush(stdout)
 }
 
-let language = CommandLine.arguments.dropFirst().first ?? "fr-FR"
-guard let transcriber = SpeechTranscriber(language: language) else {
-    exit(1)
+let arguments = Array(CommandLine.arguments.dropFirst())
+func optionValue(_ name: String) -> String? {
+    guard let index = arguments.firstIndex(of: name), arguments.indices.contains(index + 1) else { return nil }
+    return arguments[index + 1]
 }
 
-DispatchQueue.global(qos: .userInitiated).async {
-    while let line = readLine() {
-        if line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "stop" {
-            DispatchQueue.main.async {
-                transcriber.stop()
-                exit(0)
+if let filePath = optionValue("--file") {
+    let language = optionValue("--language") ?? "fr-FR"
+    guard let transcriber = FileSpeechTranscriber(language: language) else { exit(1) }
+    transcriber.start(filePath: filePath)
+    RunLoop.main.run()
+} else {
+    let language = arguments.first ?? "fr-FR"
+    guard let transcriber = SpeechTranscriber(language: language) else { exit(1) }
+
+    DispatchQueue.global(qos: .userInitiated).async {
+        while let line = readLine() {
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "stop" {
+                DispatchQueue.main.async {
+                    transcriber.stop()
+                    exit(0)
+                }
+                break
             }
-            break
         }
     }
-}
 
-transcriber.start()
-RunLoop.main.run()
+    transcriber.start()
+    RunLoop.main.run()
+}

@@ -3,14 +3,18 @@
 const state = {
     agentMode: false,
     permissionMode: 'supervised', // supervised | semi | auto
+    computerControlEnabled: false, // macOS screen/cursor control is opt-in per task
+    automationTaskId: null,
     projectRoot: null,
+    lastProjectRoot: null,
     openFiles: {}, // { [filePath]: { name, content, unsaved } }
     activeFile: null, // filePath or null
+    securityReview: { open: false, id: null, previousFile: null, data: null },
     reasoningLevel: 0, // 0 = MIN, 1 = MED, 2 = MAX
     responseStyle: 'normal', // 'normal' | 'fast' | 'deep'  (/fast, /deep)
     config: {
         aiModel: 'codex',
-        aiSubmodel: 'gpt-5.5',
+        aiSubmodel: 'gpt-5.6-sol',
         ollamaUrl: 'http://127.0.0.1:11434',
         ollamaModel: 'qwen3:8b',
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
@@ -33,16 +37,23 @@ const state = {
         // ----- Advanced hardware (GGUF engine) -----
         ggufCtx: 8192,                  // default context size for the local engine
         ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
-        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
+        customSystemInstructions: '',   // persistent style / system preferences for every model
+        // Persistent Claude-Code-style tool rules. Examples: Bash(npm test:*),
+        // Read, Edit(src/**). Deny rules always take priority.
+        toolPermissions: { allow: [], ask: [], deny: [] },
+        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' }
     },
     profile: { pseudo: 'Utilisateur', photo: '' },
     conversations: [],        // single-chat history
     currentConvId: null,
+    agentSessionId: null,     // durable server-side JSONL session for the active chat
     chatHistory: [],          // API memory for the current chat [{role, content}]
     contextTokens: 0,         // estimated tokens currently in context
     agentConversations: [],   // agents-mode history (separate)
     currentAgentConvId: null,
     attachments: [], // [{ name, ext, isImage, url?, content? }]
+    useBrainChat: false, // explicit per-composer opt-in; never enabled by default
+    useBrainAgents: false,
     language: 'fr' // 'fr' | 'en'
 };
 
@@ -51,35 +62,40 @@ let legacyApiKeysForMigration = null;
 // Sub-model options per provider — real/current API models only, NEWEST FIRST.
 // The first entry of each list is the default selection when that provider is chosen.
 const SUBMODELS = {
-    codex:  ['gpt-5.5', 'gpt-5.4', 'gpt-5.1-codex', 'gpt-5.1', 'gpt-4.5', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
-    claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3-7-sonnet', 'claude-3-5-sonnet', 'claude-3-5-haiku'],
-    gemini: ['gemini-3.5-flash', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-    grok:   ['grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-2-image-gen', 'grok-image-gen'],
-    mistral:['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest'],
+    codex:  ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
+    claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
+    mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+    kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
     local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
     gguf:   []   // populated from installed .gguf files via /api/gguf-models
 };
 
 // Human-friendly display names (dots, not dashes). Falls back to the raw id.
 const MODEL_LABELS = {
-    'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.1-codex': 'GPT-5.1 Codex', 'gpt-5.1': 'GPT-5.1',
-    'gpt-4.5': 'GPT-4.5', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
+    'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
+    'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
+    'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
     'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-    'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-4-6': 'Claude Sonnet 4.6',
-    'claude-haiku-4-5': 'Claude Haiku 4.5', 'claude-3-7-sonnet': 'Claude Sonnet 3.7',
-    'claude-3-5-sonnet': 'Claude Sonnet 3.5', 'claude-3-5-haiku': 'Claude Haiku 3.5',
-    'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro': 'Gemini 3.1 Pro', 'gemini-3-flash': 'Gemini 3 Flash',
-    'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash',
-    'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
+    'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5',
+    'claude-haiku-4-5': 'Claude Haiku 4.5',
+    'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
+    'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
+    'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
+    'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
     'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-    'grok-build-0.1': 'Grok Build 0.1', 'grok-2-image-gen': 'Grok 2 Image', 'grok-image-gen': 'Grok Image',
-    'mistral-large-latest': 'Mistral Large', 'mistral-medium-latest': 'Mistral Medium',
-    'mistral-small-latest': 'Mistral Small', 'codestral-latest': 'Codestral', 'pixtral-large-latest': 'Pixtral Large'
+    'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
+    'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
+    'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
+    'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
+    'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
+    'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6'
 };
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
 // Maker names per provider, used to tell the model its own identity.
-const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', local: 'Ollama', gguf: 'llama.cpp' };
+const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', kimi: 'Moonshot AI', local: 'Ollama', gguf: 'llama.cpp' };
 
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
@@ -106,11 +122,15 @@ function modelIdentity(model, submodel, lang) {
 // Context window (tokens) per model — aligned with official developer API key limits.
 const CONTEXT_WINDOWS = {
     codex: {
+        'gpt-5.6-sol': 1050000,
+        'gpt-5.6-terra': 1050000,
+        'gpt-5.6-luna': 1050000,
         'gpt-5.5': 1050000,
         'gpt-5.4': 1050000,
-        'gpt-5.1-codex': 400000,
+        'gpt-5.4-mini': 400000,
+        'gpt-5.4-nano': 400000,
+        'gpt-5.2': 400000,
         'gpt-5.1': 400000,
-        'gpt-4.5': 128000,
         'o3-mini': 200000,
         'o1': 200000,
         'gpt-4o-mini': 128000,
@@ -121,37 +141,46 @@ const CONTEXT_WINDOWS = {
     claude: {
         'claude-fable-5': 1000000,
         'claude-opus-4-8': 1000000,
-        'claude-sonnet-4-6': 1000000,
+        'claude-sonnet-5': 1000000,
         'claude-haiku-4-5': 200000,
-        'claude-3-7-sonnet': 200000,
-        'claude-3-5-sonnet': 200000,
-        'claude-3-5-haiku': 200000,
         _default: 200000
     },
     gemini: {
         'gemini-3.5-flash': 1048576,
-        'gemini-3.1-pro': 1048576,
-        'gemini-3-flash': 1048576,
+        'gemini-3.1-pro-preview': 1048576,
+        'gemini-3.1-flash-lite': 1048576,
+        'gemini-3-flash-preview': 1048576,
         'gemini-2.5-pro': 1048576,
         'gemini-2.5-flash': 1048576,
+        'gemini-2.5-flash-lite': 1048576,
         _default: 1048576
     },
     grok: {
+        'grok-4.5': 500000,
         'grok-4.3': 1000000,
         'grok-4.20-multi-agent-0309': 1000000,
         'grok-4.20-0309-reasoning': 1000000,
         'grok-4.20-0309-non-reasoning': 1000000,
         'grok-build-0.1': 256000,
-        'grok-2-image-gen': 1000000,
-        'grok-image-gen': 1000000,
+        'grok-imagine-image-quality': 1024,
+        'grok-imagine-image': 1024,
         _default: 1000000
     },
     mistral: {
-        'mistral-large-latest': 256000,
-        'mistral-medium-latest': 256000,
+        'mistral-medium-3-5': 256000,
         'mistral-small-latest': 256000,
-        'codestral-latest': 128000,
-        'pixtral-large-latest': 128000,
+        'mistral-large-latest': 256000,
+        'ministral-14b-2512': 256000,
+        'ministral-8b-2512': 256000,
+        'ministral-3b-2512': 256000,
+        'codestral-latest': 256000,
+        _default: 256000
+    },
+    kimi: {
+        'kimi-k3': 1000000,
+        'kimi-k2.7-code': 256000,
+        'kimi-k2.7-code-highspeed': 256000,
+        'kimi-k2.6': 256000,
         _default: 256000
     },
     local: {
@@ -203,20 +232,20 @@ function fmtDuration(ms) {
 // ==========================================================
 //  PERMISSION MODES (Claude-Code-style)
 // ==========================================================
-// supervised : ask before every write/edit/run         (UI selector)
-// semi       : write/edit auto, ask before run          (UI selector)
-// auto       : everything auto, ask only for dangerous  (UI selector)
+// supervised : commands run freely; ask before any file write/edit (UI selector)
+// semi       : broad autonomy; ask only for sensitive/dangerous     (UI selector)
+// auto       : everything auto, ask only for dangerous/publish       (UI selector)
 // plan       : read/search only, NEVER write or run     (/plan, /permissions)
 // read-only  : read/search only, NEVER write or run     (/permissions)
-// bypass     : everything, no confirmation at all        (/permissions, danger)
+// bypass     : NO restriction — reads/edits secrets (.env) in clear, no prompt (danger)
 const PERMISSION_MODES = ['read-only', 'plan', 'supervised', 'semi', 'auto', 'bypass'];
 const PERMISSION_LABELS = {
-    'read-only': { fr: 'Lecture seule', en: 'Read-only' },
-    plan:        { fr: 'Plan',          en: 'Plan' },
-    supervised:  { fr: 'Supervisé',     en: 'Supervised' },
-    semi:        { fr: 'Semi-auto',     en: 'Semi-auto' },
-    auto:        { fr: 'Autonome',      en: 'Autonomous' },
-    bypass:      { fr: 'Bypass',        en: 'Bypass' }
+    'read-only': { fr: 'Lecture seule',      en: 'Read-only' },
+    plan:        { fr: 'Plan',               en: 'Plan' },
+    supervised:  { fr: 'Supervisé',          en: 'Supervised' },
+    semi:        { fr: 'Semi-auto',          en: 'Semi-auto' },
+    auto:        { fr: 'Autonome',           en: 'Autonomous' },
+    bypass:      { fr: 'Aucune restriction', en: 'No restrictions' }
 };
 function permissionLabel(mode, lang) {
     const m = PERMISSION_LABELS[mode] || PERMISSION_LABELS.supervised;
@@ -268,11 +297,13 @@ const TRANSLATIONS = {
         'chat-default-msg': 'Selectionnez un modele et posez votre question.',
         'perm-label': 'Mode :',
         'perm-supervised': 'Supervise',
-        'perm-supervised-title': 'Chaque modification demande votre accord',
+        'perm-supervised-title': 'Commandes libres, ecritures de fichiers validees',
         'perm-semi': 'Semi-auto',
-        'perm-semi-title': 'Code auto, commandes validees',
+        'perm-semi-title': 'Large autonomie, seul le sensible est valide',
         'perm-auto': 'Autonome',
         'perm-auto-title': 'Controle total, aucune validation',
+        'perm-bypass': 'Aucune restriction',
+        'perm-bypass-title': 'Acces aux secrets (.env), zero validation — danger',
         'chat-input-placeholder': 'Ecrivez votre message...',
         'history-header': 'Historique',
         'history-empty': 'Aucune conversation',
@@ -337,6 +368,10 @@ const TRANSLATIONS = {
         'settings-fontsize-normal': 'Normale',
         'settings-fontsize-large': 'Grande',
         'settings-models-title': 'Modèles par défaut',
+        'settings-instructions-title': 'Instructions IA',
+        'settings-instructions-hint': 'Ajoutez des préférences permanentes pour toutes les IA : ton, niveau de détail, langue ou méthode de travail.',
+        'settings-instructions-label': 'Instructions système personnelles',
+        'settings-instructions-safety': 'Ces préférences s’appliquent au chat, aux agents et aux modèles locaux. Elles ne peuvent pas désactiver les règles de sécurité, les permissions ou les garde-fous du fournisseur.',
         'settings-models-hint': "Choix présélectionnés à l'ouverture de l'application.",
         'settings-default-chat-label': 'Modèle chat par défaut',
         'settings-default-chat-hint': 'Modèle sélectionné par défaut dans le chat.',
@@ -478,11 +513,13 @@ const TRANSLATIONS = {
         'chat-default-msg': 'Select a model and ask your question.',
         'perm-label': 'Mode:',
         'perm-supervised': 'Supervised',
-        'perm-supervised-title': 'Every modification requires your approval',
+        'perm-supervised-title': 'Commands run freely, file writes need approval',
         'perm-semi': 'Semi-auto',
-        'perm-semi-title': 'Auto code, approved commands',
+        'perm-semi-title': 'Broad autonomy, only sensitive actions ask',
         'perm-auto': 'Autonomous',
         'perm-auto-title': 'Full control, no approval',
+        'perm-bypass': 'No restrictions',
+        'perm-bypass-title': 'Reads secrets (.env) in clear, zero approval — danger',
         'chat-input-placeholder': 'Type a message...',
         'history-header': 'History',
         'history-empty': 'No conversation',
@@ -547,6 +584,10 @@ const TRANSLATIONS = {
         'settings-fontsize-normal': 'Normal',
         'settings-fontsize-large': 'Large',
         'settings-models-title': 'Default models',
+        'settings-instructions-title': 'AI instructions',
+        'settings-instructions-hint': 'Add lasting preferences for every AI: tone, level of detail, language, or working style.',
+        'settings-instructions-label': 'Personal system instructions',
+        'settings-instructions-safety': 'These preferences apply to chat, agents, and local models. They cannot disable safety rules, permissions, or provider safeguards.',
         'settings-models-hint': 'Preselected choices when the app starts.',
         'settings-default-chat-label': 'Default chat model',
         'settings-default-chat-hint': 'Model selected by default in chat.',
@@ -828,16 +869,26 @@ const AGENT_COLLABORATION_PROMPT = `Tu fais partie d'une equipe multi-IA. Les au
 
 // Status phrases cycled under the spinner while a model is thinking.
 const THINKING_PHRASES = {
-    fr: ['En cours de reflexion...', 'Analyse de la demande...', 'Preparation de la reponse...', 'Finalisation de la reponse...'],
-    en: ['Thinking...', 'Analyzing the request...', 'Preparing the answer...', 'Finalizing the response...']
+    fr: [
+        'Préparation de la réponse', 'Analyse de la demande', 'Organisation des informations',
+        'Vérification du contexte', 'Recherche de la meilleure approche', 'Exécution de la commande',
+        'Lecture des résultats', 'Contrôle des modifications', 'Vérification de la réponse',
+        'Préparation des détails utiles'
+    ],
+    en: [
+        'Preparing the response', 'Analyzing the request', 'Organizing information',
+        'Checking context', 'Finding the best approach', 'Running the command',
+        'Reading results', 'Reviewing changes', 'Checking the response',
+        'Preparing useful details'
+    ]
 };
 
-// Turn an element into a "thinking" indicator (spinner + cycling text).
+// Turn an element into a single cycling status indicator.
 function startThinking(el) {
     if (!el) return;
     
     const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
 
     if (isImageGen) {
         // Single rectangle (no chat bubble around it) with the same wavy-dot
@@ -856,7 +907,7 @@ function startThinking(el) {
 
     el.classList.add('thinking');
     el.classList.remove('typing');
-    el.innerHTML = '<span class="thinking-spinner"></span><span class="thinking-text"></span>';
+    el.innerHTML = '<span class="thinking-text"></span><span class="thinking-dots" aria-hidden="true"><i></i><i></i><i></i></span>';
     const lang = state.language || 'fr';
     const phrases = THINKING_PHRASES[lang] || THINKING_PHRASES.fr;
     const textEl = el.querySelector('.thinking-text');
@@ -866,6 +917,15 @@ function startThinking(el) {
         i = (i + 1) % phrases.length;
         textEl.textContent = phrases[i];
     }, 1800);
+}
+
+// Replace the fallback rotating copy with a phrase tied to a real agent event.
+// The dots keep animating; only the text stops rotating once work is observable.
+function setThinkingStatus(el, text) {
+    if (!el || !text || !el.classList.contains('thinking')) return;
+    if (el._thinkingInterval) { clearInterval(el._thinkingInterval); el._thinkingInterval = null; }
+    const textEl = el.querySelector('.thinking-text');
+    if (textEl) textEl.textContent = text;
 }
 
 // Stop the thinking indicator (the wheel disappears once the AI writes).
@@ -1104,9 +1164,16 @@ function extractRunBlocks(response) {
     while ((m = re.exec(response)) !== null) {
         const info = (m[1] || '').trim().toLowerCase();
         if (/(^|\s)run(\s|$)/.test(info)) {
-            m[2].split('\n').map(l => l.trim())
-                .filter(l => l && !l.startsWith('#'))
-                .forEach(c => cmds.push(c));
+            let pending = '';
+            m[2].split('\n').map(l => l.trim()).forEach((line) => {
+                if (!line || (!pending && line.startsWith('#'))) return;
+                pending = pending ? `${pending}\n${line}` : line;
+                if (!/\\\s*$/.test(line)) {
+                    cmds.push(pending);
+                    pending = '';
+                }
+            });
+            if (pending) cmds.push(pending);
         }
     }
     return cmds;
@@ -1290,8 +1357,10 @@ function loadState() {
             // si l'utilisateur a activé « Rouvrir le dernier projet » (Paramètres
             // → Projet). L'ancien projet reste sinon accessible via les projets
             // récents (zaalis-recent).
+            if (s.lastProjectRoot) state.lastProjectRoot = s.lastProjectRoot;
             if (s.projectRoot && state.config.reopenLastProject) {
                 state.projectRoot = s.projectRoot;
+                state.lastProjectRoot = s.projectRoot;
             } else if (s.projectRoot) {
                 // Mémorise le chemin sans l'ouvrir, pour que le toggle puisse le
                 // rouvrir plus tard et pour rester dans les projets récents.
@@ -1301,7 +1370,7 @@ function loadState() {
             // not in localStorage, to avoid leaking chats between accounts.
             if (s.language) state.language = s.language;
         }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
     } catch {}
 }
 
@@ -1311,6 +1380,7 @@ function saveState() {
         config: safeConfig,
         profile: state.profile,
         projectRoot: state.projectRoot,
+        lastProjectRoot: state.lastProjectRoot || state.projectRoot || null,
         language: state.language
     }));
 }

@@ -16,4 +16,9 @@ contextBridge.exposeInMainWorld('zaalisNative', {
       return () => ipcRenderer.removeListener('mac-speech-event', listener);
     },
   },
+  computer: {
+    status: () => ipcRenderer.invoke('mac-computer-status'),
+    requestPermissions: () => ipcRenderer.invoke('mac-computer-request-permissions'),
+    stop: () => ipcRenderer.invoke('computer-dock-stop'),
+  },
 });

@@ -3,8 +3,10 @@
 const SETTINGS_SECTION_TITLES = {
     general: 'settings-general-title',
     api: 'settings-api-keys-title',
+    mcp: 'MCP',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
+    instructions: 'settings-instructions-title',
     hardware: 'settings-hardware-title',
     project: 'settings-project-title',
     privacy: 'settings-privacy-title',
@@ -24,7 +26,7 @@ function setSettingsSection(section) {
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
         title.dataset.i18n = i18nKey;
-        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
+        title.textContent = i18nKey === 'MCP' ? 'MCP' : ((TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent);
     }
 }
 
@@ -74,7 +76,8 @@ function sharedHardwareConfigPayload() {
         ollamaModel: c.ollamaModel || 'qwen3:8b',
         ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
         ggufVariant: normalizeGgufVariant(c.ggufVariant),
-        ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers
+        ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
+        customSystemInstructions: String(c.customSystemInstructions || '').trim().slice(0, 12000)
     };
 }
 
@@ -89,6 +92,7 @@ function applySharedHardwareConfig(config) {
         const raw = config.ggufGpuLayers;
         c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
     }
+    if ('customSystemInstructions' in config) c.customSystemInstructions = String(config.customSystemInstructions || '').trim().slice(0, 12000);
 }
 
 async function syncSharedHardwareConfig() {
@@ -135,6 +139,8 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
+    const customInstructions = $('#settings-custom-system-instructions');
+    if (customInstructions) customInstructions.value = c.customSystemInstructions || '';
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -156,7 +162,7 @@ $('#close-modal').addEventListener('click', () => $('#settings-modal').classList
 $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
-const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -201,7 +207,7 @@ async function migrateLegacyApiKeys() {
         });
         if (res.ok) {
             legacyApiKeysForMigration = null;
-            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
             saveState();
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
@@ -212,6 +218,49 @@ async function migrateLegacyApiKeys() {
 async function refreshSecureSettings() {
     await migrateLegacyApiKeys();
     await loadApiKeyStatus();
+    await loadBrainMcpStatus();
+    await loadGenericMcpServers();
+}
+
+let brainMcpWasConfigured = false;
+let genericMcpLoaded = false;
+async function loadGenericMcpServers() {
+    const field = $('#mcp-servers-json');
+    if (!field) return [];
+    try {
+        const res = await fetch('/api/mcp');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const servers = Array.isArray(data.servers) ? data.servers : [];
+        field.value = JSON.stringify(servers, null, 2);
+        genericMcpLoaded = true;
+        return servers;
+    } catch { genericMcpLoaded = false; return []; }
+}
+function setBrainMcpStatus(status) {
+    const el = $('#brain-mcp-status');
+    if (!el) return;
+    const stateName = status && status.state;
+    el.textContent = stateName === 'connected' ? '● Connecté' : stateName === 'error' ? '● Erreur' : '● Déconnecté';
+    el.style.color = stateName === 'connected' ? 'var(--green)' : stateName === 'error' ? 'var(--red)' : 'var(--text-2)';
+}
+async function loadBrainMcpStatus() {
+    try {
+        const res = await fetch('/api/brain-mcp');
+        const status = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            const failed = { configured: false, enabled: false, state: 'error', detail: status.error || `HTTP ${res.status}` };
+            brainMcpWasConfigured = false;
+            setBrainMcpStatus(failed);
+            return failed;
+        }
+        brainMcpWasConfigured = !!status.configured;
+        setBrainMcpStatus(status);
+        const enabled = $('#brain-mcp-enabled'); if (enabled) enabled.checked = !!status.enabled;
+        const endpoint = $('#brain-mcp-endpoint'); if (endpoint && status.endpoint) endpoint.value = status.endpoint;
+        const token = $('#brain-mcp-token'); if (token && status.configured) token.placeholder = 'Jeton enregistré (coller pour le remplacer)';
+        return status;
+    } catch { setBrainMcpStatus({ state: 'error' }); return null; }
 }
 
 API_KEY_FIELDS.forEach(provider => {
@@ -246,6 +295,7 @@ $('#save-btn').addEventListener('click', async () => {
     if (defChat) c.aiModel = defChat;
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
+    c.customSystemInstructions = ($('#settings-custom-system-instructions')?.value || '').trim().slice(0, 12000);
     // ----- Hardware advanced -----
     c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
@@ -263,6 +313,40 @@ $('#save-btn').addEventListener('click', async () => {
     btn.disabled = true;
     try {
         await syncSharedHardwareConfig();
+        let genericMcpSaveError = '';
+        const genericMcpField = $('#mcp-servers-json');
+        if (genericMcpField && genericMcpLoaded) {
+            try {
+                const raw = genericMcpField.value.trim();
+                const servers = raw ? JSON.parse(raw) : [];
+                if (!Array.isArray(servers)) throw new Error('La configuration MCP doit être une liste JSON.');
+                const response = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                genericMcpField.value = JSON.stringify(data.servers || [], null, 2);
+            } catch (err) { genericMcpSaveError = err.message || 'Configuration MCP invalide.'; }
+        }
+        let brainSaveError = '';
+        const brainEnabled = !!$('#brain-mcp-enabled')?.checked;
+        const brainEndpoint = ($('#brain-mcp-endpoint')?.value || '').trim();
+        const brainToken = ($('#brain-mcp-token')?.value || '').trim();
+        if (brainEnabled || brainEndpoint || brainToken || brainMcpWasConfigured) {
+            try {
+                const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: brainEnabled, endpoint: brainEndpoint || undefined, token: brainToken || undefined }) });
+                const brainStatus = await brainRes.json().catch(() => ({}));
+                if (!brainRes.ok) {
+                    brainSaveError = brainStatus.error || `HTTP ${brainRes.status}`;
+                    setBrainMcpStatus({ state: 'error', detail: brainSaveError });
+                } else {
+                    brainMcpWasConfigured = !!brainStatus.configured;
+                    setBrainMcpStatus(brainStatus);
+                    if (brainStatus.state === 'error') brainSaveError = brainStatus.detail || 'Connexion MCP Zaalis Brain impossible.';
+                }
+            } catch (err) {
+                brainSaveError = err.message || 'Connexion MCP Zaalis Brain impossible.';
+                setBrainMcpStatus({ state: 'error', detail: brainSaveError });
+            }
+        }
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
                 method: 'PUT',
@@ -273,7 +357,12 @@ $('#save-btn').addEventListener('click', async () => {
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
         }
-        btn.textContent = 'OK';
+        if (brainSaveError || genericMcpSaveError) {
+            btn.textContent = state.language === 'en' ? 'Saved · MCP error' : 'Enregistré · erreur MCP';
+            toast([brainSaveError, genericMcpSaveError].filter(Boolean).join(' · '));
+        } else {
+            btn.textContent = 'OK';
+        }
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
     } catch {
         btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
@@ -338,7 +427,7 @@ if (clearKeysBtn) clearKeysBtn.addEventListener('click', async () => {
         const nulls = {}; API_KEY_FIELDS.forEach(p => nulls[p] = null);
         const res = await fetch('/api/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: nulls }) });
         if (res.ok) { const data = await res.json(); updateApiKeyInputs(data.keys || {}); }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
         toast(state.language === 'en' ? 'API keys deleted.' : 'Clés API supprimées.');
     } catch {}
 });

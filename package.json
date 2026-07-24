@@ -6,6 +6,7 @@
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/*.test.js",
     "check:mojibake": "node scripts/check-mojibake.js",
     "build:server": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/zaalis-server",
     "build:cli": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/bin/zaalis",
@@ -15,7 +16,8 @@
   },
   "pkg": {
     "assets": [
-      "interface/**/*"
+      "interface/**/*",
+      "node_modules/node-pty/build/Release/*"
     ]
   },
   "keywords": [],
@@ -26,6 +28,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "node-pty": "^1.0.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

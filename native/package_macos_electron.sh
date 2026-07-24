@@ -48,6 +48,10 @@ if command -v swiftc >/dev/null 2>&1; then
     -framework Foundation -framework Speech -framework AVFoundation \
     "$ROOT/native/macos_speech_transcriber.swift" \
     -o "$APP_RES/macos-speech-transcriber"
+  swiftc -target "$SWIFT_TARGET" -O \
+    -framework Foundation -framework AppKit -framework ApplicationServices -framework CoreGraphics -framework ImageIO -framework ScreenCaptureKit -framework Carbon \
+    "$ROOT/native/macos_computer_bridge.swift" \
+    -o "$APP_RES/macos-computer-bridge"
 else
   echo "ERROR: swiftc not found. macOS voice dictation helper cannot be built." >&2
   exit 1
@@ -82,6 +86,7 @@ data["NSHighResolutionCapable"] = True
 data["NSMicrophoneUsageDescription"] = "zaalis IDE uses the microphone only when you start voice dictation."
 data["NSSpeechRecognitionUsageDescription"] = "zaalis IDE uses macOS speech recognition only when you start voice dictation."
 data["NSAudioCaptureUsageDescription"] = "zaalis IDE uses audio capture only when you start voice dictation."
+data["NSScreenCaptureUsageDescription"] = "zaalis IDE captures the screen only while you explicitly enable AI computer control."
 
 with open(plist_path, "wb") as f:
     plistlib.dump(data, f, sort_keys=False)
@@ -90,8 +95,25 @@ PY
 find "$APP" -type d -exec chmod 755 {} +
 chmod +x "$APP/Contents/MacOS/zaalis-ide" \
   "$APP/Contents/Resources/app/macos-speech-transcriber" \
+  "$APP/Contents/Resources/app/macos-computer-bridge" \
   "$APP/Contents/Resources/app/bundle/zaalis-server" \
   "$APP/Contents/Resources/app/bundle/bin/zaalis" 2>/dev/null || true
+
+# Sign only after every bundled resource has been copied.  Signing earlier
+# leaves Electron's resource seal stale and macOS rejects the application.
+# ZAALIS_CODESIGN_ID may name a persistent (self-signed) identity: ad-hoc
+# signing ("-") produces a new code hash on every build, which silently
+# invalidates the user's Accessibility/Screen Recording approvals in TCC
+# after each update. A stable identity keeps those approvals across builds.
+CODESIGN_ID="${ZAALIS_CODESIGN_ID:--}"
+if command -v codesign >/dev/null 2>&1; then
+  # The helper itself calls the macOS Accessibility and Screen Recording APIs.
+  # Signing it before the enclosing bundle gives TCC a stable identity instead
+  # of treating it as an anonymous executable with a separate, opaque grant.
+  codesign --force --identifier fr.zaalis.ide.speech-transcriber --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/macos-speech-transcriber"
+  codesign --force --identifier fr.zaalis.ide.computer-bridge --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/macos-computer-bridge"
+  codesign --force --deep --sign "$CODESIGN_ID" "$APP"
+fi
 
 rm -rf "$WORK"
 echo "Electron darwin-${ARCH} app written to $APP"

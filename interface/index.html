@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.13">
-    <link rel="stylesheet" href="app.css?v=1.0.13">
+    <link rel="stylesheet" href="base.css?v=1.0.18">
+    <link rel="stylesheet" href="app.css?v=1.0.18">
 </head>
 <body>
 
@@ -258,6 +258,39 @@
                         <textarea id="code-textarea" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
                     </div>
                 </div>
+                <!-- Central, live security review workspace. It behaves like an
+                     editor tab so code remains one click away. -->
+                <section class="security-review-workspace hidden" id="security-review-workspace" aria-live="polite">
+                    <header class="security-review-header">
+                        <div class="security-review-title-row">
+                            <span class="security-review-shield" aria-hidden="true">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 3v5c0 5-3.1 8.8-7 10-3.9-1.2-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>
+                            </span>
+                            <div><h1>Review sécurité</h1><p id="security-review-meta">En attente d’une revue</p></div>
+                        </div>
+                        <div class="security-review-actions">
+                            <button class="security-review-button danger hidden" id="security-review-cancel" type="button">Annuler</button>
+                        </div>
+                    </header>
+                    <div class="security-review-hero">
+                        <div class="security-review-state"><span class="security-review-spinner" id="security-review-spinner"></span><strong id="security-review-stage-title">Prêt à lancer</strong></div>
+                        <div class="security-review-metrics">
+                            <div><span>Progression</span><strong id="security-review-progress">—</strong></div>
+                            <div><span>Constats signalés</span><strong id="security-review-findings">En attente</strong></div>
+                        </div>
+                    </div>
+                    <div class="security-review-progress-track"><div id="security-review-progress-bar"></div></div>
+                    <div class="security-review-content">
+                        <section class="security-review-stages">
+                            <div class="security-review-section-head"><h2>Progression de la review</h2><span id="security-review-current-stage">Étape courante</span></div>
+                            <ol id="security-review-stage-list"></ol>
+                        </section>
+                        <aside class="security-review-side">
+                            <section class="security-review-agents"><div class="security-review-section-head"><h2>Sous-agents</h2><span id="security-review-agent-count">0</span></div><div id="security-review-agent-list"></div></section>
+                            <section class="security-review-findings-panel"><div class="security-review-section-head"><h2>Constats</h2><span id="security-review-summary"></span></div><div id="security-review-finding-list"><p class="security-review-empty">Les résultats apparaîtront ici.</p></div></section>
+                        </aside>
+                    </div>
+                </section>
             </div>
             <div class="editor-statusbar" id="editor-statusbar">
                 <span id="status-file">--</span>
@@ -288,6 +321,9 @@
                     <button class="ai-tab active" data-tab="chat" data-i18n="tab-chat">Chat</button>
                     <button class="ai-tab" data-tab="agents" data-i18n="tab-agents">Agents</button>
                 </div>
+                <button class="topbar-btn" id="open-integrated-terminal" title="Ouvrir le terminal intégré" aria-label="Ouvrir le terminal intégré">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+                </button>
                 <button class="topbar-btn" id="clear-terminal" data-i18n-title="clear-title" title="Effacer">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 </button>
@@ -310,18 +346,12 @@
                         <option value="gemini">Gemini (Google)</option>
                         <option value="grok">Grok (xAI)</option>
                         <option value="mistral">Mistral (Le Chat)</option>
+                        <option value="kimi">Kimi (Moonshot AI)</option>
                         <option value="local">Ollama (Local)</option>
                         <option value="gguf">GGUF (Local)</option>
                     </select>
                     <select id="ai-submodel">
-                        <option value="gpt-4.1">gpt-4.1</option>
-                        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-                        <option value="gpt-4.1-nano">gpt-4.1-nano</option>
-                        <option value="gpt-4o">gpt-4o</option>
-                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                        <option value="o3">o3</option>
-                        <option value="o3-mini">o3-mini</option>
-                        <option value="o4-mini">o4-mini</option>
+                        <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                     </select>
                 </div>
 
@@ -343,6 +373,8 @@
                                 <div class="attach-menu" id="chat-attach-menu">
                                     <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
                                     <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                                    <button type="button" class="brain-attach-toggle" data-brain-toggle="chat" aria-pressed="false"><span class="brain-toggle-box" aria-hidden="true"></span>Utiliser Zaalis Brain</button>
+                                    <button type="button" class="computer-attach-toggle" data-computer-toggle aria-pressed="false" title="Autoriser l’IA à observer et contrôler ce Mac pour cette tâche"><span class="brain-toggle-box" aria-hidden="true"></span><span>Contrôle Mac</span></button>
                                 </div>
                             </div>
                             <!-- Mode Selector -->
@@ -355,15 +387,19 @@
                                 <div class="mode-dropdown" id="chat-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
-                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Commandes libres, écritures de fichiers validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Large autonomie, seul le sensible est validé</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
                                         <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
+                                    </button>
+                                    <button type="button" class="mode-item mode-item-danger" data-perm="bypass">
+                                        <span class="mode-item-title" data-i18n="perm-bypass">Aucune restriction</span>
+                                        <span class="mode-item-desc" data-i18n="perm-bypass-title">Accès aux secrets (.env), zéro validation — danger</span>
                                     </button>
                                 </div>
                             </div>
@@ -410,11 +446,7 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="codex">
-                            <option value="gpt-4.1">gpt-4.1</option>
-                            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-                            <option value="gpt-4o">gpt-4o</option>
-                            <option value="o3-mini">o3-mini</option>
-                            <option value="o4-mini">o4-mini</option>
+                            <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                         </select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
@@ -434,9 +466,7 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="claude">
-                            <option value="claude-sonnet-4-20250514">Claude Sonnet 4</option>
-                            <option value="claude-opus-4-20250514">Claude Opus 4</option>
-                            <option value="claude-3-5-haiku-20241022">Claude 3.5 Haiku</option>
+                            <option value="claude-fable-5">Claude Fable 5</option>
                         </select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
@@ -456,9 +486,7 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="gemini">
-                            <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                            <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                            <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
+                            <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
                         </select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
@@ -478,9 +506,7 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="grok">
-                            <option value="grok-3">Grok 3</option>
-                            <option value="grok-3-mini">Grok 3 Mini</option>
-                            <option value="grok-3-fast">Grok 3 Fast</option>
+                            <option value="grok-4.5">Grok 4.5</option>
                         </select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
@@ -500,6 +526,24 @@
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="mistral"></select>
+                        <span class="agent-badge idle">Inactif</span>
+                    </div>
+                    <!-- Kimi (Moonshot AI) -->
+                    <div class="agent-card" data-agent="kimi">
+                        <input type="checkbox" class="agent-check" data-agent="kimi">
+                        <div class="agent-dot kimi"></div>
+                        <div class="agent-info">
+                            <span class="agent-name">Kimi</span>
+                            <select class="agent-role-select" data-agent="kimi">
+                                <option value="developer">Developpeur</option>
+                                <option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option>
+                                <option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option>
+                                <option value="tester">Testeur</option>
+                            </select>
+                        </div>
+                        <select class="agent-model-select" data-agent="kimi"></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Ollama -->
@@ -560,6 +604,7 @@
                                 <div class="attach-menu" id="agents-attach-menu">
                                     <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
                                     <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
+                                    <button type="button" class="brain-attach-toggle" data-brain-toggle="agents" aria-pressed="false"><span class="brain-toggle-box" aria-hidden="true"></span>Utiliser Zaalis Brain</button>
                                 </div>
                             </div>
                             <!-- Mode Selector -->
@@ -572,15 +617,19 @@
                                 <div class="mode-dropdown" id="agents-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
-                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Commandes libres, écritures de fichiers validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Large autonomie, seul le sensible est validé</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
                                         <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
+                                    </button>
+                                    <button type="button" class="mode-item mode-item-danger" data-perm="bypass">
+                                        <span class="mode-item-title" data-i18n="perm-bypass">Aucune restriction</span>
+                                        <span class="mode-item-desc" data-i18n="perm-bypass-title">Accès aux secrets (.env), zéro validation — danger</span>
                                     </button>
                                 </div>
                             </div>
@@ -605,6 +654,13 @@
     </div>
 </div>
 
+<!-- Terminal PTY persistant : il est réduit tant qu’il n’est pas demandé. -->
+<section id="integrated-terminal" class="integrated-terminal hidden" aria-label="Terminal intégré">
+    <header><strong>Terminal intégré</strong><span id="terminal-cwd"></span><button id="terminal-close-btn" type="button" title="Fermer le terminal">×</button></header>
+    <pre id="terminal-output" aria-live="polite"></pre>
+    <textarea id="terminal-input" rows="1" spellcheck="false" autocomplete="off" placeholder="Commande terminal…"></textarea>
+</section>
+
 <!-- Shared hidden file picker for attachments -->
 <input type="file" id="attach-input" multiple hidden>
 
@@ -622,6 +678,10 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h3a5 5 0 0 1 0 10h-3"/><path d="M9 17H6A5 5 0 0 1 6 7h3"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
                 <span data-i18n="settings-api-keys-title">Cles API</span>
             </button>
+            <button class="settings-nav-item" type="button" data-settings-section="mcp">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg>
+                <span>MCP</span>
+            </button>
             <div class="settings-nav-label" data-i18n="settings-zside-category">ZS IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
@@ -630,6 +690,10 @@
             <button class="settings-nav-item" type="button" data-settings-section="models">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
                 <span data-i18n="settings-models-title">Modèles par défaut</span>
+            </button>
+            <button class="settings-nav-item" type="button" data-settings-section="instructions">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+                <span data-i18n="settings-instructions-title">Instructions IA</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -711,6 +775,23 @@
                         </div>
                         <input type="password" id="key-mistral" placeholder="...">
                     </div>
+                    <div class="form-group">
+                        <div class="key-label-row">
+                            <label for="key-moonshot">Moonshot AI (Kimi)</label>
+                            <span class="key-status" id="key-status-moonshot"></span>
+                        </div>
+                        <input type="password" id="key-moonshot" placeholder="...">
+                    </div>
+                </section>
+
+                <section class="settings-card settings-pane" data-settings-pane="mcp">
+                    <h3>MCP · Zaalis Brain</h3>
+                    <p class="form-hint">Connecte l’IDE et le CLI au Cerveau local. Copiez l’URL et le jeton affichés dans Zaalis Brain → IA → MCP local. Le jeton est chiffré localement et n’est jamais réaffiché.</p>
+                    <div class="settings-status-row"><span>État</span><strong id="brain-mcp-status">Non configuré</strong></div>
+                    <div class="form-group settings-row-group"><div class="settings-row-copy"><label for="brain-mcp-enabled">Activer Zaalis Brain</label><p>Désactive immédiatement l’usage du Cerveau par les IA de l’IDE et du CLI.</p></div><label class="zs-switch"><input id="brain-mcp-enabled" type="checkbox"><span class="zs-slider"></span></label></div>
+                    <div class="form-group"><label for="brain-mcp-endpoint">Route MCP locale</label><input id="brain-mcp-endpoint" type="url" autocomplete="off" placeholder="http://127.0.0.1:39191/mcp/..." spellcheck="false"></div>
+                    <div class="form-group"><label for="brain-mcp-token">Jeton Bearer</label><input id="brain-mcp-token" type="password" autocomplete="new-password" placeholder="Coller le jeton à 64 caractères"></div>
+                    <div class="form-group"><label for="mcp-servers-json">Serveurs MCP supplémentaires</label><p class="form-hint">JSON : id, name, endpoint HTTPS (ou loopback HTTP), enabled, allow, deny et token. Les jetons sont chiffrés localement et ne sont jamais réaffichés.</p><textarea id="mcp-servers-json" rows="6" spellcheck="false" placeholder='[{"id":"github","name":"GitHub","endpoint":"https://…/mcp","enabled":true,"allow":[] ,"deny":[]}]'></textarea></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="hardware">
@@ -826,6 +907,7 @@
                             <option value="gemini">Gemini (Google)</option>
                             <option value="grok">Grok (xAI)</option>
                             <option value="mistral">Mistral</option>
+                            <option value="kimi">Kimi (Moonshot AI)</option>
                             <option value="local">Ollama (local)</option>
                             <option value="gguf">GGUF (local)</option>
                         </select>
@@ -841,6 +923,7 @@
                             <option value="gemini">Gemini (Google)</option>
                             <option value="grok">Grok (xAI)</option>
                             <option value="mistral">Mistral</option>
+                            <option value="kimi">Kimi (Moonshot AI)</option>
                             <option value="local">Ollama (local)</option>
                             <option value="gguf">GGUF (local)</option>
                         </select>
@@ -855,6 +938,16 @@
                             <option value="1" data-i18n="settings-reasoning-med">Moyen</option>
                             <option value="2" data-i18n="settings-reasoning-max">Maximal</option>
                         </select>
+                    </div>
+                </section>
+
+                <section class="settings-card settings-pane" data-settings-pane="instructions">
+                    <h3 data-i18n="settings-instructions-title">Instructions IA</h3>
+                    <p class="form-hint" data-i18n="settings-instructions-hint">Ajoutez des préférences permanentes pour toutes les IA : ton, niveau de détail, langue ou méthode de travail.</p>
+                    <div class="form-group settings-instructions-group">
+                        <label for="settings-custom-system-instructions" data-i18n="settings-instructions-label">Instructions système personnelles</label>
+                        <textarea id="settings-custom-system-instructions" rows="11" maxlength="12000" spellcheck="true" placeholder="Ex. Réponds en français, avec un ton clair et direct. Explique brièvement les choix techniques."></textarea>
+                        <p class="form-hint" data-i18n="settings-instructions-safety">Ces préférences s’appliquent au chat, aux agents et aux modèles locaux. Elles ne peuvent pas désactiver les règles de sécurité, les permissions ou les garde-fous du fournisseur.</p>
                     </div>
                 </section>
 
@@ -1193,13 +1286,14 @@
     </div>
 </div>
 
-<script src="catalog.js?v=1.0.13"></script>
-<script src="help.js?v=1.0.13"></script>
-<script src="script/state.js?v=1.0.13" defer></script>
-<script src="script/ui.js?v=1.0.13" defer></script>
-<script src="script/commands.js?v=1.0.13" defer></script>
-<script src="script/ai.js?v=1.0.13" defer></script>
-<script src="script/remote.js?v=1.0.13" defer></script>
-<script src="script/main.js?v=1.0.13" defer></script>
+<script src="catalog.js?v=1.0.18"></script>
+<script src="help.js?v=1.0.18"></script>
+<script src="script/state.js?v=1.0.18" defer></script>
+<script src="script/ui.js?v=1.0.18" defer></script>
+<script src="script/security-review.js?v=1.0.18" defer></script>
+<script src="script/commands.js?v=1.0.18" defer></script>
+<script src="script/ai.js?v=1.0.18" defer></script>
+<script src="script/remote.js?v=1.0.18" defer></script>
+<script src="script/main.js?v=1.0.18" defer></script>
 </body>
 </html>

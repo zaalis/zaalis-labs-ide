@@ -82,7 +82,7 @@ echo "zaalis IDE __ZAALIS_VERSION__ installe dans: $DEST"
 open "$DEST" >/dev/null 2>&1 || true
 read -r -p "Installation terminee. Appuyez sur Entree pour fermer." _
 EOF
-sed -i "s/__ZAALIS_VERSION__/$VERSION/g" "$STAGE/Installer zaalis IDE.command"
+sed -i '' "s/__ZAALIS_VERSION__/$VERSION/g" "$STAGE/Installer zaalis IDE.command"
 
 cat > "$STAGE/README.txt" <<EOF
 Double-cliquez sur "Installer zaalis IDE.command".

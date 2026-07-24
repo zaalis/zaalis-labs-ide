@@ -4,8 +4,17 @@
 const MODE_ICONS = {
     supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
     semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
-    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+    bypass: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
 };
+
+// Mirrors the server-side SECRET_FILE guard: real secret-bearing files, NOT
+// ordinary source like password_reset.go. Used to force an approval before the
+// legacy fenced-block path writes a secret file, on every mode except bypass.
+function isSecretFilePath(p) {
+    return /(?:^|[\\/])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials(?:\.(?:json|ya?ml))?|client_secret[^\\/]*\.json|service[-_]?account[^\\/]*\.json|[^\\/]*\.(?:pem|key|pfx|p12|keystore|jks|asc|ppk))$/i
+        .test(String(p || '').replace(/\\/g, '/'));
+}
 
 function setupModeSelector(btnId, menuId) {
     const btn = $('#' + btnId);
@@ -48,6 +57,7 @@ function setupModeSelector(btnId, menuId) {
             // Toggle orange class and dynamic icons on the mode selector buttons
             $$('.mode-select-btn').forEach(b => {
                 b.classList.toggle('orange', perm === 'auto');
+                b.classList.toggle('danger', perm === 'bypass');
                 const svgIcon = b.querySelector('svg:not(.chevron)');
                 if (svgIcon && MODE_ICONS[perm]) {
                     svgIcon.outerHTML = MODE_ICONS[perm];
@@ -91,6 +101,7 @@ function syncModeSelectorUI() {
     // Toggle orange class and dynamic icons on the mode selector buttons
     $$('.mode-select-btn').forEach(b => {
         b.classList.toggle('orange', perm === 'auto');
+        b.classList.toggle('danger', perm === 'bypass');
         const svgIcon = b.querySelector('svg:not(.chevron)');
         if (svgIcon && MODE_ICONS[perm]) {
             svgIcon.outerHTML = MODE_ICONS[perm];
@@ -276,9 +287,11 @@ function renderMarkdown(src) {
     const out = [];
     let listType = null;
     const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
+    // Compiled once per render instead of once per line (hot path during streaming).
+    const codeLineRe = new RegExp(`^${NUL}CODE\\d+${NUL}$`);
 
     for (const line of lines) {
-        if (new RegExp(`^${NUL}CODE\\d+${NUL}$`).test(line.trim())) { closeList(); out.push(line.trim()); continue; }
+        if (codeLineRe.test(line.trim())) { closeList(); out.push(line.trim()); continue; }
         let h = line.match(/^(#{1,6})\s+(.*)$/);
         if (h) { closeList(); const lvl = Math.min(h[1].length, 4); out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`); continue; }
         if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
@@ -316,22 +329,38 @@ function renderMarkdown(src) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// Reveal `text` word-by-word into `el` (live typing effect), then replace it
-// with the final rendered HTML. Used for the chat reply and the lead synthesis.
+// Reveal `text` in bounded batches, then replace it with the final rendered
+// HTML. The model response is already complete at this point, so this is only
+// a visual effect and must never add a noticeable delay to a long answer.
 async function streamInto(el, text, finalHTML, signal, scrollEl) {
-    const words = String(text).split(/(\s+)/);
-    // Reveal several words at a time for long answers so it never feels sluggish.
-    const chunk = words.length > 400 ? 4 : (words.length > 150 ? 2 : 1);
-    let acc = '';
+    text = String(text);
     el.classList.add('md');
+    // Final render is computed exactly once (never re-parsed per frame).
+    const done = finalHTML != null ? finalHTML : renderMarkdown(text);
+
+    // The reveal is a purely cosmetic typewriter on already-complete text.
+    // Re-parsing the full markdown + reflowing the whole subtree on every frame
+    // is O(n²) and was the main source of lag on long answers. So we (a) skip
+    // the effect entirely for large responses — where the slow reveal is both
+    // costly and annoying — and (b) hard-cap the number of parse/reflow frames.
+    if (signal && signal.aborted || text.length > 4000) {
+        el.innerHTML = done;
+        if (scrollEl) followScroll(scrollEl);
+        return;
+    }
+
+    const words = text.split(/(\s+)/);
+    const FRAMES = 48;                       // max markdown re-renders (was ~120)
+    const chunk = Math.max(1, Math.ceil(words.length / FRAMES));
+    let acc = '';
     for (let i = 0; i < words.length; i += chunk) {
-        if (signal && signal.aborted) { acc = text; break; }
+        if (signal && signal.aborted) break;
         acc += words.slice(i, i + chunk).join('');
         el.innerHTML = renderMarkdown(acc);
         if (scrollEl) followScroll(scrollEl);
         await sleep(13);
     }
-    el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
+    el.innerHTML = done;
     if (scrollEl) followScroll(scrollEl);
 }
 
@@ -382,7 +411,7 @@ document.addEventListener('click', async e => {
 
 function formatAIResponse(text) {
     const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
 
     if (isImageGen) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
@@ -406,8 +435,8 @@ function formatAIResponse(text) {
 }
 
 function isMaxReasoning() {
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const { model, submodel } = reasoningContext();
+    const modes = reasoningModes(model, submodel);
     return state.reasoningLevel === (modes.length - 1);
 }
 
@@ -465,11 +494,49 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         }),
         signal
     });
+    let data;
     try {
-        return await res.json();
+        data = await res.json();
     } catch {
         return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
     }
+    return applyResponseIntegrity(data);
+}
+
+// The server decides (response-integrity.js); the surfaces only react, so the
+// desktop chat, the agent loop and the CLI cannot drift apart. Two cases:
+// a truncated answer is annotated, a degenerate one is never displayed.
+const INTEGRITY_TEXT = {
+    fr: {
+        structure_only: 'le modèle a produit une structure de liste sans contenu',
+        no_content: 'le modèle n’a produit aucun contenu exploitable',
+        no_prose: 'le modèle a produit de la mise en forme sans texte',
+        repetition: 'le modèle a répété la même ligne en boucle',
+        discarded: (why) => `Réponse écartée : ${why}. Rien d’exploitable n’a été produit — relance la demande, éventuellement avec un autre modèle.`,
+        truncated: 'Note : le fournisseur a coupé cette réponse à la limite de jetons, elle est donc incomplète. Demande la suite pour obtenir la fin.',
+    },
+    en: {
+        structure_only: 'the model produced list scaffolding with no content',
+        no_content: 'the model produced no usable content',
+        no_prose: 'the model produced formatting with no text',
+        repetition: 'the model repeated the same line in a loop',
+        discarded: (why) => `Answer discarded: ${why}. Nothing usable was produced — try again, possibly with another model.`,
+        truncated: 'Note: the provider stopped this answer at the token ceiling, so it is cut off. Ask to continue to get the rest.',
+    },
+};
+
+function applyResponseIntegrity(data) {
+    if (!data || data.error) return data;
+    // state.language is the one authoritative source in the UI; `lang` is a
+    // per-function local elsewhere in this file and is not in scope here.
+    const t = INTEGRITY_TEXT[(state && state.language === 'en') ? 'en' : 'fr'];
+    if (data.degenerate) {
+        data.integrityDiscarded = true;
+        data.response = t.discarded(t[data.degenerateReason] || t.no_content);
+        return data;
+    }
+    if (data.truncated && data.response) data.response = `${data.response}\n\n${t.truncated}`;
+    return data;
 }
 
 async function readAgentEventStream(res, onEvent) {
@@ -487,6 +554,7 @@ async function readAgentEventStream(res, onEvent) {
         const clean = line.trim();
         if (!clean) return;
         let event = null;
+        let report = '';
         try {
             event = JSON.parse(clean);
         } catch {
@@ -531,19 +599,30 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             submodel,
             message,
             root: state.projectRoot,
-            permissionMode: state.permissionMode,
+            permissionMode: options.permissionMode || state.permissionMode,
             language: state.language || 'fr',
             config: safeConfig,
             reasoningLevel: state.reasoningLevel,
             images,
             history,
-            stream: wantsStream
+            stream: wantsStream,
+            useBrain: !!options.useBrain,
+            computerControl: !!options.computerControl,
+            nativeTools: true,
+            sessionId: options.sessionId || state.agentSessionId || undefined,
+            agentId: options.agentId || undefined,
         }),
         signal
     });
-    if (wantsStream) return readAgentEventStream(res, options.onEvent);
+    if (wantsStream) {
+        const data = await readAgentEventStream(res, options.onEvent);
+        if (data && data.sessionId && options.persistSession !== false) state.agentSessionId = data.sessionId;
+        return data;
+    }
     try {
-        return await res.json();
+        const data = await res.json();
+        if (data && data.sessionId && options.persistSession !== false) state.agentSessionId = data.sessionId;
+        return data;
     } catch {
         return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
     }
@@ -825,10 +904,16 @@ async function sendChat(input) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
-    // Model reply first (name + typing dots), then the collapsed activity block
-    // below it — matches the Claude Code layout the user asked for.
+    // The response status remains the only spinner. The activity row below it
+    // carries the model notes and tool events in real time.
     const body = addTypingMsg($('#chat-messages'), modelLabel);
-    const liveActivity = createLiveAgentActivity($('#chat-messages'));
+    const liveActivity = createLiveAgentActivity($('#chat-messages'), Date.now(), (status) => {
+        if (typeof setThinkingStatus === 'function') setThinkingStatus(body, status);
+    }, body);
+    // Save the submitted message immediately. If the IDE closes while the
+    // agent is still working, reopening the chat shows the original request,
+    // never a transient loading bubble or malformed partial response.
+    saveConversation();
     let liveActivityFinished = false;
     // True only while this turn's conversation is still the one on screen.
     const turnStillActive = () => state.currentConvId === turnConvId && body.isConnected;
@@ -858,9 +943,20 @@ async function sendChat(input) {
     setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            onEvent: (event) => {
+                handleAutomationEvent(event);
+                if (liveActivity) liveActivity.onEvent(event);
+            },
+            useBrain: !!state.useBrainChat,
+            computerControl: !!state.computerControlEnabled
         });
         stopThinking(body);
+        const terminalResult = Array.isArray(data.toolResults) && data.toolResults.find((item) => item && item.terminalSessionId);
+        if (terminalResult) attachIntegratedTerminal(terminalResult.terminalSessionId).catch(() => {});
+        const delegatedSecurityReview = Array.isArray(data.toolResults) && data.toolResults.find((item) => item && item.securityReviewId);
+        if (delegatedSecurityReview && typeof openExistingSecurityReview === 'function') {
+            openExistingSecurityReview(delegatedSecurityReview.securityReviewId).catch(() => {});
+        }
         // Build the assistant's memory entry regardless of where it lands.
         const responseText = data.error ? '' : (data.response || '');
         const formatted = data.error ? '' : formatAIResponse(responseText);
@@ -921,18 +1017,20 @@ async function sendChat(input) {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
                 await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
             }
-            if (!liveActivity && Array.isArray(data.toolResults) && data.toolResults.length) {
-                body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
-                followScroll($('#chat-messages'));
-            }
-
             // Actions bloquées par le serveur (mode supervisé/semi) : demander
             // la permission à l'utilisateur puis les appliquer, comme Claude Code.
             // Skipped when the user switched away (nothing to approve in a hidden
             // conversation, and it would target the wrong project root).
             if (turnStillActive()) await applyBlockedAgentTools(data, $('#chat-messages'), lang);
 
-            state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
+            state.chatHistory.push(
+                { role: 'user', content: aiMessage },
+                {
+                    role: 'assistant',
+                    content: assistantMemory,
+                    ...(data.reasoning_content ? { reasoning_content: data.reasoning_content } : {})
+                }
+            );
             if (data.usage && data.usage.input != null) {
                 // Use actual token counts from the API when available.
                 state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
@@ -959,6 +1057,9 @@ async function sendChat(input) {
     } finally {
         chatAbort = null;
         setChatBusy(false);
+        // Le contrôle Mac est un mode explicite et persistant. Une tâche
+        // terminée ferme sa session/overlay, mais le mode reste armé pour la
+        // demande suivante jusqu'à ce que l'utilisateur le désactive ou stoppe.
     }
 
     // Only save/scan the live DOM when this turn's conversation is on screen —
@@ -1106,6 +1207,18 @@ function commandCardHTML(cmd, output, opts = {}) {
     return `<details class="file-card tool-card command-card"><summary>${icon}<span class="file-card-name">${escapeHTML(title)}</span><span class="tool-badge">${escapeHTML(badge)}</span>${chevron}</summary><div class="file-card-body tool-card-body"><pre class="tool-pre">${escapeHTML(text)}</pre></div></details>`;
 }
 
+function commandFailure(execRes) {
+    if (!execRes) return '';
+    const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
+    const details = [];
+    if (text) details.push(text);
+    if (execRes.timedOut) details.push(`Timeout après ${Math.round((execRes.timeoutMs || 0) / 1000)}s`);
+    else if (Number(execRes.exitCode) !== 0) details.push(`[exit code ${execRes.exitCode}]`);
+    if (execRes.outputTruncated) details.push('[sortie tronquée à 10 Mo]');
+    if (execRes.error) details.push(execRes.error);
+    return details.join('\n') || 'Commande échouée.';
+}
+
 function agentToolCardHTML(result) {
     const lang = state.language || 'fr';
     const failed = !!(result && (result.error || result.blocked));
@@ -1128,6 +1241,8 @@ function toolDisplayName(result) {
     if (tool === 'todo') return 'todo';
     if (tool === 'run') return `run ${input.command || ''}`.trim();
     if (tool === 'browser') return `browser ${input.url || ''}`.trim();
+    if (tool === 'image_search') return `image_search ${input.query || ''}`.trim();
+    if (tool === 'image_download') return `image_download ${input.path || ''}`.trim();
     return result.summary || tool || 'outil';
 }
 function toolRunDetailsHTML(results) {
@@ -1201,35 +1316,84 @@ function liveToolResultHTML(result) {
     return toolRunDetailsHTML([result]);
 }
 
-function createLiveAgentActivity(container) {
+// A single collapsed gray "command executed" row for the live timeline (one per
+// tool). Reuses the same ghost-tool styling as the collapsed end summary.
+function liveStepHTML(result, id) {
+    const lang = state.language || 'fr';
+    const tool = String(result && result.tool || '').toLowerCase();
+    const failed = !!(result && (result.error || result.blocked));
+    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+    const idAttr = id ? ` data-live-tool-id="${escapeHTML(String(id))}"` : '';
+    if (tool === 'edit' || tool === 'write') {
+        const input = result.input || {};
+        const kind = tool === 'edit' ? (lang === 'en' ? 'Modified' : 'Modifie') : (lang === 'en' ? 'Written' : 'Ecrit');
+        const inner = tool === 'edit'
+            ? diffCardHTML(input.path || '', input.hunks || [])
+            : `<pre class="ghost-tool-pre">${escapeHTML(String(input.content || '') || '(vide)')}</pre>`;
+        return `<details class="ghost-tool-item ghost-file-change"${idAttr}>
+            <summary><span class="ghost-tool-name">${escapeHTML(kind)} ${escapeHTML(input.path || '')}</span>${chevron}</summary>
+            <div class="ghost-tool-nested">${inner}</div>
+        </details>`;
+    }
+    const name = toolDisplayName(result);
+    const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (result.tool || 'outil');
+    const text = result.text ? String(result.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
+    return `<details class="ghost-tool-item${failed ? ' ghost-tool-failed' : ''}"${idAttr}>
+        <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
+        <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
+    </details>`;
+}
+
+function createLiveAgentActivity(container, startedAt = Date.now(), onStatus = null, statusBody = null) {
     if (!container) return null;
     const lang = state.language || 'fr';
-    const startedAt = Date.now();
     const body = addMsg(container, 'ai', null, '', true);
     const msg = body.closest('.msg');
     if (msg) msg.classList.add('live-agent-msg');
     body.classList.add('live-agent-body', 'live-agent-active');
-    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
-    // Collapsed by default: only the compact summary line is visible; users
-    // click the chevron to expand and see the individual tool events.
-    body.innerHTML = `
-        <details class="ghost-tool-group live-agent-activity">
-            <summary>
-                <span class="ghost-chevron">${chevron}</span>
-                <span class="live-agent-title">${lang === 'en' ? 'Analyzing' : 'Analyse en cours'}</span>
-                <span class="live-agent-status">${lang === 'en' ? 'Preparing context' : 'Preparation du contexte'}</span>
-            </summary>
-            <div class="ghost-tool-body live-agent-tools"></div>
-        </details>`;
-    const details = body.querySelector('.live-agent-activity');
-    const titleEl = body.querySelector('.live-agent-title');
-    const statusEl = body.querySelector('.live-agent-status');
-    const toolsEl = body.querySelector('.live-agent-tools');
+    // While the model works we show a LIVE timeline (not collapsed): its prose
+    // ("assistant_note") renders in white so you can watch it think, while each
+    // executed command is a collapsed gray ghost row you can expand. Only when
+    // the turn ends does finish() fold the whole thing into the compact
+    // "Analyse terminee en Xs" summary (unchanged end state).
+    body.innerHTML = '<div class="live-agent-stream"><div class="live-agent-timeline"></div></div>';
+    const timelineEl = body.querySelector('.live-agent-timeline');
+    const statusMsg = statusBody && statusBody.closest('.msg');
     let seenActivity = 0;
 
+    // During streaming, keep the provider label at the top of the answer while
+    // the active status follows the latest visible note or tool row. The final
+    // answer is restored to its normal position on finish.
+    let statusHost = null;
+    const placeStatusAtEnd = () => {
+        if (!msg || !statusMsg || !statusBody || msg.parentNode !== statusMsg.parentNode) return;
+        if (!statusHost) {
+            statusHost = document.createElement('div');
+            statusHost.className = 'live-agent-status-host msg-ai';
+        }
+        msg.after(statusHost);
+        statusHost.appendChild(statusBody);
+    };
+    const restoreFinalOrder = () => {
+        if (!statusMsg || !statusBody) return;
+        statusMsg.appendChild(statusBody);
+        if (statusHost) {
+            statusHost.remove();
+            statusHost = null;
+        }
+    };
+    placeStatusAtEnd();
+
     const setStatus = (text) => {
-        if (!statusEl || !text) return;
-        statusEl.textContent = text;
+        if (text && typeof onStatus === 'function') onStatus(text);
+    };
+    const statusForTool = (tool) => {
+        const name = String(tool || '').toLowerCase();
+        if (['run', 'command', 'shell'].includes(name)) return lang === 'en' ? 'Running the command' : 'Exécution de la commande';
+        if (['edit', 'write', 'image_download'].includes(name)) return lang === 'en' ? 'Reviewing changes' : 'Contrôle des modifications';
+        if (name === 'image_search') return lang === 'en' ? 'Searching images' : 'Recherche d’images';
+        if (['read', 'list', 'search', 'glob', 'grep'].includes(name)) return lang === 'en' ? 'Reading results' : 'Lecture des résultats';
+        return lang === 'en' ? 'Organizing information' : 'Organisation des informations';
     };
     const pendingHTML = (event) => {
         const id = String(event.id || '');
@@ -1243,40 +1407,65 @@ function createLiveAgentActivity(container) {
     };
     const replacePending = (event, html) => {
         const id = String(event.id || '');
-        const existing = id ? toolsEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
+        const existing = id ? timelineEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
         if (existing) existing.outerHTML = html;
-        else toolsEl.insertAdjacentHTML('beforeend', html);
+        else timelineEl.insertAdjacentHTML('beforeend', html);
+        followScroll(container);
+    };
+    // Fold the live timeline into the final collapsed summary. `inner` is the
+    // body HTML, `title`/`statusText` the summary line. Matches the previous
+    // end-of-turn layout exactly so persistence and styling are unchanged.
+    const collapseInto = (title, statusText, inner) => {
+        restoreFinalOrder();
+        const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
+        body.classList.remove('live-agent-active');
+        body.innerHTML = `
+            <details class="ghost-tool-group live-agent-activity">
+                <summary>
+                    <span class="ghost-chevron">${chevron}</span>
+                    <span class="live-agent-title">${escapeHTML(title)}</span>
+                    <span class="live-agent-status">${escapeHTML(statusText)}</span>
+                </summary>
+                <div class="ghost-tool-body live-agent-tools">${inner}</div>
+            </details>`;
         followScroll(container);
     };
 
     return {
         onEvent(event) {
             if (!event || !event.type) return;
-            if (event.type === 'phase' || event.type === 'model_start') {
-                setStatus(event.label || (lang === 'en' ? 'Thinking' : 'Reflexion'));
+            if (event.type === 'phase') {
+                setStatus(lang === 'en' ? 'Analyzing the request' : 'Analyse de la demande');
+                return;
+            }
+            if (event.type === 'model_start') {
+                setStatus(event.round > 1
+                    ? (lang === 'en' ? 'Preparing useful details' : 'Préparation des détails utiles')
+                    : (lang === 'en' ? 'Preparing the response' : 'Préparation de la réponse'));
                 return;
             }
             if (event.type === 'tool_batch') {
-                const count = Number(event.count || 0);
-                setStatus(lang === 'en'
-                    ? `${count} ${count === 1 ? 'tool' : 'tools'} planned`
-                    : `${count} ${pluralFr(count, 'outil prevu', 'outils prevus')}`);
+                setStatus(lang === 'en' ? 'Organizing information' : 'Organisation des informations');
                 return;
             }
             if (event.type === 'assistant_note') {
                 const note = String(event.text || '').trim();
                 if (note) {
                     seenActivity++;
-                    toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(note)}</div>`);
-                    setStatus(lang === 'en' ? 'Planning tools' : 'Preparation des outils');
+                    // The model talking mid-turn: visible, white, markdown-rendered.
+                    // Engine-derived narration (source:'engine') gets its own class
+                    // so it can be styled or disabled independently later.
+                    const cls = event.source === 'engine' ? 'live-agent-say live-agent-say--engine md' : 'live-agent-say md';
+                    timelineEl.insertAdjacentHTML('beforeend', `<div class="${cls}">${renderMarkdown(note)}</div>`);
+                    setStatus(lang === 'en' ? 'Finding the best approach' : 'Recherche de la meilleure approche');
                     followScroll(container);
                 }
                 return;
             }
             if (event.type === 'tool_started') {
                 seenActivity++;
-                toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
-                setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
+                timelineEl.insertAdjacentHTML('beforeend', pendingHTML(event));
+                setStatus(statusForTool(event.tool));
                 followScroll(container);
                 return;
             }
@@ -1293,8 +1482,8 @@ function createLiveAgentActivity(container) {
                     events: event.events,
                     subToolResults: event.subToolResults,
                 };
-                replacePending(event, liveToolResultHTML(result));
-                setStatus(event.summary || toolDisplayName(result));
+                replacePending(event, liveStepHTML(result, event.id));
+                setStatus(lang === 'en' ? 'Checking the response' : 'Vérification de la réponse');
                 return;
             }
             if (event.type === 'error') {
@@ -1304,31 +1493,33 @@ function createLiveAgentActivity(container) {
         finish(data) {
             const results = Array.isArray(data && data.toolResults) ? data.toolResults : [];
             if (!results.length && !seenActivity) {
+                restoreFinalOrder();
                 if (msg) msg.remove();
                 return;
             }
-            if (titleEl) {
-                titleEl.textContent = lang === 'en'
-                    ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
-                    : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
-            }
-            setStatus(results.length
+            const title = lang === 'en'
+                ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
+                : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
+            const statusText = results.length
                 ? (lang === 'en' ? `${results.length} steps` : `${results.length} ${pluralFr(results.length, 'etape', 'etapes')}`)
-                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
-            const html = agentToolResultsHTML(results);
-            toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
-            if (details) details.removeAttribute('open');
-            body.classList.remove('live-agent-active');
-            followScroll(container);
+                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute');
+            // Keep the REAL chronology (white narration lines interleaved with
+            // the collapsed tool rows) inside the folded summary, so expanding
+            // it replays the turn faithfully. Pending rows (spinners) from an
+            // interrupted stream are dropped; fall back to the grouped result
+            // list when the live timeline never rendered anything.
+            timelineEl.querySelectorAll('.live-tool-pending').forEach((el) => el.remove());
+            const liveInner = timelineEl.innerHTML.trim();
+            const inner = liveInner
+                || agentToolResultsHTML(results)
+                || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            collapseInto(title, statusText, inner);
         },
         fail(error) {
             seenActivity++;
-            if (titleEl) titleEl.textContent = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
-            setStatus(error || (lang === 'en' ? 'Agent error' : 'Erreur agent'));
-            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
-            body.classList.remove('live-agent-active');
-            if (details) details.removeAttribute('open');
-            followScroll(container);
+            const title = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
+            collapseInto(title, String(error || (lang === 'en' ? 'Agent error' : 'Erreur agent')),
+                `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
         }
     };
 }
@@ -1375,8 +1566,9 @@ async function applyEditBlocks(editBlocks, agentName, out, lang) {
             continue; // no-op edit
         }
 
-        // Permission gate (same model as full-file writes).
-        if (state.permissionMode === 'supervised') {
+        // Permission gate (same model as full-file writes): supervised asks for
+        // every edit; other modes ask only for a secret file; bypass never asks.
+        if (state.permissionMode === 'supervised' || (isSecretFilePath(targetFile) && state.permissionMode !== 'bypass')) {
             const desc = lang === 'en' ? `${agentName} wants to edit ${targetFile}` : `${agentName} veut modifier ${targetFile}`;
             const preview = applied.map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n');
             const approved = await requestApproval(desc, preview.slice(0, 500));
@@ -1467,7 +1659,7 @@ async function handleAIResponse(response, agentName, container) {
     }
     const writeChanges = [];
     for (const { path: targetFile, content: codeContent } of blocks) {
-        if (state.permissionMode === 'supervised') {
+        if (state.permissionMode === 'supervised' || (isSecretFilePath(targetFile) && state.permissionMode !== 'bypass')) {
             const desc = lang === 'en'
                 ? `${agentName} wants to write ${targetFile}`
                 : `${agentName} veut ecrire ${targetFile}`;
@@ -1519,13 +1711,13 @@ async function handleAIResponse(response, agentName, container) {
     if (wroteAny) await loadFileTree();
 
     // Run terminal commands the AI requested (```run blocks).
-    // Permission: supervised + semi ask first; auto runs without asking — EXCEPT
-    // destructive commands, which always ask (unless mode is bypass).
+    // Permission: commands run freely on every mode; only a DANGEROUS command or
+    // one touching a secret file (.env, keys) still asks — and even those run
+    // without a prompt in the unrestricted (bypass) mode.
     for (const cmd of commands) {
         const dangerous = isDangerousCommand(cmd);
-        const needAsk = dangerous
-            ? state.permissionMode !== 'bypass'
-            : state.permissionMode !== 'auto' && state.permissionMode !== 'bypass';
+        const touchesSecret = /(?:^|[\s"'=<>|(])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|[^\s"']+\.(?:pem|key|pfx|p12|keystore|jks|ppk))(?=$|[\s"'/<>|)])/i.test(cmd);
+        const needAsk = (dangerous || touchesSecret) && state.permissionMode !== 'bypass';
         if (needAsk) {
             const desc = dangerous
                 ? (lang === 'en' ? `${agentName} wants to run a DANGEROUS command` : `${agentName} veut exécuter une commande DANGEREUSE`)
@@ -1547,8 +1739,8 @@ async function handleAIResponse(response, agentName, container) {
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const execRes = await res.json();
             const duration = Math.round((Date.now() - t0) / 100) / 10;
-            if (execRes.error) {
-                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: execRes.error, duration }), true);
+            if (execRes.error || execRes.timedOut || Number(execRes.exitCode) !== 0) {
+                addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: commandFailure(execRes), duration }), true);
             } else {
                 const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
                 addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
@@ -1563,18 +1755,51 @@ async function handleAIResponse(response, agentName, container) {
 }
 
 // Approbation supervisée (parité Claude Code) : en mode supervised/semi le
-// serveur bloque write/edit/run et renvoie chaque action bloquée avec son
+// serveur bloque write/edit/run/image_download et renvoie chaque action bloquée avec son
 // input complet dans toolResults. On rejoue ici chaque action après accord
 // explicite de l'utilisateur — avant, ces actions étaient simplement perdues.
 async function applyBlockedAgentTools(data, out, lang) {
     if (isReadOnlyMode() || !state.projectRoot) return;
     const blocked = (Array.isArray(data && data.toolResults) ? data.toolResults : [])
-        .filter(r => r && r.blocked && ['write', 'edit', 'run'].includes(r.tool) && r.input);
+        // A policy deny is terminal. Only a real approval_required result may
+        // reach this UI; otherwise an agent could turn deny into an approval.
+        .filter(r => r && r.blocked && r.code === 'approval_required' && !r.terminal && ['write', 'edit', 'run', 'git_write', 'image_download'].includes(r.tool) && r.input);
     if (!blocked.length) return;
     let wroteAny = false;
     const changes = [];
     for (const r of blocked) {
         const input = r.input || {};
+        if (r.tool === 'image_download') {
+            const id = String(input.id || '').trim();
+            const target = String(input.path || '').trim();
+            if (!id || !target) continue;
+            const desc = lang === 'en'
+                ? `The agent wants to download an open-licensed image to ${target}`
+                : `L'agent veut télécharger une image sous licence ouverte dans ${target}`;
+            const approved = await requestApproval(desc, `Résultat : ${id}\nDestination : ${target}`);
+            if (!approved) {
+                addMsg(out, 'system', null, lang === 'en' ? 'Image download refused.' : 'Téléchargement de l’image refusé.');
+                continue;
+            }
+            try {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
+                });
+                const result = await res.json().catch(() => ({}));
+                if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
+                const details = [
+                    lang === 'en' ? `Image downloaded: ${result.path || target}` : `Image téléchargée : ${result.path || target}`,
+                    result.attributionPath ? (lang === 'en' ? `Attribution: ${result.attributionPath}` : `Attribution : ${result.attributionPath}`) : ''
+                ].filter(Boolean).join('\n');
+                addMsg(out, 'system', null, details);
+                wroteAny = true;
+            } catch (err) {
+                addMsg(out, 'system', null, `${lang === 'en' ? 'Image download error' : 'Erreur de téléchargement de l’image'} ${target}: ${err.message}`);
+            }
+            continue;
+        }
         if (r.tool === 'run') {
             const cmd = String(input.command || '').trim();
             if (!cmd) continue;
@@ -1586,14 +1811,15 @@ async function applyBlockedAgentTools(data, out, lang) {
             if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); continue; }
             const t0 = Date.now();
             try {
-                const res = await fetch('/api/exec', {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: cmd, cwd: state.projectRoot })
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
                 });
                 const execRes = await res.json().catch(() => ({}));
                 const duration = Math.round((Date.now() - t0) / 100) / 10;
-                if (!res.ok || execRes.error) {
-                    addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: execRes.error || ('HTTP ' + res.status), duration }), true);
+                if (!res.ok || execRes.error || execRes.timedOut || Number(execRes.exitCode) !== 0) {
+                    addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: commandFailure(execRes) || ('HTTP ' + res.status), duration }), true);
                 } else {
                     const text = ((execRes.stdout || '') + (execRes.stderr ? '\n' + execRes.stderr : '')).trim();
                     addMsg(out, 'system', null, commandCardHTML(cmd, text, { lang, duration }), true);
@@ -1601,6 +1827,27 @@ async function applyBlockedAgentTools(data, out, lang) {
             } catch (err) {
                 addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: err.message, duration: Math.round((Date.now() - t0) / 100) / 10 }), true);
             }
+            continue;
+        }
+        if (r.tool === 'git_write') {
+            const action = String(input.action || '');
+            const detail = action === 'push'
+                ? `git push ${input.remote || 'origin'} ${input.branch || ''}`
+                : `git ${action} ${input.branch || input.message || ''}`;
+            const approved = await requestApproval(
+                lang === 'en' ? 'The agent wants to perform a Git operation' : 'L’agent veut effectuer une opération Git', detail
+            );
+            if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Git operation refused.' : 'Opération Git refusée.'); continue; }
+            try {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
+                });
+                const result = await res.json().catch(() => ({}));
+                if (!res.ok || result.error || result.timedOut || Number(result.exitCode) !== 0) throw new Error(result.error || `HTTP ${res.status}`);
+                addMsg(out, 'system', null, lang === 'en' ? `Git ${action} completed.` : `Git ${action} terminé.`);
+            } catch (err) { addMsg(out, 'system', null, `${lang === 'en' ? 'Git error' : 'Erreur Git'}: ${err.message}`); }
             continue;
         }
         const targetFile = String(input.path || '');
@@ -1639,9 +1886,10 @@ async function applyBlockedAgentTools(data, out, lang) {
         const approved = await requestApproval(desc, preview);
         if (!approved) { addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusée.'); continue; }
         try {
-            const res = await fetch('/api/file', {
+            if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+            const res = await fetch('/api/agent-approval/execute', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ root: state.projectRoot, path: targetFile, content })
+                body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
             });
             const result = await res.json().catch(() => ({}));
             if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
@@ -1710,7 +1958,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
         await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, out);
         if (persistToChat) state.chatHistory.push(
             { role: 'user', content: `[${lang === 'en' ? 'Edit retry' : 'Réessai édition'}]` },
-            { role: 'assistant', content: data.response }
+            { role: 'assistant', content: data.response, ...(data.thinking ? { reasoning_content: data.thinking } : {}) }
         );
         const applied = await handleAIResponse(data.response, modelLabel, opts.container);
         if (applied && applied.editErrors && applied.editErrors.length) {
@@ -1775,7 +2023,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         // Keep conversation memory lean: record that files were read, not the dump.
         state.chatHistory.push(
             { role: 'user', content: `[${lang === 'en' ? 'Read files' : 'Lecture fichiers'}: ${picked.join(', ')}]` },
-            { role: 'assistant', content: data.response }
+            { role: 'assistant', content: data.response, ...(data.thinking ? { reasoning_content: data.thinking } : {}) }
         );
         updateTokenMeter();
         const applied = await handleAIResponse(data.response, modelLabel);
@@ -1908,7 +2156,7 @@ $('#chat-input').addEventListener('keydown', e => {
 });
 $('#send-btn').addEventListener('click', () => {
     // While the AI is generating, the button is a "stop" circle -> cancel.
-    if (chatAbort) { chatAbort.abort(); return; }
+    if (chatAbort) { stopAutomationWork(); chatAbort.abort(); return; }
     handleChatSubmit();
 });
 
@@ -1923,7 +2171,7 @@ async function sendAgentTask(input) {
         return;
     }
 
-    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama', gguf: 'GGUF' };
+    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', kimi: 'Kimi', local: 'Ollama', gguf: 'GGUF' };
     const activeAgents = [];
     $$('.agent-check:checked').forEach(cb => {
         const agent = cb.dataset.agent;
@@ -2005,8 +2253,10 @@ async function sendAgentTask(input) {
     let context = '';
     let completedCount = 0;
 
-    // Run worker agents sequentially — each only contributes to the shared context.
-    for (const { agent, role, submodel } of workers) {
+    // Workers are isolated read-only investigations. Run them in parallel: they
+    // use the same server-side agent/tool loop as Chat and CLI, but cannot edit
+    // files or execute commands. Only the lead can propose mutations.
+    const workerReports = await Promise.all(workers.map(async ({ agent, role, submodel }) => {
         const card = $(`.agent-card[data-agent="${agent}"]`);
         card.classList.add('working');
         const badge = card.querySelector('.agent-badge');
@@ -2023,21 +2273,32 @@ async function sendAgentTask(input) {
 
         const isLocalAgent = agent === 'local' || agent === 'gguf';
         const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(isLocalAgent, modelIdentity(agent, submodel, lang))}${projCtx}`;
-        const fullMessage = context
-            ? (lang === 'en'
-                ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}`
-                : `[Contexte des agents precedents]:\n${context}\n\n[Tache utilisateur]: ${task}`)
-            : task;
+        const fullMessage = lang === 'en'
+            ? `[Role: ${roleLabel}]\n[User task]: ${task}\n\nInvestigate independently. Use read/search tools, report evidence and recommendations. Do not modify files or run commands.`
+            : `[Rôle : ${roleLabel}]\n[Tâche utilisateur] : ${task}\n\nEnquête indépendamment. Utilise les outils de lecture/recherche, rends des preuves et recommandations. Ne modifie aucun fichier et n'exécute aucune commande.`;
 
+        // Live status per worker card: narration notes and tool activity from
+        // the shared agent stream replace the static "analyse en cours…".
+        const workerStatus = (event) => {
+            if (!event || !statusText) return;
+            if (event.type === 'assistant_note') {
+                const note = String(event.text || '').replace(/\s+/g, ' ').trim();
+                if (note) statusText.textContent = note.length > 90 ? note.slice(0, 89) + '…' : note;
+            } else if (event.type === 'tool_started') {
+                const input = event.input || {};
+                const hint = input.path || (Array.isArray(input.paths) && input.paths[0]) || input.pattern || input.command || input.query || '';
+                statusText.textContent = `${event.tool || 'outil'} ${String(hint).split('/').pop()}`.trim().slice(0, 90);
+            }
+        };
         try {
-            const data = await callAI(agent, submodel, fullMessage, systemPrompt, taskImages);
+        const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], { permissionMode: 'read-only', useBrain: !!state.useBrainAgents, persistSession: false, agentId: `worker-${agent}`, onEvent: workerStatus });
             if (data.error) {
                 statusText.textContent = lang === 'en' ? 'error' : 'erreur';
                 statusText.classList.add('err');
             } else {
                 statusText.textContent = TRANSLATIONS[lang]['lead-thinking-done'];
                 statusText.classList.add('ok');
-                context += `\n[${labels[agent]} (${roleLabel})]: ${data.response}\n`;
+                report = `[${labels[agent]} (${roleLabel})]: ${data.response || '(aucun rapport)'}`;
             }
         } catch (err) {
             statusText.textContent = lang === 'en' ? 'connection error' : 'erreur de connexion';
@@ -2051,7 +2312,9 @@ async function sendAgentTask(input) {
         completedCount++;
         teamProgress.textContent = `${completedCount}/${workers.length}`;
         followScroll(agentsLog);
-    }
+        return report;
+    }));
+    context = workerReports.filter(Boolean).join('\n\n');
 
     // Workers done — stop the animation, keep their statuses for a collapsed recap.
     stopWave(waveCanvas);
@@ -2094,7 +2357,16 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     startThinking(streamTarget);
 
     try {
-        const data = await callAI(leadAgent.agent, leadAgent.submodel, leadMessage, leadSystemPrompt, taskImages);
+        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], {
+            useBrain: !!state.useBrainAgents, persistSession: false, agentId: 'multi-agent-lead',
+            // The lead's spinner narrates its synthesis instead of staying mute.
+            onEvent: (event) => {
+                if (event && event.type === 'assistant_note' && typeof setThinkingStatus === 'function') {
+                    const note = String(event.text || '').replace(/\s+/g, ' ').trim();
+                    if (note) setThinkingStatus(streamTarget, note.length > 90 ? note.slice(0, 89) + '…' : note);
+                }
+            }
+        });
         stopThinking(streamTarget);
         if (data.error) {
             streamTarget.textContent = data.error;
@@ -2106,19 +2378,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             } else {
                 await streamInto(streamTarget, data.response, formatted, null, agentsLog);
             }
-            const applied = await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
-            if (applied && applied.editErrors && applied.editErrors.length) {
-                await resolveEditRetries(applied.editErrors, leadAgent.agent, leadAgent.submodel, leadIsLocal, lang, 0, {
-                    container: '#agents-log',
-                    history: [
-                        { role: 'user', content: leadMessage },
-                        { role: 'assistant', content: data.response }
-                    ],
-                    modelLabel: labels[leadAgent.agent],
-                    persistToChat: false,
-                    saveKind: 'agents'
-                });
-            }
+            await applyBlockedAgentTools(data, agentsLog, lang);
         }
     } catch (err) {
         stopThinking(streamTarget);
@@ -2199,7 +2459,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image, details.live-agent-activity');
 }
 
 function saveConversation(kind = 'chat') {
@@ -2208,6 +2468,9 @@ function saveConversation(kind = 'chat') {
     $(cfg.container).querySelectorAll('.msg').forEach(m => {
         const label = m.querySelector('.msg-label');
         const body = m.querySelector('.msg-body');
+        // Loading UI is not conversation content. Keeping it would turn an
+        // interrupted request into a bogus assistant message after reopening.
+        if (body && (body.classList.contains('thinking') || body.classList.contains('live-agent-active'))) return;
         const img = body && body.querySelector('.generated-image');
         const entry = {
             label: label ? label.textContent : null,
@@ -2222,7 +2485,7 @@ function saveConversation(kind = 'chat') {
         data.push(entry);
     });
 
-    if (data.length <= 1) return; // only the default system message
+    if (!data.some(entry => entry.type === 'user')) return; // only placeholder UI
 
     const title = data.find(d => d.type === 'user')?.text?.substring(0, 40) || 'Conversation';
     const project = projectLabel();          // folder name (mobile groups by it)
@@ -2233,7 +2496,7 @@ function saveConversation(kind = 'chat') {
     if (!curId) {
         curId = Date.now().toString();
         state[cfg.current] = curId;
-        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
+        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data, ...(kind === 'chat' && state.agentSessionId ? { agentSessionId: state.agentSessionId } : {}) });
     } else {
         const conv = listArr.find(c => c.id === curId);
         if (conv) {
@@ -2241,8 +2504,9 @@ function saveConversation(kind = 'chat') {
             if (!conv.project && project) conv.project = project;
             if (!conv.projectPath && projectPath) conv.projectPath = projectPath;
             if (!conv.title || conv.title === 'Conversation') conv.title = title;
+            if (kind === 'chat' && state.agentSessionId) conv.agentSessionId = state.agentSessionId;
         }
-        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
+        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data, ...(kind === 'chat' && state.agentSessionId ? { agentSessionId: state.agentSessionId } : {}) });
     }
 
     persistChats(kind);
@@ -2252,22 +2516,37 @@ function saveConversation(kind = 'chat') {
 // Last server snapshot per kind — drives the live history sync below so we only
 // re-render when conversations actually changed (and ignore our own writes).
 const _chatSnap = { chat: '', agents: '' };
+const _chatWrites = { chat: Promise.resolve(), agents: Promise.resolve() };
+const _chatWritePending = { chat: false, agents: false };
 
-// Save a kind's conversations to the server (debounced, per kind).
-const _persistTimers = {};
+// Save a kind's conversations to the server immediately. A sent request must
+// survive a close/relaunch even if the app is quit right after submitting it.
 function persistChats(kind = 'chat') {
     const cfg = HIST[kind];
-    clearTimeout(_persistTimers[kind]);
-    _persistTimers[kind] = setTimeout(() => {
-        // Our own write becomes the next expected server state — don't let the
-        // live sync treat it as an external change and re-render needlessly.
-        _chatSnap[kind] = JSON.stringify(state[cfg.store] || []);
-        fetch('/api/chats', {
+    // Our own write becomes the next expected server state — don't let the
+    // live sync treat it as an external change and re-render needlessly.
+    const snapshot = JSON.stringify(state[cfg.store] || []);
+    _chatSnap[kind] = snapshot;
+    _chatWritePending[kind] = true;
+    // Serialize writes and capture the state now. This prevents an older,
+    // delayed save from restoring a deleted conversation. Do not use fetch
+    // keepalive: browsers cap its body near 64 KiB, while saved chats can be
+    // much larger (images and long model replies).
+    const write = _chatWrites[kind].catch(() => {}).then(async () => {
+        const res = await fetch('/api/chats', {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ kind, conversations: state[cfg.store] })
-        }).catch(() => {});
-    }, 400);
+            body: JSON.stringify({ kind, conversations: JSON.parse(snapshot) })
+        });
+        if (!res.ok) throw new Error(`Sauvegarde des conversations impossible (HTTP ${res.status}).`);
+        _chatSnap[kind] = snapshot;
+    });
+    _chatWrites[kind] = write;
+    write.finally(() => {
+        // A newer queued write still owns the pending flag.
+        if (_chatWrites[kind] === write) _chatWritePending[kind] = false;
+    }).catch(() => {});
+    return write;
 }
 
 // Load both histories (chat + agents) from the server.
@@ -2312,6 +2591,7 @@ async function syncChatsFromServer() {
     const reopenCur = [];
     for (const kind of ['chat', 'agents']) {
         const cfg = HIST[kind];
+        if (_chatWritePending[kind]) continue;
         try {
             const res = await fetch('/api/chats?kind=' + kind);
             if (!res.ok) continue;
@@ -2384,6 +2664,7 @@ function loadConversation(kind, id) {
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
+        state.agentSessionId = conv.agentSessionId || null;
         state.chatHistory = (conv.messages || [])
             .filter(m => m.type === 'user' || m.type === 'ai')
             .map(m => ({
@@ -2521,7 +2802,7 @@ function newConversation(kind = 'chat') {
     state[cfg.current] = null;
     $(cfg.container).innerHTML = '';
     addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
-    if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
+    if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; state.agentSessionId = null; updateTokenMeter(); }
     renderHistory();
 }
 
@@ -2538,13 +2819,19 @@ async function deleteConversation(kind, id) {
     });
     if (!ok) return;
 
+    const previous = state[cfg.store];
     state[cfg.store] = state[cfg.store].filter(c => c.id !== id);
     if (state[cfg.current] === id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
     }
-    persistChats(kind);
+    try {
+        await persistChats(kind);
+    } catch (err) {
+        state[cfg.store] = previous;
+        showToast('Conversations', err.message || 'La suppression n’a pas pu être enregistrée.', { icon: '!' });
+    }
     renderHistory();
 }
 
@@ -2692,6 +2979,32 @@ function setupAttachMenu(btnId, menuId) {
             menu.classList.remove('open');
         });
     });
+    const brainToggle = menu.querySelector('[data-brain-toggle]');
+    if (brainToggle) brainToggle.addEventListener('click', async () => {
+        const key = brainToggle.dataset.brainToggle === 'agents' ? 'useBrainAgents' : 'useBrainChat';
+        const next = !state[key];
+        if (next) {
+            try {
+                const res = await fetch('/api/brain-mcp');
+                const status = await res.json();
+                if (!res.ok || status.state !== 'connected' || !status.enabled) throw new Error(status.detail || 'MCP indisponible');
+            } catch (err) {
+                const lang = state.language || 'fr';
+                showToast('Zaalis Brain', lang === 'en' ? 'Connect it first in Settings → MCP.' : 'Connectez-le d’abord dans Paramètres → MCP.', { icon: '!' });
+                return;
+            }
+        }
+        state[key] = next;
+        brainToggle.classList.toggle('active', next);
+        brainToggle.setAttribute('aria-pressed', String(next));
+        menu.classList.remove('open');
+    });
+    const computerToggle = menu.querySelector('[data-computer-toggle]');
+    if (computerToggle) computerToggle.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await setComputerControlEnabled(!state.computerControlEnabled);
+        menu.classList.remove('open');
+    });
 }
 setupAttachMenu('chat-attach-btn', 'chat-attach-menu');
 setupAttachMenu('agents-attach-btn', 'agents-attach-menu');
@@ -2706,6 +3019,43 @@ if (attachInput) attachInput.addEventListener('change', e => {
     e.target.value = '';
 });
 
+// Drag-and-drop and paste images/files straight onto a composer — a reliable
+// alternative to the "+" menu's native picker (which some sandboxes block).
+function setupComposerDropPaste(inputSel) {
+    const input = $(inputSel);
+    const area = input && input.closest('.chat-input-area');
+    if (!area) return;
+    const addFiles = (files) => {
+        const list = [...(files || [])].filter(Boolean);
+        if (list.length) list.forEach(addAttachment);
+        return list.length;
+    };
+    ['dragenter', 'dragover'].forEach(evt => area.addEventListener(evt, e => {
+        if (!e.dataTransfer || ![...(e.dataTransfer.types || [])].includes('Files')) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'copy';
+        area.classList.add('drag-hover');
+    }));
+    ['dragleave', 'dragend'].forEach(evt => area.addEventListener(evt, e => {
+        if (e.target === area) area.classList.remove('drag-hover');
+    }));
+    area.addEventListener('drop', e => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        area.classList.remove('drag-hover');
+        addFiles(e.dataTransfer.files);
+    });
+    // Paste an image from the clipboard (screenshot, copied file).
+    if (input) input.addEventListener('paste', e => {
+        const items = e.clipboardData && e.clipboardData.items;
+        if (!items) return;
+        const files = [...items].filter(it => it.kind === 'file').map(it => it.getAsFile()).filter(Boolean);
+        if (files.length) { e.preventDefault(); addFiles(files); }
+    });
+}
+setupComposerDropPaste('#chat-input');
+setupComposerDropPaste('#agents-input');
+
 // --- Vision (image) compatibility per model (from official provider docs) ---
 function isVisionCompatible(model, submodel) {
     const s = (submodel || '').toLowerCase();
@@ -2714,8 +3064,9 @@ function isVisionCompatible(model, submodel) {
         case 'claude': return true;                 // Claude 3/3.5/3.7/4.x: vision
         case 'codex':                               // OpenAI: vision except the *-mini reasoning models
             return !(s.includes('o3-mini') || s.includes('o1-mini'));
-        case 'grok':  return s.includes('grok-4');  // xAI: Grok 4 has vision, Grok 3 does not
-        case 'mistral': return s.includes('pixtral'); // Mistral: only Pixtral models have vision
+        case 'grok':  return s === 'grok-4.5' || s === 'grok-4.3' || s === 'grok-build-0.1';
+        case 'mistral': return !s.includes('codestral');
+        case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default: return false;
@@ -2759,46 +3110,56 @@ function updateAttachAvailability() {
     }
 }
 
-const REASONING_MODES = {
-    codex: [
-        { label: 'HIGH', effort: 'high' },
-        { label: 'MED', effort: 'medium' },
-        { label: 'LOW', effort: 'low' },
-        { label: 'OFF', effort: 'none' }
-    ],
-    claude: [
-        { label: 'MAX', budget: 8192 },
-        { label: 'HIGH', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gemini: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    grok: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'OFF', budget: 0 }
-    ],
-    mistral: [
-        { label: 'ON', budget: 1 },
-        { label: 'OFF', budget: 0 }
-    ],
+const REASONING_PRESETS = {
+    none: ['OFF'],
+    offLowMedHigh: ['HIGH', 'MED', 'LOW', 'OFF'],
+    lowMedHigh: ['HIGH', 'MED', 'LOW'],
+    offLowMedHighXhigh: ['XHIGH', 'HIGH', 'MED', 'LOW', 'OFF'],
+    offLowMedHighXhighMax: ['MAX', 'XHIGH', 'HIGH', 'MED', 'LOW', 'OFF'],
+    lowMedHighXhigh: ['XHIGH', 'HIGH', 'MED', 'LOW'],
+    lowMedHighXhighMax: ['MAX', 'XHIGH', 'HIGH', 'MED', 'LOW'],
+    minimalLowMedHigh: ['HIGH', 'MED', 'LOW', 'MIN'],
+    offHigh: ['HIGH', 'OFF'],
+    lowHighMax: ['MAX', 'HIGH', 'LOW'],
     local: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
+        'MAX', 'MED', 'OFF'
     ],
     gguf: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
+        'MAX', 'MED', 'OFF'
     ]
 };
+
+function reasoningModes(model, submodel) {
+    const s = String(submodel || '').toLowerCase();
+    let labels = null;
+    if (model === 'codex') {
+        if (s.startsWith('gpt-5.6')) labels = REASONING_PRESETS.offLowMedHighXhighMax;
+        else if (/^gpt-5\.(5|4|2)/.test(s)) labels = REASONING_PRESETS.offLowMedHighXhigh;
+        else if (s.startsWith('gpt-5.1')) labels = REASONING_PRESETS.offLowMedHigh;
+        else if (/^(o1|o3-mini)/.test(s)) labels = REASONING_PRESETS.lowMedHigh;
+    } else if (model === 'claude') {
+        if (s === 'claude-fable-5') labels = REASONING_PRESETS.lowMedHighXhighMax;
+        else if (s === 'claude-opus-4-8' || s === 'claude-sonnet-5') labels = REASONING_PRESETS.offLowMedHighXhighMax;
+        else if (s === 'claude-haiku-4-5') labels = ['MAX', 'HIGH', 'MED', 'LOW', 'OFF'];
+    } else if (model === 'gemini') {
+        if (s === 'gemini-3.1-pro-preview' || s === 'gemini-2.5-pro') labels = REASONING_PRESETS.lowMedHigh;
+        else if (s.startsWith('gemini-3')) labels = REASONING_PRESETS.minimalLowMedHigh;
+        else if (s.startsWith('gemini-2.5')) labels = REASONING_PRESETS.offLowMedHigh;
+    } else if (model === 'grok') {
+        if (s === 'grok-4.5') labels = REASONING_PRESETS.lowMedHigh;
+        else if (s === 'grok-4.3') labels = REASONING_PRESETS.offLowMedHigh;
+        else if (s === 'grok-4.20-multi-agent-0309') labels = REASONING_PRESETS.lowMedHighXhigh;
+    } else if (model === 'mistral') {
+        if (s === 'mistral-medium-3-5' || s === 'mistral-small-latest') labels = REASONING_PRESETS.offHigh;
+    } else if (model === 'kimi') {
+        if (s === 'kimi-k3') labels = REASONING_PRESETS.lowHighMax;
+        else if (s === 'kimi-k2.6') labels = REASONING_PRESETS.offHigh;
+        else if (s === 'kimi-k2.7-code' || s === 'kimi-k2.7-code-highspeed') labels = ['MAX'];
+    } else if (model === 'local' || model === 'gguf') {
+        labels = REASONING_PRESETS[model];
+    }
+    return (labels || REASONING_PRESETS.none).map(label => ({ label }));
+}
 
 // Determine which agent acts as the lead (chef de projet) right now.
 function currentLeadAgent() {
@@ -2830,14 +3191,13 @@ function reasoningContext() {
 }
 
 function isReasoningCompatible(model, submodel) {
-    if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
-    // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
-    if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
+    if (model === 'codex' && (/^gpt-5\.(6|5|4|2|1)/.test(submodel) || /^(o1|o3-mini)/.test(submodel))) return true;
+    if (model === 'claude' && ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'].includes(submodel)) return true;
+    if (model === 'gemini' && (submodel.startsWith('gemini-3') || submodel.startsWith('gemini-2.5'))) return true;
     if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
-    // Grok 4.x reasoning models reason natively and reject reasoning_effort,
-    // so there is no controllable budget to expose — keep the slider locked.
-    if (model === 'mistral' && submodel.includes('magistral')) return true; // Magistral = reasoning model
+    if (model === 'grok' && ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309'].includes(submodel)) return true;
+    if (model === 'mistral' && ['mistral-medium-3-5', 'mistral-small-latest'].includes(submodel)) return true;
+    if (model === 'kimi' && ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed'].includes(submodel)) return true;
     return false;
 }
 
@@ -2846,8 +3206,8 @@ function updateSliderVisuals() {
     if (!sliderBar) return;
     const handle = sliderBar.querySelector('.slider-handle');
     const notches = sliderBar.querySelectorAll('.slider-notch');
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const { model, submodel } = reasoningContext();
+    const modes = reasoningModes(model, submodel);
 
     const totalLevels = modes.length;
     const currentLevel = state.reasoningLevel;
@@ -2874,7 +3234,7 @@ function checkReasoningCompatibility() {
     if (!sliderBar) return;
     
     const compatible = isReasoningCompatible(model, submodel);
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
+    const modes = reasoningModes(model, submodel);
     const track = sliderBar.querySelector('.slider-track');
     const handle = sliderBar.querySelector('.slider-handle');
 
@@ -2945,8 +3305,8 @@ function initReasoningSlider() {
         const notch = e.target.closest('.slider-notch');
         if (notch) {
             const level = parseInt(notch.dataset.level);
-            const model = reasoningContext().model;
-            const modes = REASONING_MODES[model] || REASONING_MODES.local;
+            const { model, submodel } = reasoningContext();
+            const modes = reasoningModes(model, submodel);
             const totalLevels = modes.length;
             const targetPercentage = (1 - (level / (totalLevels - 1))) * 100;
             handle.style.top = targetPercentage + '%';
@@ -2973,8 +3333,8 @@ function initReasoningSlider() {
         const percentage = yPercent * 100;
         handle.style.top = percentage + '%';
 
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
+        const { model, submodel } = reasoningContext();
+        const modes = reasoningModes(model, submodel);
         const totalLevels = modes.length;
         
         let snapLevel = 0;
@@ -3010,8 +3370,8 @@ function initReasoningSlider() {
         yPercent = Math.max(0, Math.min(1, yPercent));
         const percentage = yPercent * 100;
 
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
+        const { model, submodel } = reasoningContext();
+        const modes = reasoningModes(model, submodel);
         const totalLevels = modes.length;
 
         let level = 0;
@@ -3224,3 +3584,153 @@ function setupVoiceRecognition(btnId, textareaId) {
 // Initialize Voice Recognition
 setupVoiceRecognition('chat-voice-btn', 'chat-input');
 setupVoiceRecognition('agents-voice-btn', 'agents-input');
+
+// ==========================================================
+//  MACOS COMPUTER CONTROL + INTEGRATED TERMINAL
+// ==========================================================
+let automationPoll = null;
+let automationQuestionOpen = false;
+let terminalSessionId = null;
+let terminalStream = null;
+
+function syncComputerControlButton() {
+    const btn = $('[data-computer-toggle]');
+    if (!btn) return;
+    const active = !!state.computerControlEnabled;
+    btn.classList.toggle('active', active);
+    btn.setAttribute('aria-pressed', String(active));
+    const label = btn.querySelector('span:last-child');
+    if (label) label.textContent = active ? 'Contrôle Mac actif' : 'Contrôle Mac';
+}
+
+function computerPermissionMessage(result) {
+    if (!result) return 'Le contrôle Mac ne répond pas. Redémarrez zaalis IDE puis réessayez.';
+    if (result.error === 'helper-missing') return 'Le composant natif de contrôle est absent. Réinstallez la dernière version de zaalis IDE.';
+    if (result.error && result.error !== 'accessibility-denied' && result.error !== 'screen-recording-denied') return `Contrôle Mac indisponible : ${result.error}`;
+    const missing = [];
+    if (!result.accessibility) missing.push('Accessibilité');
+    if (!result.screenRecording) missing.push('Enregistrement de l’écran');
+    if (!missing.length) return 'Les autorisations sont accordées, mais macOS n’a pas encore actualisé leur état. Fermez complètement zaalis IDE, rouvrez-le, puis réessayez.';
+    const helperOnly = (result.appAccessibility || result.appScreenRecording === 'granted') &&
+        (!result.helperAccessibility || !result.helperScreenRecording);
+    return helperOnly
+        ? `macOS a autorisé zaalis IDE, mais pas encore son composant de contrôle (${missing.join(' et ')}). La demande macOS vient d’être relancée : validez-la puis rouvrez zaalis IDE.`
+        : `Autorisez ${missing.join(' et ')} dans Réglages système, puis rouvrez zaalis IDE.`;
+}
+
+async function setComputerControlEnabled(enabled) {
+    const btn = $('[data-computer-toggle]');
+    if (!enabled) { state.computerControlEnabled = false; syncComputerControlButton(); return; }
+    if (btn) btn.disabled = true;
+    try {
+        // Enabling the feature is a user preference, not a macOS permission
+        // check. TCC remains enforced by the native helper at the exact action
+        // time; avoiding this preflight prevents a stale macOS status from
+        // falsely blocking a user who has already granted the two permissions.
+        state.computerControlEnabled = true;
+        showToast('Contrôle Mac prêt', 'L’IA pourra observer l’écran et agir pour la prochaine tâche.', { icon: '✦', duration: 3500 });
+    } catch (err) {
+        state.computerControlEnabled = false;
+        showToast('Contrôle Mac indisponible', err.message || 'Le composant de contrôle est indisponible.', { icon: '!', duration: 6500 });
+    } finally { if (btn) btn.disabled = false; syncComputerControlButton(); }
+}
+
+async function answerAutomationQuestion(snapshot) {
+    if (automationQuestionOpen || !snapshot || !snapshot.question || !snapshot.id) return;
+    automationQuestionOpen = true;
+    const choices = snapshot.question.options || [];
+    const detail = choices.length ? choices.join(' · ') : 'Autoriser pour continuer, ou refuser pour arrêter cette action.';
+    const approved = await requestApproval(snapshot.question.question, detail);
+    const answer = approved ? (choices[0] || 'Autoriser') : (choices.find(v => /refus|non|deny/i.test(v)) || 'Refuser');
+    try { await fetch(`/api/automation/${encodeURIComponent(snapshot.id)}/answer`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answer }) }); }
+    catch {}
+    automationQuestionOpen = false;
+}
+
+async function refreshAutomationStatus() {
+    if (!state.automationTaskId) return;
+    try {
+        const response = await fetch('/api/automation/status');
+        const snapshot = await response.json();
+        if (!snapshot.active || ['stopped', 'completed', 'failed'].includes(snapshot.state)) {
+            state.automationTaskId = null;
+            if (automationPoll) { clearInterval(automationPoll); automationPoll = null; }
+            return;
+        }
+        if (snapshot.state === 'waiting_user') answerAutomationQuestion(snapshot);
+    } catch {}
+}
+
+function handleAutomationEvent(event) {
+    if (!event || event.type !== 'automation' || !event.session) return;
+    state.automationTaskId = event.session.id;
+    if (automationPoll) clearInterval(automationPoll);
+    automationPoll = setInterval(refreshAutomationStatus, 650);
+    refreshAutomationStatus();
+}
+
+async function stopAutomationWork() {
+    try { await fetch('/api/automation/stop', { method: 'POST' }); } catch {}
+    state.automationTaskId = null;
+    state.computerControlEnabled = false;
+    if (automationPoll) { clearInterval(automationPoll); automationPoll = null; }
+    syncComputerControlButton();
+}
+
+syncComputerControlButton();
+
+function appendTerminalOutput(value) {
+    const output = $('#terminal-output');
+    if (!output) return;
+    output.textContent = (output.textContent + cleanTerminalOutput(value)).slice(-512 * 1024);
+    output.scrollTop = output.scrollHeight;
+}
+
+function cleanTerminalOutput(value) {
+    // A preformatted DOM node does not interpret terminal control codes; hide
+    // SGR, bracketed-paste and title sequences so prompts remain readable.
+    return String(value || '')
+        .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\r(?!\n)/g, '');
+}
+
+async function attachIntegratedTerminal(id) {
+    if (!id) return;
+    terminalSessionId = id;
+    const panel = $('#integrated-terminal');
+    panel.classList.remove('hidden');
+    if (terminalStream) terminalStream.close();
+    const snap = await fetch(`/api/terminal/sessions/${encodeURIComponent(id)}`).then(r => r.json());
+    $('#terminal-cwd').textContent = snap.cwd || '';
+    $('#terminal-output').textContent = cleanTerminalOutput(snap.output);
+    terminalStream = new EventSource(`/api/terminal/sessions/${encodeURIComponent(id)}/stream`);
+    terminalStream.addEventListener('snapshot', (e) => { try { const data = JSON.parse(e.data); $('#terminal-cwd').textContent = data.cwd || ''; $('#terminal-output').textContent = cleanTerminalOutput(data.output); } catch {} });
+    terminalStream.addEventListener('data', (e) => { try { appendTerminalOutput(JSON.parse(e.data)); } catch { appendTerminalOutput(e.data); } });
+    terminalStream.addEventListener('exit', () => appendTerminalOutput('\n[terminal fermé]\n'));
+    $('#terminal-input').focus();
+}
+
+async function openIntegratedTerminal() {
+    const created = await fetch('/api/terminal/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cwd: state.projectRoot }) }).then(r => r.json());
+    if (!created || created.error) throw new Error((created && created.error) || 'Terminal indisponible');
+    await attachIntegratedTerminal(created.id);
+}
+
+const terminalInput = $('#terminal-input');
+if (terminalInput) terminalInput.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    if (!terminalSessionId) { try { await openIntegratedTerminal(); } catch (err) { showToast('Terminal', err.message, { icon: '!' }); return; } }
+    const value = terminalInput.value;
+    terminalInput.value = '';
+    await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}/input`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: value + '\r' }) });
+});
+const terminalCloseBtn = $('#terminal-close-btn');
+if (terminalCloseBtn) terminalCloseBtn.addEventListener('click', async () => {
+    if (terminalStream) { terminalStream.close(); terminalStream = null; }
+    if (terminalSessionId) try { await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}`, { method: 'DELETE' }); } catch {}
+    terminalSessionId = null; $('#integrated-terminal').classList.add('hidden');
+});
+const openTerminalBtn = $('#open-integrated-terminal');
+if (openTerminalBtn) openTerminalBtn.addEventListener('click', () => openIntegratedTerminal().catch((err) => showToast('Terminal', err.message || 'Terminal indisponible', { icon: '!' })));
