@@ -213,15 +213,30 @@ function createLinuxComputerAction({ port, secret }) {
     overlayState = path.join(os.tmpdir(), `zaalis-linux-overlay-${process.pid}-${Date.now()}.json`);
     fs.writeFileSync(overlayState, '{}', 'utf8');
     const script = String.raw`
-import gi, json, os, signal, urllib.request
+import gi, json, os, signal, urllib.request, cairo, math
 gi.require_version('Gtk','3.0')
 from gi.repository import Gtk, Gdk, GLib
 screen=Gdk.Screen.get_default(); visual=screen.get_rgba_visual()
 border=Gtk.Window(type=Gtk.WindowType.TOPLEVEL); border.set_decorated(False); border.set_keep_above(True); border.set_accept_focus(False); border.set_app_paintable(True)
 if visual: border.set_visual(visual)
 border.set_default_size(screen.get_width(),screen.get_height()); border.move(0,0)
-box=Gtk.EventBox(); box.set_visible_window(True); box.set_name('border'); border.add(box)
-css=Gtk.CssProvider(); css.load_from_data(b'#border { background: rgba(0,0,0,0); border: 6px solid rgba(139,92,246,0.72); } #dock { background: rgba(17,10,32,0.94); border: 1px solid rgba(168,85,247,0.65); border-radius: 14px; padding: 10px 14px; }')
+box=Gtk.EventBox(); box.set_visible_window(False); box.set_app_paintable(True); border.add(box)
+phase=[0.0]
+def mist(cr, cx, cy, rx, ry, color):
+ cr.save(); cr.translate(cx,cy); cr.scale(rx,ry)
+ g=cairo.RadialGradient(0,0,0,0,0,1); g.add_color_stop_rgba(0,*color); g.add_color_stop_rgba(.32,color[0],color[1],color[2],0); g.add_color_stop_rgba(1,0,0,0,0)
+ cr.set_source(g); cr.rectangle(-1,-1,2,2); cr.fill(); cr.restore()
+def draw_overlay(widget, cr):
+ w=widget.get_allocated_width(); h=widget.get_allocated_height(); p=phase[0]
+ mist(cr, .15*w + math.sin(p)*.03*w, .20*h + math.cos(p)*.02*h, .72*w, .58*h, (.615,.349,1,.28))
+ mist(cr, .80*w - math.sin(p)*.03*w, .84*h - math.cos(p)*.02*h, .82*w, .62*h, (.400,.176,.824,.28))
+ g=cairo.LinearGradient(0,0,w,h); g.add_color_stop_rgba(0,.471,.243,.871,.58); g.add_color_stop_rgba(.5,.678,.341,1,.16); g.add_color_stop_rgba(1,.357,.133,.686,.54)
+ cr.set_source(g); cr.set_line_width(28); cr.rectangle(14,14,max(1,w-28),max(1,h-28)); cr.stroke()
+ return False
+box.connect('draw',draw_overlay)
+def tick(): phase[0]+=.07; box.queue_draw(); return True
+GLib.timeout_add(60,tick)
+css=Gtk.CssProvider(); css.load_from_data(b'#dock { background: rgba(24,14,42,0.88); border: 1px solid rgba(214,187,255,0.36); border-radius: 18px; padding: 10px 14px; color: #f4ecff; }')
 Gtk.StyleContext.add_provider_for_screen(screen,css,Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 border.realize(); border.get_window().set_pass_through(True); border.show_all()
 dock=Gtk.Window(type=Gtk.WindowType.TOPLEVEL); dock.set_decorated(False); dock.set_keep_above(True); dock.set_type_hint(Gdk.WindowTypeHint.UTILITY)
