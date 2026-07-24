@@ -70,4 +70,3 @@ async function callTool(config, tool, args) {
   return result || {};
 }
 module.exports = { validateConfig, check, callTool, ALLOWED_TOOLS };
-

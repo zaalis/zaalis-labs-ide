@@ -6,698 +6,28 @@ const crypto = require('crypto');
 const dns = require('dns').promises;
 const net = require('net');
 const { exec, execFile, spawn } = require('child_process');
+const { EventEmitter } = require('events');
 const { runAgentTurn, TOOL_CATALOG, COMPUTER_FUNCTION_TOOL, nativeComputerCallsAsText } = require('./agent-engine');
 const brainMcp = require('./brain-mcp-client');
 const { AutomationManager } = require('./automation-manager');
+const { windowsComputerAction } = require('./windows-computer-bridge');
 const { TerminalManager } = require('./terminal-manager');
+const { buildKimiPayload, parseKimiResponse } = require('./kimi-provider');
+const responseIntegrity = require('./response-integrity');
+const { ExecutionBroker } = require('./execution-broker');
+const { SessionStore } = require('./session-store');
+const { ApprovalStore, normaliseRules, evaluate: evaluatePermission } = require('./permission-policy');
+const securityPipeline = require('./security-pipeline');
+const { profile: agentProfile } = require('./agent-profiles');
+const { openAIFunctionTools, anthropicTools, geminiTools } = require('./tool-registry');
+const skillsRegistry = require('./skills-registry');
+const languageService = require('./language-service');
+const mcpRegistry = require('./mcp-registry');
+const projectInspector = require('./project-inspector');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch {}
-
-// Visual activity indicator only: a click-through fog around each screen,
-// plus a small "Stopper l'IA" button. It never draws, moves, or hides a cursor.
-// The button authenticates against /api/automation/stop-bridge with a random
-// per-launch secret (the Windows equivalent of the macOS bridge secret).
-const WINDOWS_FOG_SECRET = crypto.randomBytes(32).toString('hex');
-let windowsFogProcess = null;
-
-function stopWindowsActivityFog() {
-  const child = windowsFogProcess;
-  if (!child) return;
-  try { child.kill(); } catch {}
-  if (windowsFogProcess === child) windowsFogProcess = null;
-}
-
-async function startWindowsActivityFog() {
-  if (process.platform !== 'win32') return { ok: false, error: 'unsupported-platform' };
-  if (windowsFogProcess && windowsFogProcess.exitCode == null) return { ok: true, pid: windowsFogProcess.pid };
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class ZaalisFogNative {
-  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
-  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
-  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
-}
-'@
-# powershell.exe spawné démarre DPI-unaware : sur un 4K à 150 %, les bornes
-# écran sont virtualisées et la brume sort floue/décalée. On force le mode
-# per-monitor puis on mesure l'échelle DIP->pixels réellement appliquée par
-# WPF sur une fenêtre sonde (M11) — la seule source fiable.
-try { [void][ZaalisFogNative]::SetProcessDpiAwareness(2) } catch {}
-$probe = New-Object Windows.Window
-$probe.WindowStyle = 'None'; $probe.ResizeMode = 'NoResize'; $probe.AllowsTransparency = $true
-$probe.Background = [Windows.Media.Brushes]::Transparent; $probe.ShowInTaskbar = $false
-$probe.Left = 0; $probe.Top = 0; $probe.Width = 1; $probe.Height = 1; $probe.Opacity = 0
-$probe.Show()
-$dip = [Windows.PresentationSource]::FromVisual($probe).CompositionTarget.TransformToDevice.M11
-$probe.Close()
-if (-not ($dip -gt 0)) { $dip = 1 }
-foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
-  $b = $screen.Bounds
-  $win = New-Object Windows.Window
-  $win.WindowStyle = 'None'; $win.ResizeMode = 'NoResize'; $win.AllowsTransparency = $true
-  $win.Background = [Windows.Media.Brushes]::Transparent; $win.ShowInTaskbar = $false; $win.Topmost = $true
-  $win.Left = $b.X / $dip; $win.Top = $b.Y / $dip; $win.Width = $b.Width / $dip; $win.Height = $b.Height / $dip
-  $win.Add_SourceInitialized({
-    $helper = New-Object Windows.Interop.WindowInteropHelper($this)
-    $style = [ZaalisFogNative]::GetWindowLong($helper.Handle, -20)
-    [void][ZaalisFogNative]::SetWindowLong($helper.Handle, -20, ($style -bor 0x20 -bor 0x80))
-  })
-  $border = New-Object Windows.Controls.Border
-  $border.BorderThickness = 24; $border.CornerRadius = 8; $border.Opacity = .76
-  $brush = New-Object Windows.Media.LinearGradientBrush
-  $brush.StartPoint = New-Object Windows.Point 0,0; $brush.EndPoint = New-Object Windows.Point 1,1
-  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(109,40,217),0)))
-  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(216,180,254),.5)))
-  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(109,40,217),1)))
-  $border.BorderBrush = $brush
-  $border.Effect = New-Object Windows.Media.Effects.BlurEffect -Property @{ Radius = 24 }
-  $win.Content = $border; $win.Show()
-}
-# Bouton « Stopper l'IA » : petit rectangle arrondi en bas au centre de
-# l'écran principal. Cliquable (pas de click-through) ; il coupe la session
-# d'automatisation côté serveur puis ferme l'overlay.
-$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$stopWin = New-Object Windows.Window
-$stopWin.WindowStyle = 'None'; $stopWin.ResizeMode = 'NoResize'; $stopWin.AllowsTransparency = $true
-$stopWin.Background = [Windows.Media.Brushes]::Transparent; $stopWin.ShowInTaskbar = $false; $stopWin.Topmost = $true
-$stopWin.Width = 150; $stopWin.Height = 56
-$stopWin.Left = ($wa.X + $wa.Width / 2) / $dip - 75
-$stopWin.Top = ($wa.Y + $wa.Height) / $dip - 72
-$stopButton = New-Object Windows.Controls.Border
-$stopButton.CornerRadius = 12; $stopButton.Height = 40; $stopButton.VerticalAlignment = 'Center'
-$stopButton.Cursor = [Windows.Input.Cursors]::Hand
-$stopButton.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86))
-$stopButton.BorderThickness = 1
-$stopButton.BorderBrush = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(120,255,255,255))
-$stopShadow = New-Object Windows.Media.Effects.DropShadowEffect
-$stopShadow.Color = [Windows.Media.Color]::FromRgb(46,16,101); $stopShadow.BlurRadius = 18; $stopShadow.ShadowDepth = 2; $stopShadow.Opacity = .5
-$stopButton.Effect = $stopShadow
-$stopText = New-Object Windows.Controls.TextBlock
-$stopText.Text = "Stopper l'IA"; $stopText.Foreground = [Windows.Media.Brushes]::White
-$stopText.FontWeight = 'SemiBold'; $stopText.FontSize = 13
-$stopText.HorizontalAlignment = 'Center'; $stopText.VerticalAlignment = 'Center'
-$stopButton.Child = $stopText
-$stopButton.Add_MouseEnter({ $this.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(190,45,70)) })
-$stopButton.Add_MouseLeave({ $this.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86)) })
-$stopButton.Add_MouseLeftButtonDown({
-  try { Invoke-WebRequest -UseBasicParsing -Method Post -Uri ("http://127.0.0.1:" + $env:ZAALIS_FOG_PORT + "/api/automation/stop-bridge") -Headers @{ 'x-zaalis-computer' = $env:ZAALIS_FOG_SECRET } -TimeoutSec 5 | Out-Null } catch {}
-  [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background)
-})
-$stopWin.Content = $stopButton; $stopWin.Show()
-[Windows.Threading.Dispatcher]::Run()
-`;
-  const child = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-    windowsHide: true,
-    stdio: 'ignore',
-    env: { ...process.env, ZAALIS_FOG_SECRET: WINDOWS_FOG_SECRET, ZAALIS_FOG_PORT: String(PORT) },
-  });
-  windowsFogProcess = child;
-  child.once('exit', () => { if (windowsFogProcess === child) windowsFogProcess = null; });
-  child.once('error', () => { if (windowsFogProcess === child) windowsFogProcess = null; });
-  await new Promise((resolve) => setTimeout(resolve, 450));
-  return child.exitCode == null ? { ok: true, pid: child.pid } : { ok: false, error: `fog-exited:${child.exitCode}` };
-}
-
-/* Legacy AI-cursor overlay removed: desktop control now uses only real input.
-const WINDOWS_OVERLAY_SECRET = crypto.randomBytes(32).toString('hex');
-let windowsOverlayProcess = null;
-let windowsOverlayStatePath = null;
-let windowsOverlaySequence = 0;
-
-function writeWindowsOverlayState(state) {
-  if (!windowsOverlayStatePath) return false;
-  try {
-    fs.writeFileSync(windowsOverlayStatePath, JSON.stringify({ sequence: ++windowsOverlaySequence, ...state }), 'utf8');
-    return true;
-  } catch { return false; }
-}
-
-function publishWindowsAutomationVisual(action) {
-  if (!windowsOverlayProcess || windowsOverlayProcess.exitCode != null || !action) return false;
-  const kind = String(action.action || 'pulse');
-  const hasPoint = Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.y));
-  const duration = Math.max(140, Math.min(1200, Math.round((Number(action.duration) || (kind === 'click' ? 0.34 : 0.28)) * 1000)));
-  return writeWindowsOverlayState({
-    command: 'visual', kind, x: hasPoint ? Number(action.x) : null, y: hasPoint ? Number(action.y) : null,
-    duration, button: action.button === 'right' ? 'right' : 'left', at: Date.now(),
-  });
-}
-
-function stopWindowsAutomationOverlay() {
-  const child = windowsOverlayProcess;
-  if (!child) return;
-  // Ask the STA overlay to close itself first: its finally block restores the
-  // real Windows cursor before the helper process exits.
-  writeWindowsOverlayState({ command: 'stop', at: Date.now() });
-  setTimeout(() => {
-    if (windowsOverlayProcess === child && child.exitCode == null) {
-      try { child.kill(); } catch {}
-    }
-  }, 1500).unref();
-}
-
-async function startWindowsAutomationOverlay() {
-  if (process.platform !== 'win32') return { ok: false, error: 'unsupported-platform' };
-  if (windowsOverlayProcess && windowsOverlayProcess.exitCode == null) return { ok: true, pid: windowsOverlayProcess.pid };
-  windowsOverlaySequence = 0;
-  windowsOverlayStatePath = path.join(os.tmpdir(), `zaalis-ai-cursor-${process.pid}-${Date.now()}.json`);
-  if (!writeWindowsOverlayState({ command: 'ready', at: Date.now() })) return { ok: false, error: 'overlay-state-unavailable' };
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName PresentationFramework
-Add-Type -AssemblyName PresentationCore
-Add-Type -AssemblyName WindowsBase
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class ZaalisOverlayNative {
-  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
-  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
-  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
-  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
-  [DllImport("user32.dll")] public static extern int ShowCursor(bool show);
-  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
-}
-'@
-# powershell.exe peut démarrer DPI-unaware (métriques écran virtualisées)
-# alors que WPF rend à l'échelle du moniteur : sur un 4K à 150 %, tout sort
-# 1,5x trop grand (bordures hors champ, dock repoussé sous le bord visible).
-# On force un état connu AVANT toute lecture de métrique ou création de
-# fenêtre, puis on mesure l'échelle DIP->pixels réellement appliquée par WPF
-# sur une fenêtre sonde — la seule source fiable, quel que soit le mode DPI.
-try { [void][ZaalisOverlayNative]::SetProcessDpiAwareness(2) } catch {}
-$windows = New-Object Collections.Generic.List[Windows.Window]
-function Make-Window([double]$x,[double]$y,[double]$width,[double]$height,[bool]$clickThrough) {
-  $win = New-Object Windows.Window
-  $win.WindowStyle = 'None'; $win.ResizeMode = 'NoResize'; $win.AllowsTransparency = $true
-  $win.Background = [Windows.Media.Brushes]::Transparent; $win.ShowInTaskbar = $false; $win.Topmost = $true
-  $win.Left = $x; $win.Top = $y; $win.Width = $width; $win.Height = $height
-  if ($clickThrough) {
-    $win.Add_SourceInitialized({
-      $helper = New-Object Windows.Interop.WindowInteropHelper($this)
-      $style = [ZaalisOverlayNative]::GetWindowLong($helper.Handle, -20)
-      [void][ZaalisOverlayNative]::SetWindowLong($helper.Handle, -20, ($style -bor 0x20 -bor 0x80))
-    })
-  }
-  return $win
-}
-function New-GradientStop([byte]$a,[byte]$r,[byte]$g,[byte]$b,[double]$offset) {
-  $stop = New-Object Windows.Media.GradientStop
-  $stop.Color = [Windows.Media.Color]::FromArgb($a,$r,$g,$b); $stop.Offset = $offset
-  return $stop
-}
-function New-Pt([double]$x,[double]$y) { return New-Object Windows.Point $x,$y }
-$probe = Make-Window 0 0 1 1 $true
-$probe.Opacity = 0
-$probe.Show()
-$dip = [Windows.PresentationSource]::FromVisual($probe).CompositionTarget.TransformToDevice.M11
-$probe.Close()
-if (-not ($dip -gt 0)) { $dip = 1 }
-# Pinceau « flux » : palette violette du thème IA (violet profond 6D28D9,
-# violet A855F7, lavande D8B4FE à 85 % d'alpha) étalée sur deux largeurs,
-# répétée puis translatée en boucle sur 7 s — l'équivalent WPF exact du
-# background-size:200% animé de setAiControlBorder (zaalisBrowser macOS).
-function New-FlowBrush {
-  $brush = New-Object Windows.Media.LinearGradientBrush
-  $brush.StartPoint = New-Pt 0 .5
-  $brush.EndPoint = New-Pt 2 .5
-  $brush.MappingMode = [Windows.Media.BrushMappingMode]::RelativeToBoundingBox
-  $brush.SpreadMethod = [Windows.Media.GradientSpreadMethod]::Repeat
-  [void]$brush.GradientStops.Add((New-GradientStop 217 109 40 217 0))
-  [void]$brush.GradientStops.Add((New-GradientStop 217 168 85 247 .25))
-  [void]$brush.GradientStops.Add((New-GradientStop 217 216 180 254 .5))
-  [void]$brush.GradientStops.Add((New-GradientStop 217 168 85 247 .75))
-  [void]$brush.GradientStops.Add((New-GradientStop 217 109 40 217 1))
-  $slide = New-Object Windows.Media.TranslateTransform
-  $brush.RelativeTransform = $slide
-  $flow = New-Object Windows.Media.Animation.DoubleAnimation
-  $flow.From = 0; $flow.To = 2; $flow.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds(7)); $flow.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
-  $slide.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $flow)
-  return $brush
-}
-# Fondu d'un bord pour le masque : opaque à 10 DIP du bord de l'écran, éteint
-# à 40 DIP vers l'intérieur — le « feather » du masque CSS macOS. Dessiné en
-# géométries absolues (DrawingBrush) : un VisualBrush re-mesurerait le visuel
-# hors arbre et rendrait le masque opaque partout.
-function New-FeatherDrawing([string]$edge,[double]$w,[double]$h) {
-  $fade = New-Object Windows.Media.LinearGradientBrush
-  [void]$fade.GradientStops.Add((New-GradientStop 0 255 255 255 0))
-  [void]$fade.GradientStops.Add((New-GradientStop 255 255 255 255 .25))
-  [void]$fade.GradientStops.Add((New-GradientStop 0 255 255 255 1))
-  $x = 0; $y = 0; $rw = $w; $rh = $h
-  if ($edge -eq 'top')    { $rh = 40;                $fade.StartPoint = New-Pt .5 0; $fade.EndPoint = New-Pt .5 1 }
-  if ($edge -eq 'bottom') { $rh = 40; $y = $h - 40;  $fade.StartPoint = New-Pt .5 1; $fade.EndPoint = New-Pt .5 0 }
-  if ($edge -eq 'left')   { $rw = 40;                $fade.StartPoint = New-Pt 0 .5; $fade.EndPoint = New-Pt 1 .5 }
-  if ($edge -eq 'right')  { $rw = 40; $x = $w - 40;  $fade.StartPoint = New-Pt 1 .5; $fade.EndPoint = New-Pt 0 .5 }
-  $geom = New-Object Windows.Media.RectangleGeometry (New-Object Windows.Rect $x,$y,$rw,$rh)
-  return New-Object Windows.Media.GeometryDrawing $fade,$null,$geom
-}
-function Add-ControlBorder([System.Windows.Forms.Screen]$screen) {
-  # Port du halo de contrôle du zaalisBrowser macOS : un rectangle plein au
-  # dégradé défilant dont seul le pourtour reste visible via le masque fondu,
-  # le tout flouté 14 px à 80 % d'opacité. Aucune brume centrale.
-  $b = $screen.Bounds
-  $w = $b.Width / $dip; $h = $b.Height / $dip
-  $win = Make-Window ($b.X / $dip) ($b.Y / $dip) $w $h $true
-  $root = New-Object Windows.Controls.Grid
-  $root.Opacity = .8
-  $root.Effect = New-Object Windows.Media.Effects.BlurEffect -Property @{ Radius = 14 }
-  $band = New-Object Windows.Shapes.Rectangle
-  $band.Fill = New-FlowBrush
-  $maskGroup = New-Object Windows.Media.DrawingGroup
-  foreach ($edge in @('top','bottom','left','right')) { [void]$maskGroup.Children.Add((New-FeatherDrawing $edge $w $h)) }
-  $band.OpacityMask = New-Object Windows.Media.DrawingBrush $maskGroup
-  [void]$root.Children.Add($band)
-  $win.Content = $root; $win.Show(); $windows.Add($win)
-}
-foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) { Add-ControlBorder $screen }
-
-# The AI pointer is intentionally a click-through topmost window. The real
-# input still goes to the application below, while this pointer makes the
-# requested movement and click visible to the person watching the desktop.
-$initialPoint = New-Object ZaalisOverlayNative+POINT
-[void][ZaalisOverlayNative]::GetCursorPos([ref]$initialPoint)
-$aiCursor = Make-Window ($initialPoint.X / $dip - 4) ($initialPoint.Y / $dip - 3) 42 54 $true
-$aiCursorCanvas = New-Object Windows.Controls.Canvas
-$aiPointer = New-Object Windows.Shapes.Path
-$aiPointer.Data = [Windows.Media.Geometry]::Parse('M 3,2 L 3,39 L 12,29 L 19,47 L 26,44 L 18,27 L 34,27 Z')
-$aiPointer.Fill = [Windows.Media.Brushes]::White; $aiPointer.Stroke = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(54,26,112)); $aiPointer.StrokeThickness = 2
-$aiPointer.Effect = New-Object Windows.Media.Effects.DropShadowEffect -Property @{ Color = [Windows.Media.Color]::FromRgb(109,40,217); BlurRadius = 15; ShadowDepth = 2; Opacity = .82 }
-[void]$aiCursorCanvas.Children.Add($aiPointer)
-$clickRing = New-Object Windows.Shapes.Ellipse
-$clickRing.Width = 18; $clickRing.Height = 18; $clickRing.StrokeThickness = 3; $clickRing.Opacity = 0
-$clickRing.Stroke = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(216,180,254)); $clickRing.RenderTransformOrigin = New-Pt .5 .5; $clickRing.RenderTransform = New-Object Windows.Media.ScaleTransform 1,1
-[Windows.Controls.Canvas]::SetLeft($clickRing, -6); [Windows.Controls.Canvas]::SetTop($clickRing, -6)
-[void]$aiCursorCanvas.Children.Add($clickRing)
-$aiCursor.Content = $aiCursorCanvas; $aiCursor.Show(); $windows.Add($aiCursor)
-
-$nativeCursorHidden = $false
-function Set-NativeCursorHidden([bool]$hide) {
-  if ($hide -eq $nativeCursorHidden) { return }
-  [void][ZaalisOverlayNative]::ShowCursor(-not $hide)
-  $script:nativeCursorHidden = $hide
-}
-function Animate-AiCursor([double]$x,[double]$y,[int]$duration,[bool]$click) {
-  $duration = [Math]::Max(140, [Math]::Min($duration, 1200))
-  $toLeft = $x / $dip - 4; $toTop = $y / $dip - 3
-  $time = [Windows.Duration]::new([TimeSpan]::FromMilliseconds($duration))
-  $leftAnimation = New-Object Windows.Media.Animation.DoubleAnimation; $leftAnimation.From = $aiCursor.Left; $leftAnimation.To = $toLeft; $leftAnimation.Duration = $time; $leftAnimation.FillBehavior = [Windows.Media.Animation.FillBehavior]::HoldEnd
-  $topAnimation = New-Object Windows.Media.Animation.DoubleAnimation; $topAnimation.From = $aiCursor.Top; $topAnimation.To = $toTop; $topAnimation.Duration = $time; $topAnimation.FillBehavior = [Windows.Media.Animation.FillBehavior]::HoldEnd
-  $aiCursor.BeginAnimation([Windows.Window]::LeftProperty, $leftAnimation); $aiCursor.BeginAnimation([Windows.Window]::TopProperty, $topAnimation)
-  if ($click) {
-    $ringOpacity = New-Object Windows.Media.Animation.DoubleAnimation; $ringOpacity.From = 1; $ringOpacity.To = 0; $ringOpacity.BeginTime = [TimeSpan]::FromMilliseconds($duration); $ringOpacity.Duration = [Windows.Duration]::new([TimeSpan]::FromMilliseconds(360))
-    $clickRing.BeginAnimation([Windows.UIElement]::OpacityProperty, $ringOpacity)
-    $ringScale = $clickRing.RenderTransform
-    $ringGrow = New-Object Windows.Media.Animation.DoubleAnimation; $ringGrow.From = .55; $ringGrow.To = 2.7; $ringGrow.BeginTime = [TimeSpan]::FromMilliseconds($duration); $ringGrow.Duration = [Windows.Duration]::new([TimeSpan]::FromMilliseconds(360))
-    $ringScale.BeginAnimation([Windows.Media.ScaleTransform]::ScaleXProperty, $ringGrow); $ringScale.BeginAnimation([Windows.Media.ScaleTransform]::ScaleYProperty, $ringGrow)
-  }
-}
-
-$lastPhysical = $initialPoint; $lastHumanInput = [DateTime]::UtcNow; $suppressPhysicalUntil = [DateTime]::MinValue
-$expectedPoint = $initialPoint; $lastOverlaySequence = 0; $statePath = [Environment]::GetEnvironmentVariable('ZAALIS_OVERLAY_STATE')
-$cursorTimer = New-Object Windows.Threading.DispatcherTimer; $cursorTimer.Interval = [TimeSpan]::FromMilliseconds(35)
-$cursorTimer.Add_Tick({
-  $now = [DateTime]::UtcNow
-  $current = New-Object ZaalisOverlayNative+POINT; [void][ZaalisOverlayNative]::GetCursorPos([ref]$current)
-  if ($current.X -ne $lastPhysical.X -or $current.Y -ne $lastPhysical.Y) {
-    $expectedMove = $now -le $suppressPhysicalUntil -and [Math]::Abs($current.X - $expectedPoint.X) -le 3 -and [Math]::Abs($current.Y - $expectedPoint.Y) -le 3
-    if (-not $expectedMove) { $script:lastHumanInput = $now }
-    $script:lastPhysical = $current
-  }
-  if ($statePath -and (Test-Path -LiteralPath $statePath)) {
-    try {
-      $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-      if ($state.sequence -gt $lastOverlaySequence) {
-        $script:lastOverlaySequence = [int64]$state.sequence
-        if ($state.command -eq 'stop') { [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Send); return }
-        if ($state.command -eq 'visual') {
-          $x = if ($null -eq $state.x) { $current.X } else { [double]$state.x }; $y = if ($null -eq $state.y) { $current.Y } else { [double]$state.y }
-          $duration = [Math]::Max(140, [Math]::Min([int]$state.duration, 1200)); $script:expectedPoint = New-Object ZaalisOverlayNative+POINT; $script:expectedPoint.X = [int][Math]::Round($x); $script:expectedPoint.Y = [int][Math]::Round($y)
-          $script:suppressPhysicalUntil = $now.AddMilliseconds($duration + 550); $aiCursor.Opacity = 1; Set-NativeCursorHidden $true
-          Animate-AiCursor $x $y $duration ($state.kind -eq 'click')
-        }
-      }
-    } catch {}
-  }
-  $humanActive = $now.Subtract($lastHumanInput).TotalMilliseconds -lt 800 -and $now -gt $suppressPhysicalUntil
-  if ($humanActive) { $aiCursor.Opacity = 0; Set-NativeCursorHidden $false }
-  elseif ($now -gt $suppressPhysicalUntil) { $aiCursor.Opacity = 1; Set-NativeCursorHidden $true }
-})
-$cursorTimer.Start()
-
-$primary = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-$dock = Make-Window (($primary.X + $primary.Width / 2) / $dip - 160) (($primary.Y + $primary.Height) / $dip - 92) 320 58 $false
-$dockBorder = New-Object Windows.Controls.Border
-$dockBorder.Height = 54; $dockBorder.CornerRadius = 18; $dockBorder.Padding = '13,0'; $dockBorder.BorderThickness = 1
-$dockBorder.BorderBrush = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(96,168,85,247))
-$dockBorder.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(226,17,10,32))
-$shadow = New-Object Windows.Media.Effects.DropShadowEffect
-$shadow.Color = [Windows.Media.Color]::FromRgb(46,16,101); $shadow.BlurRadius = 42; $shadow.ShadowDepth = 0; $shadow.Opacity = .45
-$dockBorder.Effect = $shadow
-$panel = New-Object Windows.Controls.StackPanel; $panel.Orientation = 'Horizontal'; $panel.VerticalAlignment = 'Center'
-$dot = New-Object Windows.Controls.Border; $dot.Width = 9; $dot.Height = 9; $dot.CornerRadius = 5; $dot.Margin = '0,0,12,0'
-$dot.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(192,132,252))
-$dotGlow = New-Object Windows.Media.Effects.DropShadowEffect; $dotGlow.Color = [Windows.Media.Color]::FromRgb(192,132,252); $dotGlow.BlurRadius = 13; $dotGlow.ShadowDepth = 0; $dotGlow.Opacity = 1; $dot.Effect = $dotGlow
-$pulse = New-Object Windows.Media.Animation.DoubleAnimation; $pulse.From = 1; $pulse.To = .6; $pulse.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds(.8)); $pulse.AutoReverse = $true; $pulse.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever; $dot.BeginAnimation([Windows.UIElement]::OpacityProperty, $pulse)
-$label = New-Object Windows.Controls.TextBlock; $label.Text = "L'IA travaille sur ce PC"; $label.Foreground = [Windows.Media.Brushes]::White
-$label.FontWeight = 'SemiBold'; $label.FontSize = 12; $label.VerticalAlignment = 'Center'; $label.Margin = '0,0,12,0'
-$button = New-Object Windows.Controls.Border; $button.CornerRadius = 11; $button.Padding = '12,8'; $button.Cursor = [Windows.Input.Cursors]::Hand
-$button.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86))
-$buttonText = New-Object Windows.Controls.TextBlock; $buttonText.Text = 'Arrêter le travail'; $buttonText.Foreground = [Windows.Media.Brushes]::White; $buttonText.FontWeight = 'Bold'; $buttonText.FontSize = 12; $button.Child = $buttonText
-$button.Add_MouseLeftButtonUp({
-  try { Invoke-WebRequest -UseBasicParsing -Method Post -Uri ("http://127.0.0.1:"+$env:ZAALIS_OVERLAY_PORT+"/api/automation/stop-bridge") -Headers @{'x-zaalis-computer'=$env:ZAALIS_OVERLAY_SECRET} | Out-Null } catch {}
-  [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background)
-})
-[void]$panel.Children.Add($dot); [void]$panel.Children.Add($label); [void]$panel.Children.Add($button)
-$dockBorder.Child = $panel; $dock.Content = $dockBorder; $dock.Show(); $windows.Add($dock)
-try { [Windows.Threading.Dispatcher]::Run() }
-finally {
-  $cursorTimer.Stop()
-  Set-NativeCursorHidden $false
-  foreach ($win in $windows) { try { $win.Close() } catch {} }
-}
-`;
-  const child = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-    windowsHide: true,
-    stdio: ['ignore', 'ignore', 'pipe'],
-    env: { ...process.env, ZAALIS_OVERLAY_SECRET: WINDOWS_OVERLAY_SECRET, ZAALIS_OVERLAY_PORT: String(PORT), ZAALIS_OVERLAY_STATE: windowsOverlayStatePath },
-  });
-  let startupError = '';
-  child.stderr.on('data', (chunk) => { startupError = (startupError + chunk.toString('utf8')).slice(-4000); });
-  windowsOverlayProcess = child;
-  const clearOverlay = () => {
-    if (windowsOverlayProcess === child) windowsOverlayProcess = null;
-    const statePath = windowsOverlayStatePath;
-    windowsOverlayStatePath = null;
-    if (statePath) { try { fs.unlinkSync(statePath); } catch {} }
-  };
-  child.once('exit', clearOverlay);
-  child.once('error', clearOverlay);
-  await new Promise((resolve) => setTimeout(resolve, 700));
-  if (child.exitCode != null || windowsOverlayProcess !== child) {
-    return { ok: false, error: startupError.trim() || `overlay-exited:${child.exitCode}` };
-  }
-  return { ok: true, pid: child.pid };
-}
-
-*/
-// The macOS desktop bundle provides a dedicated accessibility helper.  On
-// Windows, use the signed-in desktop session directly through PowerShell and
-// Win32.  Input reaches this handler only after the explicit, authenticated
-// computer-control flow in AutomationManager; text and paths are transferred
-// as JSON in an environment variable, never interpolated into shell code.
-async function windowsComputerAction(action) {
-  if (process.platform !== 'win32') return Promise.resolve({ ok: false, error: 'unsupported-platform' });
-  if (action && action.action === 'overlay_start') return startWindowsActivityFog();
-  if (action && action.action === 'overlay_stop') { stopWindowsActivityFog(); return Promise.resolve({ ok: true }); }
-  const payload = Buffer.from(JSON.stringify(action || {}), 'utf8').toString('base64');
-  const script = String.raw`
-$ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName System.Windows.Forms
-if (-not ('ZaalisNative' -as [type])) {
-  Add-Type @'
-using System;
-using System.Runtime.InteropServices;
-public static class ZaalisNative {
-  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
-  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extraInfo);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
-  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
-  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
-}
-'@
-}
-# powershell.exe spawné démarre DPI-unaware : sur un écran 4K à 150 %, les
-# métriques GDI (Screen.Bounds, GetWindowRect, SetCursorPos) sont virtualisées
-# (2560x1440) alors que UI Automation renvoie des pixels physiques (3840x2160).
-# Les clics guidés par inspect atterrissent alors 1,5x trop loin. On force le
-# mode per-monitor AVANT toute lecture de métrique pour que capture, éléments
-# UI et souris partagent le même repère physique.
-try { [void][ZaalisNative]::SetProcessDpiAwareness(2) } catch {}
-$a = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ZAALIS_COMPUTER_ACTION)) | ConvertFrom-Json
-$ok = @{ ok = $true }
-switch ($a.action) {
-  'status' { $ok.accessibility = $true; $ok.screenRecording = $true }
-  'request_permissions' { $ok.accessibility = $true; $ok.screenRecording = $true }
-  'observe' {
-    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-    $bmp = New-Object Drawing.Bitmap $bounds.Width, $bounds.Height
-    $g = [Drawing.Graphics]::FromImage($bmp)
-    $g.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
-    $stream = New-Object IO.MemoryStream
-    $bmp.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
-    $ok.image = [Convert]::ToBase64String($stream.ToArray()); $ok.mime = 'image/png'
-    $stream.Dispose(); $g.Dispose(); $bmp.Dispose()
-  }
-  'inspect' {
-    $handle = [ZaalisNative]::GetForegroundWindow()
-    $title = New-Object Text.StringBuilder 1024
-    [void][ZaalisNative]::GetWindowText($handle, $title, $title.Capacity)
-    [uint32]$pidValue = 0; [void][ZaalisNative]::GetWindowThreadProcessId($handle, [ref]$pidValue)
-    $processName = ''; try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}
-    $ok.application = $title.ToString()
-    $target = [string]$a.target; if ($target -notin @('active_window','display','region')) { $target = 'active_window' }
-    $screens = @([System.Windows.Forms.Screen]::AllScreens)
-    $displayIndex = 0; try { $displayIndex = [Math]::Max(0, [Math]::Min([int]$a.display_index, $screens.Count - 1)) } catch {}
-    $captureBounds = $null
-    if ($target -eq 'display') { $captureBounds = $screens[$displayIndex].Bounds }
-    elseif ($target -eq 'region') { $captureBounds = [Drawing.Rectangle]::new([int]$a.x, [int]$a.y, [int]$a.width, [int]$a.height) }
-    else {
-      $rect = New-Object ZaalisNative+RECT
-      if ([ZaalisNative]::GetWindowRect($handle, [ref]$rect) -and $rect.Right -gt $rect.Left -and $rect.Bottom -gt $rect.Top) {
-        $captureBounds = [Drawing.Rectangle]::new($rect.Left, $rect.Top, $rect.Right - $rect.Left, $rect.Bottom - $rect.Top)
-      } else { $captureBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds }
-    }
-    $ok.target = $target
-    $ok.capture = [PSCustomObject]@{ x=$captureBounds.X; y=$captureBounds.Y; width=$captureBounds.Width; height=$captureBounds.Height; displayIndex=$displayIndex }
-    if ($a.include_image -ne $false) {
-      try {
-        $limit = 2560; try { $limit = [Math]::Max(800, [Math]::Min([int]$a.max_dimension, 4096)) } catch {}
-        $scale = [Math]::Min(1.0, [Math]::Min($limit / [double]$captureBounds.Width, $limit / [double]$captureBounds.Height))
-        $outputWidth = [Math]::Max(1, [int][Math]::Round($captureBounds.Width * $scale))
-        $outputHeight = [Math]::Max(1, [int][Math]::Round($captureBounds.Height * $scale))
-        $source = New-Object Drawing.Bitmap $captureBounds.Width, $captureBounds.Height
-        $sourceGraphics = [Drawing.Graphics]::FromImage($source)
-        $sourceGraphics.CopyFromScreen($captureBounds.Location, [Drawing.Point]::Empty, $captureBounds.Size)
-        $bmp = if ($outputWidth -eq $captureBounds.Width -and $outputHeight -eq $captureBounds.Height) { $source } else { New-Object Drawing.Bitmap $outputWidth, $outputHeight }
-        $g = if ($bmp -eq $source) { $sourceGraphics } else { [Drawing.Graphics]::FromImage($bmp) }
-        if ($bmp -ne $source) { $g.DrawImage($source, 0, 0, $outputWidth, $outputHeight) }
-        $stream = New-Object IO.MemoryStream
-        $bmp.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
-        $ok.image = [Convert]::ToBase64String($stream.ToArray()); $ok.mime = 'image/png'
-        $ok.capture | Add-Member -NotePropertyName imageWidth -NotePropertyValue $outputWidth
-        $ok.capture | Add-Member -NotePropertyName imageHeight -NotePropertyValue $outputHeight
-        $stream.Dispose(); if ($g -ne $sourceGraphics) { $g.Dispose() }; $sourceGraphics.Dispose(); if ($bmp -ne $source) { $bmp.Dispose() }; $source.Dispose()
-      } catch { $ok.captureError = $_.Exception.Message }
-    }
-    if ($a.include_ocr -ne $false -and $a.include_image -ne $false) {
-      # UI Automation below supplies accessible text. Do not claim OCR unless a
-      # packaged Windows OCR component is available in this build.
-      $ok.ocr = @(); $ok.ocrError = 'ocr-not-available-on-this-windows-build'
-    }
-    if ($a.include_ui -ne $false) {
-      try {
-        Add-Type -AssemblyName UIAutomationClient
-        Add-Type -AssemblyName UIAutomationTypes
-        $root = [Windows.Automation.AutomationElement]::FromHandle($handle)
-        $nodes = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-        $maxElements = 220; try { $maxElements = [Math]::Max(25, [Math]::Min([int]$a.max_elements, 400)) } catch {}
-        $elements = @()
-        for ($i=0; $i -lt [Math]::Min($nodes.Count, 1200) -and $elements.Count -lt $maxElements; $i++) {
-          try {
-            $node = $nodes.Item($i); $current = $node.Current; $box = $current.BoundingRectangle
-            if ($box.Width -le 0 -or $box.Height -le 0) { continue }
-            $isPassword = [bool]$current.IsPassword
-            $value = $null
-            if (-not $isPassword) {
-              try { $pattern = $null; if ($node.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { $value = ([Windows.Automation.ValuePattern]$pattern).Current.Value } } catch {}
-            }
-            $elements += [PSCustomObject]@{
-              role=($current.ControlType.ProgrammaticName -replace '^ControlType\\.',''); title=if ($isPassword) { '[secure field]' } else { $current.Name }; label=if ($isPassword) { $null } else { $current.AutomationId }; help=if ($isPassword) { $null } else { $current.HelpText }; value=$value
-              frame=[PSCustomObject]@{ x=[int][Math]::Round($box.X); y=[int][Math]::Round($box.Y); width=[int][Math]::Round($box.Width); height=[int][Math]::Round($box.Height) }; enabled=[bool]$current.IsEnabled; offscreen=[bool]$current.IsOffscreen; secure=$isPassword
-            }
-          } catch {}
-        }
-        $ok.ui = [PSCustomObject]@{ application=$ok.application; bundleId=$processName; focusedWindow=[PSCustomObject]@{ x=$captureBounds.X; y=$captureBounds.Y; width=$captureBounds.Width; height=$captureBounds.Height }; truncated=($nodes.Count -gt $elements.Count); elements=$elements }
-      } catch { $ok.uiError = $_.Exception.Message }
-    }
-  }
-  'menus' {
-    $title = New-Object Text.StringBuilder 1024
-    $handle = [ZaalisNative]::GetForegroundWindow()
-    [void][ZaalisNative]::GetWindowText($handle, $title, $title.Capacity)
-    [uint32]$pidValue = 0; [void][ZaalisNative]::GetWindowThreadProcessId($handle, [ref]$pidValue)
-    $processName = ''; try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}
-    $ok.application = $title.ToString()
-    $ok.process = $processName
-    $items = @()
-    try {
-      Add-Type -AssemblyName UIAutomationClient
-      Add-Type -AssemblyName UIAutomationTypes
-      $root = [Windows.Automation.AutomationElement]::FromHandle($handle)
-      $nodes = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
-      for ($i=0; $i -lt [Math]::Min($nodes.Count,700) -and $items.Count -lt 120; $i++) {
-        try {
-          $node = $nodes.Item($i); $kind = $node.Current.ControlType.ProgrammaticName -replace '^ControlType\\.',''
-          if ($kind -notin @('MenuBar','MenuItem','Button','Tab','TabItem','ToolBar','SplitButton')) { continue }
-          $name = $node.Current.Name
-          if ([string]::IsNullOrWhiteSpace($name)) { continue }
-          $items += [PSCustomObject]@{ name=$name; type=$kind; shortcut=$node.Current.AcceleratorKey; accessKey=$node.Current.AccessKey }
-        } catch {}
-      }
-    } catch {}
-    if ($items.Count -eq 0 -and $processName -match 'chrome|msedge|firefox') {
-      $items = @(
-        [PSCustomObject]@{name='New tab';type='Shortcut';shortcut='Ctrl+T';source='browser-standard'},
-        [PSCustomObject]@{name='Focus address bar';type='Shortcut';shortcut='Ctrl+L';source='browser-standard'},
-        [PSCustomObject]@{name='New window';type='Shortcut';shortcut='Ctrl+N';source='browser-standard'},
-        [PSCustomObject]@{name='Reopen closed tab';type='Shortcut';shortcut='Ctrl+Shift+T';source='browser-standard'},
-        [PSCustomObject]@{name='Find in page';type='Shortcut';shortcut='Ctrl+F';source='browser-standard'},
-        [PSCustomObject]@{name='Downloads';type='Shortcut';shortcut='Ctrl+J';source='browser-standard'},
-        [PSCustomObject]@{name='History';type='Shortcut';shortcut='Ctrl+H';source='browser-standard'},
-        [PSCustomObject]@{name='Close tab';type='Shortcut';shortcut='Ctrl+W';source='browser-standard'}
-      )
-    } elseif ($items.Count -eq 0 -and $processName -match 'notepad') {
-      $items = @(
-        [PSCustomObject]@{name='New tab';type='Shortcut';shortcut='Ctrl+N';source='notepad-standard'},
-        [PSCustomObject]@{name='New window';type='Shortcut';shortcut='Ctrl+Shift+N';source='notepad-standard'},
-        [PSCustomObject]@{name='Open';type='Shortcut';shortcut='Ctrl+O';source='notepad-standard'},
-        [PSCustomObject]@{name='Save';type='Shortcut';shortcut='Ctrl+S';source='notepad-standard'},
-        [PSCustomObject]@{name='Find';type='Shortcut';shortcut='Ctrl+F';source='notepad-standard'},
-        [PSCustomObject]@{name='Replace';type='Shortcut';shortcut='Ctrl+H';source='notepad-standard'},
-        [PSCustomObject]@{name='Close tab';type='Shortcut';shortcut='Ctrl+W';source='notepad-standard'}
-      )
-    } elseif ($items.Count -eq 0) {
-      $items = @(
-        [PSCustomObject]@{name='Select all';type='Shortcut';shortcut='Ctrl+A';source='windows-standard'},
-        [PSCustomObject]@{name='Copy';type='Shortcut';shortcut='Ctrl+C';source='windows-standard'},
-        [PSCustomObject]@{name='Paste';type='Shortcut';shortcut='Ctrl+V';source='windows-standard'},
-        [PSCustomObject]@{name='Cut';type='Shortcut';shortcut='Ctrl+X';source='windows-standard'},
-        [PSCustomObject]@{name='Undo';type='Shortcut';shortcut='Ctrl+Z';source='windows-standard'},
-        [PSCustomObject]@{name='Redo';type='Shortcut';shortcut='Ctrl+Y';source='windows-standard'},
-        [PSCustomObject]@{name='Save';type='Shortcut';shortcut='Ctrl+S';source='windows-standard'},
-        [PSCustomObject]@{name='Find';type='Shortcut';shortcut='Ctrl+F';source='windows-standard'}
-      )
-    }
-    $ok.menus = $items
-  }
-  'move' { [void][ZaalisNative]::SetCursorPos([int]$a.x, [int]$a.y) }
-  'click' {
-    [void][ZaalisNative]::SetCursorPos([int]$a.x, [int]$a.y)
-    if ($a.button -eq 'right') { [ZaalisNative]::mouse_event(0x0008,0,0,0,[UIntPtr]::Zero); [ZaalisNative]::mouse_event(0x0010,0,0,0,[UIntPtr]::Zero) }
-    else { [ZaalisNative]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero); [ZaalisNative]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero) }
-  }
-  'scroll' { [ZaalisNative]::mouse_event(0x0800,0,0,[uint32]([int]$a.dy * 120),[UIntPtr]::Zero) }
-  'type' { Set-Clipboard -Value ([string]$a.text); [System.Windows.Forms.SendKeys]::SendWait('^v') }
-  'key' {
-    $mods = @($a.modifiers | ForEach-Object { $_.ToString().ToLowerInvariant() })
-    $held = New-Object Collections.Generic.List[byte]
-    function Hold-Key([byte]$vk) { [ZaalisNative]::keybd_event($vk,0,0,[UIntPtr]::Zero); $held.Add($vk) }
-    if ($mods -match 'ctrl|control|cmd|command') { Hold-Key 0x11 }
-    if ($mods -match 'alt|option|opt') { Hold-Key 0x12 }
-    if ($mods -match 'shift') { Hold-Key 0x10 }
-    if ($mods -match 'meta|super|win|windows') { Hold-Key 0x5B }
-    $name = $a.key.ToString().ToLowerInvariant()
-    $keys = @{ enter=0x0D; return=0x0D; tab=0x09; escape=0x1B; esc=0x1B; backspace=0x08; delete=0x2E; insert=0x2D; space=0x20; up=0x26; down=0x28; left=0x25; right=0x27; home=0x24; end=0x23; pageup=0x21; pagedown=0x22; pgup=0x21; pgdn=0x22; printscreen=0x2C; prtsc=0x2C; pause=0x13; capslock=0x14; numlock=0x90; scrolllock=0x91; menu=0x5D; apps=0x5D; win=0x5B; windows=0x5B; volumeup=0xAF; volumedown=0xAE; volumemute=0xAD; medianext=0xB0; mediaprev=0xB1; mediastop=0xB2; mediaplaypause=0xB3 }
-    [byte]$vk = 0
-    if ($keys.ContainsKey($name)) { $vk = $keys[$name] }
-    elseif ($name -match '^f([1-9]|1[0-9]|2[0-4])$') { $vk = [byte](0x6F + [int]$Matches[1]) }
-    elseif ($name.Length -eq 1) { $vk = [byte][char]$name.ToUpperInvariant() }
-    else { throw "unsupported-key:$name" }
-    [ZaalisNative]::keybd_event($vk,0,0,[UIntPtr]::Zero); [ZaalisNative]::keybd_event($vk,0,2,[UIntPtr]::Zero)
-    for ($i=$held.Count-1; $i -ge 0; $i--) { [ZaalisNative]::keybd_event($held[$i],0,2,[UIntPtr]::Zero) }
-  }
-  'open_terminal' { Start-Process -FilePath $(if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }) }
-  'activate_app' {
-    $target = [string]$a.path
-    $alias = $target.ToLowerInvariant()
-    $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
-    if ($alias -in @('chrome','chrome.exe')) {
-      $target = @("$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe", "$pf86\\Google\\Chrome\\Application\\chrome.exe", "$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-      if (-not $target) { throw 'chrome-not-found' }
-    } elseif ($alias -in @('edge','msedge','msedge.exe')) {
-      $target = @("$pf86\\Microsoft\\Edge\\Application\\msedge.exe", "$env:ProgramFiles\\Microsoft\\Edge\\Application\\msedge.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-      if (-not $target) { throw 'edge-not-found' }
-    } elseif ($alias -in @('notepad','notepad.exe')) {
-      # Sur Windows 11, « notepad » du PATH est un app-execution-alias (point de
-      # réanalyse) que Start-Process refuse de lancer. Le stub System32 relaie
-      # correctement vers le Bloc-notes du Store.
-      $target = Join-Path $env:WINDIR 'System32\\notepad.exe'
-    }
-    $baseName = [IO.Path]::GetFileNameWithoutExtension($target)
-    if ($alias -match 'chrome') { $baseName = 'chrome' }
-    elseif ($alias -match 'edge|msedge') { $baseName = 'msedge' }
-    elseif ($alias -match 'notepad') { $baseName = 'notepad' }
-    $proc = $null
-    try { $proc = Start-Process -FilePath $target -PassThru }
-    catch {
-      # Dernier recours pour les app-execution-aliases : cmd start sait les
-      # résoudre là où Start-Process échoue.
-      Start-Process -FilePath (Join-Path $env:WINDIR 'System32\\cmd.exe') -ArgumentList @('/c','start','""',('"' + $target + '"')) -WindowStyle Hidden
-    }
-    if ($proc) { try { [void]$proc.WaitForInputIdle(1800) } catch { Start-Sleep -Milliseconds 500 } } else { Start-Sleep -Milliseconds 700 }
-    $focusProc = $proc
-    for ($attempt=0; $attempt -lt 8; $attempt++) {
-      Start-Sleep -Milliseconds 180
-      $candidate = Get-Process -Name $baseName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object StartTime -Descending | Select-Object -First 1
-      if ($candidate) { $focusProc = $candidate; break }
-      try { $focusProc.Refresh() } catch {}
-    }
-    if (-not $focusProc) { throw "activate-app-window-not-found:$baseName" }
-    try {
-      $shell = New-Object -ComObject WScript.Shell
-      if (-not $shell.AppActivate($focusProc.Id)) {
-        if ($alias -match 'chrome') { [void]$shell.AppActivate('Google Chrome') }
-        elseif ($alias -match 'edge|msedge') { [void]$shell.AppActivate('Microsoft Edge') }
-        elseif ($alias -match 'notepad') { if (-not $shell.AppActivate('Bloc-notes')) { [void]$shell.AppActivate('Notepad') } }
-      }
-    } catch {}
-    if ($focusProc.MainWindowHandle) {
-      [void][ZaalisNative]::ShowWindowAsync($focusProc.MainWindowHandle, 9)
-      [ZaalisNative]::keybd_event(0x12,0,0,[UIntPtr]::Zero); [ZaalisNative]::keybd_event(0x12,0,2,[UIntPtr]::Zero)
-      [void][ZaalisNative]::BringWindowToTop($focusProc.MainWindowHandle)
-      [void][ZaalisNative]::SetForegroundWindow($focusProc.MainWindowHandle)
-      [ZaalisNative]::SwitchToThisWindow($focusProc.MainWindowHandle, $true)
-    }
-    Start-Sleep -Milliseconds 180
-    $ok.processId = $focusProc.Id
-    $ok.windowTitle = $focusProc.MainWindowTitle
-    $ok.windowHandle = [int64]$focusProc.MainWindowHandle
-  }
-  default { throw "unsupported-action:$($a.action)" }
-}
-$ok | ConvertTo-Json -Compress -Depth 7
-`;
-  return new Promise((resolve) => {
-    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
-      timeout: 30_000, windowsHide: true, maxBuffer: 24 * 1024 * 1024,
-      env: { ...process.env, ZAALIS_COMPUTER_ACTION: payload },
-    }, (error, stdout, stderr) => {
-      if (error) return resolve({ ok: false, error: (stderr || error.message || 'windows-computer-failed').trim().slice(0, 1000) });
-      try { resolve(JSON.parse(String(stdout).trim())); }
-      catch { resolve({ ok: false, error: 'windows-computer-invalid-response' }); }
-    });
-  });
-}
 
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
@@ -707,6 +37,7 @@ const automationManager = new AutomationManager({
   actionHandler: process.platform === 'win32' ? windowsComputerAction : null,
 });
 const terminalManager = new TerminalManager();
+const approvalStore = new ApprovalStore();
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
@@ -768,6 +99,12 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
 const COOKIE_NAME = 'zaalis_session';
+const sessionStore = new SessionStore({ dataDir: DATA_DIR });
+const executionBroker = new ExecutionBroker({
+  // An explicit development escape hatch is useful on unsupported platforms,
+  // but production builds remain fail-closed when no isolation backend exists.
+  requireSandbox: process.env.ZAALIS_ALLOW_UNSANDBOXED !== '1',
+});
 
 // One-time migration: copy data from the old location (next to the exe)
 // so existing accounts and chats are kept.
@@ -792,7 +129,7 @@ try {
 // API key vault — keys are encrypted at rest (AES-256-GCM) with a key derived
 // from the local install secret, stored per user and never sent back in clear.
 // ---------------------------------------------------------------------------
-const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
 
 function encryptSecret(plain) {
@@ -956,10 +293,12 @@ const SHARED_CONFIG_DEFAULTS = {
   ggufCtx: 8192,
   ggufVariant: '',
   ggufGpuLayers: '',
-  terminalProfile: 'cmd'
+  // Personal preferences applied to every model request. This is deliberately
+  // bounded: it is a preference field, not an unbounded prompt transport.
+  customSystemInstructions: '',
+  toolPermissions: { allow: [], ask: [], deny: [] }
 };
-const GGUF_VARIANTS = new Set(process.platform === 'win32' ? ['', 'cuda', 'cpu'] : ['', 'metal', 'cpu']);
-const TERMINAL_PROFILES = new Set(['cmd', 'powershell', 'pwsh', 'git-bash']);
+const GGUF_VARIANTS = new Set(['', 'metal', 'cpu']);
 
 function clampSharedGgufCtx(value) {
   const n = parseInt(value, 10);
@@ -989,20 +328,48 @@ function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
       ? ''
       : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
   }
-  if ('terminalProfile' in src) {
-    const value = String(src.terminalProfile || '').trim().toLowerCase();
-    out.terminalProfile = TERMINAL_PROFILES.has(value) ? value : SHARED_CONFIG_DEFAULTS.terminalProfile;
+  if ('customSystemInstructions' in src) {
+    out.customSystemInstructions = String(src.customSystemInstructions || '').trim().slice(0, 12000);
   }
+  if ('toolPermissions' in src) out.toolPermissions = normaliseRules(src.toolPermissions);
+  else out.toolPermissions = normaliseRules(out.toolPermissions);
   return out;
 }
 
 function sharedConfigForUser(user) {
   return sanitizeSharedConfig(user && user.sharedConfig);
 }
+
+function mergeCustomSystemInstructions(systemPrompt, config) {
+  const custom = String(config && config.customSystemInstructions || '').trim().slice(0, 12000);
+  if (!custom) return systemPrompt || '';
+  // Keep the product's safety, permission and tool boundaries authoritative.
+  // The user text is still sent as system context so tone and working style
+  // are consistent across providers.
+  return `${systemPrompt || ''}\n\n[USER PREFERENCES]\nApply these preferences when they do not conflict with higher-priority safety, security, permission, or tool-use rules:\n${custom}`;
+}
 function brainMcpForUser(user) {
   const saved = user && user.brainMcp;
   if (!saved || !saved.enabled) return null;
-  return brainMcp.validateConfig({ endpoint: saved.endpoint, token: saved.token ? decryptSecret(saved.token) : '' });
+  // A malformed or legacy encrypted value must never make the settings screen
+  // unavailable. Treat it as a disconnected Brain configuration instead.
+  try {
+    return brainMcp.validateConfig({ endpoint: saved.endpoint, token: saved.token ? decryptSecret(saved.token) : '' });
+  } catch {
+    return null;
+  }
+}
+function mcpServersForUser(user) {
+  const servers = Array.isArray(user && user.mcpServers) ? user.mcpServers : [];
+  return servers.map((saved) => {
+    const base = mcpRegistry.normaliseServer(saved);
+    if (!base) return null;
+    return { ...base, token: saved.token ? decryptSecret(saved.token) : '' };
+  }).filter(Boolean);
+}
+function mcpServerForUser(user, id) {
+  const wanted = mcpRegistry.safeId(id);
+  return mcpServersForUser(user).find((server) => server.id === wanted && server.enabled) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,13 +509,8 @@ app.get('/api/health', (_req, res) => {
 // Electron's dock is not a web client and therefore cannot carry a user cookie.
 // Its random per-launch bridge secret is the only accepted credential here.
 app.post('/api/automation/stop-bridge', async (req, res) => {
-  const supplied = req.headers['x-zaalis-computer'];
-  const validMacSecret = !!process.env.ZAALIS_COMPUTER_BRIDGE_SECRET && supplied === process.env.ZAALIS_COMPUTER_BRIDGE_SECRET;
-  // Bouton « Stopper l'IA » de l'overlay Windows : secret aléatoire généré à
-  // chaque lancement du serveur et transmis au processus de brume via env.
-  const validWindowsSecret = supplied === WINDOWS_FOG_SECRET;
-  if (!validMacSecret && !validWindowsSecret) return res.status(403).json({ error: 'Forbidden' });
-  await automationManager.stop(undefined, 'Arrêt demandé depuis l’application de bureau.');
+  if (!process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || req.headers['x-zaalis-computer'] !== process.env.ZAALIS_COMPUTER_BRIDGE_SECRET) return res.status(403).json({ error: 'Forbidden' });
+  await automationManager.stop(undefined, 'Arrêt demandé depuis l’interface Windows.');
   res.json({ ok: true });
 });
 app.use('/api', (req, res, next) => {
@@ -1176,7 +538,7 @@ app.use('/api', (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
-// DESKTOP COMPUTER CONTROL API
+// MACOS COMPUTER CONTROL API
 // ---------------------------------------------------------------------------
 app.get('/api/automation/status', (req, res) => {
   const active = automationManager.active;
@@ -1207,8 +569,7 @@ app.post('/api/terminal/sessions', (req, res) => {
   try {
     if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
     const cwd = resolveBase((req.body && req.body.cwd) || APP_DIR);
-    const profileId = sharedConfigForUser(req.user).terminalProfile;
-    const session = terminalManager.create({ userId: req.user.id, cwd, profileId, origin: 'user' });
+    const session = terminalManager.create({ userId: req.user.id, cwd });
     res.json(terminalManager.snapshot(session));
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1272,8 +633,7 @@ app.post('/api/profile', (req, res) => {
 app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
-    config: sharedConfigForUser(req.user),
-    terminalProfiles: terminalManager.profiles()
+    config: sharedConfigForUser(req.user)
   });
 });
 
@@ -1320,11 +680,52 @@ app.put('/api/brain-mcp', async (req, res) => {
     users[index].brainMcp = { enabled, endpoint, token: token ? encryptSecret(token) : '' };
     saveUsers(users);
     if (!enabled) return res.json({ configured: !!(endpoint && token), enabled: false, state: 'disconnected', detail: 'MCP Zaalis Brain désactivé dans l’IDE.' });
-    const result = await brainMcp.check(brainMcpForUser(users[index]));
-    res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint });
+    try {
+      const result = await brainMcp.check(brainMcpForUser(users[index]));
+      res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint });
+    } catch (err) {
+      // The configuration was saved successfully even when the local Brain
+      // service is offline. Returning a normal status prevents this optional
+      // integration from blocking API-key or general settings saves.
+      res.json({ configured: true, enabled: true, state: 'error', detail: err.message || 'Connexion MCP Zaalis Brain impossible.', endpoint });
+    }
   } catch (err) {
-    res.status(502).json({ error: err.message || 'Connexion MCP Zaalis Brain impossible.' });
+    res.status(500).json({ error: err.message || 'Configuration MCP Zaalis Brain impossible.' });
   }
+});
+
+// Generic MCP servers. Tokens remain encrypted in users.json and are never
+// returned to a browser/CLI; only this loopback server speaks MCP.
+app.get('/api/mcp', async (req, res) => {
+  const rows = mcpServersForUser(req.user).map((server) => ({ id: server.id, name: server.name, endpoint: server.endpoint, enabled: server.enabled, allow: server.allow, deny: server.deny }));
+  res.json({ servers: rows });
+});
+
+app.put('/api/mcp', (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+    const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers.slice(0, 20) : [];
+    const current = new Map((Array.isArray(req.user.mcpServers) ? req.user.mcpServers : []).map((item) => [item.id, item]));
+    const servers = [];
+    for (const item of incoming) {
+      const server = mcpRegistry.normaliseServer(item); if (!server) return res.status(400).json({ error: 'Configuration MCP invalide.' });
+      const supplied = String(item.token || '').trim(); const previous = current.get(server.id);
+      servers.push({ ...server, token: supplied ? encryptSecret(supplied) : (previous && previous.token || '') });
+    }
+    const users = loadUsers(); const index = users.findIndex((user) => user.id === req.user.id);
+    if (index < 0) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+    users[index].mcpServers = servers; saveUsers(users);
+    res.json({ servers: servers.map(({ token, ...server }) => server) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/mcp/:id/tools', async (req, res) => {
+  try {
+    const server = mcpServerForUser(req.user, req.params.id);
+    if (!server) return res.status(404).json({ error: 'Serveur MCP introuvable ou désactivé.' });
+    const tools = await mcpRegistry.tools(server);
+    res.json({ server: { id: server.id, name: server.name }, tools: tools.filter((tool) => tool && mcpRegistry.allowed(server, tool.name)).map((tool) => ({ name: tool.name, description: tool.description || '', inputSchema: tool.inputSchema || tool.input_schema || {} })) });
+  } catch (err) { res.status(502).json({ error: err.message }); }
 });
 
 
@@ -1332,8 +733,14 @@ app.put('/api/brain-mcp', async (req, res) => {
 // API KEYS API (protected) — write-only vault with masked read-back
 // ---------------------------------------------------------------------------
 // GET  /api/keys -> { keys: { openai: { set, last4 }, ... } }   (never the key)
+// A mobile session reaches the API over an internet-facing tunnel, so it only
+// gets the boolean presence flag — never the last4 fragment of a key.
 app.get('/api/keys', (req, res) => {
-  res.json({ keys: apiKeysStatus(req.user) });
+  const status = apiKeysStatus(req.user);
+  if (req.isMobile) {
+    for (const p of Object.keys(status)) status[p] = { set: !!status[p].set, last4: '' };
+  }
+  res.json({ keys: status });
 });
 
 // PUT /api/keys  { keys: { openai: 'sk-...', anthropic: null, ... } }
@@ -1382,6 +789,271 @@ app.put('/api/chats', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// DURABLE AGENT SESSIONS — SQLite index + append-only JSONL logs
+// ---------------------------------------------------------------------------
+app.get('/api/agent-sessions', (req, res) => {
+  try {
+    res.json({ sessions: sessionStore.list({
+      userId: req.user.id,
+      cwd: req.query.root ? resolveBase(req.query.root) : '',
+      includeArchived: req.query.archived === 'true',
+      query: req.query.query || '',
+      limit: req.query.limit,
+    }) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.post('/api/agent-sessions', (req, res) => {
+  try {
+    const body = req.body || {};
+    const session = sessionStore.create({ userId: req.user.id, cwd: resolveBase(body.root || body.cwd), title: body.title, model: body.model, submodel: body.submodel });
+    res.status(201).json({ session });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.get('/api/agent-sessions/:id', (req, res) => {
+  const session = sessionStore.get(req.params.id, req.user.id);
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.json({ session, events: sessionStore.events(session.id, req.user.id) || [] });
+});
+
+app.patch('/api/agent-sessions/:id', (req, res) => {
+  const session = sessionStore.update(req.params.id, req.user.id, req.body || {});
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.json({ session });
+});
+
+app.post('/api/agent-sessions/:id/fork', (req, res) => {
+  const session = sessionStore.fork(req.params.id, req.user.id, { title: req.body && req.body.title });
+  if (!session) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.status(201).json({ session });
+});
+
+app.get('/api/agent-sessions/:id/export', (req, res) => {
+  const exported = sessionStore.export(req.params.id, req.user.id);
+  if (!exported) return res.status(404).json({ error: 'Conversation introuvable.' });
+  res.setHeader('Content-Disposition', `attachment; filename="${exported.session.id}.json"`);
+  res.json(exported);
+});
+
+// ---------------------------------------------------------------------------
+// PROJECT SKILLS + LANGUAGE SERVICE
+// ---------------------------------------------------------------------------
+app.get('/api/skills', (req, res) => {
+  try {
+    const root = resolveBase(req.query.root);
+    res.json({ skills: skillsRegistry.discover(root).map(({ instructions, ...skill }) => skill) });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+app.get('/api/lsp/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || ''); const root = resolveBase(req.query.root);
+    if (action === 'symbols') return res.json({ symbols: languageService.symbols({ root, file: req.query.path }) });
+    if (action === 'diagnostics') return res.json({ diagnostics: languageService.diagnostics({ root, file: req.query.path }) });
+    if (action === 'references') return res.json({ references: languageService.references({ root, symbol: req.query.symbol, limit: req.query.limit }) });
+    if (action === 'definition') return res.json({ definition: languageService.definition({ root, symbol: req.query.symbol }) });
+    if (action === 'rename') return res.json({ plan: languageService.renamePlan({ root, symbol: req.query.symbol, replacement: req.query.replacement }) });
+    return res.status(404).json({ error: 'Action LSP inconnue.' });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// Exhaustive project inspection is separate from the convenience glob/grep
+// routes: it never silently truncates the whole result set, exposes every
+// exclusion, and lets callers resume with a cursor.
+app.get('/api/audit/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || '').toLowerCase();
+    if (!['inventory', 'glob', 'grep'].includes(action)) return res.status(404).json({ error: 'Action audit inconnue.' });
+    const root = resolveBase(req.query.root);
+    if (action === 'grep' && !String(req.query.pattern || '')) return res.status(400).json({ error: 'Le motif grep est requis.' });
+    const result = projectInspector[action]({
+      root, pattern: req.query.pattern, includeIgnored: req.query.includeIgnored === 'true',
+      cursor: req.query.cursor, limit: req.query.limit,
+    });
+    res.json({ action, ...result });
+  } catch (err) { res.status(400).json({ error: err.message }); }
+});
+
+// ---------------------------------------------------------------------------
+// SECURITY REVIEW WORKSPACE — durable job + real-time staged progress
+// ---------------------------------------------------------------------------
+const securityReviews = new Map();
+const SECURITY_REVIEW_STAGES = Object.freeze([
+  { id: 'preparing', label: 'Préparation de la revue', profile: 'explorer' },
+  { id: 'mapping_attack_surface', label: 'Cartographie de la surface d’attaque', profile: 'secrets' },
+  { id: 'reviewing_code', label: 'Revue du code', profile: 'source_to_sink' },
+  { id: 'validating_findings', label: 'Validation des constats', profile: 'validator' },
+  { id: 'tracing_impact', label: 'Traçage de l’impact', profile: 'dependencies' },
+  { id: 'building_report', label: 'Construction du rapport', profile: 'verifier' },
+]);
+
+function reviewSnapshot(review) {
+  const result = review.report ? {
+    summary: review.report.summary,
+    scope: review.report.scope,
+    threatModel: review.report.threatModel,
+    findings: (review.report.findings || []).slice(0, 300),
+    dependencies: review.report.dependencies,
+    scanners: review.report.scanners,
+    generatedAt: review.report.generatedAt,
+  } : null;
+  return {
+    id: review.id, sessionId: review.sessionId, root: review.root, workflow: review.workflow,
+    status: review.status, stage: review.stage, startedAt: review.startedAt, completedAt: review.completedAt || null,
+    stages: SECURITY_REVIEW_STAGES.map((stage) => ({ ...stage, status: review.stageStatus[stage.id] || 'pending' })),
+    agents: Object.values(review.agents), result, error: review.error || null,
+  };
+}
+
+function publishSecurityReview(review, event) {
+  const payload = { id: `security_event_${crypto.randomUUID()}`, ts: Date.now(), ...event };
+  review.events.push(payload); if (review.events.length > 400) review.events.shift();
+  review.emitter.emit('review', payload);
+  try { sessionStore.append(review.sessionId, { type: 'security_review_event', reviewId: review.id, event: payload }); } catch {}
+}
+
+function sleepReview(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
+function reviewActivity(stage, profile, phase, report) {
+  const total = report && report.summary ? Number(report.summary.total || 0) : 0;
+  const high = report && report.summary ? Number(report.summary.high || 0) : 0;
+  const noun = total > 1 ? 'constats' : 'constat';
+  if (phase === 'started') return `${profile.label} démarre : ${stage.label.toLowerCase()}.`;
+  if (phase === 'completed') {
+    if (stage.id === 'mapping_attack_surface') return `${profile.label} a cartographié le périmètre et identifié ${total} ${noun} candidat(s).`;
+    if (stage.id === 'validating_findings') return `${profile.label} a vérifié les preuves et le contexte des ${total} ${noun}.`;
+    if (stage.id === 'tracing_impact') return `${profile.label} a enrichi l’impact et la remédiation de chaque constat.`;
+    if (stage.id === 'building_report') return `${profile.label} a finalisé le rapport${high ? ` (${high} de sévérité élevée)` : ''}.`;
+    return `${profile.label} a terminé : ${stage.label.toLowerCase()}.`;
+  }
+  return `${profile.label} traite ${stage.label.toLowerCase()}.`;
+}
+function findingsForProfile(report, profile) {
+  const findings = report && Array.isArray(report.findings) ? report.findings : [];
+  if (profile === 'secrets') return findings.filter((item) => String(item.rule).startsWith('secret.'));
+  if (profile === 'source_to_sink') return findings.filter((item) => /child_process|eval|sql|path/.test(String(item.rule)));
+  if (profile === 'dependencies') return Object.keys(report && report.dependencies && report.dependencies.direct || {}).map((name) => ({ rule: 'dependency.inventory', file: 'package.json', message: name }));
+  return findings;
+}
+
+async function runSecurityReview(review) {
+  review.status = 'running';
+  publishSecurityReview(review, { type: 'status', status: review.status, activity: 'La revue sécurité démarre et prépare le périmètre du projet.', snapshot: reviewSnapshot(review) });
+  try {
+    // The local scanner is only a baseline. Every deep stage below delegates
+    // to the real agent loop, which must read files and use its tools.
+    review.report = securityPipeline.scan({ root: review.root, mode: review.workflow, includeIgnored: review.workflow === 'deep' });
+    for (const stage of SECURITY_REVIEW_STAGES) {
+      if (review.cancelRequested) throw Object.assign(new Error('Revue annulée.'), { code: 'cancelled' });
+      review.stage = stage.id; review.stageStatus[stage.id] = 'active';
+      const profile = agentProfile(stage.profile);
+      // A profile may participate in more than one phase (the explorer first
+      // prepares the scope, then maps attack surface). Keep each sub-agent
+      // visible as its own completed unit instead of overwriting it.
+      const agentId = `security-${stage.id}`;
+      review.agents[agentId] = { id: agentId, profile: stage.profile, label: profile.label, tools: profile.tools, status: 'running', findings: 0, stage: stage.id };
+      publishSecurityReview(review, { type: 'stage', stage: stage.id, status: 'active', agent: review.agents[agentId], activity: reviewActivity(stage, profile, 'started', review.report), snapshot: reviewSnapshot(review) });
+      if (!review.callModel) throw new Error('Modèle requis pour une revue sécurité approfondie.');
+      const baseline = (review.report.findings || []).slice(0, 80).map((f) => `${f.id} ${f.severity} ${f.file}:${f.line} ${f.message}`).join('\n');
+      const mission = `Revue sécurité, étape: ${stage.label}. Lis les fichiers pertinents avec les outils avant toute conclusion. Analyse uniquement le périmètre sécurité. Les constats locaux suivants sont des CANDIDATS, pas des vulnérabilités confirmées:\n${baseline || '(aucun candidat)'}.\nRends un rapport concis avec preuves fichier:ligne, constats à confirmer/écarter, impact, remédiation proposée et test éventuel. Ne modifie aucun fichier.`;
+      const agentResult = await runAgentTurn({ root: review.root, sessionId: review.sessionId, turnId: `security_${review.id}_${stage.id}`, agentId, model: review.model, submodel: review.submodel, message: mission, config: review.config, reasoningLevel: review.reasoningLevel, permissionMode: review.permissionMode, language: 'fr', callModel: review.callModel, securityPipeline, projectInspector, languageService, executionBroker, emitEvent: (event) => publishSecurityReview(review, { type: 'agent_event', stage: stage.id, agent: agentId, activity: `${profile.label} · ${event.type}`, detail: event, snapshot: reviewSnapshot(review) }) });
+      review.agents[agentId] = { ...review.agents[agentId], toolsUsed: (agentResult.toolResults || []).map((item) => item.tool), report: String(agentResult.response || '').slice(0, 5000), findings: (agentResult.toolResults || []).length };
+      // The local baseline stays candidate-only. A model report can recommend
+      // confirmation, but no regex hit is promoted automatically.
+      if (stage.id === 'tracing_impact') for (const finding of review.report.findings) {
+        finding.impact = finding.impact || 'À confirmer dans le chemin d’attaque indiqué par les agents.';
+        finding.remediation = finding.remediation || 'Correctif proposé dans le rapport des agents ; appliquer uniquement après validation.';
+      }
+      if (stage.id === 'building_report') review.report.markdown = securityPipeline.toMarkdown(review.report);
+      const reviewed = findingsForProfile(review.report, stage.profile);
+      review.agents[agentId] = { ...review.agents[agentId], status: 'completed', findings: reviewed.length };
+      review.stageStatus[stage.id] = 'completed';
+      publishSecurityReview(review, { type: 'stage', stage: stage.id, status: 'completed', agent: review.agents[agentId], activity: reviewActivity(stage, profile, 'completed', review.report), snapshot: reviewSnapshot(review) });
+    }
+    review.status = 'completed'; review.completedAt = new Date().toISOString();
+    const summary = review.report && review.report.summary || {};
+    publishSecurityReview(review, { type: 'completed', status: review.status, activity: `Review terminée : ${summary.total || 0} constat(s), dont ${summary.high || 0} élevé(s) et ${summary.medium || 0} moyen(s).`, snapshot: reviewSnapshot(review) });
+  } catch (error) {
+    review.status = error && error.code === 'cancelled' ? 'cancelled' : 'failed';
+    review.error = review.status === 'failed' ? (error.message || String(error)) : null;
+    review.completedAt = new Date().toISOString();
+    if (review.stage && review.stageStatus[review.stage] === 'active') review.stageStatus[review.stage] = review.status;
+    publishSecurityReview(review, { type: review.status, status: review.status, error: review.error, activity: review.status === 'cancelled' ? 'La revue sécurité a été annulée.' : `La revue sécurité a échoué : ${review.error}`, snapshot: reviewSnapshot(review) });
+  } finally {
+    setTimeout(() => securityReviews.delete(review.id), 30 * 60_000).unref();
+  }
+}
+
+function createSecurityReview({ userId, root, workflow = 'deep', model, submodel, callModel, config, reasoningLevel, permissionMode }) {
+  if (!model) throw new Error('Modèle requis pour une revue sécurité approfondie.');
+  const session = sessionStore.create({ userId, cwd: root, title: `Review sécurité · ${workflow}`, model, submodel });
+  const review = { id: `security_review_${crypto.randomUUID()}`, userId, sessionId: session.id, root, workflow, status: 'starting', stage: 'preparing', stageStatus: {}, agents: {}, events: [], emitter: new EventEmitter(), startedAt: new Date().toISOString(), completedAt: null, cancelRequested: false, report: null, error: null, model, submodel, callModel, config: config || {}, reasoningLevel: Number(reasoningLevel || 0), permissionMode: permissionMode || 'supervised' };
+  securityReviews.set(review.id, review);
+  publishSecurityReview(review, { type: 'created', activity: 'Revue IA approfondie créée.', snapshot: reviewSnapshot(review) });
+  setImmediate(() => { runSecurityReview(review); });
+  return review;
+}
+
+app.post('/api/security/reviews', (req, res) => {
+  try {
+    const body = req.body || {}; const workflow = String(body.workflow || 'scan').toLowerCase();
+    if (body.source !== 'slash') return res.status(403).json({ error: 'La revue sécurité est disponible uniquement via une commande slash.' });
+    if (!['diff', 'scan', 'deep'].includes(workflow)) return res.status(400).json({ error: 'Workflow de revue invalide.' });
+    const root = resolveBase(body.root || body.projectRoot);
+    const model = String(body.model || ''); const submodel = String(body.submodel || '');
+    if (!model) return res.status(400).json({ error: 'Sélectionnez un modèle pour la revue approfondie.' });
+    const cookie = req.headers.cookie || '';
+    const callModel = async (payload) => fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) }, body: JSON.stringify(payload) });
+    const review = createSecurityReview({ userId: req.user.id, root, workflow, model, submodel, callModel, config: { ...sharedConfigForUser(req.user), ...(body.config && typeof body.config === 'object' ? body.config : {}) }, reasoningLevel: body.reasoningLevel, permissionMode: body.permissionMode });
+    res.status(202).json({ review: reviewSnapshot(review) });
+  } catch (error) { res.status(400).json({ error: error.message || String(error) }); }
+});
+
+app.get('/api/security/reviews/:id', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).json({ error: 'Review sécurité introuvable.' });
+  res.json({ review: reviewSnapshot(review), events: review.events });
+});
+
+app.get('/api/security/reviews/:id/stream', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive');
+  const send = (event) => { try { res.write(`event: review\ndata: ${JSON.stringify(event)}\n\n`); } catch {} };
+  send({ type: 'snapshot', snapshot: reviewSnapshot(review) });
+  const listener = (event) => send(event);
+  review.emitter.on('review', listener);
+  req.on('close', () => review.emitter.removeListener('review', listener));
+});
+
+app.post('/api/security/reviews/:id/cancel', (req, res) => {
+  const review = securityReviews.get(String(req.params.id || ''));
+  if (!review || review.userId !== req.user.id) return res.status(404).json({ error: 'Review sécurité introuvable.' });
+  if (['completed', 'failed', 'cancelled'].includes(review.status)) return res.json({ review: reviewSnapshot(review) });
+  review.cancelRequested = true;
+  review.status = 'cancelling';
+  publishSecurityReview(review, { type: 'cancelling', status: 'cancelling', snapshot: reviewSnapshot(review) });
+  res.json({ review: reviewSnapshot(review) });
+});
+
+// ---------------------------------------------------------------------------
+// SECURITY PIPELINE — deterministic local baseline, JSON and SARIF output
+// ---------------------------------------------------------------------------
+app.post('/api/security/:action', (req, res) => {
+  try {
+    const action = String(req.params.action || '').toLowerCase();
+    if (!['diff', 'scan', 'deep', 'validate', 'fix', 'report'].includes(action)) return res.status(404).json({ error: 'Workflow sécurité inconnu.' });
+    const body = req.body || {};
+    if (body.source !== 'slash') return res.status(403).json({ error: 'Le scan sécurité est disponible uniquement via une commande slash.' });
+    const root = resolveBase(body.root || body.projectRoot);
+    let report = securityPipeline.scan({ root, mode: action, includeIgnored: action === 'deep' || body.includeIgnored === true });
+    if (action === 'validate') report = securityPipeline.validate(report, body.findingIds || []);
+    const output = action === 'fix' ? securityPipeline.fixPlan(report, body.findingIds || []) : (body.format === 'sarif' ? report.sarif : (body.format === 'markdown' ? report.markdown : report));
+    res.json({ report: output, summary: report.summary, generatedAt: report.generatedAt, workflow: action });
+  } catch (err) { res.status(400).json({ error: err.message }); }
 });
 
 // ---------------------------------------------------------------------------
@@ -1442,10 +1114,10 @@ async function fetchJSON(url, options) {
   }
   if (!res.ok) {
     const errMsg =
-      data.error?.message || data.message || data.error?.type ||
+      data.error?.message || data.error?.type ||
       (typeof data.error === 'string' ? data.error : '') ||
       (data.error ? JSON.stringify(data.error) : '') || res.statusText;
-    throw new Error(`HTTP ${res.status}: ${errMsg}`);
+    throw new Error(errMsg);
   }
   return data;
 }
@@ -1594,6 +1266,119 @@ app.post('/api/agent-image-download', async (req, res) => {
   }
 });
 
+function approvedProjectFile(root, relative) {
+  const base = fs.realpathSync(resolveBase(root));
+  const value = String(relative || '').replace(/\\/g, '/').replace(/^\.\//, '');
+  if (!value || value.split('/').some((part) => !part || part === '.' || part === '..')) throw new Error('Chemin de projet invalide.');
+  const full = path.resolve(base, value);
+  if (!isInsideBase(base, full)) throw new Error('Chemin hors projet refusé.');
+  // Existing symlinks are refused: approving project/foo must never overwrite
+  // a target outside the project through a link created between two turns.
+  let cursor = base;
+  for (const part of value.split('/')) {
+    cursor = path.join(cursor, part);
+    try { if (fs.lstatSync(cursor).isSymbolicLink()) throw new Error('Lien symbolique refusé.'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  }
+  return { base, full, relative: value };
+}
+
+function atomicProjectWrite(full, content) {
+  fs.mkdirSync(path.dirname(full), { recursive: true, mode: 0o700 });
+  const temp = `${full}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, String(content || ''), { encoding: 'utf8', mode: 0o600 });
+  fs.renameSync(temp, full);
+}
+
+function approvedEdit(content, hunks) {
+  let next = String(content || '');
+  for (const hunk of (Array.isArray(hunks) ? hunks : [])) {
+    const search = String(hunk && hunk.search || ''); const replace = String(hunk && hunk.replace || '');
+    if (!search) throw new Error('SEARCH vide refusé.');
+    const first = next.indexOf(search); const last = next.lastIndexOf(search);
+    if (first < 0) throw new Error('SEARCH introuvable.');
+    if (first !== last) throw new Error('SEARCH apparaît plusieurs fois.');
+    next = next.slice(0, first) + replace + next.slice(first + search.length);
+  }
+  return next;
+}
+
+function approvedGitCommand(input) {
+  const value = input && typeof input === 'object' ? input : {};
+  const quote = (item) => `'${String(item || '').replace(/'/g, "'\\''")}'`;
+  const action = String(value.action || '');
+  const branch = String(value.branch || '');
+  if (action === 'branch_create' && branch) return { command: `git switch -c ${quote(branch)}`, network: false };
+  if (action === 'worktree_create' && branch) {
+    const safeName = branch.replace(/[^A-Za-z0-9._-]/g, '-');
+    return { command: `mkdir -p .zaalis/worktrees && git worktree add ${quote(`.zaalis/worktrees/${safeName}`)} -b ${quote(branch)}`, network: false };
+  }
+  if (action === 'commit' && value.message && Array.isArray(value.paths) && value.paths.length) return { command: `git add -- ${value.paths.map(quote).join(' ')} && git commit -m ${quote(value.message)}`, network: false };
+  if (action === 'push' && branch) return { command: `git push ${quote(value.remote || 'origin')} ${quote(branch)}`, network: true };
+  throw new Error('Action Git approuvée invalide.');
+}
+
+function approvedGitPush(root, input) {
+  const remote = String(input && input.remote || 'origin');
+  const branch = String(input && input.branch || '');
+  if (!/^[A-Za-z0-9._/-]{1,80}$/.test(remote) || !/^[A-Za-z0-9._/-]{1,120}$/.test(branch)) throw new Error('Remote ou branche Git invalide.');
+  // This is a deliberately narrow privileged bridge: the exact remote and
+  // branch were bound to a single-use user approval, and no shell is invoked.
+  // It may access Git/SSH/Keychain credentials already configured by the user,
+  // something the general sandbox intentionally cannot do.
+  const env = {
+    PATH: process.env.PATH || '/usr/bin:/bin:/usr/sbin:/sbin',
+    HOME: os.homedir(),
+    LANG: process.env.LANG || 'en_US.UTF-8',
+    GIT_TERMINAL_PROMPT: '0',
+    ...(process.env.SSH_AUTH_SOCK ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK } : {}),
+  };
+  return new Promise((resolve) => {
+    let stdout = ''; let stderr = ''; let settled = false; let timedOut = false;
+    const done = (extra = {}) => {
+      if (settled) return; settled = true;
+      resolve({ stdout: stdout.slice(0, MAX_COMMAND_OUTPUT), stderr: stderr.slice(0, MAX_COMMAND_OUTPUT), timedOut, ...extra });
+    };
+    let child;
+    try { child = spawn('git', ['-C', root, 'push', remote, branch], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true }); } catch (error) { done({ exitCode: 1, error: error.message }); return; }
+    const append = (which, chunk) => { if (which === 'out') stdout += String(chunk); else stderr += String(chunk); };
+    child.stdout.on('data', (chunk) => append('out', chunk)); child.stderr.on('data', (chunk) => append('err', chunk));
+    const timer = setTimeout(() => { timedOut = true; try { child.kill('SIGTERM'); } catch {} }, Math.min(COMMAND_TIMEOUT_MS, 120_000));
+    child.on('error', (error) => { clearTimeout(timer); done({ exitCode: 1, error: error.message }); });
+    child.on('close', (exitCode) => { clearTimeout(timer); done({ exitCode: exitCode == null ? 1 : exitCode }); });
+  });
+}
+
+// Single-use approvals are bound to a user, session, call and exact JSON
+// input. This endpoint is the only supervised replay path; direct /api/file
+// and /api/exec calls cannot turn a policy deny into an approval.
+app.post('/api/agent-approval/execute', async (req, res) => {
+  try {
+    const body = req.body || {}; const tool = String(body.tool || '').toLowerCase(); const input = body.input && typeof body.input === 'object' ? body.input : {};
+    const valid = approvalStore.consume({ approvalId: body.approvalId, token: body.token, sessionId: body.sessionId, callId: body.callId, tool, input, userId: req.user.id });
+    if (!valid.ok) return res.status(403).json({ error: valid.reason, code: 'approval_required' });
+    const policy = evaluatePermission({ tool, input, mode: 'auto', rules: valid.context.rules });
+    if (policy.decision === 'deny') return res.status(403).json({ error: policy.reason, code: 'permission_denied' });
+    const root = valid.context.root;
+    let result;
+    if (tool === 'run') {
+      result = await executionBroker.run({ command: String(input.command || ''), root, write: input.write !== false, network: input.network === true });
+    } else if (tool === 'git_write') {
+      const git = approvedGitCommand(input);
+      result = input.action === 'push'
+        ? await approvedGitPush(root, input)
+        : await executionBroker.run({ command: git.command, root, write: true, network: git.network });
+    } else if (tool === 'write') {
+      result = executionBroker.writeFile({ root, path: input.path, content: input.content });
+    } else if (tool === 'edit') {
+      result = executionBroker.editFile({ root, path: input.path, hunks: input.hunks });
+    } else if (tool === 'image_download') {
+      result = { success: true, ...(await downloadProjectImage({ id: input.id, path: input.path, root })) };
+    } else return res.status(400).json({ error: 'Outil non approuvable.' });
+    approvalStore.prune();
+    res.json(result);
+  } catch (err) { res.status(400).json({ error: err.message || String(err), code: 'tool_failure' }); }
+});
+
 // ---------------------------------------------------------------------------
 // EXEC API
 // ---------------------------------------------------------------------------
@@ -1658,10 +1443,13 @@ function runShellCommand(command, cwd) {
 // POST /api/exec  { command, cwd }. Always returns the exit status: a command
 // that writes an error must never be presented to the user or an AI as success.
 app.post('/api/exec', async (req, res) => {
-  const { command, cwd } = req.body || {};
+  const { command, cwd, write, network } = req.body || {};
   if (!command) return res.status(400).json({ error: 'command is required' });
   try {
-    res.json(await runShellCommand(String(command), cwd || APP_DIR));
+    res.json(await executionBroker.run({
+      command: String(command), root: resolveBase(cwd || APP_DIR),
+      write: write !== false, network: network === true,
+    }));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -3431,6 +3219,8 @@ function transcribeWithMacSpeech(helper, wav, language) {
   });
 }
 
+// Téléchargement (unique) du modèle whisper, dans l'esprit des pulls gguf.
+let whisperPull = null;   // { status, completed, total, error }
 function transcribeWithWindowsSpeech(wav, language) {
   const locale = language === 'en' ? 'en-US' : 'fr-FR';
   const script = [
@@ -3443,7 +3233,6 @@ function transcribeWithWindowsSpeech(wav, language) {
     '$engine.SetInputToWaveFile($env:ZAALIS_STT_WAV)',
     '$result = $engine.Recognize()',
     'if ($result) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::Write($result.Text) }',
-    '$engine.Dispose()'
   ].join('; ');
   return new Promise((resolve, reject) => {
     execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
@@ -3451,13 +3240,11 @@ function transcribeWithWindowsSpeech(wav, language) {
       env: { ...process.env, ZAALIS_STT_WAV: wav },
     }, (err, stdout, stderr) => {
       if (err) reject(new Error(String(stderr || err.message || err).trim()));
-      else resolve(String(stdout || ''));
+      else resolve(String(stdout || '').trim());
     });
   });
 }
 
-// Téléchargement (unique) du modèle whisper, dans l'esprit des pulls gguf.
-let whisperPull = null;   // { status, completed, total, error }
 function startWhisperModelPull() {
   if (whisperPull && whisperPull.status === 'downloading') return whisperPull;
   if (fs.existsSync(whisperModelPath())) return { status: 'success' };
@@ -3557,8 +3344,8 @@ function voiceStatusSnapshot() {
       ready: !!macSpeech || windowsSpeech || !!(bin && model),
       engine: macSpeech ? 'macos-speech' : (windowsSpeech ? 'windows-speech' : (bin ? 'whisper' : 'none')),
       binary: !!(macSpeech || windowsSpeech || bin), model, pull,
-      hint: (macSpeech || windowsSpeech) ? '' : (bin ? (model ? '' : 'Modèle vocal en cours d\'installation…')
-                                                         : 'La reconnaissance vocale n’est pas installée sur ce PC.'),
+      hint: macSpeech ? '' : (bin ? (model ? '' : 'Modèle vocal en cours d\'installation…')
+                                      : 'La reconnaissance vocale sera disponible après la mise à jour de zaalis labs IDE.'),
     },
     tts: {
       ready: process.platform === 'darwin' || !!(piper && piperVoice),
@@ -3572,7 +3359,7 @@ function voiceStatusSnapshot() {
 // du modèle whisper si le binaire est là mais pas le modèle.
 app.get('/api/voice-status', (req, res) => {
   try {
-    if (!macSpeechHelper() && whisperBinary() && !fs.existsSync(whisperModelPath())) startWhisperModelPull();
+    if (!macSpeechHelper() && process.platform !== 'win32' && whisperBinary() && !fs.existsSync(whisperModelPath())) startWhisperModelPull();
     res.json(voiceStatusSnapshot());
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -3785,16 +3572,38 @@ app.post('/api/agent-chat', async (req, res) => {
     }
     const computerControl = b.computerControl === true;
     if (computerControl && req.isBrowser) return respondError(403, 'Le contrôle du PC est indisponible depuis Zaalis Browser.');
-    if (computerControl && !['codex', 'claude', 'gemini', 'grok', 'mistral', 'local', 'gguf'].includes(String(model))) {
+    if (computerControl && !['codex', 'claude', 'gemini', 'grok', 'mistral', 'kimi', 'local', 'gguf'].includes(String(model))) {
       return respondError(400, 'Le contrôle du PC est indisponible pour ce modèle.');
     }
 
     const root = resolveBase(b.root || b.projectRoot);
+    const existingSession = b.sessionId ? sessionStore.get(String(b.sessionId), req.user.id) : null;
+    const agentSession = existingSession || sessionStore.create({
+      userId: req.user.id,
+      cwd: root,
+      title: String(message).replace(/\s+/g, ' ').trim().slice(0, 120),
+      model,
+      submodel: b.submodel,
+    });
+    const turnId = `turn_${crypto.randomUUID()}`;
+    const suppliedRules = b.config && b.config.toolPermissions;
+    const runtimeConfig = {
+      ...sharedConfigForUser(req.user),
+      ...(b.config && typeof b.config === 'object' ? b.config : {}),
+      // The server is the authoritative enforcement point. A client may
+      // narrow its own session rules, but malformed rules never reach tools.
+      toolPermissions: normaliseRules(suppliedRules || sharedConfigForUser(req.user).toolPermissions),
+    };
+    runtimeConfig.customSystemInstructions = sharedConfigForUser(req.user).customSystemInstructions;
+    sessionStore.append(agentSession.id, { type: 'message', role: 'user', turnId, content: message });
     const cookie = req.headers.cookie || '';
     const callModel = async (payload) => {
       const requestedTimeout = parseInt(payload.timeoutMs, 10);
+      // A deep security audit carries a very large context and legitimately
+      // needs several minutes. The old 120s ceiling silently overrode the
+      // engine's own budget and killed healthy calls mid-report.
       const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-        ? Math.max(1000, Math.min(requestedTimeout, 120000))
+        ? Math.max(1000, Math.min(requestedTimeout, 300000))
         : 0;
       const ac = timeoutMs ? new AbortController() : null;
       const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
@@ -3813,7 +3622,7 @@ app.post('/api/agent-chat', async (req, res) => {
         });
       } catch (e) {
         if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
-        throw new Error(`[${String(payload.model || 'modele')}/${String(payload.submodel || 'defaut')}] ${e && e.message ? e.message : String(e)}`);
+        throw e;
       } finally {
         if (timer) clearTimeout(timer);
       }
@@ -3827,17 +3636,43 @@ app.post('/api/agent-chat', async (req, res) => {
       return r.ok ? { ok: true } : { ok: false, error: r.body && (r.body.message || r.body.error) };
     };
     const imageDownload = ({ id, path: imagePath }) => downloadProjectImage({ id, path: imagePath, root });
+    const configuredMcpServers = mcpServersForUser(req.user).filter((server) => server.enabled);
+    const agentMessage = configuredMcpServers.length
+      ? `${message}\n\n[MCP CONFIGURÉS]\nUtilise l’outil mcp uniquement si nécessaire. Serveurs disponibles : ${configuredMcpServers.map((server) => `${server.id} (${server.name})`).join(', ')}. Demande tools/list mentalement via le contexte ou appelle seulement un outil dont le nom a été confirmé.`
+      : message;
+    const webFetch = async (url, maxChars = 12000) => {
+      const target = new URL(String(url));
+      if (target.protocol !== 'https:' || !target.hostname || target.username || target.password) throw new Error('Seules les URLs HTTPS publiques sont autorisées.');
+      const addresses = await dns.lookup(target.hostname, { all: true });
+      const privateAddress = (address) => {
+        if (net.isIP(address) === 4) return /^(?:10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[0-1])\.)/.test(address);
+        const low = String(address).toLowerCase(); return low === '::1' || low.startsWith('fc') || low.startsWith('fd') || low.startsWith('fe80:');
+      };
+      if (!addresses.length || addresses.some((row) => privateAddress(row.address))) throw new Error('Adresse privée ou locale refusée.');
+      const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(15_000), headers: { 'User-Agent': 'zaalis-security-fetch/1.0' } });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return (await response.text()).replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, Math.max(100, Math.min(Number(maxChars) || 12000, 50000)));
+    };
     if (computerControl) {
       computerSession = await automationManager.start({ userId: req.user.id, permissionMode: b.permissionMode || 'supervised' });
       if (wantsStream) writeStreamEvent({ type: 'automation', session: automationManager.snapshot(computerSession) });
     }
 
+    const emitAgentEvent = (event) => {
+      sessionStore.append(agentSession.id, { type: 'agent_event', turnId, event });
+      // Internal events (per-round model transcripts) are persisted for
+      // post-mortem but never streamed: they are diagnostics, not UI.
+      if (wantsStream && !(event && event.internal)) writeStreamEvent(event);
+    };
     const result = await runAgentTurn({
       root,
+      sessionId: agentSession.id,
+      turnId,
+      agentId: String(b.agentId || 'lead').slice(0, 128),
       model,
       submodel: b.submodel,
-      message,
-      config: b.config || {},
+      message: agentMessage,
+      config: runtimeConfig,
       reasoningLevel: b.reasoningLevel,
       images: Array.isArray(b.images) ? b.images : [],
       history: Array.isArray(b.history) ? b.history : [],
@@ -3851,12 +3686,34 @@ app.post('/api/agent-chat', async (req, res) => {
       brainMcp: b.useBrain === true && brainMcpForUser(req.user)
         ? { callTool: (tool, args) => brainMcp.callTool(brainMcpForUser(req.user), tool, args) }
         : null,
+      mcpRegistry: {
+        callTool: (serverId, tool, args) => {
+          const server = mcpServerForUser(req.user, serverId);
+          if (!server) throw new Error('Serveur MCP non configuré ou désactivé.');
+          return mcpRegistry.call(server, tool, args);
+        },
+      },
+      languageService,
+      projectInspector,
       computerControl: computerControl ? automationManager : null,
       computerSession,
-      terminalControl: terminalManager,
-      terminalUserId: req.user.id,
-      emitEvent: wantsStream ? writeStreamEvent : undefined,
+      executionBroker,
+      securityPipeline,
+      webFetch,
+      emitEvent: emitAgentEvent,
     });
+    for (const toolResult of (Array.isArray(result.toolResults) ? result.toolResults : [])) {
+      if (!toolResult || toolResult.code !== 'approval_required' || toolResult.terminal || !toolResult.callId) continue;
+      toolResult.approval = approvalStore.issue({
+        sessionId: agentSession.id,
+        callId: toolResult.callId,
+        tool: toolResult.tool,
+        input: toolResult.input,
+        userId: req.user.id,
+        context: { root, rules: runtimeConfig.toolPermissions },
+      });
+    }
+    sessionStore.append(agentSession.id, { type: 'message', role: 'assistant', turnId, content: result.response || '', toolResults: result.toolResults || [] });
     if (computerSession) await automationManager.complete(computerSession);
     if (wantsStream) {
       writeStreamEvent({ type: 'done', result });
@@ -3917,71 +3774,60 @@ function parseMistralContent(content) {
   return { text: text.join(''), thinking: thinking.join('\n') };
 }
 
-function normalizeProviderHistory(history) {
-  if (!Array.isArray(history)) return [];
-  const safeCall = (call) => {
-    if (!call || typeof call !== 'object') return null;
-    const id = String(call.id || '').trim().slice(0, 200);
-    const fn = call.function && typeof call.function === 'object' ? call.function : null;
-    const name = String(fn && fn.name || '').trim();
-    const args = fn && fn.arguments;
-    if (!id || !name || (typeof args !== 'string' && typeof args !== 'object')) return null;
-    return { id, type: 'function', function: { name, arguments: typeof args === 'string' ? args.slice(0, 32000) : JSON.stringify(args).slice(0, 32000) } };
-  };
-  return history.flatMap((message) => {
-    if (!message || typeof message !== 'object') return [];
-    const role = String(message.role || '');
-    if (role === 'user') return typeof message.content === 'string' ? [{ role, content: message.content }] : [];
-    if (role === 'assistant') {
-      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map(safeCall).filter(Boolean) : [];
-      const content = message.content;
-      if (typeof content !== 'string' && !(toolCalls.length && content === null)) return [];
-      return [{ role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
-    }
-    if (role === 'tool') {
-      const name = String(message.name || '').trim();
-      const toolCallId = String(message.tool_call_id || '').trim().slice(0, 200);
-      if (!name || !toolCallId || typeof message.content !== 'string') return [];
-      return [{ role, name, tool_call_id: toolCallId, content: message.content.slice(0, 32000) }];
-    }
-    return [];
-  });
-}
-
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 app.post('/api/chat', async (req, res) => {
   try {
     const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
     const images = Array.isArray(req.body.images) ? req.body.images : [];
-    const continueAfterToolResult = req.body.continueAfterToolResult === true;
     // Prior conversation turns (memory). Each: { role: 'user'|'assistant', content: string }
-    const history = normalizeProviderHistory(req.body.history);
-    if (!model || (!message && !continueAfterToolResult)) {
+    const history = Array.isArray(req.body.history)
+      ? req.body.history
+          .filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .map((m) => ({
+            role: m.role,
+            content: m.content,
+            ...(m.role === 'assistant' && typeof m.reasoning_content === 'string'
+              ? { reasoning_content: m.reasoning_content }
+              : {}),
+          }))
+      : [];
+    if (!model || !message) {
       return res.status(400).json({ error: 'model and message are required' });
     }
 
     // API keys come from the encrypted per-user vault. Keys still sent by an
     // older client (pre-1.0.9 localStorage) are accepted as a fallback only.
-    const keys = { ...(config?.keys || {}), ...userApiKeys(req.user) };
-    const ollamaUrl = config?.ollamaUrl || 'http://127.0.0.1:11434';
-    const ollamaModel = config?.ollamaModel || 'llama3';
+    const runtimeConfig = { ...sharedConfigForUser(req.user), ...(config && typeof config === 'object' ? config : {}) };
+    // A saved preference is authoritative. This prevents an arbitrary web
+    // client from silently supplying a different persistent instruction set.
+    runtimeConfig.customSystemInstructions = sharedConfigForUser(req.user).customSystemInstructions;
+    const effectiveSystemPrompt = mergeCustomSystemInstructions(systemPrompt, runtimeConfig);
+    const keys = { ...(runtimeConfig.keys || {}), ...userApiKeys(req.user) };
+    const ollamaUrl = runtimeConfig.ollamaUrl || 'http://127.0.0.1:11434';
+    const ollamaModel = runtimeConfig.ollamaModel || 'llama3';
+    // Native calls are preferred by every capable provider. The text protocol
+    // remains a compatibility fallback for older/local models.
+    const useNativeTools = req.body.nativeTools === true || req.body.computerTools === true;
+    const computerOnlyTools = req.body.computerTools === true;
+    const providerTools = () => openAIFunctionTools({ computerOnly: computerOnlyTools });
 
     let responseText = '';
     let thinkingText = '';
     let usage = null;
-    let nativeToolCalls = null;
-    let nativeAssistantMessage = null;
+    let nativeToolCalls = [];
+    // Why the provider stopped. Without it, an answer cut at the token ceiling
+    // is indistinguishable from a finished one — every surface then treats a
+    // truncated security report as complete.
+    let finishReason = '';
 
     // ----- OpenAI (Codex) -----
     if (model === 'codex') {
       if (!keys.openai) return res.json({ response: '[OpenAI] Aucune cle API configuree.' });
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      // Keep native tool_calls and tool_call_id intact for providers that
-      // require a correlated assistant/tool exchange on the next request.
-      for (const h of history) messages.push(h);
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({
         role: 'user',
         content: images.length
@@ -3993,11 +3839,11 @@ app.post('/api/chat', async (req, res) => {
       });
 
       const openAIModel = submodel || 'gpt-5.6-sol';
-      const payload = { model: openAIModel, messages };
-      if (req.body.computerTools === true) {
-        payload.tools = [COMPUTER_FUNCTION_TOOL];
+      const payload = { model: openAIModel, messages, max_completion_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+      if (useNativeTools) {
+        payload.tools = providerTools();
         payload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
-        payload.parallel_tool_calls = false;
+        payload.parallel_tool_calls = !computerOnlyTools;
       }
       const openAIEffort = openAIReasoningEffort(openAIModel, reasoningLevel);
       if (openAIEffort) payload.reasoning_effort = openAIEffort;
@@ -4012,7 +3858,9 @@ app.post('/api/chat', async (req, res) => {
       });
 
       const openAIMessage = data.choices?.[0]?.message || {};
-      responseText = nativeComputerCallsAsText(openAIMessage.content || '', openAIMessage.tool_calls);
+      responseText = openAIMessage.content || '';
+      nativeToolCalls = Array.isArray(openAIMessage.tool_calls) ? openAIMessage.tool_calls : [];
+      finishReason = data.choices?.[0]?.finish_reason || '';
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
@@ -4036,13 +3884,9 @@ app.post('/api/chat', async (req, res) => {
         max_tokens: 4096,
         messages: claudeMessages,
       };
-      if (systemPrompt) body.system = systemPrompt;
-      if (req.body.computerTools === true) {
-        body.tools = [{
-          name: COMPUTER_FUNCTION_TOOL.function.name,
-          description: COMPUTER_FUNCTION_TOOL.function.description,
-          input_schema: COMPUTER_FUNCTION_TOOL.function.parameters,
-        }];
+      if (effectiveSystemPrompt) body.system = effectiveSystemPrompt;
+      if (useNativeTools) {
+        body.tools = anthropicTools({ computerOnly: computerOnlyTools });
         body.tool_choice = { type: req.body.computerToolChoice === 'any' ? 'any' : 'auto' };
       }
 
@@ -4075,11 +3919,10 @@ app.post('/api/chat', async (req, res) => {
       });
 
       // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
-      responseText = nativeComputerCallsAsText(
-        (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join(''),
-        (data.content || []).filter((c) => c.type === 'tool_use'),
-      );
+      responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+      nativeToolCalls = (data.content || []).filter((c) => c.type === 'tool_use');
       thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
+      finishReason = data.stop_reason || '';
       if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
     }
 
@@ -4097,14 +3940,9 @@ app.post('/api/chat', async (req, res) => {
       contents.push({ role: 'user', parts });
 
       const payload = { contents };
-      if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
-      if (req.body.computerTools === true) {
-        const { additionalProperties, ...geminiParameters } = COMPUTER_FUNCTION_TOOL.function.parameters;
-        payload.tools = [{ functionDeclarations: [{
-          name: COMPUTER_FUNCTION_TOOL.function.name,
-          description: COMPUTER_FUNCTION_TOOL.function.description,
-          parameters: geminiParameters,
-        }] }];
+      if (effectiveSystemPrompt) payload.system_instruction = { parts: [{ text: effectiveSystemPrompt }] };
+      if (useNativeTools) {
+        payload.tools = geminiTools({ computerOnly: computerOnlyTools });
         const geminiMode = req.body.computerToolChoice === 'any' ? 'ANY' : 'AUTO';
         payload.toolConfig = { functionCallingConfig: {
           mode: geminiMode,
@@ -4139,11 +3977,10 @@ app.post('/api/chat', async (req, res) => {
       });
 
       const geminiParts = data.candidates?.[0]?.content?.parts || [];
-      responseText = nativeComputerCallsAsText(
-        geminiParts.filter((p) => !p.thought).map((p) => p.text || '').join(''),
-        geminiParts.filter((p) => p.functionCall),
-      );
+      responseText = geminiParts.filter((p) => !p.thought && !p.functionCall).map((p) => p.text || '').join('');
+      nativeToolCalls = geminiParts.filter((p) => p.functionCall);
       thinkingText = geminiParts.filter((p) => p.thought).map((p) => p.text || '').join('\n');
+      finishReason = data.candidates?.[0]?.finishReason || '';
       if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
     }
 
@@ -4182,7 +4019,7 @@ app.post('/api/chat', async (req, res) => {
         }
       } else {
         const messages = [];
-        if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+        if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
         for (const h of history) messages.push({ role: h.role, content: h.content });
         messages.push({
           role: 'user',
@@ -4195,11 +4032,11 @@ app.post('/api/chat', async (req, res) => {
         });
 
         const grokModel = submodel || 'grok-4.5';
-        const grokPayload = { model: grokModel, messages };
-        if (req.body.computerTools === true) {
-          grokPayload.tools = [COMPUTER_FUNCTION_TOOL];
+        const grokPayload = { model: grokModel, messages, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+        if (useNativeTools) {
+          grokPayload.tools = providerTools();
           grokPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
-          grokPayload.parallel_tool_calls = false;
+          grokPayload.parallel_tool_calls = !computerOnlyTools;
         }
         const grokEffort = xaiReasoningEffort(grokModel, reasoningLevel);
         if (grokEffort) grokPayload.reasoning_effort = grokEffort;
@@ -4214,8 +4051,10 @@ app.post('/api/chat', async (req, res) => {
         });
 
         const grokMessage = data.choices?.[0]?.message || {};
-        responseText = nativeComputerCallsAsText(grokMessage.content || '', grokMessage.tool_calls);
+        responseText = grokMessage.content || '';
+        nativeToolCalls = Array.isArray(grokMessage.tool_calls) ? grokMessage.tool_calls : [];
         thinkingText = grokMessage.reasoning_content || '';
+        finishReason = data.choices?.[0]?.finish_reason || '';
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
       }
     }
@@ -4225,30 +4064,26 @@ app.post('/api/chat', async (req, res) => {
       if (!keys.mistral) return res.json({ response: '[Mistral] Aucune cle API configuree.' });
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      // Mistral requires the assistant tool-call message and its matching
-      // tool result verbatim before it can continue the conversation.
-      for (const h of history) messages.push(h);
-      if (!continueAfterToolResult) {
-        messages.push({
-          role: 'user',
-          content: images.length
-            ? [
-                { type: 'text', text: message },
-                ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
-              ]
-            : message,
-        });
-      }
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
+      for (const h of history) messages.push({ role: h.role, content: h.content });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
+            ]
+          : message,
+      });
 
       const mistralModel = submodel || 'mistral-medium-3-5';
-      const mistralPayload = { model: mistralModel, messages };
-      if (req.body.computerTools === true) {
-        mistralPayload.tools = [COMPUTER_FUNCTION_TOOL];
+      const mistralPayload = { model: mistralModel, messages, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+      if (useNativeTools) {
+        mistralPayload.tools = providerTools();
         mistralPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'any' : 'auto';
         // Desktop steps depend on the previous result (activate, observe,
         // interact), so ask for one ordered call at a time.
-        mistralPayload.parallel_tool_calls = false;
+        mistralPayload.parallel_tool_calls = !computerOnlyTools;
       }
       if (mistralModel === 'mistral-medium-3-5' || mistralModel === 'mistral-small-latest') {
         mistralPayload.reasoning_effort = pickReasoningValue(['none', 'high'], reasoningLevel);
@@ -4265,24 +4100,66 @@ app.post('/api/chat', async (req, res) => {
 
       const mistralMessage = data.choices?.[0]?.message || {};
       const mistralContent = parseMistralContent(mistralMessage.content);
-      responseText = nativeComputerCallsAsText(mistralContent.text, mistralMessage.tool_calls);
+      responseText = mistralContent.text;
+      nativeToolCalls = Array.isArray(mistralMessage.tool_calls) ? mistralMessage.tool_calls : [];
       thinkingText = mistralContent.thinking;
-      if (Array.isArray(mistralMessage.tool_calls) && mistralMessage.tool_calls.length) {
-        nativeToolCalls = mistralMessage.tool_calls;
-        nativeAssistantMessage = {
-          role: 'assistant',
-          content: mistralMessage.content == null ? null : mistralMessage.content,
-          tool_calls: mistralMessage.tool_calls,
-        };
-      }
+      finishReason = data.choices?.[0]?.finish_reason || '';
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+    }
+
+    // ----- Moonshot AI (Kimi) -----
+    else if (model === 'kimi') {
+      if (!keys.moonshot) return res.json({ response: '[Kimi] Aucune cle API Moonshot configuree.' });
+
+      const messages = [];
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
+      for (const h of history) messages.push({
+        role: h.role,
+        content: h.content,
+        ...(h.role === 'assistant' && h.reasoning_content ? { reasoning_content: h.reasoning_content } : {}),
+      });
+      messages.push({
+        role: 'user',
+        content: images.length
+          ? [
+              { type: 'text', text: message },
+              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
+            ]
+          : message,
+      });
+
+      const kimiModel = submodel || 'kimi-k3';
+      const kimiPayload = buildKimiPayload({
+        model: kimiModel,
+        messages,
+        reasoningLevel,
+        tools: useNativeTools ? providerTools() : undefined,
+        requireTool: req.body.computerToolChoice === 'any',
+        maxTokens: responseIntegrity.MAX_OUTPUT_TOKENS,
+      });
+
+      const data = await fetchJSON('https://api.moonshot.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${keys.moonshot}`,
+        },
+        body: JSON.stringify(kimiPayload),
+      });
+
+      const kimiResult = parseKimiResponse(data);
+      responseText = kimiResult.content;
+      nativeToolCalls = Array.isArray(kimiResult.toolCalls) ? kimiResult.toolCalls : [];
+      thinkingText = kimiResult.thinking;
+      finishReason = kimiResult.finishReason || '';
+      usage = kimiResult.usage;
     }
 
     // ----- Ollama (Local) -----
     else if (model === 'local') {
       const messages = [];
-      if (systemPrompt) {
-        messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) {
+        messages.push({ role: 'system', content: effectiveSystemPrompt });
       }
       for (const h of history) {
         messages.push({ role: h.role, content: h.content });
@@ -4318,7 +4195,7 @@ app.post('/api/chat', async (req, res) => {
         options: { num_ctx: numCtx, num_predict: Math.max(512, numPredict) },
         keep_alive: '10m'
       };
-      if (req.body.computerTools === true) ollamaBody.tools = [COMPUTER_FUNCTION_TOOL];
+      if (useNativeTools) ollamaBody.tools = providerTools();
 
       // Abort if Ollama takes longer than 5 minutes.
       const ollamaAC = new AbortController();
@@ -4332,7 +4209,9 @@ app.post('/api/chat', async (req, res) => {
         });
         clearTimeout(ollamaTimeout);
 
-        responseText = nativeComputerCallsAsText(data.message?.content || '', data.message?.tool_calls);
+        responseText = data.message?.content || '';
+        nativeToolCalls = Array.isArray(data.message?.tool_calls) ? data.message.tool_calls : [];
+        finishReason = data.done_reason || '';
 
         // deepseek-r1 etc. embed reasoning inside <think>...</think>.
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
@@ -4340,8 +4219,8 @@ app.post('/api/chat', async (req, res) => {
 
         // Strip system prompt echo — some models regurgitate the instructions.
         // Detect and remove if the response starts with a large chunk of the system prompt.
-        if (systemPrompt && responseText.length > 0) {
-          const sysNorm = systemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
+        if (effectiveSystemPrompt && responseText.length > 0) {
+          const sysNorm = effectiveSystemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
           const resNorm = responseText.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
           if (resNorm.startsWith(sysNorm.slice(0, 80))) {
             // Find where the echo ends and keep only the original content.
@@ -4353,7 +4232,7 @@ app.post('/api/chat', async (req, res) => {
               const lines = responseText.split('\n');
               let cut = 0;
               for (let i = 0; i < lines.length && i < 30; i++) {
-                if (systemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
+                if (effectiveSystemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
                 else break;
               }
               if (cut > 0) responseText = lines.slice(cut).join('\n').trim();
@@ -4389,18 +4268,18 @@ app.post('/api/chat', async (req, res) => {
       }
 
       const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      if (effectiveSystemPrompt) messages.push({ role: 'system', content: effectiveSystemPrompt });
       for (const h of history) messages.push({ role: h.role, content: h.content });
       messages.push({ role: 'user', content: message });
 
       const ggufAC = new AbortController();
       const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
       try {
-        const ggufBody = { model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 };
-        if (req.body.computerTools === true) {
-          ggufBody.tools = [COMPUTER_FUNCTION_TOOL];
+        const ggufBody = { model: 'local', messages, stream: false, temperature: 0.7, max_tokens: responseIntegrity.MAX_OUTPUT_TOKENS };
+        if (useNativeTools) {
+          ggufBody.tools = providerTools();
           ggufBody.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
-          ggufBody.parallel_tool_calls = false;
+          ggufBody.parallel_tool_calls = !computerOnlyTools;
         }
         const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
           method: 'POST',
@@ -4410,7 +4289,9 @@ app.post('/api/chat', async (req, res) => {
         });
         clearTimeout(ggufTimeout);
         const ggufMessage = data.choices?.[0]?.message || {};
-        responseText = nativeComputerCallsAsText(ggufMessage.content || '', ggufMessage.tool_calls);
+        responseText = ggufMessage.content || '';
+        nativeToolCalls = Array.isArray(ggufMessage.tool_calls) ? ggufMessage.tool_calls : [];
+        finishReason = data.choices?.[0]?.finish_reason || '';
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
         if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
@@ -4428,7 +4309,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Final safety net: strip any response that begins with the anti-leak marker
     // or echoes the system instructions (applies to ALL providers).
-    if (systemPrompt && responseText) {
+    if (effectiveSystemPrompt && responseText) {
       const markers = ['[REGLE ABSOLUE]', '[ABSOLUTE RULE]', 'Tu es un agent de code', 'You are a coding agent', 'Tu es un assistant de code', 'You are a coding assistant'];
       for (const mk of markers) {
         if (responseText.startsWith(mk)) {
@@ -4442,12 +4323,21 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
+    // Integrity metadata travels with every answer so the three surfaces
+    // (desktop chat, agent loop, CLI) apply the same rule instead of each
+    // trusting the raw text. The text itself is returned untouched: the agent
+    // loop still has to parse tool calls out of it.
+    const integrity = responseIntegrity.analyzeAnswer(responseText);
+    const truncated = responseIntegrity.isTruncated(finishReason);
     res.json({
       response: responseText,
       thinking: thinkingText || undefined,
       usage: usage || undefined,
-      nativeToolCalls: nativeToolCalls || undefined,
-      nativeAssistantMessage: nativeAssistantMessage || undefined,
+      toolCalls: nativeToolCalls.length ? nativeToolCalls : undefined,
+      finishReason: finishReason || undefined,
+      truncated: truncated || undefined,
+      degenerate: integrity.degenerate || undefined,
+      degenerateReason: integrity.degenerate ? integrity.reason : undefined,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -4885,7 +4775,3 @@ app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT} (local access only)`);
   startOllamaIfNeeded();
 });
-
-// Exposed for the Windows end-to-end control smoke test. The HTTP API remains
-// authenticated; this export is not reachable from the browser.
-module.exports.windowsComputerAction = windowsComputerAction;

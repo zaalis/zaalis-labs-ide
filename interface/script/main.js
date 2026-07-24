@@ -6,6 +6,7 @@ const SETTINGS_SECTION_TITLES = {
     mcp: 'MCP',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
+    instructions: 'settings-instructions-title',
     hardware: 'settings-hardware-title',
     project: 'settings-project-title',
     privacy: 'settings-privacy-title',
@@ -51,14 +52,14 @@ function applyAppearance() {
 // IDs of the settings <select> elements that should render as rounded custom
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
-    'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
+    'settings-lang-select', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
 function normalizeGgufVariant(value) {
-    return value === 'cuda' || value === 'cpu' ? value : '';
+    return value === 'metal' || value === 'cpu' ? value : '';
 }
 
 function initSettingsCustomSelects() {
@@ -76,7 +77,7 @@ function sharedHardwareConfigPayload() {
         ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
         ggufVariant: normalizeGgufVariant(c.ggufVariant),
         ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
-        terminalProfile: c.terminalProfile || 'cmd'
+        customSystemInstructions: String(c.customSystemInstructions || '').trim().slice(0, 12000)
     };
 }
 
@@ -91,22 +92,7 @@ function applySharedHardwareConfig(config) {
         const raw = config.ggufGpuLayers;
         c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
     }
-    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || 'cmd');
-}
-
-function populateTerminalProfiles(profiles) {
-    const select = $('#settings-terminal-profile');
-    if (!select || !Array.isArray(profiles)) return;
-    select.replaceChildren(...profiles.map((profile) => {
-        const option = document.createElement('option');
-        option.value = profile.id;
-        option.textContent = profile.label + (profile.available ? '' : ' (non installé)');
-        option.disabled = !profile.available;
-        return option;
-    }));
-    const saved = state.config.terminalProfile || 'cmd';
-    state.config.terminalProfile = select.querySelector(`option[value="${saved}"]:not(:disabled)`) ? saved : 'cmd';
-    select.value = state.config.terminalProfile;
+    if ('customSystemInstructions' in config) c.customSystemInstructions = String(config.customSystemInstructions || '').trim().slice(0, 12000);
 }
 
 async function syncSharedHardwareConfig() {
@@ -124,7 +110,6 @@ async function loadSharedHardwareConfig() {
         const res = await fetch('/api/config');
         if (!res.ok) return;
         const data = await res.json();
-        populateTerminalProfiles(data.terminalProfiles);
         if (data && data.configured && data.config) {
             applySharedHardwareConfig(data.config);
             saveState();
@@ -145,7 +130,6 @@ function populateSettingsControls() {
         el.dispatchEvent(new Event('change')); // refresh custom-select display
     };
     setVal('settings-lang-select', state.language || 'fr');
-    setVal('settings-terminal-profile', c.terminalProfile || 'cmd');
     setVal('gguf-variant-select', normalizeGgufVariant(c.ggufVariant));
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
@@ -155,6 +139,8 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
+    const customInstructions = $('#settings-custom-system-instructions');
+    if (customInstructions) customInstructions.value = c.customSystemInstructions || '';
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -176,7 +162,7 @@ $('#close-modal').addEventListener('click', () => $('#settings-modal').classList
 $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
-const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -221,7 +207,7 @@ async function migrateLegacyApiKeys() {
         });
         if (res.ok) {
             legacyApiKeysForMigration = null;
-            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
             saveState();
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
@@ -233,9 +219,24 @@ async function refreshSecureSettings() {
     await migrateLegacyApiKeys();
     await loadApiKeyStatus();
     await loadBrainMcpStatus();
+    await loadGenericMcpServers();
 }
 
 let brainMcpWasConfigured = false;
+let genericMcpLoaded = false;
+async function loadGenericMcpServers() {
+    const field = $('#mcp-servers-json');
+    if (!field) return [];
+    try {
+        const res = await fetch('/api/mcp');
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        const servers = Array.isArray(data.servers) ? data.servers : [];
+        field.value = JSON.stringify(servers, null, 2);
+        genericMcpLoaded = true;
+        return servers;
+    } catch { genericMcpLoaded = false; return []; }
+}
 function setBrainMcpStatus(status) {
     const el = $('#brain-mcp-status');
     if (!el) return;
@@ -246,7 +247,13 @@ function setBrainMcpStatus(status) {
 async function loadBrainMcpStatus() {
     try {
         const res = await fetch('/api/brain-mcp');
-        const status = await res.json();
+        const status = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            const failed = { configured: false, enabled: false, state: 'error', detail: status.error || `HTTP ${res.status}` };
+            brainMcpWasConfigured = false;
+            setBrainMcpStatus(failed);
+            return failed;
+        }
         brainMcpWasConfigured = !!status.configured;
         setBrainMcpStatus(status);
         const enabled = $('#brain-mcp-enabled'); if (enabled) enabled.checked = !!status.enabled;
@@ -271,9 +278,6 @@ $('#save-btn').addEventListener('click', async () => {
     if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
     const variantSelect = $('#gguf-variant-select');
     if (variantSelect) state.config.ggufVariant = normalizeGgufVariant(variantSelect.value);
-    const previousTerminalProfile = state.config.terminalProfile || 'cmd';
-    const terminalProfile = $('#settings-terminal-profile');
-    if (terminalProfile && terminalProfile.value) state.config.terminalProfile = terminalProfile.value;
     const ollamaUrlInput = $('#ollama-url');
     state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
@@ -291,6 +295,7 @@ $('#save-btn').addEventListener('click', async () => {
     if (defChat) c.aiModel = defChat;
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
+    c.customSystemInstructions = ($('#settings-custom-system-instructions')?.value || '').trim().slice(0, 12000);
     // ----- Hardware advanced -----
     c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
@@ -308,14 +313,39 @@ $('#save-btn').addEventListener('click', async () => {
     btn.disabled = true;
     try {
         await syncSharedHardwareConfig();
-        if (state.config.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
+        let genericMcpSaveError = '';
+        const genericMcpField = $('#mcp-servers-json');
+        if (genericMcpField && genericMcpLoaded) {
+            try {
+                const raw = genericMcpField.value.trim();
+                const servers = raw ? JSON.parse(raw) : [];
+                if (!Array.isArray(servers)) throw new Error('La configuration MCP doit être une liste JSON.');
+                const response = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+                genericMcpField.value = JSON.stringify(data.servers || [], null, 2);
+            } catch (err) { genericMcpSaveError = err.message || 'Configuration MCP invalide.'; }
+        }
+        let brainSaveError = '';
         const brainEnabled = !!$('#brain-mcp-enabled')?.checked;
         const brainEndpoint = ($('#brain-mcp-endpoint')?.value || '').trim();
         const brainToken = ($('#brain-mcp-token')?.value || '').trim();
         if (brainEnabled || brainEndpoint || brainToken || brainMcpWasConfigured) {
-            const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: brainEnabled, endpoint: brainEndpoint || undefined, token: brainToken || undefined }) });
-            if (!brainRes.ok) { const body = await brainRes.json().catch(() => ({})); throw new Error(body.error || 'brain-mcp'); }
-            setBrainMcpStatus(await brainRes.json());
+            try {
+                const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: brainEnabled, endpoint: brainEndpoint || undefined, token: brainToken || undefined }) });
+                const brainStatus = await brainRes.json().catch(() => ({}));
+                if (!brainRes.ok) {
+                    brainSaveError = brainStatus.error || `HTTP ${brainRes.status}`;
+                    setBrainMcpStatus({ state: 'error', detail: brainSaveError });
+                } else {
+                    brainMcpWasConfigured = !!brainStatus.configured;
+                    setBrainMcpStatus(brainStatus);
+                    if (brainStatus.state === 'error') brainSaveError = brainStatus.detail || 'Connexion MCP Zaalis Brain impossible.';
+                }
+            } catch (err) {
+                brainSaveError = err.message || 'Connexion MCP Zaalis Brain impossible.';
+                setBrainMcpStatus({ state: 'error', detail: brainSaveError });
+            }
         }
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
@@ -327,7 +357,12 @@ $('#save-btn').addEventListener('click', async () => {
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
         }
-        btn.textContent = 'OK';
+        if (brainSaveError || genericMcpSaveError) {
+            btn.textContent = state.language === 'en' ? 'Saved · MCP error' : 'Enregistré · erreur MCP';
+            toast([brainSaveError, genericMcpSaveError].filter(Boolean).join(' · '));
+        } else {
+            btn.textContent = 'OK';
+        }
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
     } catch {
         btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
@@ -392,7 +427,7 @@ if (clearKeysBtn) clearKeysBtn.addEventListener('click', async () => {
         const nulls = {}; API_KEY_FIELDS.forEach(p => nulls[p] = null);
         const res = await fetch('/api/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: nulls }) });
         if (res.ok) { const data = await res.json(); updateApiKeyInputs(data.keys || {}); }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
         toast(state.language === 'en' ? 'API keys deleted.' : 'Clés API supprimées.');
     } catch {}
 });

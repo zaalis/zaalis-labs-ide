@@ -9,6 +9,7 @@ const state = {
     lastProjectRoot: null,
     openFiles: {}, // { [filePath]: { name, content, unsaved } }
     activeFile: null, // filePath or null
+    securityReview: { open: false, id: null, previousFile: null, data: null },
     reasoningLevel: 0, // 0 = MIN, 1 = MED, 2 = MAX
     responseStyle: 'normal', // 'normal' | 'fast' | 'deep'  (/fast, /deep)
     config: {
@@ -37,14 +38,16 @@ const state = {
         // ----- Advanced hardware (GGUF engine) -----
         ggufCtx: 8192,                  // default context size for the local engine
         ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
+        customSystemInstructions: '',   // persistent style / system preferences for every model
         // Persistent Claude-Code-style tool rules. Examples: Bash(npm test:*),
         // Read, Edit(src/**). Deny rules always take priority.
-        toolPermissions: { allow: [], deny: [] },
-        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
+        toolPermissions: { allow: [], ask: [], deny: [] },
+        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' }
     },
     profile: { pseudo: 'Utilisateur', photo: '' },
     conversations: [],        // single-chat history
     currentConvId: null,
+    agentSessionId: null,     // durable server-side JSONL session for the active chat
     chatHistory: [],          // API memory for the current chat [{role, content}]
     contextTokens: 0,         // estimated tokens currently in context
     agentConversations: [],   // agents-mode history (separate)
@@ -65,6 +68,7 @@ const SUBMODELS = {
     gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
     grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
     mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+    kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
     local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
     gguf:   []   // populated from installed .gguf files via /api/gguf-models
 };
@@ -85,12 +89,14 @@ const MODEL_LABELS = {
     'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
     'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
     'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
-    'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08'
+    'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
+    'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
+    'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6'
 };
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
 // Maker names per provider, used to tell the model its own identity.
-const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', local: 'Ollama', gguf: 'llama.cpp' };
+const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', kimi: 'Moonshot AI', local: 'Ollama', gguf: 'llama.cpp' };
 
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
@@ -171,6 +177,13 @@ const CONTEXT_WINDOWS = {
         'codestral-latest': 256000,
         _default: 256000
     },
+    kimi: {
+        'kimi-k3': 1000000,
+        'kimi-k2.7-code': 256000,
+        'kimi-k2.7-code-highspeed': 256000,
+        'kimi-k2.6': 256000,
+        _default: 256000
+    },
     local: {
         _default: 8000
     },
@@ -220,20 +233,20 @@ function fmtDuration(ms) {
 // ==========================================================
 //  PERMISSION MODES (Claude-Code-style)
 // ==========================================================
-// supervised : ask before every write/edit/run         (UI selector)
-// semi       : write/edit auto, ask before run          (UI selector)
-// auto       : everything auto, ask only for dangerous  (UI selector)
+// supervised : commands run freely; ask before any file write/edit (UI selector)
+// semi       : broad autonomy; ask only for sensitive/dangerous     (UI selector)
+// auto       : everything auto, ask only for dangerous/publish       (UI selector)
 // plan       : read/search only, NEVER write or run     (/plan, /permissions)
 // read-only  : read/search only, NEVER write or run     (/permissions)
-// bypass     : everything, no confirmation at all        (/permissions, danger)
+// bypass     : NO restriction — reads/edits secrets (.env) in clear, no prompt (danger)
 const PERMISSION_MODES = ['read-only', 'plan', 'supervised', 'semi', 'auto', 'bypass'];
 const PERMISSION_LABELS = {
-    'read-only': { fr: 'Lecture seule', en: 'Read-only' },
-    plan:        { fr: 'Plan',          en: 'Plan' },
-    supervised:  { fr: 'Supervisé',     en: 'Supervised' },
-    semi:        { fr: 'Semi-auto',     en: 'Semi-auto' },
-    auto:        { fr: 'Autonome',      en: 'Autonomous' },
-    bypass:      { fr: 'Bypass',        en: 'Bypass' }
+    'read-only': { fr: 'Lecture seule',      en: 'Read-only' },
+    plan:        { fr: 'Plan',               en: 'Plan' },
+    supervised:  { fr: 'Supervisé',          en: 'Supervised' },
+    semi:        { fr: 'Semi-auto',          en: 'Semi-auto' },
+    auto:        { fr: 'Autonome',           en: 'Autonomous' },
+    bypass:      { fr: 'Aucune restriction', en: 'No restrictions' }
 };
 function permissionLabel(mode, lang) {
     const m = PERMISSION_LABELS[mode] || PERMISSION_LABELS.supervised;
@@ -285,11 +298,13 @@ const TRANSLATIONS = {
         'chat-default-msg': 'Selectionnez un modele et posez votre question.',
         'perm-label': 'Mode :',
         'perm-supervised': 'Supervise',
-        'perm-supervised-title': 'Chaque modification demande votre accord',
+        'perm-supervised-title': 'Commandes libres, ecritures de fichiers validees',
         'perm-semi': 'Semi-auto',
-        'perm-semi-title': 'Code auto, commandes validees',
+        'perm-semi-title': 'Large autonomie, seul le sensible est valide',
         'perm-auto': 'Autonome',
         'perm-auto-title': 'Controle total, aucune validation',
+        'perm-bypass': 'Aucune restriction',
+        'perm-bypass-title': 'Acces aux secrets (.env), zero validation — danger',
         'chat-input-placeholder': 'Ecrivez votre message...',
         'history-header': 'Historique',
         'history-empty': 'Aucune conversation',
@@ -354,6 +369,10 @@ const TRANSLATIONS = {
         'settings-fontsize-normal': 'Normale',
         'settings-fontsize-large': 'Grande',
         'settings-models-title': 'Modèles par défaut',
+        'settings-instructions-title': 'Instructions IA',
+        'settings-instructions-hint': 'Ajoutez des préférences permanentes pour toutes les IA : ton, niveau de détail, langue ou méthode de travail.',
+        'settings-instructions-label': 'Instructions système personnelles',
+        'settings-instructions-safety': 'Ces préférences s’appliquent au chat, aux agents et aux modèles locaux. Elles ne peuvent pas désactiver les règles de sécurité, les permissions ou les garde-fous du fournisseur.',
         'settings-models-hint': "Choix présélectionnés à l'ouverture de l'application.",
         'settings-default-chat-label': 'Modèle chat par défaut',
         'settings-default-chat-hint': 'Modèle sélectionné par défaut dans le chat.',
@@ -495,11 +514,13 @@ const TRANSLATIONS = {
         'chat-default-msg': 'Select a model and ask your question.',
         'perm-label': 'Mode:',
         'perm-supervised': 'Supervised',
-        'perm-supervised-title': 'Every modification requires your approval',
+        'perm-supervised-title': 'Commands run freely, file writes need approval',
         'perm-semi': 'Semi-auto',
-        'perm-semi-title': 'Auto code, approved commands',
+        'perm-semi-title': 'Broad autonomy, only sensitive actions ask',
         'perm-auto': 'Autonomous',
         'perm-auto-title': 'Full control, no approval',
+        'perm-bypass': 'No restrictions',
+        'perm-bypass-title': 'Reads secrets (.env) in clear, zero approval — danger',
         'chat-input-placeholder': 'Type a message...',
         'history-header': 'History',
         'history-empty': 'No conversation',
@@ -564,6 +585,10 @@ const TRANSLATIONS = {
         'settings-fontsize-normal': 'Normal',
         'settings-fontsize-large': 'Large',
         'settings-models-title': 'Default models',
+        'settings-instructions-title': 'AI instructions',
+        'settings-instructions-hint': 'Add lasting preferences for every AI: tone, level of detail, language, or working style.',
+        'settings-instructions-label': 'Personal system instructions',
+        'settings-instructions-safety': 'These preferences apply to chat, agents, and local models. They cannot disable safety rules, permissions, or provider safeguards.',
         'settings-models-hint': 'Preselected choices when the app starts.',
         'settings-default-chat-label': 'Default chat model',
         'settings-default-chat-hint': 'Model selected by default in chat.',
@@ -1346,7 +1371,7 @@ function loadState() {
             // not in localStorage, to avoid leaking chats between accounts.
             if (s.language) state.language = s.language;
         }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
     } catch {}
 }
 

@@ -1,6 +1,6 @@
 # zaalis IDE macOS
 
-Packages portables macOS x64 et arm64.
+Applications Electron macOS x64 et arm64.
 
 Build depuis Windows:
 
@@ -27,9 +27,11 @@ Lancement portable:
 mkdir -p zaalis-macos
 tar -xzf zaalis-macos-arm64.tar.gz -C zaalis-macos
 cd zaalis-macos
-chmod +x zaalis-server bin/zaalis zaalis-ide.command
-codesign --sign - zaalis-server bin/zaalis 2>/dev/null || true
-./zaalis-ide.command
+chmod +x zaalis\ IDE.app/Contents/MacOS/zaalis-ide \
+  zaalis\ IDE.app/Contents/Resources/app/bundle/zaalis-server \
+  zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis
+codesign --force --deep --sign - zaalis\ IDE.app 2>/dev/null || true
+open zaalis\ IDE.app
 ```
 
 Sur Mac Intel, utilisez `zaalis-macos-x64.tar.gz`.
@@ -37,6 +39,6 @@ Sur Mac Intel, utilisez `zaalis-macos-x64.tar.gz`.
 CLI:
 
 ```sh
-./bin/zaalis
-./bin/zaalis "analyse le dossier"
+./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis
+./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis "analyse le dossier"
 ```

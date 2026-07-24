@@ -4,7 +4,7 @@ const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
 // Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
+const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', kimi: '#38bdf8', local: '#fafafa', gguf: '#34d399' };
 function applyModelColor() {
     modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
 }
@@ -833,6 +833,33 @@ function renderTabs() {
     tabBar.innerHTML = '';
 
     const filePaths = Object.keys(state.openFiles);
+    const review = state.securityReview || {};
+    const reviewTab = '__security_review__';
+    const reviewWorkspace = $('#security-review-workspace');
+    if (review.open) {
+        const tab = document.createElement('div');
+        const isActive = state.activeFile === reviewTab;
+        tab.className = `tab security-review-tab ${isActive ? 'active' : ''}`;
+        tab.dataset.file = reviewTab;
+        tab.innerHTML = '<span class="tab-icon" aria-hidden="true">◈</span><span class="tab-name">Review sécurité</span>';
+        const close = document.createElement('button');
+        close.className = 'tab-close'; close.innerHTML = '&times;';
+        close.addEventListener('click', (event) => { event.stopPropagation(); if (typeof closeSecurityReview === 'function') closeSecurityReview(); });
+        tab.appendChild(close);
+        tab.addEventListener('click', () => { state.activeFile = reviewTab; renderTabs(); if (typeof renderSecurityReview === 'function') renderSecurityReview(); });
+        tabBar.appendChild(tab);
+    }
+
+    if (review.open && state.activeFile === reviewTab) {
+        $('#welcome-screen').classList.add('hidden');
+        $('#code-editor').classList.add('hidden');
+        if (reviewWorkspace) reviewWorkspace.classList.remove('hidden');
+        $('#status-file').textContent = 'Review sécurité';
+        $('#status-saved').textContent = review.data && review.data.status === 'running' ? 'Analyse en cours' : '';
+        $('#status-saved').style.color = 'var(--green)';
+        return;
+    }
+    if (reviewWorkspace) reviewWorkspace.classList.add('hidden');
     if (filePaths.length === 0) {
         const lang = state.language || 'fr';
         tabBar.innerHTML = `<div class="tab active" data-file="welcome"><span class="tab-name" data-i18n="welcome-tab">${TRANSLATIONS[lang]['welcome-tab']}</span></div>`;
@@ -1666,7 +1693,7 @@ function createCustomSelect(selectId, opts) {
 
         // Update color for model select trigger
         if (selectId === 'ai-model') {
-            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
+            const colors = MODEL_COLORS;
             triggerText.style.color = colors[select.value] || 'var(--text-0)';
         }
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
@@ -1682,7 +1709,7 @@ function createCustomSelect(selectId, opts) {
             div.title = opt.title || opt.textContent;
 
             if (selectId === 'ai-model') {
-                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
+                const colors = MODEL_COLORS;
                 div.style.color = colors[opt.value] || 'inherit';
                 div.style.fontWeight = '600';
             }

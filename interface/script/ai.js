@@ -4,8 +4,17 @@
 const MODE_ICONS = {
     supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
     semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
-    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`,
+    bypass: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>`
 };
+
+// Mirrors the server-side SECRET_FILE guard: real secret-bearing files, NOT
+// ordinary source like password_reset.go. Used to force an approval before the
+// legacy fenced-block path writes a secret file, on every mode except bypass.
+function isSecretFilePath(p) {
+    return /(?:^|[\\/])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials(?:\.(?:json|ya?ml))?|client_secret[^\\/]*\.json|service[-_]?account[^\\/]*\.json|[^\\/]*\.(?:pem|key|pfx|p12|keystore|jks|asc|ppk))$/i
+        .test(String(p || '').replace(/\\/g, '/'));
+}
 
 function setupModeSelector(btnId, menuId) {
     const btn = $('#' + btnId);
@@ -48,6 +57,7 @@ function setupModeSelector(btnId, menuId) {
             // Toggle orange class and dynamic icons on the mode selector buttons
             $$('.mode-select-btn').forEach(b => {
                 b.classList.toggle('orange', perm === 'auto');
+                b.classList.toggle('danger', perm === 'bypass');
                 const svgIcon = b.querySelector('svg:not(.chevron)');
                 if (svgIcon && MODE_ICONS[perm]) {
                     svgIcon.outerHTML = MODE_ICONS[perm];
@@ -91,6 +101,7 @@ function syncModeSelectorUI() {
     // Toggle orange class and dynamic icons on the mode selector buttons
     $$('.mode-select-btn').forEach(b => {
         b.classList.toggle('orange', perm === 'auto');
+        b.classList.toggle('danger', perm === 'bypass');
         const svgIcon = b.querySelector('svg:not(.chevron)');
         if (svgIcon && MODE_ICONS[perm]) {
             svgIcon.outerHTML = MODE_ICONS[perm];
@@ -276,9 +287,11 @@ function renderMarkdown(src) {
     const out = [];
     let listType = null;
     const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
+    // Compiled once per render instead of once per line (hot path during streaming).
+    const codeLineRe = new RegExp(`^${NUL}CODE\\d+${NUL}$`);
 
     for (const line of lines) {
-        if (new RegExp(`^${NUL}CODE\\d+${NUL}$`).test(line.trim())) { closeList(); out.push(line.trim()); continue; }
+        if (codeLineRe.test(line.trim())) { closeList(); out.push(line.trim()); continue; }
         let h = line.match(/^(#{1,6})\s+(.*)$/);
         if (h) { closeList(); const lvl = Math.min(h[1].length, 4); out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`); continue; }
         if (/^\s*([-*_])\1{2,}\s*$/.test(line)) { closeList(); out.push('<hr>'); continue; }
@@ -320,18 +333,34 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 // HTML. The model response is already complete at this point, so this is only
 // a visual effect and must never add a noticeable delay to a long answer.
 async function streamInto(el, text, finalHTML, signal, scrollEl) {
-    const words = String(text).split(/(\s+)/);
-    const chunk = Math.max(1, Math.ceil(words.length / 120));
-    let acc = '';
+    text = String(text);
     el.classList.add('md');
+    // Final render is computed exactly once (never re-parsed per frame).
+    const done = finalHTML != null ? finalHTML : renderMarkdown(text);
+
+    // The reveal is a purely cosmetic typewriter on already-complete text.
+    // Re-parsing the full markdown + reflowing the whole subtree on every frame
+    // is O(n²) and was the main source of lag on long answers. So we (a) skip
+    // the effect entirely for large responses — where the slow reveal is both
+    // costly and annoying — and (b) hard-cap the number of parse/reflow frames.
+    if (signal && signal.aborted || text.length > 4000) {
+        el.innerHTML = done;
+        if (scrollEl) followScroll(scrollEl);
+        return;
+    }
+
+    const words = text.split(/(\s+)/);
+    const FRAMES = 48;                       // max markdown re-renders (was ~120)
+    const chunk = Math.max(1, Math.ceil(words.length / FRAMES));
+    let acc = '';
     for (let i = 0; i < words.length; i += chunk) {
-        if (signal && signal.aborted) { acc = text; break; }
+        if (signal && signal.aborted) break;
         acc += words.slice(i, i + chunk).join('');
         el.innerHTML = renderMarkdown(acc);
         if (scrollEl) followScroll(scrollEl);
         await sleep(13);
     }
-    el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
+    el.innerHTML = done;
     if (scrollEl) followScroll(scrollEl);
 }
 
@@ -465,11 +494,49 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         }),
         signal
     });
+    let data;
     try {
-        return await res.json();
+        data = await res.json();
     } catch {
         return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
     }
+    return applyResponseIntegrity(data);
+}
+
+// The server decides (response-integrity.js); the surfaces only react, so the
+// desktop chat, the agent loop and the CLI cannot drift apart. Two cases:
+// a truncated answer is annotated, a degenerate one is never displayed.
+const INTEGRITY_TEXT = {
+    fr: {
+        structure_only: 'le modèle a produit une structure de liste sans contenu',
+        no_content: 'le modèle n’a produit aucun contenu exploitable',
+        no_prose: 'le modèle a produit de la mise en forme sans texte',
+        repetition: 'le modèle a répété la même ligne en boucle',
+        discarded: (why) => `Réponse écartée : ${why}. Rien d’exploitable n’a été produit — relance la demande, éventuellement avec un autre modèle.`,
+        truncated: 'Note : le fournisseur a coupé cette réponse à la limite de jetons, elle est donc incomplète. Demande la suite pour obtenir la fin.',
+    },
+    en: {
+        structure_only: 'the model produced list scaffolding with no content',
+        no_content: 'the model produced no usable content',
+        no_prose: 'the model produced formatting with no text',
+        repetition: 'the model repeated the same line in a loop',
+        discarded: (why) => `Answer discarded: ${why}. Nothing usable was produced — try again, possibly with another model.`,
+        truncated: 'Note: the provider stopped this answer at the token ceiling, so it is cut off. Ask to continue to get the rest.',
+    },
+};
+
+function applyResponseIntegrity(data) {
+    if (!data || data.error) return data;
+    // state.language is the one authoritative source in the UI; `lang` is a
+    // per-function local elsewhere in this file and is not in scope here.
+    const t = INTEGRITY_TEXT[(state && state.language === 'en') ? 'en' : 'fr'];
+    if (data.degenerate) {
+        data.integrityDiscarded = true;
+        data.response = t.discarded(t[data.degenerateReason] || t.no_content);
+        return data;
+    }
+    if (data.truncated && data.response) data.response = `${data.response}\n\n${t.truncated}`;
+    return data;
 }
 
 async function readAgentEventStream(res, onEvent) {
@@ -540,13 +607,22 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             history,
             stream: wantsStream,
             useBrain: !!options.useBrain,
-            computerControl: !!options.computerControl
+            computerControl: !!options.computerControl,
+            nativeTools: true,
+            sessionId: options.sessionId || state.agentSessionId || undefined,
+            agentId: options.agentId || undefined,
         }),
         signal
     });
-    if (wantsStream) return readAgentEventStream(res, options.onEvent);
+    if (wantsStream) {
+        const data = await readAgentEventStream(res, options.onEvent);
+        if (data && data.sessionId && options.persistSession !== false) state.agentSessionId = data.sessionId;
+        return data;
+    }
     try {
-        return await res.json();
+        const data = await res.json();
+        if (data && data.sessionId && options.persistSession !== false) state.agentSessionId = data.sessionId;
+        return data;
     } catch {
         return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
     }
@@ -825,15 +901,6 @@ async function sendChat(input) {
     const turnProject = projectLabel();
     const turnProjectPath = state.projectRoot || null;
 
-    // A desktop request without the explicit mode would make the model answer
-    // normally but with no computer tool. State that cause in the chat instead
-    // of letting it look like a model failure.
-    const desktopRequest = /\b(ouvre|ouvrir|lance|lancer|active|activer|ecris|ecrire|tape|taper|clique|cliquer|cherche|chercher|recherche|open|launch|type|click|search)\b/i.test(message);
-    if (desktopRequest && !state.computerControlEnabled) {
-        addMsg($('#chat-messages'), 'system', null, lang === 'en'
-            ? 'PC control is inactive: this request will not be able to operate Notes or Chrome. Enable “PC control” in the attachment menu, then retry.'
-            : 'Contrôle PC inactif : cette demande ne pourra pas agir dans Notes ou Chrome. Active « Contrôle PC » dans le menu de pièces jointes, puis relance la demande.');
-    }
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
@@ -886,6 +953,10 @@ async function sendChat(input) {
         stopThinking(body);
         const terminalResult = Array.isArray(data.toolResults) && data.toolResults.find((item) => item && item.terminalSessionId);
         if (terminalResult) attachIntegratedTerminal(terminalResult.terminalSessionId).catch(() => {});
+        const delegatedSecurityReview = Array.isArray(data.toolResults) && data.toolResults.find((item) => item && item.securityReviewId);
+        if (delegatedSecurityReview && typeof openExistingSecurityReview === 'function') {
+            openExistingSecurityReview(delegatedSecurityReview.securityReviewId).catch(() => {});
+        }
         // Build the assistant's memory entry regardless of where it lands.
         const responseText = data.error ? '' : (data.response || '');
         const formatted = data.error ? '' : formatAIResponse(responseText);
@@ -897,7 +968,7 @@ async function sendChat(input) {
         }
         if (!data.error && Array.isArray(data.toolResults) && data.toolResults.length) {
             const toolMemory = data.toolResults
-                .map(t => `[${t?.tool || 'outil'}] ${t?.summary || ''}\n${String(t?.text || '').slice(0, 4000)}`)
+                .map(t => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
                 .join('\n\n');
             assistantMemory += `\n\n[Outils utilises]\n${toolMemory}`;
         }
@@ -952,7 +1023,14 @@ async function sendChat(input) {
             // conversation, and it would target the wrong project root).
             if (turnStillActive()) await applyBlockedAgentTools(data, $('#chat-messages'), lang);
 
-            state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
+            state.chatHistory.push(
+                { role: 'user', content: aiMessage },
+                {
+                    role: 'assistant',
+                    content: assistantMemory,
+                    ...(data.reasoning_content ? { reasoning_content: data.reasoning_content } : {})
+                }
+            );
             if (data.usage && data.usage.input != null) {
                 // Use actual token counts from the API when available.
                 state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
@@ -979,7 +1057,7 @@ async function sendChat(input) {
     } finally {
         chatAbort = null;
         setChatBusy(false);
-        // Le contrôle PC est un mode explicite et persistant. Une tâche
+        // Le contrôle Mac est un mode explicite et persistant. Une tâche
         // terminée ferme sa session/overlay, mais le mode reste armé pour la
         // demande suivante jusqu'à ce que l'utilisateur le désactive ou stoppe.
     }
@@ -1361,26 +1439,9 @@ function createLiveAgentActivity(container, startedAt = Date.now(), onStatus = n
                 return;
             }
             if (event.type === 'model_start') {
-                setStatus(lang === 'en' ? 'Waiting for the model action' : 'Attente de l’action du modèle');
-                return;
-            }
-            if (event.type === 'model_wait') {
-                const seconds = Math.max(1, Math.round(Number(event.elapsedMs || 0) / 1000));
-                setStatus(lang === 'en' ? `Waiting for the model (${seconds}s)` : `Attente du modèle (${seconds}s)`);
-                return;
-            }
-            if (event.type === 'final_response') {
-                setStatus(lang === 'en' ? 'Generating the final response' : 'Génération de la réponse finale');
-                return;
-            }
-            if (event.type === 'agent_log') {
-                const note = String(event.message || '').trim();
-                if (note) {
-                    seenActivity++;
-                    const level = event.level === 'warn' ? ' live-agent-warn' : '';
-                    timelineEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre live-agent-log${level}">${escapeHTML(note)}</pre>`);
-                    followScroll(container);
-                }
+                setStatus(event.round > 1
+                    ? (lang === 'en' ? 'Preparing useful details' : 'Préparation des détails utiles')
+                    : (lang === 'en' ? 'Preparing the response' : 'Préparation de la réponse'));
                 return;
             }
             if (event.type === 'tool_batch') {
@@ -1392,7 +1453,10 @@ function createLiveAgentActivity(container, startedAt = Date.now(), onStatus = n
                 if (note) {
                     seenActivity++;
                     // The model talking mid-turn: visible, white, markdown-rendered.
-                    timelineEl.insertAdjacentHTML('beforeend', `<div class="live-agent-say md">${renderMarkdown(note)}</div>`);
+                    // Engine-derived narration (source:'engine') gets its own class
+                    // so it can be styled or disabled independently later.
+                    const cls = event.source === 'engine' ? 'live-agent-say live-agent-say--engine md' : 'live-agent-say md';
+                    timelineEl.insertAdjacentHTML('beforeend', `<div class="${cls}">${renderMarkdown(note)}</div>`);
                     setStatus(lang === 'en' ? 'Finding the best approach' : 'Recherche de la meilleure approche');
                     followScroll(container);
                 }
@@ -1439,7 +1503,16 @@ function createLiveAgentActivity(container, startedAt = Date.now(), onStatus = n
             const statusText = results.length
                 ? (lang === 'en' ? `${results.length} steps` : `${results.length} ${pluralFr(results.length, 'etape', 'etapes')}`)
                 : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute');
-            const inner = agentToolResultsHTML(results) || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            // Keep the REAL chronology (white narration lines interleaved with
+            // the collapsed tool rows) inside the folded summary, so expanding
+            // it replays the turn faithfully. Pending rows (spinners) from an
+            // interrupted stream are dropped; fall back to the grouped result
+            // list when the live timeline never rendered anything.
+            timelineEl.querySelectorAll('.live-tool-pending').forEach((el) => el.remove());
+            const liveInner = timelineEl.innerHTML.trim();
+            const inner = liveInner
+                || agentToolResultsHTML(results)
+                || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
             collapseInto(title, statusText, inner);
         },
         fail(error) {
@@ -1493,8 +1566,9 @@ async function applyEditBlocks(editBlocks, agentName, out, lang) {
             continue; // no-op edit
         }
 
-        // Permission gate (same model as full-file writes).
-        if (state.permissionMode === 'supervised') {
+        // Permission gate (same model as full-file writes): supervised asks for
+        // every edit; other modes ask only for a secret file; bypass never asks.
+        if (state.permissionMode === 'supervised' || (isSecretFilePath(targetFile) && state.permissionMode !== 'bypass')) {
             const desc = lang === 'en' ? `${agentName} wants to edit ${targetFile}` : `${agentName} veut modifier ${targetFile}`;
             const preview = applied.map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n');
             const approved = await requestApproval(desc, preview.slice(0, 500));
@@ -1585,7 +1659,7 @@ async function handleAIResponse(response, agentName, container) {
     }
     const writeChanges = [];
     for (const { path: targetFile, content: codeContent } of blocks) {
-        if (state.permissionMode === 'supervised') {
+        if (state.permissionMode === 'supervised' || (isSecretFilePath(targetFile) && state.permissionMode !== 'bypass')) {
             const desc = lang === 'en'
                 ? `${agentName} wants to write ${targetFile}`
                 : `${agentName} veut ecrire ${targetFile}`;
@@ -1637,13 +1711,13 @@ async function handleAIResponse(response, agentName, container) {
     if (wroteAny) await loadFileTree();
 
     // Run terminal commands the AI requested (```run blocks).
-    // Permission: supervised + semi ask first; auto runs without asking — EXCEPT
-    // destructive commands, which always ask (unless mode is bypass).
+    // Permission: commands run freely on every mode; only a DANGEROUS command or
+    // one touching a secret file (.env, keys) still asks — and even those run
+    // without a prompt in the unrestricted (bypass) mode.
     for (const cmd of commands) {
         const dangerous = isDangerousCommand(cmd);
-        const needAsk = dangerous
-            ? state.permissionMode !== 'bypass'
-            : state.permissionMode !== 'auto' && state.permissionMode !== 'bypass';
+        const touchesSecret = /(?:^|[\s"'=<>|(])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|[^\s"']+\.(?:pem|key|pfx|p12|keystore|jks|ppk))(?=$|[\s"'/<>|)])/i.test(cmd);
+        const needAsk = (dangerous || touchesSecret) && state.permissionMode !== 'bypass';
         if (needAsk) {
             const desc = dangerous
                 ? (lang === 'en' ? `${agentName} wants to run a DANGEROUS command` : `${agentName} veut exécuter une commande DANGEREUSE`)
@@ -1687,7 +1761,9 @@ async function handleAIResponse(response, agentName, container) {
 async function applyBlockedAgentTools(data, out, lang) {
     if (isReadOnlyMode() || !state.projectRoot) return;
     const blocked = (Array.isArray(data && data.toolResults) ? data.toolResults : [])
-        .filter(r => r && r.blocked && ['write', 'edit', 'run', 'image_download'].includes(r.tool) && r.input);
+        // A policy deny is terminal. Only a real approval_required result may
+        // reach this UI; otherwise an agent could turn deny into an approval.
+        .filter(r => r && r.blocked && r.code === 'approval_required' && !r.terminal && ['write', 'edit', 'run', 'git_write', 'image_download'].includes(r.tool) && r.input);
     if (!blocked.length) return;
     let wroteAny = false;
     const changes = [];
@@ -1706,9 +1782,10 @@ async function applyBlockedAgentTools(data, out, lang) {
                 continue;
             }
             try {
-                const res = await fetch('/api/agent-image-download', {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ root: state.projectRoot, id, path: target })
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
                 });
                 const result = await res.json().catch(() => ({}));
                 if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
@@ -1734,9 +1811,10 @@ async function applyBlockedAgentTools(data, out, lang) {
             if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Command refused.' : 'Commande refusée.'); continue; }
             const t0 = Date.now();
             try {
-                const res = await fetch('/api/exec', {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
                     method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ command: cmd, cwd: state.projectRoot })
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
                 });
                 const execRes = await res.json().catch(() => ({}));
                 const duration = Math.round((Date.now() - t0) / 100) / 10;
@@ -1749,6 +1827,27 @@ async function applyBlockedAgentTools(data, out, lang) {
             } catch (err) {
                 addMsg(out, 'system', null, commandCardHTML(cmd, '', { lang, error: err.message, duration: Math.round((Date.now() - t0) / 100) / 10 }), true);
             }
+            continue;
+        }
+        if (r.tool === 'git_write') {
+            const action = String(input.action || '');
+            const detail = action === 'push'
+                ? `git push ${input.remote || 'origin'} ${input.branch || ''}`
+                : `git ${action} ${input.branch || input.message || ''}`;
+            const approved = await requestApproval(
+                lang === 'en' ? 'The agent wants to perform a Git operation' : 'L’agent veut effectuer une opération Git', detail
+            );
+            if (!approved) { addMsg(out, 'system', null, lang === 'en' ? 'Git operation refused.' : 'Opération Git refusée.'); continue; }
+            try {
+                if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+                const res = await fetch('/api/agent-approval/execute', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
+                });
+                const result = await res.json().catch(() => ({}));
+                if (!res.ok || result.error || result.timedOut || Number(result.exitCode) !== 0) throw new Error(result.error || `HTTP ${res.status}`);
+                addMsg(out, 'system', null, lang === 'en' ? `Git ${action} completed.` : `Git ${action} terminé.`);
+            } catch (err) { addMsg(out, 'system', null, `${lang === 'en' ? 'Git error' : 'Erreur Git'}: ${err.message}`); }
             continue;
         }
         const targetFile = String(input.path || '');
@@ -1787,9 +1886,10 @@ async function applyBlockedAgentTools(data, out, lang) {
         const approved = await requestApproval(desc, preview);
         if (!approved) { addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusée.'); continue; }
         try {
-            const res = await fetch('/api/file', {
+            if (!r.approval) throw new Error(lang === 'en' ? 'Missing approval token.' : 'Jeton d’approbation absent.');
+            const res = await fetch('/api/agent-approval/execute', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ root: state.projectRoot, path: targetFile, content })
+                body: JSON.stringify({ tool: r.tool, input, sessionId: data.sessionId, callId: r.callId, approvalId: r.approval.approvalId, token: r.approval.token })
             });
             const result = await res.json().catch(() => ({}));
             if (!res.ok || result.error) throw new Error(result.error || ('HTTP ' + res.status));
@@ -1858,7 +1958,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
         await streamInto(body.querySelector('.stream-target'), data.response, formatted, controller.signal, out);
         if (persistToChat) state.chatHistory.push(
             { role: 'user', content: `[${lang === 'en' ? 'Edit retry' : 'Réessai édition'}]` },
-            { role: 'assistant', content: data.response }
+            { role: 'assistant', content: data.response, ...(data.thinking ? { reasoning_content: data.thinking } : {}) }
         );
         const applied = await handleAIResponse(data.response, modelLabel, opts.container);
         if (applied && applied.editErrors && applied.editErrors.length) {
@@ -1923,7 +2023,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         // Keep conversation memory lean: record that files were read, not the dump.
         state.chatHistory.push(
             { role: 'user', content: `[${lang === 'en' ? 'Read files' : 'Lecture fichiers'}: ${picked.join(', ')}]` },
-            { role: 'assistant', content: data.response }
+            { role: 'assistant', content: data.response, ...(data.thinking ? { reasoning_content: data.thinking } : {}) }
         );
         updateTokenMeter();
         const applied = await handleAIResponse(data.response, modelLabel);
@@ -2024,15 +2124,11 @@ function handleChatSubmit() {
         return;
     }
     if (chatAbort) {
-        if (queuePendingChat(text)) {
-            resetInput(slashInput);
-            continueVoiceAfterSubmit('chat-input');
-        }
+        if (queuePendingChat(text)) resetInput(slashInput);
         return;
     }
     sendChat(createChatDraft(text));
     resetInput(slashInput);
-    continueVoiceAfterSubmit('chat-input');
 }
 
 // Show/hide the menu as the user types a "/command" (no space yet).
@@ -2075,7 +2171,7 @@ async function sendAgentTask(input) {
         return;
     }
 
-    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama', gguf: 'GGUF' };
+    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', kimi: 'Kimi', local: 'Ollama', gguf: 'GGUF' };
     const activeAgents = [];
     $$('.agent-check:checked').forEach(cb => {
         const agent = cb.dataset.agent;
@@ -2181,8 +2277,21 @@ async function sendAgentTask(input) {
             ? `[Role: ${roleLabel}]\n[User task]: ${task}\n\nInvestigate independently. Use read/search tools, report evidence and recommendations. Do not modify files or run commands.`
             : `[Rôle : ${roleLabel}]\n[Tâche utilisateur] : ${task}\n\nEnquête indépendamment. Utilise les outils de lecture/recherche, rends des preuves et recommandations. Ne modifie aucun fichier et n'exécute aucune commande.`;
 
+        // Live status per worker card: narration notes and tool activity from
+        // the shared agent stream replace the static "analyse en cours…".
+        const workerStatus = (event) => {
+            if (!event || !statusText) return;
+            if (event.type === 'assistant_note') {
+                const note = String(event.text || '').replace(/\s+/g, ' ').trim();
+                if (note) statusText.textContent = note.length > 90 ? note.slice(0, 89) + '…' : note;
+            } else if (event.type === 'tool_started') {
+                const input = event.input || {};
+                const hint = input.path || (Array.isArray(input.paths) && input.paths[0]) || input.pattern || input.command || input.query || '';
+                statusText.textContent = `${event.tool || 'outil'} ${String(hint).split('/').pop()}`.trim().slice(0, 90);
+            }
+        };
         try {
-        const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], { permissionMode: 'read-only', useBrain: !!state.useBrainAgents });
+        const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], { permissionMode: 'read-only', useBrain: !!state.useBrainAgents, persistSession: false, agentId: `worker-${agent}`, onEvent: workerStatus });
             if (data.error) {
                 statusText.textContent = lang === 'en' ? 'error' : 'erreur';
                 statusText.classList.add('err');
@@ -2248,7 +2357,16 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     startThinking(streamTarget);
 
     try {
-        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], { useBrain: !!state.useBrainAgents });
+        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], {
+            useBrain: !!state.useBrainAgents, persistSession: false, agentId: 'multi-agent-lead',
+            // The lead's spinner narrates its synthesis instead of staying mute.
+            onEvent: (event) => {
+                if (event && event.type === 'assistant_note' && typeof setThinkingStatus === 'function') {
+                    const note = String(event.text || '').replace(/\s+/g, ' ').trim();
+                    if (note) setThinkingStatus(streamTarget, note.length > 90 ? note.slice(0, 89) + '…' : note);
+                }
+            }
+        });
         stopThinking(streamTarget);
         if (data.error) {
             streamTarget.textContent = data.error;
@@ -2289,15 +2407,11 @@ function handleAgentsSubmit() {
     const text = input.value.trim();
     if (!text) return;
     if (agentTaskRunning) {
-        if (queuePendingAgent(text)) {
-            resetInput(input);
-            continueVoiceAfterSubmit('agents-input');
-        }
+        if (queuePendingAgent(text)) resetInput(input);
         return;
     }
     sendAgentTask(text);
     resetInput(input);
-    continueVoiceAfterSubmit('agents-input');
 }
 $('#agents-input').addEventListener('keydown', e => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2345,7 +2459,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image, details.live-agent-activity');
 }
 
 function saveConversation(kind = 'chat') {
@@ -2382,7 +2496,7 @@ function saveConversation(kind = 'chat') {
     if (!curId) {
         curId = Date.now().toString();
         state[cfg.current] = curId;
-        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
+        listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data, ...(kind === 'chat' && state.agentSessionId ? { agentSessionId: state.agentSessionId } : {}) });
     } else {
         const conv = listArr.find(c => c.id === curId);
         if (conv) {
@@ -2390,8 +2504,9 @@ function saveConversation(kind = 'chat') {
             if (!conv.project && project) conv.project = project;
             if (!conv.projectPath && projectPath) conv.projectPath = projectPath;
             if (!conv.title || conv.title === 'Conversation') conv.title = title;
+            if (kind === 'chat' && state.agentSessionId) conv.agentSessionId = state.agentSessionId;
         }
-        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
+        else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data, ...(kind === 'chat' && state.agentSessionId ? { agentSessionId: state.agentSessionId } : {}) });
     }
 
     persistChats(kind);
@@ -2549,6 +2664,7 @@ function loadConversation(kind, id) {
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
+        state.agentSessionId = conv.agentSessionId || null;
         state.chatHistory = (conv.messages || [])
             .filter(m => m.type === 'user' || m.type === 'ai')
             .map(m => ({
@@ -2686,7 +2802,7 @@ function newConversation(kind = 'chat') {
     state[cfg.current] = null;
     $(cfg.container).innerHTML = '';
     addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
-    if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
+    if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; state.agentSessionId = null; updateTokenMeter(); }
     renderHistory();
 }
 
@@ -2950,6 +3066,7 @@ function isVisionCompatible(model, submodel) {
             return !(s.includes('o3-mini') || s.includes('o1-mini'));
         case 'grok':  return s === 'grok-4.5' || s === 'grok-4.3' || s === 'grok-build-0.1';
         case 'mistral': return !s.includes('codestral');
+        case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default: return false;
@@ -3003,6 +3120,7 @@ const REASONING_PRESETS = {
     lowMedHighXhighMax: ['MAX', 'XHIGH', 'HIGH', 'MED', 'LOW'],
     minimalLowMedHigh: ['HIGH', 'MED', 'LOW', 'MIN'],
     offHigh: ['HIGH', 'OFF'],
+    lowHighMax: ['MAX', 'HIGH', 'LOW'],
     local: [
         'MAX', 'MED', 'OFF'
     ],
@@ -3033,6 +3151,10 @@ function reasoningModes(model, submodel) {
         else if (s === 'grok-4.20-multi-agent-0309') labels = REASONING_PRESETS.lowMedHighXhigh;
     } else if (model === 'mistral') {
         if (s === 'mistral-medium-3-5' || s === 'mistral-small-latest') labels = REASONING_PRESETS.offHigh;
+    } else if (model === 'kimi') {
+        if (s === 'kimi-k3') labels = REASONING_PRESETS.lowHighMax;
+        else if (s === 'kimi-k2.6') labels = REASONING_PRESETS.offHigh;
+        else if (s === 'kimi-k2.7-code' || s === 'kimi-k2.7-code-highspeed') labels = ['MAX'];
     } else if (model === 'local' || model === 'gguf') {
         labels = REASONING_PRESETS[model];
     }
@@ -3075,6 +3197,7 @@ function isReasoningCompatible(model, submodel) {
     if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
     if (model === 'grok' && ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309'].includes(submodel)) return true;
     if (model === 'mistral' && ['mistral-medium-3-5', 'mistral-small-latest'].includes(submodel)) return true;
+    if (model === 'kimi' && ['kimi-k3', 'kimi-k2.6', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed'].includes(submodel)) return true;
     return false;
 }
 
@@ -3271,12 +3394,6 @@ function initReasoningSlider() {
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
-const voiceControllers = new Map();
-function continueVoiceAfterSubmit(textareaId) {
-    const controller = voiceControllers.get(textareaId);
-    if (controller && typeof controller.afterSubmit === 'function') controller.afterSubmit();
-}
-
 function setupMacNativeVoiceRecognition(btn, textarea) {
     const nativeSpeech = window.zaalisNative && window.zaalisNative.speech;
     if (!nativeSpeech || typeof nativeSpeech.start !== 'function' || typeof nativeSpeech.stop !== 'function') return false;
@@ -3392,20 +3509,15 @@ function setupVoiceRecognition(btnId, textareaId) {
     // Track state: 'inactive' | 'starting' | 'active' | 'stopping'
     let engineState = 'inactive';
     let baseText = '';
-    let desiredActive = false;
-    let ignoreResults = false;
-    let restartTimer = null;
 
     recognition.onstart = () => {
         engineState = 'active';
-        ignoreResults = false;
         btn.classList.add('recording');
         textarea.classList.add('recording-text');
         btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
     };
 
     recognition.onresult = (event) => {
-        if (ignoreResults) return;
         let sessionTranscript = '';
         for (let i = 0; i < event.results.length; ++i) {
             sessionTranscript += event.results[i][0].transcript;
@@ -3420,20 +3532,11 @@ function setupVoiceRecognition(btnId, textareaId) {
     };
 
     recognition.onerror = (event) => {
-        if (event.error !== 'aborted' && event.error !== 'no-speech') console.error("Speech recognition error:", event.error);
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') desiredActive = false;
-        if (!desiredActive) cleanupState();
+        console.error("Speech recognition error:", event.error);
+        cleanupState();
     };
 
     recognition.onend = () => {
-        engineState = 'inactive';
-        if (desiredActive) {
-            btn.classList.add('recording');
-            textarea.classList.add('recording-text');
-            clearTimeout(restartTimer);
-            restartTimer = setTimeout(startEngine, 140);
-            return;
-        }
         cleanupState();
     };
 
@@ -3444,7 +3547,7 @@ function setupVoiceRecognition(btnId, textareaId) {
         btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
     }
 
-    function startEngine() {
+    function startRecording() {
         if (engineState !== 'inactive') return;
         engineState = 'starting';
         baseText = textarea.value;
@@ -3453,21 +3556,12 @@ function setupVoiceRecognition(btnId, textareaId) {
             recognition.start();
         } catch (err) {
             console.error("Failed to start speech recognition:", err);
-            desiredActive = false;
             cleanupState();
         }
     }
 
-    function startRecording() {
-        desiredActive = true;
-        startEngine();
-    }
-
     function stopRecording() {
         if (engineState !== 'active' && engineState !== 'starting') return;
-        desiredActive = false;
-        ignoreResults = true;
-        clearTimeout(restartTimer);
         engineState = 'stopping';
         try {
             recognition.stop();
@@ -3485,30 +3579,6 @@ function setupVoiceRecognition(btnId, textareaId) {
             startRecording();
         }
     });
-
-    // Sending a dictated message commits the current transcript, clears the
-    // composer and immediately starts a fresh recognition session. The mic
-    // therefore remains visibly active without re-inserting the text that was
-    // just sent (Web Speech results are cumulative within one session).
-    voiceControllers.set(textareaId, {
-        afterSubmit() {
-            baseText = '';
-            if (!desiredActive) return;
-            ignoreResults = true;
-            if (engineState === 'active' || engineState === 'starting') {
-                engineState = 'stopping';
-                try { recognition.stop(); }
-                catch {
-                    engineState = 'inactive';
-                    clearTimeout(restartTimer);
-                    restartTimer = setTimeout(startEngine, 140);
-                }
-            } else if (engineState === 'inactive') {
-                clearTimeout(restartTimer);
-                restartTimer = setTimeout(startEngine, 140);
-            }
-        }
-    });
 }
 
 // Initialize Voice Recognition
@@ -3516,13 +3586,12 @@ setupVoiceRecognition('chat-voice-btn', 'chat-input');
 setupVoiceRecognition('agents-voice-btn', 'agents-input');
 
 // ==========================================================
-//  WINDOWS COMPUTER CONTROL + INTEGRATED TERMINAL
+//  MACOS COMPUTER CONTROL + INTEGRATED TERMINAL
 // ==========================================================
 let automationPoll = null;
 let automationQuestionOpen = false;
 let terminalSessionId = null;
 let terminalStream = null;
-let terminalSessionOrigin = null;
 
 function syncComputerControlButton() {
     const btn = $('[data-computer-toggle]');
@@ -3531,18 +3600,22 @@ function syncComputerControlButton() {
     btn.classList.toggle('active', active);
     btn.setAttribute('aria-pressed', String(active));
     const label = btn.querySelector('span:last-child');
-    if (label) label.textContent = active ? 'Contrôle PC actif' : 'Contrôle PC';
+    if (label) label.textContent = active ? 'Contrôle Mac actif' : 'Contrôle Mac';
 }
 
 function computerPermissionMessage(result) {
-    if (!result) return 'Le contrôle PC ne répond pas. Redémarrez zaalis IDE puis réessayez.';
+    if (!result) return 'Le contrôle Mac ne répond pas. Redémarrez zaalis IDE puis réessayez.';
     if (result.error === 'helper-missing') return 'Le composant natif de contrôle est absent. Réinstallez la dernière version de zaalis IDE.';
-    if (result.error && result.error !== 'accessibility-denied' && result.error !== 'screen-recording-denied') return `Contrôle PC indisponible : ${result.error}`;
+    if (result.error && result.error !== 'accessibility-denied' && result.error !== 'screen-recording-denied') return `Contrôle Mac indisponible : ${result.error}`;
     const missing = [];
     if (!result.accessibility) missing.push('Accessibilité');
     if (!result.screenRecording) missing.push('Enregistrement de l’écran');
-    if (!missing.length) return 'Les autorisations du contrôle PC sont vérifiées. Relancez zaalis IDE puis réessayez.';
-    return `Autorisez ${missing.join(' et ')} pour zaalis IDE dans Windows, puis rouvrez l’application.`;
+    if (!missing.length) return 'Les autorisations sont accordées, mais macOS n’a pas encore actualisé leur état. Fermez complètement zaalis IDE, rouvrez-le, puis réessayez.';
+    const helperOnly = (result.appAccessibility || result.appScreenRecording === 'granted') &&
+        (!result.helperAccessibility || !result.helperScreenRecording);
+    return helperOnly
+        ? `macOS a autorisé zaalis IDE, mais pas encore son composant de contrôle (${missing.join(' et ')}). La demande macOS vient d’être relancée : validez-la puis rouvrez zaalis IDE.`
+        : `Autorisez ${missing.join(' et ')} dans Réglages système, puis rouvrez zaalis IDE.`;
 }
 
 async function setComputerControlEnabled(enabled) {
@@ -3550,19 +3623,15 @@ async function setComputerControlEnabled(enabled) {
     if (!enabled) { state.computerControlEnabled = false; syncComputerControlButton(); return; }
     if (btn) btn.disabled = true;
     try {
-        // Check the Windows desktop-control capability on every activation.
-        // Windows keeps this capability across reinstalls, so a valid status
-        // immediately enables the control without a second confirmation.
-        const response = await fetch('/api/automation/permissions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        const permissions = await response.json().catch(() => null);
-        if (!response.ok || !permissions || !permissions.ok || !permissions.accessibility || !permissions.screenRecording) {
-            throw new Error(computerPermissionMessage(permissions));
-        }
+        // Enabling the feature is a user preference, not a macOS permission
+        // check. TCC remains enforced by the native helper at the exact action
+        // time; avoiding this preflight prevents a stale macOS status from
+        // falsely blocking a user who has already granted the two permissions.
         state.computerControlEnabled = true;
-        showToast('Contrôle PC prêt', 'L’IA pourra observer l’écran et agir pour la prochaine tâche.', { icon: '✦', duration: 3500 });
+        showToast('Contrôle Mac prêt', 'L’IA pourra observer l’écran et agir pour la prochaine tâche.', { icon: '✦', duration: 3500 });
     } catch (err) {
         state.computerControlEnabled = false;
-        showToast('Contrôle PC indisponible', err.message || 'Le composant de contrôle est indisponible.', { icon: '!', duration: 6500 });
+        showToast('Contrôle Mac indisponible', err.message || 'Le composant de contrôle est indisponible.', { icon: '!', duration: 6500 });
     } finally { if (btn) btn.disabled = false; syncComputerControlButton(); }
 }
 
@@ -3603,8 +3672,7 @@ function handleAutomationEvent(event) {
 async function stopAutomationWork() {
     try { await fetch('/api/automation/stop', { method: 'POST' }); } catch {}
     state.automationTaskId = null;
-    // Stopping the current task must not silently revoke the explicit computer
-    // permission. Keeping it armed lets the user retry after a provider timeout.
+    state.computerControlEnabled = false;
     if (automationPoll) { clearInterval(automationPoll); automationPoll = null; }
     syncComputerControlButton();
 }
@@ -3634,7 +3702,6 @@ async function attachIntegratedTerminal(id) {
     panel.classList.remove('hidden');
     if (terminalStream) terminalStream.close();
     const snap = await fetch(`/api/terminal/sessions/${encodeURIComponent(id)}`).then(r => r.json());
-    terminalSessionOrigin = snap.origin || 'agent';
     $('#terminal-cwd').textContent = snap.cwd || '';
     $('#terminal-output').textContent = cleanTerminalOutput(snap.output);
     terminalStream = new EventSource(`/api/terminal/sessions/${encodeURIComponent(id)}/stream`);
@@ -3663,16 +3730,7 @@ const terminalCloseBtn = $('#terminal-close-btn');
 if (terminalCloseBtn) terminalCloseBtn.addEventListener('click', async () => {
     if (terminalStream) { terminalStream.close(); terminalStream = null; }
     if (terminalSessionId) try { await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}`, { method: 'DELETE' }); } catch {}
-    terminalSessionId = null; terminalSessionOrigin = null; $('#integrated-terminal').classList.add('hidden');
-});
-document.addEventListener('terminal-profile-changed', async () => {
-    if (terminalSessionOrigin !== 'user' || !terminalSessionId) return;
-    const oldId = terminalSessionId;
-    if (terminalStream) { terminalStream.close(); terminalStream = null; }
-    terminalSessionId = null;
-    terminalSessionOrigin = null;
-    try { await fetch(`/api/terminal/sessions/${encodeURIComponent(oldId)}`, { method: 'DELETE' }); } catch {}
-    try { await openIntegratedTerminal(); } catch (err) { showToast('Terminal', err.message || 'Terminal indisponible', { icon: '!' }); }
+    terminalSessionId = null; $('#integrated-terminal').classList.add('hidden');
 });
 const openTerminalBtn = $('#open-integrated-terminal');
 if (openTerminalBtn) openTerminalBtn.addEventListener('click', () => openIntegratedTerminal().catch((err) => showToast('Terminal', err.message || 'Terminal indisponible', { icon: '!' })));
