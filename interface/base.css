@@ -44,7 +44,11 @@ input,select,textarea{font-family:inherit;color:inherit;}
 /* ---- Layout ---- */
 #app{display:flex;flex-direction:column;height:100vh;}
 #topbar{height:var(--topbar-h);background:var(--bg-1);border-bottom:1px solid var(--border);display:flex;align-items:center;justify-content:space-between;padding:0 16px;flex-shrink:0;z-index:10;}
-.topbar-left,.topbar-center,.topbar-right{display:flex;align-items:center;gap:12px;}
+/* min-width:0 lets the sections shrink; without it the right-hand buttons are
+   pushed past the window edge as soon as the window gets narrow. */
+.topbar-left,.topbar-center,.topbar-right{display:flex;align-items:center;gap:12px;min-width:0;}
+.topbar-left,.topbar-right{flex-shrink:0;}
+.topbar-center{flex:1 1 auto;justify-content:center;overflow:hidden;}
 .logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;letter-spacing:.3px;}
 .logo svg{color:var(--accent);}
 .topbar-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius);color:var(--text-2);transition:all .15s;}
@@ -74,7 +78,9 @@ input,select,textarea{font-family:inherit;color:inherit;}
 #workspace{flex:1;display:flex;overflow:hidden;}
 
 /* ---- Sidebar ---- */
-#sidebar{width:240px;min-width:180px;background:var(--bg-1);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:hidden;position:relative;}
+/* overflow stays visible so the project dropdown (wider than the sidebar) is
+   not clipped at the sidebar edge; the inner panes do their own clipping. */
+#sidebar{width:240px;min-width:180px;background:var(--bg-1);border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0;overflow:visible;position:relative;}
 
 /* Project Switcher */
 .sidebar-project{padding:8px;border-bottom:1px solid var(--border-subtle);position:relative;}
@@ -763,10 +769,14 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .mode-dropdown.open {
     display: flex !important;
 }
+/* Icon in its own fixed column, title + description stacked beside it, so the
+   three modes line up on a single optical grid whatever the icon drawing. */
 .mode-item {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    grid-template-areas: "icon title" "icon desc";
+    column-gap: 10px;
+    align-items: center;
     text-align: left;
     width: 100%;
     padding: 8px 12px;
@@ -781,13 +791,23 @@ input,select,textarea{font-family:inherit;color:inherit;}
     background: var(--bg-hover);
     color: var(--text-0);
 }
+.mode-item-icon {
+    grid-area: icon;
+    align-self: center;
+    justify-self: center;
+    color: var(--text-2);
+}
+.mode-item.active .mode-item-icon { color: var(--accent-hover); }
+.mode-item.active[data-perm="auto"] .mode-item-icon { color: var(--orange); }
 .mode-item-title {
+    grid-area: title;
     font-size: 12px;
     font-weight: 600;
     margin-bottom: 2px;
     color: var(--text-0);
 }
 .mode-item-desc {
+    grid-area: desc;
     font-size: 10px;
     color: var(--text-3);
     line-height: 1.3;

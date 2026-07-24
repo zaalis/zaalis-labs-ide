@@ -16,6 +16,7 @@ const state = {
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
         ggufModels: [],        // installed local GGUF files (llama.cpp engine)
         ggufVariant: '',       // '' = auto-detect (cuda / vulkan / cpu)
+        terminalProfile: 'cmd', // shell used only by the terminal opened from the UI
         catalogTarget: 'gguf',
         // ----- Appearance -----
         theme: 'dark',         // 'dark' | 'light'

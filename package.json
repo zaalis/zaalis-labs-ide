@@ -26,6 +26,7 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.21.0"
+    "@yao-pkg/pkg": "^6.21.0",
+    "node-pty": "^1.1.0"
   }
 }

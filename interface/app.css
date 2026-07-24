@@ -46,6 +46,34 @@
 .attach-wrap{position:relative;flex-shrink:0;}
 .attach-btn{width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius);background:var(--bg-3);border:1px solid var(--border);color:var(--text-1);cursor:pointer;transition:all .15s;}
 .attach-btn:hover{background:var(--bg-hover);color:var(--text-0);}
+.computer-control-btn[aria-pressed="true"]{color:#fff;background:#b76516;border-color:#e4892d;box-shadow:0 0 0 2px rgba(228,137,45,.16);}
+
+/* --- Integrated terminal (real PTY, docked at the bottom of the IDE) ------ */
+.integrated-terminal{
+    position:fixed;z-index:500;left:14px;right:14px;bottom:12px;
+    height:min(38vh,360px);display:flex;flex-direction:column;overflow:hidden;
+    border:1px solid rgba(167,139,250,.38);border-radius:13px;background:#0a0b11;
+    box-shadow:0 22px 70px rgba(0,0,0,.55);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+.integrated-terminal.hidden{display:none;}
+.integrated-terminal header{
+    height:34px;display:flex;align-items:center;gap:10px;padding:0 11px;
+    background:linear-gradient(90deg,rgba(91,33,182,.34),rgba(17,16,28,.95));
+    color:#ede9fe;font-family:inherit;font-size:11px;flex-shrink:0;
+}
+.integrated-terminal header span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#a7a1b6;font-size:10px;}
+.integrated-terminal header button{width:22px;height:22px;border-radius:6px;color:#d6d3d1;font-size:19px;line-height:1;flex-shrink:0;}
+.integrated-terminal header button:hover{background:rgba(239,68,68,.2);color:#fecaca;}
+#terminal-output{flex:1;margin:0;overflow:auto;padding:10px 12px;color:#d1fae5;font-size:12px;line-height:1.46;white-space:pre-wrap;word-break:break-word;}
+#terminal-input{
+    min-height:34px;max-height:80px;resize:none;border:0;border-top:1px solid rgba(255,255,255,.08);
+    padding:8px 12px;background:#11121a;color:#f5f3ff;
+    font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;outline:none;flex-shrink:0;
+}
+#terminal-input:focus{border-top-color:rgba(167,139,250,.5);}
+/* Stacked layout: the dock would otherwise cover most of the AI panel. */
+@media (max-width:820px){.integrated-terminal{left:8px;right:8px;bottom:8px;height:min(32vh,260px);}}
 .attach-menu{display:none;position:absolute;bottom:38px;left:0;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius);box-shadow:0 8px 24px rgba(0,0,0,.4);padding:4px;z-index:60;min-width:130px;}
 .attach-menu.open{display:block;}
 .attach-menu button{display:flex;align-items:center;gap:8px;width:100%;padding:7px 10px;border-radius:4px;font-size:12px;color:var(--text-1);background:transparent;cursor:pointer;text-align:left;}
@@ -140,6 +168,35 @@
 .settings-status-row{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--bg-3);border:1px solid var(--border-subtle);border-radius:var(--radius);padding:8px 10px;margin-bottom:10px;font-size:12px;color:var(--text-2);}
 .settings-pane[data-settings-pane="hardware"] .settings-status-row{background:var(--bg-3);border-color:var(--border);border-radius:12px;padding:16px 18px;margin-bottom:14px;font-size:14px;color:#c7c7cb;}
 .settings-status-row strong{color:var(--text-0);font-family:var(--font-mono);font-size:12px;}
+/* --- MCP pane: give every field room to breathe -------------------------
+   Labels sat flush against their input and the cards reused the pane's own
+   background, so "URL MCP", its field and the next row all ran together. */
+.settings-pane[data-settings-pane="mcp"] .form-group{padding:16px 18px;}
+.settings-pane[data-settings-pane="mcp"] .form-group label{margin-bottom:9px;}
+.settings-pane[data-settings-pane="mcp"] .form-group.settings-row-group label{margin-bottom:0;}
+.settings-pane[data-settings-pane="mcp"] .form-group input{padding:10px 12px;font-size:13px;}
+.settings-pane[data-settings-pane="mcp"] .settings-separator{margin:26px 0 4px;}
+.mcp-personal-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:26px 0 14px;}
+.mcp-personal-toolbar h3{margin:0;}
+.mcp-personal-actions{display:flex;gap:10px;flex-wrap:wrap;}
+/* Actions read at the same weight as the "MCP personnels" heading they sit on.
+   Two classes deep so they win over the generic .btn sizing defined below. */
+.btn.mcp-action-btn{min-height:40px;padding:10px 20px;font-size:14px;font-weight:600;border-radius:10px;}
+.btn.mcp-action-btn.btn-ghost{background:var(--bg-3);border:1px solid var(--border);}
+.btn.mcp-action-btn.btn-ghost:hover{background:var(--bg-hover);border-color:var(--text-3);}
+.btn.mcp-action-btn.btn-primary{border:1px solid transparent;}
+.mcp-server-list{display:flex;flex-direction:column;gap:14px;}
+.mcp-server-card{background:var(--bg-3);border:1px solid var(--border-subtle);border-radius:var(--radius-lg,12px);padding:18px;}
+.mcp-server-card .form-group{margin:12px 0 0;background:var(--bg-1);border:1px solid var(--border-subtle);border-radius:10px;}
+.mcp-server-card .form-group:first-of-type{margin-top:0;}
+.mcp-server-card .mcp-server-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.45fr);gap:14px;margin-top:12px;}
+.mcp-server-card .mcp-server-grid .form-group{margin:0;}
+.mcp-server-card details.form-group{padding:14px 18px;}
+.mcp-server-card details.form-group summary{font-size:13px;font-weight:600;color:var(--text-1);cursor:pointer;}
+.mcp-server-card details.form-group .mcp-server-grid{margin-top:14px;}
+.mcp-server-card .settings-row-copy p{margin-top:4px;}
+.mcp-server-card .mcp-remove{color:#ff8f8f;margin-top:16px;}
+@media (max-width:700px){.mcp-server-card .mcp-server-grid{grid-template-columns:1fr;}.mcp-personal-toolbar{align-items:flex-start;flex-direction:column;}}
 .settings-pane[data-settings-pane="hardware"] .settings-status-row strong{font-size:14px;color:#fff;}
 .settings-installed-box{margin-top:12px;}
 .modal-settings .ollama-box{background:var(--bg-3);border-color:var(--border);border-radius:12px;}
@@ -390,7 +447,9 @@
 
 /* Collapsible left sidebar — collapses to a thin rail keeping the toggle (ChatGPT-style) */
 #sidebar{transition:width .28s cubic-bezier(.4,0,.2,1), min-width .28s cubic-bezier(.4,0,.2,1);}
-#sidebar.collapsed{width:46px!important;min-width:46px!important;}
+/* Collapsed the sidebar clips again: the labels are only faded out, so with
+   overflow visible they would hang over the editor while the width animates. */
+#sidebar.collapsed{width:46px!important;min-width:46px!important;overflow:hidden;}
 #app.sidebar-collapsed #sidebar{width:46px!important;min-width:46px!important;}
 #app.sidebar-collapsed #resizer-left{display:none;}
 /* Collapsed content slides/fades instead of disappearing abruptly. */
@@ -1517,4 +1576,53 @@ body.project-open .project-history{display:block;}
 .project-history-list .convo-item.active::before{background:var(--accent-hover);opacity:1;}
 body.ai-busy.project-open .project-history-list .convo-item.active::before{
     width:12px;height:12px;background:transparent;opacity:1;border:2px solid rgba(129,140,248,.28);border-top-color:var(--accent-hover);animation:sidebar-ai-spin .7s linear infinite;
+}
+
+/* Nothing inside a chat bubble may push the column wider than the panel:
+   wide blocks scroll inside their own box instead of dragging the layout.
+   (.md already does this for rendered markdown; this covers every other
+   path -- tool output, restored history, raw HTML blocks.) */
+.chat-messages,.agents-log{overflow-x:hidden;}
+.msg-body pre,.msg-body table,.reasoning-body pre,.reasoning-body table,
+.thinking-content pre,.thinking-content table{max-width:100%;overflow-x:auto;}
+.msg-body img,.reasoning-body img{max-width:100%;height:auto;}
+
+/* ============================================================
+   NARROW WINDOW — the workspace stacks instead of overflowing
+   ============================================================
+   The three panes have hard minimums: sidebar 240 + editor 200 + AI panel 380
+   + two resizers = ~844px.  Below that the AI panel kept its 380px and ran off
+   the right edge, where #workspace{overflow:hidden} silently cut it in half --
+   the chat and the reasoning block became unreachable.  Now the panes shrink
+   first, then the editor and the AI panel stack vertically. */
+@media (max-width:1040px){
+    #sidebar{flex-shrink:1;}
+    #ai-panel{flex-shrink:1;}
+}
+@media (max-width:820px){
+    /* Top bar: icon-only actions so they stay on screen and clickable. */
+    #topbar{padding:0 10px;gap:8px;}
+    .topbar-label-btn span{display:none;}
+    .topbar-label-btn{padding-left:8px;padding-right:8px;}
+    #workspace{
+        display:grid;
+        grid-template-columns:auto minmax(0,1fr);
+        grid-template-rows:minmax(0,1fr) minmax(0,1fr);
+    }
+    #sidebar{grid-column:1;grid-row:1 / span 2;}
+    #resizer-left,#resizer-right{display:none;}
+    #editor-panel{grid-column:2;grid-row:1;min-width:0;}
+    #ai-panel{
+        grid-column:2;grid-row:2;
+        width:auto!important;min-width:0;
+        border-left:0;border-top:1px solid var(--border);
+    }
+    /* The reasoning slider hugs the panel's left edge; keep it off the text. */
+    #reasoning-slider-bar{transform:scale(.9);transform-origin:left center;}
+}
+@media (max-width:560px){
+    #workspace{grid-template-columns:minmax(0,1fr);}
+    #sidebar{display:none;}
+    #editor-panel,#ai-panel{grid-column:1;}
+    .topbar-center{display:none;}
 }

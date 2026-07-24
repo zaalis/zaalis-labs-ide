@@ -1,10 +1,13 @@
 // ==========================================================
 //  PERMISSION MODE
 // ==========================================================
+// One family, one optical weight: shield -> shield+bolt -> bolt.  These must
+// stay identical to the .mode-item-icon paths in index.html, otherwise the
+// button and the dropdown show two different icons for the same mode.
 const MODE_ICONS = {
-    supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
-    semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>`,
-    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>`
+    supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
+    semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M13 8.5 10 13h4l-3 4.5"/></svg>`,
+    auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>`
 };
 
 function setupModeSelector(btnId, menuId) {
@@ -103,6 +106,24 @@ function syncModeSelectorUI() {
 setupModeSelector('chat-mode-btn', 'chat-mode-menu');
 setupModeSelector('agents-mode-btn', 'agents-mode-menu');
 syncModeSelectorUI();
+
+// Desktop control is deliberately opt-in for the current task. It is not
+// persisted, so reopening the IDE never silently restores control of the PC.
+state.computerControl = false;
+function syncComputerControlUI() {
+    $$('.computer-control-btn').forEach(btn => {
+        btn.setAttribute('aria-pressed', state.computerControl ? 'true' : 'false');
+        btn.title = state.computerControl
+            ? 'Contrôle du PC activé pour cette tâche (cliquer pour couper)'
+            : 'Activer le contrôle explicite du PC pour cette tâche';
+    });
+}
+$$('.computer-control-btn').forEach(btn => btn.addEventListener('click', () => {
+    state.computerControl = !state.computerControl;
+    syncComputerControlUI();
+    toast(state.computerControl ? 'Contrôle du PC activé : l’IA doit inspecter avant et après ses actions.' : 'Contrôle du PC désactivé.');
+}));
+syncComputerControlUI();
 
 // Approval modal
 let pendingApproval = null;
@@ -318,7 +339,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // Reveal `text` word-by-word into `el` (live typing effect), then replace it
 // with the final rendered HTML. Used for the chat reply and the lead synthesis.
-async function streamInto(el, text, finalHTML, signal, scrollEl) {
+async function streamInto(el, text, finalHTML, signal, scrollEl, onProgress) {
     const words = String(text).split(/(\s+)/);
     // Reveal several words at a time for long answers so it never feels sluggish.
     const chunk = words.length > 400 ? 4 : (words.length > 150 ? 2 : 1);
@@ -328,10 +349,12 @@ async function streamInto(el, text, finalHTML, signal, scrollEl) {
         if (signal && signal.aborted) { acc = text; break; }
         acc += words.slice(i, i + chunk).join('');
         el.innerHTML = renderMarkdown(acc);
+        if (typeof onProgress === 'function') onProgress(acc, false);
         if (scrollEl) followScroll(scrollEl);
         await sleep(13);
     }
     el.innerHTML = finalHTML != null ? finalHTML : renderMarkdown(text);
+    if (typeof onProgress === 'function') onProgress(String(text), true);
     if (scrollEl) followScroll(scrollEl);
 }
 
@@ -531,12 +554,16 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             submodel,
             message,
             root: state.projectRoot,
-            permissionMode: state.permissionMode,
+            // Agents mode overrides these per agent: workers run read-only so
+            // several of them can never fight over the same files.
+            permissionMode: options.permissionMode || state.permissionMode,
+            rolePrompt: options.rolePrompt || undefined,
             language: state.language || 'fr',
             config: safeConfig,
             reasoningLevel: state.reasoningLevel,
             images,
             history,
+            computerControl: options.computerControl === undefined ? !!state.computerControl : !!options.computerControl,
             stream: wantsStream
         }),
         signal
@@ -836,6 +863,13 @@ async function sendChat(input) {
         }
     }
 
+    // Reflect the prompt immediately. Exact provider usage is applied as soon
+    // as it arrives; until then the rendered response advances the output
+    // estimate so the meter never stays frozen during a turn.
+    const contextTokensBeforeTurn = state.contextTokens || state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+    state.contextTokens = contextTokensBeforeTurn + estimateTokens(aiMessage);
+    updateTokenMeter();
+
     const t0 = Date.now();
     const controller = new AbortController();
     chatAbort = controller;
@@ -861,13 +895,26 @@ async function sendChat(input) {
             const responseText = data.response || '';
             const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
+            const providerInputTokens = Number(data.usage && data.usage.input);
+            const providerOutputTokens = Number(data.usage && data.usage.output);
+            const liveInputTokens = Number.isFinite(providerInputTokens)
+                ? Math.max(0, providerInputTokens)
+                : contextTokensBeforeTurn + estimateTokens(aiMessage);
+            const updateLiveTokens = (visibleText, final) => {
+                const output = final && Number.isFinite(providerOutputTokens)
+                    ? Math.max(0, providerOutputTokens)
+                    : estimateTokens(visibleText);
+                state.contextTokens = liveInputTokens + output;
+                updateTokenMeter();
+            };
             // Generated image = single rectangle (instant); text = streamed word-by-word.
             body.classList.toggle('has-image', isImg);
             if (isImg) {
                 body.innerHTML = reasoning + formatted;
+                updateLiveTokens(responseText, true);
             } else {
                 body.innerHTML = reasoning + '<div class="stream-target"></div>';
-                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'));
+                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'), updateLiveTokens);
             }
             if (!liveActivity && Array.isArray(data.toolResults) && data.toolResults.length) {
                 body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
@@ -904,6 +951,8 @@ async function sendChat(input) {
         }
     } catch (err) {
         stopThinking(body);
+        state.contextTokens = contextTokensBeforeTurn;
+        updateTokenMeter();
         if (err && err.name === 'AbortError') {
             aborted = true;
             if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
@@ -1788,7 +1837,9 @@ async function sendAgentTask(input) {
     const { aiText = '', names = [], images: taskImages = [] } = taskDraft;
     const displayTask = task + (names.length ? `\n📎 ${names.join(', ')}` : '');
     task = task + aiText;
-    const projCtx = await projectContext(false); // appended to each agent's SYSTEM prompt (full for agents)
+    // No static project tree here any more: every agent now runs on the engine,
+    // which injects the project context itself and lets the agent read the real
+    // files with glob/grep/read instead of working from a frozen listing.
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', displayTask);
 
     const agentsLog = $('#agents-log');
@@ -1836,8 +1887,11 @@ async function sendAgentTask(input) {
         followScroll(agentsLog);
         const statusText = line.querySelector('.team-agent-status');
 
-        const isLocalAgent = agent === 'local' || agent === 'gguf';
-        const systemPrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(isLocalAgent, modelIdentity(agent, submodel, lang))}${projCtx}`;
+        // Same engine as Chat and the CLI: the role is layered on top of the
+        // engine prompt, so a worker keeps read/glob/grep to inspect the real
+        // project instead of guessing from a static tree.  read-only means it
+        // can never write, which is what kept several agents safe until now.
+        const workerRolePrompt = `${ROLE_PROMPTS[role]}\n${AGENT_COLLABORATION_PROMPT}\n${modelIdentity(agent, submodel, lang)}`;
         const fullMessage = context
             ? (lang === 'en'
                 ? `[Previous agents context]:\n${context}\n\n[User task]: ${task}`
@@ -1845,7 +1899,11 @@ async function sendAgentTask(input) {
             : task;
 
         try {
-            const data = await callAI(agent, submodel, fullMessage, systemPrompt, taskImages);
+            const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], {
+                rolePrompt: workerRolePrompt,
+                permissionMode: 'read-only',
+                computerControl: false
+            });
             if (data.error) {
                 statusText.textContent = lang === 'en' ? 'error' : 'erreur';
                 statusText.classList.add('err');
@@ -1880,7 +1938,10 @@ async function sendAgentTask(input) {
     leadBadge.className = 'agent-badge working';
 
     const leadIsLocal = leadAgent.agent === 'local' || leadAgent.agent === 'gguf';
-    const leadSystemPrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${codeAgentPrompt(leadIsLocal, modelIdentity(leadAgent.agent, leadAgent.submodel, lang))}${projCtx}`;
+    // The lead runs the full engine (same tools as Chat and the CLI), so its
+    // role prompt must NOT carry the old 4-block text protocol: the engine
+    // supplies its own tool protocol and applies the changes server-side.
+    const leadRolePrompt = `${ROLE_PROMPTS[leadAgent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${modelIdentity(leadAgent.agent, leadAgent.submodel, lang)}`;
     const leadMessage = lang === 'fr'
         ? `[Tache utilisateur]: ${task}
 
@@ -1909,7 +1970,9 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     startThinking(streamTarget);
 
     try {
-        const data = await callAI(leadAgent.agent, leadAgent.submodel, leadMessage, leadSystemPrompt, taskImages);
+        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], {
+            rolePrompt: leadRolePrompt
+        });
         stopThinking(streamTarget);
         if (data.error) {
             streamTarget.textContent = data.error;
@@ -1921,18 +1984,12 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             } else {
                 await streamInto(streamTarget, data.response, formatted, null, agentsLog);
             }
-            const applied = await handleAIResponse(data.response, labels[leadAgent.agent], '#agents-log');
-            if (applied && applied.editErrors && applied.editErrors.length) {
-                await resolveEditRetries(applied.editErrors, leadAgent.agent, leadAgent.submodel, leadIsLocal, lang, 0, {
-                    container: '#agents-log',
-                    history: [
-                        { role: 'user', content: leadMessage },
-                        { role: 'assistant', content: data.response }
-                    ],
-                    modelLabel: labels[leadAgent.agent],
-                    persistToChat: false,
-                    saveKind: 'agents'
-                });
+            // The engine already applied every edit/write/run server-side, so the
+            // response must NOT go through handleAIResponse here — that would
+            // apply the same changes a second time.  Show what it did instead.
+            if (Array.isArray(data.toolResults) && data.toolResults.length) {
+                leadBody.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
+                followScroll(agentsLog);
             }
         }
     } catch (err) {
@@ -2915,3 +2972,96 @@ function setupVoiceRecognition(btnId, textareaId) {
 // Initialize Voice Recognition
 setupVoiceRecognition('chat-voice-btn', 'chat-input');
 setupVoiceRecognition('agents-voice-btn', 'agents-input');
+
+// ==========================================================
+//  INTEGRATED TERMINAL
+// ==========================================================
+// A real shell (PTY) docked at the bottom of the IDE. The session lives on the
+// server and survives panel closes, so output is never lost mid-command.
+let terminalSessionId = null;
+let terminalStream = null;
+let terminalSessionOrigin = null;
+
+function cleanTerminalOutput(value) {
+    // A preformatted DOM node does not interpret terminal control codes; strip
+    // SGR, bracketed-paste and title sequences so prompts stay readable.
+    return String(value || '')
+        .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, '')
+        .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+        .replace(/\r(?!\n)/g, '');
+}
+
+function appendTerminalOutput(value) {
+    const output = $('#terminal-output');
+    if (!output) return;
+    output.textContent = (output.textContent + cleanTerminalOutput(value)).slice(-512 * 1024);
+    output.scrollTop = output.scrollHeight;
+}
+
+async function attachIntegratedTerminal(id) {
+    if (!id) return;
+    terminalSessionId = id;
+    const panel = $('#integrated-terminal');
+    panel.classList.remove('hidden');
+    if (terminalStream) terminalStream.close();
+    const snap = await fetch(`/api/terminal/sessions/${encodeURIComponent(id)}`).then(r => r.json());
+    terminalSessionOrigin = snap.origin || 'agent';
+    $('#terminal-cwd').textContent = snap.cwd || '';
+    $('#terminal-output').textContent = cleanTerminalOutput(snap.output);
+    terminalStream = new EventSource(`/api/terminal/sessions/${encodeURIComponent(id)}/stream`);
+    terminalStream.addEventListener('snapshot', (e) => {
+        try { const data = JSON.parse(e.data); $('#terminal-cwd').textContent = data.cwd || ''; $('#terminal-output').textContent = cleanTerminalOutput(data.output); } catch {}
+    });
+    terminalStream.addEventListener('data', (e) => { try { appendTerminalOutput(JSON.parse(e.data)); } catch { appendTerminalOutput(e.data); } });
+    terminalStream.addEventListener('exit', () => appendTerminalOutput('\n[terminal fermé]\n'));
+    $('#terminal-input').focus();
+}
+
+async function openIntegratedTerminal() {
+    const created = await fetch('/api/terminal/sessions', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cwd: state.projectRoot })
+    }).then(r => r.json());
+    if (!created || created.error) throw new Error((created && created.error) || 'Terminal indisponible');
+    await attachIntegratedTerminal(created.id);
+}
+
+const openTerminalBtn = $('#open-integrated-terminal');
+if (openTerminalBtn) openTerminalBtn.addEventListener('click', () => {
+    // Already open: the button just puts the cursor back in it.
+    if (terminalSessionId) { $('#integrated-terminal').classList.remove('hidden'); $('#terminal-input').focus(); return; }
+    openIntegratedTerminal().catch((err) => toast(err.message || 'Terminal indisponible'));
+});
+
+const terminalInput = $('#terminal-input');
+if (terminalInput) terminalInput.addEventListener('keydown', async (e) => {
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+    if (!terminalSessionId) {
+        try { await openIntegratedTerminal(); } catch (err) { toast(err.message || 'Terminal indisponible'); return; }
+    }
+    const value = terminalInput.value;
+    terminalInput.value = '';
+    await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}/input`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ data: value + '\r' })
+    });
+});
+
+const terminalCloseBtn = $('#terminal-close-btn');
+if (terminalCloseBtn) terminalCloseBtn.addEventListener('click', async () => {
+    if (terminalStream) { terminalStream.close(); terminalStream = null; }
+    if (terminalSessionId) { try { await fetch(`/api/terminal/sessions/${encodeURIComponent(terminalSessionId)}`, { method: 'DELETE' }); } catch {} }
+    terminalSessionId = null; terminalSessionOrigin = null;
+    $('#integrated-terminal').classList.add('hidden');
+});
+
+// Switching the shell in Settings restarts a terminal the user opened himself
+// (an agent-owned session keeps running so its command is not interrupted).
+document.addEventListener('terminal-profile-changed', async () => {
+    if (terminalSessionOrigin !== 'user' || !terminalSessionId) return;
+    const oldId = terminalSessionId;
+    if (terminalStream) { terminalStream.close(); terminalStream = null; }
+    terminalSessionId = null; terminalSessionOrigin = null;
+    try { await fetch(`/api/terminal/sessions/${encodeURIComponent(oldId)}`, { method: 'DELETE' }); } catch {}
+    try { await openIntegratedTerminal(); } catch (err) { toast(err.message || 'Terminal indisponible'); }
+});
