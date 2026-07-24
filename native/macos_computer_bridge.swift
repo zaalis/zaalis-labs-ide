@@ -33,10 +33,33 @@ func screenPermission(prompt: Bool) -> Bool {
     return false
 }
 
+// The screenshot API is async while this command-line bridge deliberately
+// returns one synchronous JSON response. The lock also keeps Swift 6's strict
+// concurrency checker from seeing a mutable captured local across Task.
+final class ScreenshotResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var image: CGImage?
+    private var failure: String?
+
+    func succeed(_ value: CGImage) {
+        lock.lock(); image = value; lock.unlock()
+    }
+
+    func fail(_ error: Error) {
+        lock.lock(); failure = error.localizedDescription; lock.unlock()
+    }
+
+    func get() throws -> CGImage {
+        lock.lock(); defer { lock.unlock() }
+        if let image { return image }
+        throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: failure ?? "screen capture failed"])
+    }
+}
+
 @available(macOS 14.0, *)
 func capturedImage() throws -> CGImage {
     let semaphore = DispatchSemaphore(value: 0)
-    var result: Result<CGImage, Error>!
+    let result = ScreenshotResult()
     Task {
         do {
             let content = try await SCShareableContent.current
@@ -45,8 +68,8 @@ func capturedImage() throws -> CGImage {
             let config = SCStreamConfiguration()
             config.width = display.width
             config.height = display.height
-            result = .success(try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config))
-        } catch { result = .failure(error) }
+            result.succeed(try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config))
+        } catch { result.fail(error) }
         semaphore.signal()
     }
     semaphore.wait()
