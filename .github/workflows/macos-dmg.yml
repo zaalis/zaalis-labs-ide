@@ -46,6 +46,11 @@ jobs:
           path: native/macos-build.log
           if-no-files-found: error
 
+      - name: Surface macOS build failure
+        if: failure()
+        run: |
+          echo "::error title=macOS DMG build failed::$(tail -n 30 native/macos-build.log | tr '\n' ' ')"
+
       - name: Upload DMGs as artifacts
         uses: actions/upload-artifact@v4
         with:
