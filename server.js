@@ -1,22 +1,719 @@
-﻿const express = require('express');
+const express = require('express');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const dns = require('dns').promises;
+const net = require('net');
 const { exec, execFile, spawn } = require('child_process');
-const { runAgentTurn } = require('./agent-engine');
+const { runAgentTurn, TOOL_CATALOG, COMPUTER_FUNCTION_TOOL, nativeComputerCallsAsText } = require('./agent-engine');
+const brainMcp = require('./brain-mcp-client');
+const { AutomationManager } = require('./automation-manager');
+const { TerminalManager } = require('./terminal-manager');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
 try { QRCode = require('qrcode'); } catch {}
 
+// Visual activity indicator only: a click-through fog around each screen,
+// plus a small "Stopper l'IA" button. It never draws, moves, or hides a cursor.
+// The button authenticates against /api/automation/stop-bridge with a random
+// per-launch secret (the Windows equivalent of the macOS bridge secret).
+const WINDOWS_FOG_SECRET = crypto.randomBytes(32).toString('hex');
+let windowsFogProcess = null;
+
+function stopWindowsActivityFog() {
+  const child = windowsFogProcess;
+  if (!child) return;
+  try { child.kill(); } catch {}
+  if (windowsFogProcess === child) windowsFogProcess = null;
+}
+
+async function startWindowsActivityFog() {
+  if (process.platform !== 'win32') return { ok: false, error: 'unsupported-platform' };
+  if (windowsFogProcess && windowsFogProcess.exitCode == null) return { ok: true, pid: windowsFogProcess.pid };
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ZaalisFogNative {
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+}
+'@
+# powershell.exe spawné démarre DPI-unaware : sur un 4K à 150 %, les bornes
+# écran sont virtualisées et la brume sort floue/décalée. On force le mode
+# per-monitor puis on mesure l'échelle DIP->pixels réellement appliquée par
+# WPF sur une fenêtre sonde (M11) — la seule source fiable.
+try { [void][ZaalisFogNative]::SetProcessDpiAwareness(2) } catch {}
+$probe = New-Object Windows.Window
+$probe.WindowStyle = 'None'; $probe.ResizeMode = 'NoResize'; $probe.AllowsTransparency = $true
+$probe.Background = [Windows.Media.Brushes]::Transparent; $probe.ShowInTaskbar = $false
+$probe.Left = 0; $probe.Top = 0; $probe.Width = 1; $probe.Height = 1; $probe.Opacity = 0
+$probe.Show()
+$dip = [Windows.PresentationSource]::FromVisual($probe).CompositionTarget.TransformToDevice.M11
+$probe.Close()
+if (-not ($dip -gt 0)) { $dip = 1 }
+foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) {
+  $b = $screen.Bounds
+  $win = New-Object Windows.Window
+  $win.WindowStyle = 'None'; $win.ResizeMode = 'NoResize'; $win.AllowsTransparency = $true
+  $win.Background = [Windows.Media.Brushes]::Transparent; $win.ShowInTaskbar = $false; $win.Topmost = $true
+  $win.Left = $b.X / $dip; $win.Top = $b.Y / $dip; $win.Width = $b.Width / $dip; $win.Height = $b.Height / $dip
+  $win.Add_SourceInitialized({
+    $helper = New-Object Windows.Interop.WindowInteropHelper($this)
+    $style = [ZaalisFogNative]::GetWindowLong($helper.Handle, -20)
+    [void][ZaalisFogNative]::SetWindowLong($helper.Handle, -20, ($style -bor 0x20 -bor 0x80))
+  })
+  $border = New-Object Windows.Controls.Border
+  $border.BorderThickness = 24; $border.CornerRadius = 8; $border.Opacity = .76
+  $brush = New-Object Windows.Media.LinearGradientBrush
+  $brush.StartPoint = New-Object Windows.Point 0,0; $brush.EndPoint = New-Object Windows.Point 1,1
+  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(109,40,217),0)))
+  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(216,180,254),.5)))
+  [void]$brush.GradientStops.Add((New-Object Windows.Media.GradientStop ([Windows.Media.Color]::FromRgb(109,40,217),1)))
+  $border.BorderBrush = $brush
+  $border.Effect = New-Object Windows.Media.Effects.BlurEffect -Property @{ Radius = 24 }
+  $win.Content = $border; $win.Show()
+}
+# Bouton « Stopper l'IA » : petit rectangle arrondi en bas au centre de
+# l'écran principal. Cliquable (pas de click-through) ; il coupe la session
+# d'automatisation côté serveur puis ferme l'overlay.
+$wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$stopWin = New-Object Windows.Window
+$stopWin.WindowStyle = 'None'; $stopWin.ResizeMode = 'NoResize'; $stopWin.AllowsTransparency = $true
+$stopWin.Background = [Windows.Media.Brushes]::Transparent; $stopWin.ShowInTaskbar = $false; $stopWin.Topmost = $true
+$stopWin.Width = 150; $stopWin.Height = 56
+$stopWin.Left = ($wa.X + $wa.Width / 2) / $dip - 75
+$stopWin.Top = ($wa.Y + $wa.Height) / $dip - 72
+$stopButton = New-Object Windows.Controls.Border
+$stopButton.CornerRadius = 12; $stopButton.Height = 40; $stopButton.VerticalAlignment = 'Center'
+$stopButton.Cursor = [Windows.Input.Cursors]::Hand
+$stopButton.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86))
+$stopButton.BorderThickness = 1
+$stopButton.BorderBrush = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(120,255,255,255))
+$stopShadow = New-Object Windows.Media.Effects.DropShadowEffect
+$stopShadow.Color = [Windows.Media.Color]::FromRgb(46,16,101); $stopShadow.BlurRadius = 18; $stopShadow.ShadowDepth = 2; $stopShadow.Opacity = .5
+$stopButton.Effect = $stopShadow
+$stopText = New-Object Windows.Controls.TextBlock
+$stopText.Text = "Stopper l'IA"; $stopText.Foreground = [Windows.Media.Brushes]::White
+$stopText.FontWeight = 'SemiBold'; $stopText.FontSize = 13
+$stopText.HorizontalAlignment = 'Center'; $stopText.VerticalAlignment = 'Center'
+$stopButton.Child = $stopText
+$stopButton.Add_MouseEnter({ $this.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(190,45,70)) })
+$stopButton.Add_MouseLeave({ $this.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86)) })
+$stopButton.Add_MouseLeftButtonDown({
+  try { Invoke-WebRequest -UseBasicParsing -Method Post -Uri ("http://127.0.0.1:" + $env:ZAALIS_FOG_PORT + "/api/automation/stop-bridge") -Headers @{ 'x-zaalis-computer' = $env:ZAALIS_FOG_SECRET } -TimeoutSec 5 | Out-Null } catch {}
+  [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background)
+})
+$stopWin.Content = $stopButton; $stopWin.Show()
+[Windows.Threading.Dispatcher]::Run()
+`;
+  const child = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    windowsHide: true,
+    stdio: 'ignore',
+    env: { ...process.env, ZAALIS_FOG_SECRET: WINDOWS_FOG_SECRET, ZAALIS_FOG_PORT: String(PORT) },
+  });
+  windowsFogProcess = child;
+  child.once('exit', () => { if (windowsFogProcess === child) windowsFogProcess = null; });
+  child.once('error', () => { if (windowsFogProcess === child) windowsFogProcess = null; });
+  await new Promise((resolve) => setTimeout(resolve, 450));
+  return child.exitCode == null ? { ok: true, pid: child.pid } : { ok: false, error: `fog-exited:${child.exitCode}` };
+}
+
+/* Legacy AI-cursor overlay removed: desktop control now uses only real input.
+const WINDOWS_OVERLAY_SECRET = crypto.randomBytes(32).toString('hex');
+let windowsOverlayProcess = null;
+let windowsOverlayStatePath = null;
+let windowsOverlaySequence = 0;
+
+function writeWindowsOverlayState(state) {
+  if (!windowsOverlayStatePath) return false;
+  try {
+    fs.writeFileSync(windowsOverlayStatePath, JSON.stringify({ sequence: ++windowsOverlaySequence, ...state }), 'utf8');
+    return true;
+  } catch { return false; }
+}
+
+function publishWindowsAutomationVisual(action) {
+  if (!windowsOverlayProcess || windowsOverlayProcess.exitCode != null || !action) return false;
+  const kind = String(action.action || 'pulse');
+  const hasPoint = Number.isFinite(Number(action.x)) && Number.isFinite(Number(action.y));
+  const duration = Math.max(140, Math.min(1200, Math.round((Number(action.duration) || (kind === 'click' ? 0.34 : 0.28)) * 1000)));
+  return writeWindowsOverlayState({
+    command: 'visual', kind, x: hasPoint ? Number(action.x) : null, y: hasPoint ? Number(action.y) : null,
+    duration, button: action.button === 'right' ? 'right' : 'left', at: Date.now(),
+  });
+}
+
+function stopWindowsAutomationOverlay() {
+  const child = windowsOverlayProcess;
+  if (!child) return;
+  // Ask the STA overlay to close itself first: its finally block restores the
+  // real Windows cursor before the helper process exits.
+  writeWindowsOverlayState({ command: 'stop', at: Date.now() });
+  setTimeout(() => {
+    if (windowsOverlayProcess === child && child.exitCode == null) {
+      try { child.kill(); } catch {}
+    }
+  }, 1500).unref();
+}
+
+async function startWindowsAutomationOverlay() {
+  if (process.platform !== 'win32') return { ok: false, error: 'unsupported-platform' };
+  if (windowsOverlayProcess && windowsOverlayProcess.exitCode == null) return { ok: true, pid: windowsOverlayProcess.pid };
+  windowsOverlaySequence = 0;
+  windowsOverlayStatePath = path.join(os.tmpdir(), `zaalis-ai-cursor-${process.pid}-${Date.now()}.json`);
+  if (!writeWindowsOverlayState({ command: 'ready', at: Date.now() })) return { ok: false, error: 'overlay-state-unavailable' };
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName PresentationFramework
+Add-Type -AssemblyName PresentationCore
+Add-Type -AssemblyName WindowsBase
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ZaalisOverlayNative {
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int index);
+  [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int index, int value);
+  [DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT point);
+  [DllImport("user32.dll")] public static extern int ShowCursor(bool show);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+}
+'@
+# powershell.exe peut démarrer DPI-unaware (métriques écran virtualisées)
+# alors que WPF rend à l'échelle du moniteur : sur un 4K à 150 %, tout sort
+# 1,5x trop grand (bordures hors champ, dock repoussé sous le bord visible).
+# On force un état connu AVANT toute lecture de métrique ou création de
+# fenêtre, puis on mesure l'échelle DIP->pixels réellement appliquée par WPF
+# sur une fenêtre sonde — la seule source fiable, quel que soit le mode DPI.
+try { [void][ZaalisOverlayNative]::SetProcessDpiAwareness(2) } catch {}
+$windows = New-Object Collections.Generic.List[Windows.Window]
+function Make-Window([double]$x,[double]$y,[double]$width,[double]$height,[bool]$clickThrough) {
+  $win = New-Object Windows.Window
+  $win.WindowStyle = 'None'; $win.ResizeMode = 'NoResize'; $win.AllowsTransparency = $true
+  $win.Background = [Windows.Media.Brushes]::Transparent; $win.ShowInTaskbar = $false; $win.Topmost = $true
+  $win.Left = $x; $win.Top = $y; $win.Width = $width; $win.Height = $height
+  if ($clickThrough) {
+    $win.Add_SourceInitialized({
+      $helper = New-Object Windows.Interop.WindowInteropHelper($this)
+      $style = [ZaalisOverlayNative]::GetWindowLong($helper.Handle, -20)
+      [void][ZaalisOverlayNative]::SetWindowLong($helper.Handle, -20, ($style -bor 0x20 -bor 0x80))
+    })
+  }
+  return $win
+}
+function New-GradientStop([byte]$a,[byte]$r,[byte]$g,[byte]$b,[double]$offset) {
+  $stop = New-Object Windows.Media.GradientStop
+  $stop.Color = [Windows.Media.Color]::FromArgb($a,$r,$g,$b); $stop.Offset = $offset
+  return $stop
+}
+function New-Pt([double]$x,[double]$y) { return New-Object Windows.Point $x,$y }
+$probe = Make-Window 0 0 1 1 $true
+$probe.Opacity = 0
+$probe.Show()
+$dip = [Windows.PresentationSource]::FromVisual($probe).CompositionTarget.TransformToDevice.M11
+$probe.Close()
+if (-not ($dip -gt 0)) { $dip = 1 }
+# Pinceau « flux » : palette violette du thème IA (violet profond 6D28D9,
+# violet A855F7, lavande D8B4FE à 85 % d'alpha) étalée sur deux largeurs,
+# répétée puis translatée en boucle sur 7 s — l'équivalent WPF exact du
+# background-size:200% animé de setAiControlBorder (zaalisBrowser macOS).
+function New-FlowBrush {
+  $brush = New-Object Windows.Media.LinearGradientBrush
+  $brush.StartPoint = New-Pt 0 .5
+  $brush.EndPoint = New-Pt 2 .5
+  $brush.MappingMode = [Windows.Media.BrushMappingMode]::RelativeToBoundingBox
+  $brush.SpreadMethod = [Windows.Media.GradientSpreadMethod]::Repeat
+  [void]$brush.GradientStops.Add((New-GradientStop 217 109 40 217 0))
+  [void]$brush.GradientStops.Add((New-GradientStop 217 168 85 247 .25))
+  [void]$brush.GradientStops.Add((New-GradientStop 217 216 180 254 .5))
+  [void]$brush.GradientStops.Add((New-GradientStop 217 168 85 247 .75))
+  [void]$brush.GradientStops.Add((New-GradientStop 217 109 40 217 1))
+  $slide = New-Object Windows.Media.TranslateTransform
+  $brush.RelativeTransform = $slide
+  $flow = New-Object Windows.Media.Animation.DoubleAnimation
+  $flow.From = 0; $flow.To = 2; $flow.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds(7)); $flow.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+  $slide.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $flow)
+  return $brush
+}
+# Fondu d'un bord pour le masque : opaque à 10 DIP du bord de l'écran, éteint
+# à 40 DIP vers l'intérieur — le « feather » du masque CSS macOS. Dessiné en
+# géométries absolues (DrawingBrush) : un VisualBrush re-mesurerait le visuel
+# hors arbre et rendrait le masque opaque partout.
+function New-FeatherDrawing([string]$edge,[double]$w,[double]$h) {
+  $fade = New-Object Windows.Media.LinearGradientBrush
+  [void]$fade.GradientStops.Add((New-GradientStop 0 255 255 255 0))
+  [void]$fade.GradientStops.Add((New-GradientStop 255 255 255 255 .25))
+  [void]$fade.GradientStops.Add((New-GradientStop 0 255 255 255 1))
+  $x = 0; $y = 0; $rw = $w; $rh = $h
+  if ($edge -eq 'top')    { $rh = 40;                $fade.StartPoint = New-Pt .5 0; $fade.EndPoint = New-Pt .5 1 }
+  if ($edge -eq 'bottom') { $rh = 40; $y = $h - 40;  $fade.StartPoint = New-Pt .5 1; $fade.EndPoint = New-Pt .5 0 }
+  if ($edge -eq 'left')   { $rw = 40;                $fade.StartPoint = New-Pt 0 .5; $fade.EndPoint = New-Pt 1 .5 }
+  if ($edge -eq 'right')  { $rw = 40; $x = $w - 40;  $fade.StartPoint = New-Pt 1 .5; $fade.EndPoint = New-Pt 0 .5 }
+  $geom = New-Object Windows.Media.RectangleGeometry (New-Object Windows.Rect $x,$y,$rw,$rh)
+  return New-Object Windows.Media.GeometryDrawing $fade,$null,$geom
+}
+function Add-ControlBorder([System.Windows.Forms.Screen]$screen) {
+  # Port du halo de contrôle du zaalisBrowser macOS : un rectangle plein au
+  # dégradé défilant dont seul le pourtour reste visible via le masque fondu,
+  # le tout flouté 14 px à 80 % d'opacité. Aucune brume centrale.
+  $b = $screen.Bounds
+  $w = $b.Width / $dip; $h = $b.Height / $dip
+  $win = Make-Window ($b.X / $dip) ($b.Y / $dip) $w $h $true
+  $root = New-Object Windows.Controls.Grid
+  $root.Opacity = .8
+  $root.Effect = New-Object Windows.Media.Effects.BlurEffect -Property @{ Radius = 14 }
+  $band = New-Object Windows.Shapes.Rectangle
+  $band.Fill = New-FlowBrush
+  $maskGroup = New-Object Windows.Media.DrawingGroup
+  foreach ($edge in @('top','bottom','left','right')) { [void]$maskGroup.Children.Add((New-FeatherDrawing $edge $w $h)) }
+  $band.OpacityMask = New-Object Windows.Media.DrawingBrush $maskGroup
+  [void]$root.Children.Add($band)
+  $win.Content = $root; $win.Show(); $windows.Add($win)
+}
+foreach ($screen in [System.Windows.Forms.Screen]::AllScreens) { Add-ControlBorder $screen }
+
+# The AI pointer is intentionally a click-through topmost window. The real
+# input still goes to the application below, while this pointer makes the
+# requested movement and click visible to the person watching the desktop.
+$initialPoint = New-Object ZaalisOverlayNative+POINT
+[void][ZaalisOverlayNative]::GetCursorPos([ref]$initialPoint)
+$aiCursor = Make-Window ($initialPoint.X / $dip - 4) ($initialPoint.Y / $dip - 3) 42 54 $true
+$aiCursorCanvas = New-Object Windows.Controls.Canvas
+$aiPointer = New-Object Windows.Shapes.Path
+$aiPointer.Data = [Windows.Media.Geometry]::Parse('M 3,2 L 3,39 L 12,29 L 19,47 L 26,44 L 18,27 L 34,27 Z')
+$aiPointer.Fill = [Windows.Media.Brushes]::White; $aiPointer.Stroke = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(54,26,112)); $aiPointer.StrokeThickness = 2
+$aiPointer.Effect = New-Object Windows.Media.Effects.DropShadowEffect -Property @{ Color = [Windows.Media.Color]::FromRgb(109,40,217); BlurRadius = 15; ShadowDepth = 2; Opacity = .82 }
+[void]$aiCursorCanvas.Children.Add($aiPointer)
+$clickRing = New-Object Windows.Shapes.Ellipse
+$clickRing.Width = 18; $clickRing.Height = 18; $clickRing.StrokeThickness = 3; $clickRing.Opacity = 0
+$clickRing.Stroke = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(216,180,254)); $clickRing.RenderTransformOrigin = New-Pt .5 .5; $clickRing.RenderTransform = New-Object Windows.Media.ScaleTransform 1,1
+[Windows.Controls.Canvas]::SetLeft($clickRing, -6); [Windows.Controls.Canvas]::SetTop($clickRing, -6)
+[void]$aiCursorCanvas.Children.Add($clickRing)
+$aiCursor.Content = $aiCursorCanvas; $aiCursor.Show(); $windows.Add($aiCursor)
+
+$nativeCursorHidden = $false
+function Set-NativeCursorHidden([bool]$hide) {
+  if ($hide -eq $nativeCursorHidden) { return }
+  [void][ZaalisOverlayNative]::ShowCursor(-not $hide)
+  $script:nativeCursorHidden = $hide
+}
+function Animate-AiCursor([double]$x,[double]$y,[int]$duration,[bool]$click) {
+  $duration = [Math]::Max(140, [Math]::Min($duration, 1200))
+  $toLeft = $x / $dip - 4; $toTop = $y / $dip - 3
+  $time = [Windows.Duration]::new([TimeSpan]::FromMilliseconds($duration))
+  $leftAnimation = New-Object Windows.Media.Animation.DoubleAnimation; $leftAnimation.From = $aiCursor.Left; $leftAnimation.To = $toLeft; $leftAnimation.Duration = $time; $leftAnimation.FillBehavior = [Windows.Media.Animation.FillBehavior]::HoldEnd
+  $topAnimation = New-Object Windows.Media.Animation.DoubleAnimation; $topAnimation.From = $aiCursor.Top; $topAnimation.To = $toTop; $topAnimation.Duration = $time; $topAnimation.FillBehavior = [Windows.Media.Animation.FillBehavior]::HoldEnd
+  $aiCursor.BeginAnimation([Windows.Window]::LeftProperty, $leftAnimation); $aiCursor.BeginAnimation([Windows.Window]::TopProperty, $topAnimation)
+  if ($click) {
+    $ringOpacity = New-Object Windows.Media.Animation.DoubleAnimation; $ringOpacity.From = 1; $ringOpacity.To = 0; $ringOpacity.BeginTime = [TimeSpan]::FromMilliseconds($duration); $ringOpacity.Duration = [Windows.Duration]::new([TimeSpan]::FromMilliseconds(360))
+    $clickRing.BeginAnimation([Windows.UIElement]::OpacityProperty, $ringOpacity)
+    $ringScale = $clickRing.RenderTransform
+    $ringGrow = New-Object Windows.Media.Animation.DoubleAnimation; $ringGrow.From = .55; $ringGrow.To = 2.7; $ringGrow.BeginTime = [TimeSpan]::FromMilliseconds($duration); $ringGrow.Duration = [Windows.Duration]::new([TimeSpan]::FromMilliseconds(360))
+    $ringScale.BeginAnimation([Windows.Media.ScaleTransform]::ScaleXProperty, $ringGrow); $ringScale.BeginAnimation([Windows.Media.ScaleTransform]::ScaleYProperty, $ringGrow)
+  }
+}
+
+$lastPhysical = $initialPoint; $lastHumanInput = [DateTime]::UtcNow; $suppressPhysicalUntil = [DateTime]::MinValue
+$expectedPoint = $initialPoint; $lastOverlaySequence = 0; $statePath = [Environment]::GetEnvironmentVariable('ZAALIS_OVERLAY_STATE')
+$cursorTimer = New-Object Windows.Threading.DispatcherTimer; $cursorTimer.Interval = [TimeSpan]::FromMilliseconds(35)
+$cursorTimer.Add_Tick({
+  $now = [DateTime]::UtcNow
+  $current = New-Object ZaalisOverlayNative+POINT; [void][ZaalisOverlayNative]::GetCursorPos([ref]$current)
+  if ($current.X -ne $lastPhysical.X -or $current.Y -ne $lastPhysical.Y) {
+    $expectedMove = $now -le $suppressPhysicalUntil -and [Math]::Abs($current.X - $expectedPoint.X) -le 3 -and [Math]::Abs($current.Y - $expectedPoint.Y) -le 3
+    if (-not $expectedMove) { $script:lastHumanInput = $now }
+    $script:lastPhysical = $current
+  }
+  if ($statePath -and (Test-Path -LiteralPath $statePath)) {
+    try {
+      $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+      if ($state.sequence -gt $lastOverlaySequence) {
+        $script:lastOverlaySequence = [int64]$state.sequence
+        if ($state.command -eq 'stop') { [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Send); return }
+        if ($state.command -eq 'visual') {
+          $x = if ($null -eq $state.x) { $current.X } else { [double]$state.x }; $y = if ($null -eq $state.y) { $current.Y } else { [double]$state.y }
+          $duration = [Math]::Max(140, [Math]::Min([int]$state.duration, 1200)); $script:expectedPoint = New-Object ZaalisOverlayNative+POINT; $script:expectedPoint.X = [int][Math]::Round($x); $script:expectedPoint.Y = [int][Math]::Round($y)
+          $script:suppressPhysicalUntil = $now.AddMilliseconds($duration + 550); $aiCursor.Opacity = 1; Set-NativeCursorHidden $true
+          Animate-AiCursor $x $y $duration ($state.kind -eq 'click')
+        }
+      }
+    } catch {}
+  }
+  $humanActive = $now.Subtract($lastHumanInput).TotalMilliseconds -lt 800 -and $now -gt $suppressPhysicalUntil
+  if ($humanActive) { $aiCursor.Opacity = 0; Set-NativeCursorHidden $false }
+  elseif ($now -gt $suppressPhysicalUntil) { $aiCursor.Opacity = 1; Set-NativeCursorHidden $true }
+})
+$cursorTimer.Start()
+
+$primary = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+$dock = Make-Window (($primary.X + $primary.Width / 2) / $dip - 160) (($primary.Y + $primary.Height) / $dip - 92) 320 58 $false
+$dockBorder = New-Object Windows.Controls.Border
+$dockBorder.Height = 54; $dockBorder.CornerRadius = 18; $dockBorder.Padding = '13,0'; $dockBorder.BorderThickness = 1
+$dockBorder.BorderBrush = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(96,168,85,247))
+$dockBorder.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromArgb(226,17,10,32))
+$shadow = New-Object Windows.Media.Effects.DropShadowEffect
+$shadow.Color = [Windows.Media.Color]::FromRgb(46,16,101); $shadow.BlurRadius = 42; $shadow.ShadowDepth = 0; $shadow.Opacity = .45
+$dockBorder.Effect = $shadow
+$panel = New-Object Windows.Controls.StackPanel; $panel.Orientation = 'Horizontal'; $panel.VerticalAlignment = 'Center'
+$dot = New-Object Windows.Controls.Border; $dot.Width = 9; $dot.Height = 9; $dot.CornerRadius = 5; $dot.Margin = '0,0,12,0'
+$dot.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(192,132,252))
+$dotGlow = New-Object Windows.Media.Effects.DropShadowEffect; $dotGlow.Color = [Windows.Media.Color]::FromRgb(192,132,252); $dotGlow.BlurRadius = 13; $dotGlow.ShadowDepth = 0; $dotGlow.Opacity = 1; $dot.Effect = $dotGlow
+$pulse = New-Object Windows.Media.Animation.DoubleAnimation; $pulse.From = 1; $pulse.To = .6; $pulse.Duration = [Windows.Duration]::new([TimeSpan]::FromSeconds(.8)); $pulse.AutoReverse = $true; $pulse.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever; $dot.BeginAnimation([Windows.UIElement]::OpacityProperty, $pulse)
+$label = New-Object Windows.Controls.TextBlock; $label.Text = "L'IA travaille sur ce PC"; $label.Foreground = [Windows.Media.Brushes]::White
+$label.FontWeight = 'SemiBold'; $label.FontSize = 12; $label.VerticalAlignment = 'Center'; $label.Margin = '0,0,12,0'
+$button = New-Object Windows.Controls.Border; $button.CornerRadius = 11; $button.Padding = '12,8'; $button.Cursor = [Windows.Input.Cursors]::Hand
+$button.Background = New-Object Windows.Media.SolidColorBrush ([Windows.Media.Color]::FromRgb(219,61,86))
+$buttonText = New-Object Windows.Controls.TextBlock; $buttonText.Text = 'Arrêter le travail'; $buttonText.Foreground = [Windows.Media.Brushes]::White; $buttonText.FontWeight = 'Bold'; $buttonText.FontSize = 12; $button.Child = $buttonText
+$button.Add_MouseLeftButtonUp({
+  try { Invoke-WebRequest -UseBasicParsing -Method Post -Uri ("http://127.0.0.1:"+$env:ZAALIS_OVERLAY_PORT+"/api/automation/stop-bridge") -Headers @{'x-zaalis-computer'=$env:ZAALIS_OVERLAY_SECRET} | Out-Null } catch {}
+  [Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvokeShutdown([Windows.Threading.DispatcherPriority]::Background)
+})
+[void]$panel.Children.Add($dot); [void]$panel.Children.Add($label); [void]$panel.Children.Add($button)
+$dockBorder.Child = $panel; $dock.Content = $dockBorder; $dock.Show(); $windows.Add($dock)
+try { [Windows.Threading.Dispatcher]::Run() }
+finally {
+  $cursorTimer.Stop()
+  Set-NativeCursorHidden $false
+  foreach ($win in $windows) { try { $win.Close() } catch {} }
+}
+`;
+  const child = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+    windowsHide: true,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: { ...process.env, ZAALIS_OVERLAY_SECRET: WINDOWS_OVERLAY_SECRET, ZAALIS_OVERLAY_PORT: String(PORT), ZAALIS_OVERLAY_STATE: windowsOverlayStatePath },
+  });
+  let startupError = '';
+  child.stderr.on('data', (chunk) => { startupError = (startupError + chunk.toString('utf8')).slice(-4000); });
+  windowsOverlayProcess = child;
+  const clearOverlay = () => {
+    if (windowsOverlayProcess === child) windowsOverlayProcess = null;
+    const statePath = windowsOverlayStatePath;
+    windowsOverlayStatePath = null;
+    if (statePath) { try { fs.unlinkSync(statePath); } catch {} }
+  };
+  child.once('exit', clearOverlay);
+  child.once('error', clearOverlay);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  if (child.exitCode != null || windowsOverlayProcess !== child) {
+    return { ok: false, error: startupError.trim() || `overlay-exited:${child.exitCode}` };
+  }
+  return { ok: true, pid: child.pid };
+}
+
+*/
+// The macOS desktop bundle provides a dedicated accessibility helper.  On
+// Windows, use the signed-in desktop session directly through PowerShell and
+// Win32.  Input reaches this handler only after the explicit, authenticated
+// computer-control flow in AutomationManager; text and paths are transferred
+// as JSON in an environment variable, never interpolated into shell code.
+async function windowsComputerAction(action) {
+  if (process.platform !== 'win32') return Promise.resolve({ ok: false, error: 'unsupported-platform' });
+  if (action && action.action === 'overlay_start') return startWindowsActivityFog();
+  if (action && action.action === 'overlay_stop') { stopWindowsActivityFog(); return Promise.resolve({ ok: true }); }
+  const payload = Buffer.from(JSON.stringify(action || {}), 'utf8').toString('base64');
+  const script = String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.Windows.Forms
+if (-not ('ZaalisNative' -as [type])) {
+  Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ZaalisNative {
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extraInfo);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extraInfo);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int command);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool altTab);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+}
+'@
+}
+# powershell.exe spawné démarre DPI-unaware : sur un écran 4K à 150 %, les
+# métriques GDI (Screen.Bounds, GetWindowRect, SetCursorPos) sont virtualisées
+# (2560x1440) alors que UI Automation renvoie des pixels physiques (3840x2160).
+# Les clics guidés par inspect atterrissent alors 1,5x trop loin. On force le
+# mode per-monitor AVANT toute lecture de métrique pour que capture, éléments
+# UI et souris partagent le même repère physique.
+try { [void][ZaalisNative]::SetProcessDpiAwareness(2) } catch {}
+$a = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ZAALIS_COMPUTER_ACTION)) | ConvertFrom-Json
+$ok = @{ ok = $true }
+switch ($a.action) {
+  'status' { $ok.accessibility = $true; $ok.screenRecording = $true }
+  'request_permissions' { $ok.accessibility = $true; $ok.screenRecording = $true }
+  'observe' {
+    $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $bmp = New-Object Drawing.Bitmap $bounds.Width, $bounds.Height
+    $g = [Drawing.Graphics]::FromImage($bmp)
+    $g.CopyFromScreen($bounds.Location, [Drawing.Point]::Empty, $bounds.Size)
+    $stream = New-Object IO.MemoryStream
+    $bmp.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
+    $ok.image = [Convert]::ToBase64String($stream.ToArray()); $ok.mime = 'image/png'
+    $stream.Dispose(); $g.Dispose(); $bmp.Dispose()
+  }
+  'inspect' {
+    $handle = [ZaalisNative]::GetForegroundWindow()
+    $title = New-Object Text.StringBuilder 1024
+    [void][ZaalisNative]::GetWindowText($handle, $title, $title.Capacity)
+    [uint32]$pidValue = 0; [void][ZaalisNative]::GetWindowThreadProcessId($handle, [ref]$pidValue)
+    $processName = ''; try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}
+    $ok.application = $title.ToString()
+    $target = [string]$a.target; if ($target -notin @('active_window','display','region')) { $target = 'active_window' }
+    $screens = @([System.Windows.Forms.Screen]::AllScreens)
+    $displayIndex = 0; try { $displayIndex = [Math]::Max(0, [Math]::Min([int]$a.display_index, $screens.Count - 1)) } catch {}
+    $captureBounds = $null
+    if ($target -eq 'display') { $captureBounds = $screens[$displayIndex].Bounds }
+    elseif ($target -eq 'region') { $captureBounds = [Drawing.Rectangle]::new([int]$a.x, [int]$a.y, [int]$a.width, [int]$a.height) }
+    else {
+      $rect = New-Object ZaalisNative+RECT
+      if ([ZaalisNative]::GetWindowRect($handle, [ref]$rect) -and $rect.Right -gt $rect.Left -and $rect.Bottom -gt $rect.Top) {
+        $captureBounds = [Drawing.Rectangle]::new($rect.Left, $rect.Top, $rect.Right - $rect.Left, $rect.Bottom - $rect.Top)
+      } else { $captureBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds }
+    }
+    $ok.target = $target
+    $ok.capture = [PSCustomObject]@{ x=$captureBounds.X; y=$captureBounds.Y; width=$captureBounds.Width; height=$captureBounds.Height; displayIndex=$displayIndex }
+    if ($a.include_image -ne $false) {
+      try {
+        $limit = 2560; try { $limit = [Math]::Max(800, [Math]::Min([int]$a.max_dimension, 4096)) } catch {}
+        $scale = [Math]::Min(1.0, [Math]::Min($limit / [double]$captureBounds.Width, $limit / [double]$captureBounds.Height))
+        $outputWidth = [Math]::Max(1, [int][Math]::Round($captureBounds.Width * $scale))
+        $outputHeight = [Math]::Max(1, [int][Math]::Round($captureBounds.Height * $scale))
+        $source = New-Object Drawing.Bitmap $captureBounds.Width, $captureBounds.Height
+        $sourceGraphics = [Drawing.Graphics]::FromImage($source)
+        $sourceGraphics.CopyFromScreen($captureBounds.Location, [Drawing.Point]::Empty, $captureBounds.Size)
+        $bmp = if ($outputWidth -eq $captureBounds.Width -and $outputHeight -eq $captureBounds.Height) { $source } else { New-Object Drawing.Bitmap $outputWidth, $outputHeight }
+        $g = if ($bmp -eq $source) { $sourceGraphics } else { [Drawing.Graphics]::FromImage($bmp) }
+        if ($bmp -ne $source) { $g.DrawImage($source, 0, 0, $outputWidth, $outputHeight) }
+        $stream = New-Object IO.MemoryStream
+        $bmp.Save($stream, [Drawing.Imaging.ImageFormat]::Png)
+        $ok.image = [Convert]::ToBase64String($stream.ToArray()); $ok.mime = 'image/png'
+        $ok.capture | Add-Member -NotePropertyName imageWidth -NotePropertyValue $outputWidth
+        $ok.capture | Add-Member -NotePropertyName imageHeight -NotePropertyValue $outputHeight
+        $stream.Dispose(); if ($g -ne $sourceGraphics) { $g.Dispose() }; $sourceGraphics.Dispose(); if ($bmp -ne $source) { $bmp.Dispose() }; $source.Dispose()
+      } catch { $ok.captureError = $_.Exception.Message }
+    }
+    if ($a.include_ocr -ne $false -and $a.include_image -ne $false) {
+      # UI Automation below supplies accessible text. Do not claim OCR unless a
+      # packaged Windows OCR component is available in this build.
+      $ok.ocr = @(); $ok.ocrError = 'ocr-not-available-on-this-windows-build'
+    }
+    if ($a.include_ui -ne $false) {
+      try {
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+        $root = [Windows.Automation.AutomationElement]::FromHandle($handle)
+        $nodes = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+        $maxElements = 220; try { $maxElements = [Math]::Max(25, [Math]::Min([int]$a.max_elements, 400)) } catch {}
+        $elements = @()
+        for ($i=0; $i -lt [Math]::Min($nodes.Count, 1200) -and $elements.Count -lt $maxElements; $i++) {
+          try {
+            $node = $nodes.Item($i); $current = $node.Current; $box = $current.BoundingRectangle
+            if ($box.Width -le 0 -or $box.Height -le 0) { continue }
+            $isPassword = [bool]$current.IsPassword
+            $value = $null
+            if (-not $isPassword) {
+              try { $pattern = $null; if ($node.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { $value = ([Windows.Automation.ValuePattern]$pattern).Current.Value } } catch {}
+            }
+            $elements += [PSCustomObject]@{
+              role=($current.ControlType.ProgrammaticName -replace '^ControlType\\.',''); title=if ($isPassword) { '[secure field]' } else { $current.Name }; label=if ($isPassword) { $null } else { $current.AutomationId }; help=if ($isPassword) { $null } else { $current.HelpText }; value=$value
+              frame=[PSCustomObject]@{ x=[int][Math]::Round($box.X); y=[int][Math]::Round($box.Y); width=[int][Math]::Round($box.Width); height=[int][Math]::Round($box.Height) }; enabled=[bool]$current.IsEnabled; offscreen=[bool]$current.IsOffscreen; secure=$isPassword
+            }
+          } catch {}
+        }
+        $ok.ui = [PSCustomObject]@{ application=$ok.application; bundleId=$processName; focusedWindow=[PSCustomObject]@{ x=$captureBounds.X; y=$captureBounds.Y; width=$captureBounds.Width; height=$captureBounds.Height }; truncated=($nodes.Count -gt $elements.Count); elements=$elements }
+      } catch { $ok.uiError = $_.Exception.Message }
+    }
+  }
+  'menus' {
+    $title = New-Object Text.StringBuilder 1024
+    $handle = [ZaalisNative]::GetForegroundWindow()
+    [void][ZaalisNative]::GetWindowText($handle, $title, $title.Capacity)
+    [uint32]$pidValue = 0; [void][ZaalisNative]::GetWindowThreadProcessId($handle, [ref]$pidValue)
+    $processName = ''; try { $processName = (Get-Process -Id $pidValue -ErrorAction Stop).ProcessName } catch {}
+    $ok.application = $title.ToString()
+    $ok.process = $processName
+    $items = @()
+    try {
+      Add-Type -AssemblyName UIAutomationClient
+      Add-Type -AssemblyName UIAutomationTypes
+      $root = [Windows.Automation.AutomationElement]::FromHandle($handle)
+      $nodes = $root.FindAll([Windows.Automation.TreeScope]::Descendants, [Windows.Automation.Condition]::TrueCondition)
+      for ($i=0; $i -lt [Math]::Min($nodes.Count,700) -and $items.Count -lt 120; $i++) {
+        try {
+          $node = $nodes.Item($i); $kind = $node.Current.ControlType.ProgrammaticName -replace '^ControlType\\.',''
+          if ($kind -notin @('MenuBar','MenuItem','Button','Tab','TabItem','ToolBar','SplitButton')) { continue }
+          $name = $node.Current.Name
+          if ([string]::IsNullOrWhiteSpace($name)) { continue }
+          $items += [PSCustomObject]@{ name=$name; type=$kind; shortcut=$node.Current.AcceleratorKey; accessKey=$node.Current.AccessKey }
+        } catch {}
+      }
+    } catch {}
+    if ($items.Count -eq 0 -and $processName -match 'chrome|msedge|firefox') {
+      $items = @(
+        [PSCustomObject]@{name='New tab';type='Shortcut';shortcut='Ctrl+T';source='browser-standard'},
+        [PSCustomObject]@{name='Focus address bar';type='Shortcut';shortcut='Ctrl+L';source='browser-standard'},
+        [PSCustomObject]@{name='New window';type='Shortcut';shortcut='Ctrl+N';source='browser-standard'},
+        [PSCustomObject]@{name='Reopen closed tab';type='Shortcut';shortcut='Ctrl+Shift+T';source='browser-standard'},
+        [PSCustomObject]@{name='Find in page';type='Shortcut';shortcut='Ctrl+F';source='browser-standard'},
+        [PSCustomObject]@{name='Downloads';type='Shortcut';shortcut='Ctrl+J';source='browser-standard'},
+        [PSCustomObject]@{name='History';type='Shortcut';shortcut='Ctrl+H';source='browser-standard'},
+        [PSCustomObject]@{name='Close tab';type='Shortcut';shortcut='Ctrl+W';source='browser-standard'}
+      )
+    } elseif ($items.Count -eq 0 -and $processName -match 'notepad') {
+      $items = @(
+        [PSCustomObject]@{name='New tab';type='Shortcut';shortcut='Ctrl+N';source='notepad-standard'},
+        [PSCustomObject]@{name='New window';type='Shortcut';shortcut='Ctrl+Shift+N';source='notepad-standard'},
+        [PSCustomObject]@{name='Open';type='Shortcut';shortcut='Ctrl+O';source='notepad-standard'},
+        [PSCustomObject]@{name='Save';type='Shortcut';shortcut='Ctrl+S';source='notepad-standard'},
+        [PSCustomObject]@{name='Find';type='Shortcut';shortcut='Ctrl+F';source='notepad-standard'},
+        [PSCustomObject]@{name='Replace';type='Shortcut';shortcut='Ctrl+H';source='notepad-standard'},
+        [PSCustomObject]@{name='Close tab';type='Shortcut';shortcut='Ctrl+W';source='notepad-standard'}
+      )
+    } elseif ($items.Count -eq 0) {
+      $items = @(
+        [PSCustomObject]@{name='Select all';type='Shortcut';shortcut='Ctrl+A';source='windows-standard'},
+        [PSCustomObject]@{name='Copy';type='Shortcut';shortcut='Ctrl+C';source='windows-standard'},
+        [PSCustomObject]@{name='Paste';type='Shortcut';shortcut='Ctrl+V';source='windows-standard'},
+        [PSCustomObject]@{name='Cut';type='Shortcut';shortcut='Ctrl+X';source='windows-standard'},
+        [PSCustomObject]@{name='Undo';type='Shortcut';shortcut='Ctrl+Z';source='windows-standard'},
+        [PSCustomObject]@{name='Redo';type='Shortcut';shortcut='Ctrl+Y';source='windows-standard'},
+        [PSCustomObject]@{name='Save';type='Shortcut';shortcut='Ctrl+S';source='windows-standard'},
+        [PSCustomObject]@{name='Find';type='Shortcut';shortcut='Ctrl+F';source='windows-standard'}
+      )
+    }
+    $ok.menus = $items
+  }
+  'move' { [void][ZaalisNative]::SetCursorPos([int]$a.x, [int]$a.y) }
+  'click' {
+    [void][ZaalisNative]::SetCursorPos([int]$a.x, [int]$a.y)
+    if ($a.button -eq 'right') { [ZaalisNative]::mouse_event(0x0008,0,0,0,[UIntPtr]::Zero); [ZaalisNative]::mouse_event(0x0010,0,0,0,[UIntPtr]::Zero) }
+    else { [ZaalisNative]::mouse_event(0x0002,0,0,0,[UIntPtr]::Zero); [ZaalisNative]::mouse_event(0x0004,0,0,0,[UIntPtr]::Zero) }
+  }
+  'scroll' { [ZaalisNative]::mouse_event(0x0800,0,0,[uint32]([int]$a.dy * 120),[UIntPtr]::Zero) }
+  'type' { Set-Clipboard -Value ([string]$a.text); [System.Windows.Forms.SendKeys]::SendWait('^v') }
+  'key' {
+    $mods = @($a.modifiers | ForEach-Object { $_.ToString().ToLowerInvariant() })
+    $held = New-Object Collections.Generic.List[byte]
+    function Hold-Key([byte]$vk) { [ZaalisNative]::keybd_event($vk,0,0,[UIntPtr]::Zero); $held.Add($vk) }
+    if ($mods -match 'ctrl|control|cmd|command') { Hold-Key 0x11 }
+    if ($mods -match 'alt|option|opt') { Hold-Key 0x12 }
+    if ($mods -match 'shift') { Hold-Key 0x10 }
+    if ($mods -match 'meta|super|win|windows') { Hold-Key 0x5B }
+    $name = $a.key.ToString().ToLowerInvariant()
+    $keys = @{ enter=0x0D; return=0x0D; tab=0x09; escape=0x1B; esc=0x1B; backspace=0x08; delete=0x2E; insert=0x2D; space=0x20; up=0x26; down=0x28; left=0x25; right=0x27; home=0x24; end=0x23; pageup=0x21; pagedown=0x22; pgup=0x21; pgdn=0x22; printscreen=0x2C; prtsc=0x2C; pause=0x13; capslock=0x14; numlock=0x90; scrolllock=0x91; menu=0x5D; apps=0x5D; win=0x5B; windows=0x5B; volumeup=0xAF; volumedown=0xAE; volumemute=0xAD; medianext=0xB0; mediaprev=0xB1; mediastop=0xB2; mediaplaypause=0xB3 }
+    [byte]$vk = 0
+    if ($keys.ContainsKey($name)) { $vk = $keys[$name] }
+    elseif ($name -match '^f([1-9]|1[0-9]|2[0-4])$') { $vk = [byte](0x6F + [int]$Matches[1]) }
+    elseif ($name.Length -eq 1) { $vk = [byte][char]$name.ToUpperInvariant() }
+    else { throw "unsupported-key:$name" }
+    [ZaalisNative]::keybd_event($vk,0,0,[UIntPtr]::Zero); [ZaalisNative]::keybd_event($vk,0,2,[UIntPtr]::Zero)
+    for ($i=$held.Count-1; $i -ge 0; $i--) { [ZaalisNative]::keybd_event($held[$i],0,2,[UIntPtr]::Zero) }
+  }
+  'open_terminal' { Start-Process -FilePath $(if ($env:ComSpec) { $env:ComSpec } else { 'cmd.exe' }) }
+  'activate_app' {
+    $target = [string]$a.path
+    $alias = $target.ToLowerInvariant()
+    $pf86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+    if ($alias -in @('chrome','chrome.exe')) {
+      $target = @("$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe", "$pf86\\Google\\Chrome\\Application\\chrome.exe", "$env:LOCALAPPDATA\\Google\\Chrome\\Application\\chrome.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+      if (-not $target) { throw 'chrome-not-found' }
+    } elseif ($alias -in @('edge','msedge','msedge.exe')) {
+      $target = @("$pf86\\Microsoft\\Edge\\Application\\msedge.exe", "$env:ProgramFiles\\Microsoft\\Edge\\Application\\msedge.exe") | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+      if (-not $target) { throw 'edge-not-found' }
+    } elseif ($alias -in @('notepad','notepad.exe')) {
+      # Sur Windows 11, « notepad » du PATH est un app-execution-alias (point de
+      # réanalyse) que Start-Process refuse de lancer. Le stub System32 relaie
+      # correctement vers le Bloc-notes du Store.
+      $target = Join-Path $env:WINDIR 'System32\\notepad.exe'
+    }
+    $baseName = [IO.Path]::GetFileNameWithoutExtension($target)
+    if ($alias -match 'chrome') { $baseName = 'chrome' }
+    elseif ($alias -match 'edge|msedge') { $baseName = 'msedge' }
+    elseif ($alias -match 'notepad') { $baseName = 'notepad' }
+    $proc = $null
+    try { $proc = Start-Process -FilePath $target -PassThru }
+    catch {
+      # Dernier recours pour les app-execution-aliases : cmd start sait les
+      # résoudre là où Start-Process échoue.
+      Start-Process -FilePath (Join-Path $env:WINDIR 'System32\\cmd.exe') -ArgumentList @('/c','start','""',('"' + $target + '"')) -WindowStyle Hidden
+    }
+    if ($proc) { try { [void]$proc.WaitForInputIdle(1800) } catch { Start-Sleep -Milliseconds 500 } } else { Start-Sleep -Milliseconds 700 }
+    $focusProc = $proc
+    for ($attempt=0; $attempt -lt 8; $attempt++) {
+      Start-Sleep -Milliseconds 180
+      $candidate = Get-Process -Name $baseName -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Sort-Object StartTime -Descending | Select-Object -First 1
+      if ($candidate) { $focusProc = $candidate; break }
+      try { $focusProc.Refresh() } catch {}
+    }
+    if (-not $focusProc) { throw "activate-app-window-not-found:$baseName" }
+    try {
+      $shell = New-Object -ComObject WScript.Shell
+      if (-not $shell.AppActivate($focusProc.Id)) {
+        if ($alias -match 'chrome') { [void]$shell.AppActivate('Google Chrome') }
+        elseif ($alias -match 'edge|msedge') { [void]$shell.AppActivate('Microsoft Edge') }
+        elseif ($alias -match 'notepad') { if (-not $shell.AppActivate('Bloc-notes')) { [void]$shell.AppActivate('Notepad') } }
+      }
+    } catch {}
+    if ($focusProc.MainWindowHandle) {
+      [void][ZaalisNative]::ShowWindowAsync($focusProc.MainWindowHandle, 9)
+      [ZaalisNative]::keybd_event(0x12,0,0,[UIntPtr]::Zero); [ZaalisNative]::keybd_event(0x12,0,2,[UIntPtr]::Zero)
+      [void][ZaalisNative]::BringWindowToTop($focusProc.MainWindowHandle)
+      [void][ZaalisNative]::SetForegroundWindow($focusProc.MainWindowHandle)
+      [ZaalisNative]::SwitchToThisWindow($focusProc.MainWindowHandle, $true)
+    }
+    Start-Sleep -Milliseconds 180
+    $ok.processId = $focusProc.Id
+    $ok.windowTitle = $focusProc.MainWindowTitle
+    $ok.windowHandle = [int64]$focusProc.MainWindowHandle
+  }
+  default { throw "unsupported-action:$($a.action)" }
+}
+$ok | ConvertTo-Json -Compress -Depth 7
+`;
+  return new Promise((resolve) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      timeout: 30_000, windowsHide: true, maxBuffer: 24 * 1024 * 1024,
+      env: { ...process.env, ZAALIS_COMPUTER_ACTION: payload },
+    }, (error, stdout, stderr) => {
+      if (error) return resolve({ ok: false, error: (stderr || error.message || 'windows-computer-failed').trim().slice(0, 1000) });
+      try { resolve(JSON.parse(String(stdout).trim())); }
+      catch { resolve({ ok: false, error: 'windows-computer-invalid-response' }); }
+    });
+  });
+}
+
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
+const automationManager = new AutomationManager({
+  bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '',
+  bridgeSecret: process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || '',
+  actionHandler: process.platform === 'win32' ? windowsComputerAction : null,
+});
+const terminalManager = new TerminalManager();
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
 // snapshot, so we use the folder next to the executable instead.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
+const COMMAND_TIMEOUT_MS = Math.max(30_000, Number(process.env.ZAALIS_COMMAND_TIMEOUT_MS) || 10 * 60_000);
+const MAX_COMMAND_OUTPUT = 10 * 1024 * 1024;
 let APP_VERSION = '0.0.0';
 try {
   APP_VERSION = require('./package.json').version || APP_VERSION;
@@ -36,12 +733,37 @@ try {
 // stable per-user location that survives app updates and reinstalls
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() {
-  if (process.pkg && process.platform === 'win32' && process.env.LOCALAPPDATA) {
-    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  // Useful for isolated diagnostics/tests; normal desktop installs never set
+  // this and therefore always use the durable per-user location below.
+  if (process.env.ZAALIS_DATA_DIR) return path.resolve(process.env.ZAALIS_DATA_DIR);
+  // When packaged with pkg, the executable can live in a read-only install
+  // location. Keep accounts/chats/session secret in a stable per-user folder.
+  if (process.pkg) {
+    if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+      return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+    }
+    if (process.platform === 'darwin') {
+      return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
+    }
+    const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+    return path.join(base, 'zaalis', 'server-data');
   }
   return path.join(APP_DIR, 'server-data');
 }
-const DATA_DIR = resolveDataDir();
+
+function ensureWritableDataDir() {
+  const preferred = resolveDataDir();
+  try {
+    fs.mkdirSync(preferred, { recursive: true });
+    fs.accessSync(preferred, fs.constants.W_OK);
+    return preferred;
+  } catch {
+    const fallback = path.join(os.tmpdir(), 'zaalis', 'server-data');
+    try { fs.mkdirSync(fallback, { recursive: true }); } catch {}
+    return fallback;
+  }
+}
+const DATA_DIR = ensureWritableDataDir();
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
@@ -166,10 +888,66 @@ function currentUser(req) {
   if (!userId) return null;
   return loadUsers().find((u) => u.id === userId) || null;
 }
+
+// ---------------------------------------------------------------------------
+// BROWSER BRIDGE — accès restreint pour zaalis browser (même machine).
+// Un secret partagé est écrit dans le dossier per-user stable (le même que
+// DATA_DIR en mode packagé). zaalis browser le lit sur disque et l'envoie via
+// l'en-tête x-zaalis-browser. Requêtes loopback uniquement (déjà garanti par
+// le middleware global) et limitées au chat — jamais fichiers/exec/tunnel.
+// Modèle de confiance identique au fichier `secret` : tout processus local du
+// même utilisateur peut le lire ; on n'expose rien de plus que ce que le
+// vault local permet déjà.
+// ---------------------------------------------------------------------------
+function browserBridgeDir() {
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'zaalis', 'server-data');
+}
+const BROWSER_SECRET_FILE = path.join(browserBridgeDir(), 'browser-secret');
+let BROWSER_SECRET;
+try {
+  BROWSER_SECRET = fs.readFileSync(BROWSER_SECRET_FILE, 'utf-8').trim();
+  if (!BROWSER_SECRET) throw new Error('empty');
+} catch {
+  BROWSER_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(BROWSER_SECRET_FILE, BROWSER_SECRET, { mode: 0o600 });
+  } catch {}
+}
+function browserUser(req) {
+  const header = String(req.headers['x-zaalis-browser'] || '');
+  if (!header || !safeEqual(header, BROWSER_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  // Compte le plus récemment connecté, sinon le premier créé.
+  return users.slice().sort((a, b) =>
+    String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''))
+  )[0];
+}
+// Le navigateur n'a accès qu'au chat, à la liste des modèles locaux (pour
+// remplir ses menus) et aux briques vocales locales (STT/TTS du mode vocal) —
+// jamais aux fichiers, à l'exec ni aux clés.
+function browserAllowed(p) {
+  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models' ||
+         p === '/stt' || p === '/tts' || p === '/voice-status' || p === '/voice-options';
+}
 function chatsFile(userId, kind) {
   // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
   const k = kind === 'agents' ? 'agents' : 'chat';
   return path.join(CHATS_DIR, `${userId}__${k}.json`);
+}
+
+function writeJsonAtomic(file, value) {
+  const temp = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  fs.renameSync(temp, file);
 }
 
 const SHARED_CONFIG_DEFAULTS = {
@@ -177,9 +955,11 @@ const SHARED_CONFIG_DEFAULTS = {
   ollamaModel: 'qwen3:8b',
   ggufCtx: 8192,
   ggufVariant: '',
-  ggufGpuLayers: ''
+  ggufGpuLayers: '',
+  terminalProfile: 'cmd'
 };
-const GGUF_VARIANTS = new Set(['', 'cuda', 'vulkan', 'cpu']);
+const GGUF_VARIANTS = new Set(process.platform === 'win32' ? ['', 'cuda', 'cpu'] : ['', 'metal', 'cpu']);
+const TERMINAL_PROFILES = new Set(['cmd', 'powershell', 'pwsh', 'git-bash']);
 
 function clampSharedGgufCtx(value) {
   const n = parseInt(value, 10);
@@ -209,11 +989,20 @@ function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
       ? ''
       : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
   }
+  if ('terminalProfile' in src) {
+    const value = String(src.terminalProfile || '').trim().toLowerCase();
+    out.terminalProfile = TERMINAL_PROFILES.has(value) ? value : SHARED_CONFIG_DEFAULTS.terminalProfile;
+  }
   return out;
 }
 
 function sharedConfigForUser(user) {
   return sanitizeSharedConfig(user && user.sharedConfig);
+}
+function brainMcpForUser(user) {
+  const saved = user && user.brainMcp;
+  if (!saved || !saved.enabled) return null;
+  return brainMcp.validateConfig({ endpoint: saved.endpoint, token: saved.token ? decryptSecret(saved.token) : '' });
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +1103,12 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !safeEqual(candidate, user.hash)) {
     return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
   }
+  // Mémorise la dernière connexion (utilisée par le pont zaalis browser).
+  try {
+    const users = loadUsers();
+    const i = users.findIndex((u) => u.id === user.id);
+    if (i >= 0) { users[i].lastLoginAt = new Date().toISOString(); saveUsers(users); }
+  } catch {}
   setSessionCookie(res, makeToken(user.id));
   res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
 });
@@ -333,9 +1128,29 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
+// Used by the Electron launcher to avoid reusing an old server left behind by
+// a previous IDE installation. Keep it public and deliberately content-free.
+app.get('/api/health', (_req, res) => {
+  // Electron uses this revision to make sure it never attaches a freshly
+  // installed UI to a server process left behind by an older installation.
+  res.json({ ok: true, apiRevision: 'desktop-launcher-v2', version: APP_VERSION });
+});
+
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
+// Electron's dock is not a web client and therefore cannot carry a user cookie.
+// Its random per-launch bridge secret is the only accepted credential here.
+app.post('/api/automation/stop-bridge', async (req, res) => {
+  const supplied = req.headers['x-zaalis-computer'];
+  const validMacSecret = !!process.env.ZAALIS_COMPUTER_BRIDGE_SECRET && supplied === process.env.ZAALIS_COMPUTER_BRIDGE_SECRET;
+  // Bouton « Stopper l'IA » de l'overlay Windows : secret aléatoire généré à
+  // chaque lancement du serveur et transmis au processus de brume via env.
+  const validWindowsSecret = supplied === WINDOWS_FOG_SECRET;
+  if (!validMacSecret && !validWindowsSecret) return res.status(403).json({ error: 'Forbidden' });
+  await automationManager.stop(undefined, 'Arrêt demandé depuis l’application de bureau.');
+  res.json({ ok: true });
+});
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
   const user = currentUser(req);
@@ -349,7 +1164,91 @@ app.use('/api', (req, res, next) => {
     req.isMobile = true;
     return next();
   }
+  // Pont zaalis browser : secret local partagé, endpoints chat uniquement.
+  const bUser = browserUser(req);
+  if (bUser) {
+    if (!browserAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour le navigateur.' });
+    req.user = bUser;
+    req.isBrowser = true;
+    return next();
+  }
   return res.status(401).json({ error: 'Authentification requise.' });
+});
+
+// ---------------------------------------------------------------------------
+// DESKTOP COMPUTER CONTROL API
+// ---------------------------------------------------------------------------
+app.get('/api/automation/status', (req, res) => {
+  const active = automationManager.active;
+  if (active && active.userId !== req.user.id) return res.status(409).json({ active: true, state: 'busy' });
+  res.json(automationManager.snapshot(active));
+});
+
+app.post('/api/automation/permissions', async (req, res) => {
+  if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+  const result = await automationManager.bridge({ action: 'request_permissions' });
+  res.status(result.ok ? 200 : 400).json(result);
+});
+
+app.post('/api/automation/stop', async (req, res) => {
+  const active = automationManager.active;
+  if (active && active.userId !== req.user.id) return res.status(403).json({ error: 'Cette tâche appartient à un autre utilisateur.' });
+  res.json(await automationManager.stop(active, 'Arrêt demandé dans l’IDE.'));
+});
+
+app.post('/api/automation/:id/answer', async (req, res) => {
+  try { res.json(await automationManager.answer(req.user.id, String(req.params.id || ''), req.body && req.body.answer)); }
+  catch (err) { res.status(409).json({ error: err.message }); }
+});
+
+// Persistent, interactive terminal sessions for the IDE. They are scoped to a
+// logged-in user and only bind to the project folder selected by that user.
+app.post('/api/terminal/sessions', (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
+    const cwd = resolveBase((req.body && req.body.cwd) || APP_DIR);
+    const profileId = sharedConfigForUser(req.user).terminalProfile;
+    const session = terminalManager.create({ userId: req.user.id, cwd, profileId, origin: 'user' });
+    res.json(terminalManager.snapshot(session));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  res.json(terminalManager.snapshot(session));
+});
+
+app.get('/api/terminal/sessions/:id/stream', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive');
+  const write = (event, value) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`); } catch {} };
+  write('snapshot', terminalManager.snapshot(session));
+  const onData = (data) => write('data', data);
+  const onExit = (data) => { write('exit', data); try { res.end(); } catch {} };
+  session.events.on('data', onData); session.events.once('exit', onExit);
+  req.on('close', () => { session.events.removeListener('data', onData); session.events.removeListener('exit', onExit); });
+});
+
+app.post('/api/terminal/sessions/:id/input', (req, res) => {
+  try {
+    const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+    if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+    terminalManager.write(session, String(req.body && req.body.data || '').slice(0, 16000)); res.json({ ok: true });
+  } catch (err) { res.status(409).json({ error: err.message }); }
+});
+
+app.post('/api/terminal/sessions/:id/resize', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.resize(session, req.body && req.body.cols, req.body && req.body.rows); res.json({ ok: true });
+});
+
+app.delete('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.close(session); res.json({ ok: true });
 });
 
 // Update profile
@@ -373,7 +1272,8 @@ app.post('/api/profile', (req, res) => {
 app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
-    config: sharedConfigForUser(req.user)
+    config: sharedConfigForUser(req.user),
+    terminalProfiles: terminalManager.profiles()
   });
 });
 
@@ -389,6 +1289,41 @@ app.put('/api/config', (req, res) => {
     res.json({ success: true, config: users[userIdx].sharedConfig });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// The Zaalis Brain bearer token stays encrypted on this server. It is never
+// returned to the browser/CLI; only this local process speaks MCP with Brain.
+app.get('/api/brain-mcp', async (req, res) => {
+  const saved = req.user && req.user.brainMcp;
+  const config = brainMcpForUser(req.user);
+  if (!config) return res.json({ configured: !!(saved && saved.endpoint && saved.token), enabled: !!(saved && saved.enabled), state: 'disconnected', detail: 'Configuration MCP Zaalis Brain absente.' });
+  try {
+    const result = await brainMcp.check(config);
+    res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint: saved.endpoint });
+  } catch (err) {
+    res.json({ configured: true, enabled: true, state: 'error', detail: err.message, endpoint: saved.endpoint });
+  }
+});
+
+app.put('/api/brain-mcp', async (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Action indisponible dans ce mode.' });
+    const body = req.body || {}, users = loadUsers(), index = users.findIndex((u) => u.id === req.user.id);
+    if (index < 0) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    const current = users[index].brainMcp || {};
+    const enabled = body.enabled === undefined ? !!current.enabled : !!body.enabled;
+    const endpoint = body.endpoint === undefined ? String(current.endpoint || '') : String(body.endpoint || '').trim();
+    const suppliedToken = body.token === undefined ? '' : String(body.token || '').trim();
+    const token = suppliedToken || (current.token ? decryptSecret(current.token) : '');
+    if (enabled && !brainMcp.validateConfig({ endpoint, token })) return res.status(400).json({ error: 'Route ou jeton MCP Zaalis Brain invalide.' });
+    users[index].brainMcp = { enabled, endpoint, token: token ? encryptSecret(token) : '' };
+    saveUsers(users);
+    if (!enabled) return res.json({ configured: !!(endpoint && token), enabled: false, state: 'disconnected', detail: 'MCP Zaalis Brain désactivé dans l’IDE.' });
+    const result = await brainMcp.check(brainMcpForUser(users[index]));
+    res.json({ configured: true, enabled: true, state: 'connected', detail: `${result.tools.length} outils Zaalis Brain disponibles.`, tools: result.tools, endpoint });
+  } catch (err) {
+    res.status(502).json({ error: err.message || 'Connexion MCP Zaalis Brain impossible.' });
   }
 });
 
@@ -441,7 +1376,8 @@ app.get('/api/chats', (req, res) => {
 app.put('/api/chats', (req, res) => {
   try {
     const conversations = (req.body && req.body.conversations) || [];
-    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(conversations, null, 2));
+    if (!Array.isArray(conversations)) return res.status(400).json({ error: 'Conversations invalides.' });
+    writeJsonAtomic(chatsFile(req.user.id, req.body && req.body.kind), conversations);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -506,10 +1442,10 @@ async function fetchJSON(url, options) {
   }
   if (!res.ok) {
     const errMsg =
-      data.error?.message || data.error?.type ||
+      data.error?.message || data.message || data.error?.type ||
       (typeof data.error === 'string' ? data.error : '') ||
       (data.error ? JSON.stringify(data.error) : '') || res.statusText;
-    throw new Error(errMsg);
+    throw new Error(`HTTP ${res.status}: ${errMsg}`);
   }
   return data;
 }
@@ -640,53 +1576,143 @@ app.post('/api/file', (req, res) => {
   }
 });
 
+// Replays a supervised image_download after the IDE or CLI has shown its
+// approval prompt. The id is valid only for a recent image_search result, so
+// this endpoint never acts as a general-purpose URL downloader.
+app.post('/api/agent-image-download', async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (!body.id || !body.path) return res.status(400).json({ error: 'id and path are required' });
+    const result = await downloadProjectImage({
+      id: body.id,
+      path: body.path,
+      root: resolveBase(body.root || body.projectRoot),
+    });
+    res.json({ success: true, ...result });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // EXEC API
 // ---------------------------------------------------------------------------
 
-// POST /api/exec  { command, cwd }
-// Use execFile with cmd.exe instead of exec() to reliably hide the console
-// window on Windows. exec() spawns an intermediate cmd.exe shell that can
-// flash a visible window even with windowsHide:true, especially from a
-// pkg-packaged .exe. execFile + explicit cmd.exe avoids the extra shell.
-app.post('/api/exec', (req, res) => {
-  try {
-    const { command, cwd } = req.body;
-    if (!command) return res.status(400).json({ error: 'command is required' });
+// GUI-launched apps (Finder / Electron) inherit a minimal PATH that omits
+// Homebrew and other common tool locations, so node/npm/python3/git often fail
+// with "command not found". Append the usual bin dirs. Windows is left as-is.
+function execEnv() {
+  if (process.platform === 'win32') return process.env;
+  const extra = [
+    '/opt/homebrew/bin', '/opt/homebrew/sbin',
+    '/usr/local/bin', '/usr/local/sbin',
+    '/usr/bin', '/bin', '/usr/sbin', '/sbin',
+    path.join(os.homedir(), '.local', 'bin'),
+  ];
+  const seen = new Set();
+  const merged = [];
+  for (const d of [...String(process.env.PATH || '').split(':'), ...extra]) {
+    if (d && !seen.has(d)) { seen.add(d); merged.push(d); }
+  }
+  return { ...process.env, PATH: merged.join(':') };
+}
 
-    const execCwd = cwd || APP_DIR;
-
-    execFile('cmd.exe', ['/c', command], {
-      cwd: execCwd,
-      timeout: 30000,
-      maxBuffer: 1024 * 1024 * 5,
-      windowsHide: true
-    }, (err, stdout, stderr) => {
-      if (err && !stdout && !stderr) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({ stdout: stdout || '', stderr: stderr || '' });
+function runShellCommand(command, cwd) {
+  return new Promise((resolve) => {
+    let stdout = '', stderr = '', timedOut = false, outputTruncated = false, settled = false;
+    const child = spawn('/bin/sh', ['-lc', command], {
+      cwd, env: execEnv(), detached: process.platform !== 'win32', windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const append = (current, chunk) => {
+      const text = chunk.toString();
+      const remaining = MAX_COMMAND_OUTPUT - Buffer.byteLength(current);
+      if (remaining <= 0) { outputTruncated = true; return current; }
+      if (Buffer.byteLength(text) > remaining) { outputTruncated = true; return current + Buffer.from(text).subarray(0, remaining).toString(); }
+      return current + text;
+    };
+    const stop = () => {
+      if (!child.pid) return;
+      if (process.platform === 'win32') child.kill('SIGTERM');
+      else { try { process.kill(-child.pid, 'SIGTERM'); } catch { child.kill('SIGTERM'); } }
+      setTimeout(() => {
+        if (child.exitCode != null) return;
+        if (process.platform === 'win32') child.kill('SIGKILL');
+        else { try { process.kill(-child.pid, 'SIGKILL'); } catch { child.kill('SIGKILL'); } }
+      }, 5000).unref();
+    };
+    const timer = setTimeout(() => { timedOut = true; stop(); }, COMMAND_TIMEOUT_MS);
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ ...result, stdout, stderr, timedOut, outputTruncated, timeoutMs: COMMAND_TIMEOUT_MS });
+    };
+    child.stdout.on('data', (chunk) => { stdout = append(stdout, chunk); });
+    child.stderr.on('data', (chunk) => { stderr = append(stderr, chunk); });
+    child.once('error', (error) => finish({ exitCode: 1, error: error.message }));
+    child.once('close', (code, signal) => finish({ exitCode: timedOut ? 124 : (Number.isInteger(code) ? code : 1), signal, error: '' }));
+  });
+}
+
+// POST /api/exec  { command, cwd }. Always returns the exit status: a command
+// that writes an error must never be presented to the user or an AI as success.
+app.post('/api/exec', async (req, res) => {
+  const { command, cwd } = req.body || {};
+  if (!command) return res.status(400).json({ error: 'command is required' });
+  try {
+    res.json(await runShellCommand(String(command), cwd || APP_DIR));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ---------------------------------------------------------------------------
-// AGENT TOOLS — read-only search & diagnostics (Grep / Glob / GitDiff / Doctor)
+// ZAALIS BROWSER + DEEP SEARCH API
 // ---------------------------------------------------------------------------
-// These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
-// are strictly read-only, bounded in output, and path-guarded to the project.
-
-// zaalis browser est un projet frere (meme auteur), installe par son propre
-// installateur Inno Setup a un chemin fixe et non configurable (DisableDirPage
-// dans installer.iss) : on peut donc le retrouver sans dependre d'un
-// raccourci que l'utilisateur pourrait deplacer ou renommer.
-const ZAALIS_BROWSER_EXE = process.env.LOCALAPPDATA
-  ? path.join(process.env.LOCALAPPDATA, 'Programs', 'zaalis browser', 'zaalis-browser.exe')
-  : null;
 const ZAALIS_BROWSER_PING = 'http://127.0.0.1:8715/zaalis/ping';
-const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+const SEARCH_USER_AGENT = process.platform === 'darwin'
+  ? 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0'
+  : process.platform === 'linux'
+    ? 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0'
+    : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+
+function browserLaunchCandidates() {
+  if (process.platform === 'win32') {
+    return [
+      process.env.LOCALAPPDATA ? { file: path.join(process.env.LOCALAPPDATA, 'Programs', 'zaalis browser', 'zaalis-browser.exe') } : null,
+      { file: 'zaalis-browser.exe', pathLookup: true },
+    ].filter(Boolean);
+  }
+  if (process.platform === 'darwin') {
+    return [
+      { file: 'open', args: ['-a', 'zaalis browser'], pathLookup: true },
+      { file: path.join(os.homedir(), 'Applications', 'zaalis browser.app', 'Contents', 'MacOS', 'zaalis browser') },
+      { file: '/Applications/zaalis browser.app/Contents/MacOS/zaalis browser' },
+      { file: 'zaalis-browser', pathLookup: true },
+    ];
+  }
+  return [
+    { file: '/opt/zaalis-browser/zaalis-browser' },
+    { file: '/opt/zaalis browser/zaalis-browser' },
+    { file: '/usr/local/bin/zaalis-browser' },
+    { file: '/usr/bin/zaalis-browser' },
+    { file: 'zaalis-browser', pathLookup: true },
+  ];
+}
+
+function spawnBrowserCandidate(candidate) {
+  if (!candidate || !candidate.file) return false;
+  if (!candidate.pathLookup && !fs.existsSync(candidate.file)) return false;
+  try {
+    const child = spawn(candidate.file, candidate.args || [], { detached: true, stdio: 'ignore' });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 async function pingZaalisBrowser(timeoutMs) {
   const ctrl = new AbortController();
@@ -701,33 +1727,26 @@ async function pingZaalisBrowser(timeoutMs) {
   }
 }
 
-// S'assure que zaalis browser tourne, en le lancant si besoin (chemin fixe
-// ci-dessus). L'API locale du navigateur demarre des l'ouverture du process,
-// avant meme que la fenetre/WebView2 soit prete : on patiente donc un peu
-// apres le premier ping reussi pour laisser le premier onglet s'initialiser
-// (sinon une recherche envoyee trop tot est silencieusement ignoree).
 let launchingBrowser = null;
 async function ensureZaalisBrowserRunning() {
   if (await pingZaalisBrowser(800)) return true;
   if (launchingBrowser) return launchingBrowser;
 
   launchingBrowser = (async () => {
-    if (!ZAALIS_BROWSER_EXE || !fs.existsSync(ZAALIS_BROWSER_EXE)) return false;
-    try {
-      const child = spawn(ZAALIS_BROWSER_EXE, [], { detached: true, stdio: 'ignore' });
-      child.unref();
-    } catch {
-      return false;
-    }
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      if (await pingZaalisBrowser(800)) {
-        await new Promise((r) => setTimeout(r, 700)); // laisse le premier onglet s'initialiser
-        return true;
+    let tried = false;
+    for (const candidate of browserLaunchCandidates()) {
+      if (!spawnBrowserCandidate(candidate)) continue;
+      tried = true;
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        if (await pingZaalisBrowser(800)) {
+          await new Promise((r) => setTimeout(r, 700));
+          return true;
+        }
+        await new Promise((r) => setTimeout(r, 300));
       }
-      await new Promise((r) => setTimeout(r, 300));
     }
-    return false;
+    return tried && await pingZaalisBrowser(800);
   })();
 
   try {
@@ -889,6 +1908,384 @@ async function webSearch(query, limit) {
   return extractSearchResults(html, query, limit);
 }
 
+// ---------------------------------------------------------------------------
+// OPEN-LICENSED IMAGE SEARCH + LOCAL ASSET DOWNLOAD
+// ---------------------------------------------------------------------------
+// The cache deliberately contains only results that our server just received
+// from Openverse or Wikimedia Commons. image_download accepts an opaque result
+// id rather than an arbitrary URL, which keeps the SSRF and licensing boundary
+// on the server instead of trusting model-generated URLs.
+const IMAGE_SEARCH_TTL_MS = 30 * 60 * 1000;
+const MAX_CACHED_IMAGE_RESULTS = 480;
+const MAX_IMAGE_DOWNLOAD_BYTES = 12 * 1024 * 1024;
+const imageSearchResults = new Map();
+
+const IMAGE_TYPE_BY_MIME = Object.freeze({
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/gif': 'gif',
+  'image/avif': 'avif',
+});
+
+function compactImageText(value, max = 500) {
+  return stripHtml(String(value || ''))
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max);
+}
+
+function imageFileType(value) {
+  const raw = String(value || '').trim().toLowerCase().replace(/^image\//, '').replace(/^\./, '');
+  if (raw === 'jpeg' || raw === 'jpg') return 'jpg';
+  return ['png', 'webp', 'gif', 'avif'].includes(raw) ? raw : '';
+}
+
+function imageFileTypeFromUrl(rawUrl) {
+  try {
+    const pathname = new URL(rawUrl).pathname;
+    const match = pathname.match(/\.([a-z0-9]{2,5})$/i);
+    return imageFileType(match && match[1]);
+  } catch {
+    return '';
+  }
+}
+
+function imageMimeFromBytes(bytes) {
+  if (!Buffer.isBuffer(bytes) || bytes.length < 12) return '';
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a') return 'image/gif';
+  if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (bytes.subarray(4, 8).toString('ascii') === 'ftyp' && /^(avif|avis)$/i.test(bytes.subarray(8, 12).toString('ascii'))) return 'image/avif';
+  return '';
+}
+
+function allowedImageDestinationType(relativePath) {
+  return imageFileType(path.extname(relativePath));
+}
+
+function cacheImageSearchResult(result) {
+  const now = Date.now();
+  for (const [key, cached] of imageSearchResults) {
+    if (!cached || cached.expiresAt <= now) imageSearchResults.delete(key);
+  }
+  while (imageSearchResults.size >= MAX_CACHED_IMAGE_RESULTS) {
+    const oldest = imageSearchResults.keys().next().value;
+    if (!oldest) break;
+    imageSearchResults.delete(oldest);
+  }
+  const record = { ...result, expiresAt: now + IMAGE_SEARCH_TTL_MS };
+  imageSearchResults.set(record.id, record);
+  return {
+    id: record.id,
+    title: record.title,
+    imageUrl: record.imageUrl,
+    thumb: record.thumb,
+    sourcePage: record.sourcePage,
+    license: record.license,
+    licenseUrl: record.licenseUrl,
+    attribution: record.attribution,
+    width: record.width,
+    height: record.height,
+    fileType: record.fileType,
+    provider: record.provider,
+  };
+}
+
+function normaliseOpenverseImage(row) {
+  const imageUrl = publicHttpUrl(row && row.url);
+  const sourcePage = publicHttpUrl(row && row.foreign_landing_url) || publicHttpUrl(row && row.detail_url);
+  const fileType = imageFileType(row && row.filetype) || imageFileTypeFromUrl(imageUrl);
+  const licenseKey = String(row && row.license || '').toLowerCase();
+  if (!imageUrl || !sourcePage || !fileType || !['cc0', 'pdm', 'by', 'by-sa'].includes(licenseKey)) return null;
+  const title = compactImageText(row.title || 'Image Openverse', 180);
+  const creator = compactImageText(row.creator, 180);
+  return {
+    id: `ov:${row.id}`,
+    imageUrl,
+    thumb: publicHttpUrl(row.thumbnail) || imageUrl,
+    sourcePage,
+    license: compactImageText(`${String(row.license || '').toUpperCase()}${row.license_version ? ' ' + row.license_version : ''}`, 80),
+    licenseUrl: publicHttpUrl(row.license_url),
+    attribution: compactImageText(row.attribution || [title, creator].filter(Boolean).join(' — ')),
+    title,
+    creator,
+    width: Number(row.width) || undefined,
+    height: Number(row.height) || undefined,
+    fileType,
+    provider: 'Openverse',
+  };
+}
+
+async function searchOpenverseImages(query, limit) {
+  const url = new URL('https://api.openverse.org/v1/images/');
+  url.searchParams.set('q', query);
+  url.searchParams.set('page_size', String(Math.min(Math.max(limit * 2, 8), 24)));
+  // Exclude NC/ND works so a generated website is not accidentally given an
+  // asset that cannot be adapted or used commercially.
+  url.searchParams.set('license', 'cc0,pdm,by,by-sa');
+  url.searchParams.set('mature', 'false');
+  const response = await fetchWithTimeout(url.toString(), 9000, { headers: { Accept: 'application/json' } });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return (Array.isArray(payload && payload.results) ? payload.results : [])
+    .map(normaliseOpenverseImage)
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+function normaliseWikimediaImage(page) {
+  const info = page && Array.isArray(page.imageinfo) ? page.imageinfo[0] : null;
+  if (!info) return null;
+  const imageUrl = publicHttpUrl(info.thumburl) || (Number(info.size) <= MAX_IMAGE_DOWNLOAD_BYTES ? publicHttpUrl(info.url) : null);
+  const sourcePage = publicHttpUrl(info.descriptionurl);
+  const fileType = imageFileType(info.mime) || imageFileTypeFromUrl(imageUrl);
+  const meta = info.extmetadata || {};
+  const license = compactImageText((meta.LicenseShortName && meta.LicenseShortName.value) || (meta.License && meta.License.value) || (meta.UsageTerms && meta.UsageTerms.value), 100);
+  if (!imageUrl || !sourcePage || !fileType || !license) return null;
+  const title = compactImageText(String(page.title || 'Image Wikimedia Commons').replace(/^File:/i, ''), 180);
+  const creator = compactImageText(meta.Artist && meta.Artist.value, 180);
+  const attribution = compactImageText((meta.Attribution && meta.Attribution.value) || [title, creator].filter(Boolean).join(' — '));
+  return {
+    id: `commons:${page.pageid}`,
+    imageUrl,
+    thumb: publicHttpUrl(info.thumburl) || imageUrl,
+    sourcePage,
+    license,
+    licenseUrl: publicHttpUrl(meta.LicenseUrl && meta.LicenseUrl.value),
+    attribution,
+    title,
+    creator,
+    width: Number(info.thumbwidth || info.width) || undefined,
+    height: Number(info.thumbheight || info.height) || undefined,
+    fileType,
+    provider: 'Wikimedia Commons',
+  };
+}
+
+async function searchWikimediaImages(query, limit) {
+  const url = new URL('https://commons.wikimedia.org/w/api.php');
+  url.searchParams.set('action', 'query');
+  url.searchParams.set('generator', 'search');
+  url.searchParams.set('gsrsearch', query);
+  url.searchParams.set('gsrnamespace', '6');
+  url.searchParams.set('gsrlimit', String(Math.min(Math.max(limit * 2, 8), 24)));
+  url.searchParams.set('prop', 'imageinfo');
+  url.searchParams.set('iiprop', 'url|mime|size|extmetadata');
+  // The thumbnail is a web-appropriate asset; originals on Commons often
+  // exceed practical website and download limits.
+  url.searchParams.set('iiurlwidth', '1440');
+  url.searchParams.set('format', 'json');
+  const response = await fetchWithTimeout(url.toString(), 9000, { headers: { Accept: 'application/json' } });
+  if (!response.ok) return [];
+  const payload = await response.json();
+  return Object.values(payload && payload.query && payload.query.pages || {})
+    .map(normaliseWikimediaImage)
+    .filter(Boolean)
+    .slice(0, limit);
+}
+
+async function searchOpenLicensedImages(query, limit = 8) {
+  const cleanQuery = String(query || '').replace(/\s+/g, ' ').trim().slice(0, 300);
+  const max = Math.min(Math.max(Number(limit) || 8, 1), 12);
+  if (!cleanQuery) return [];
+  const settled = await Promise.allSettled([
+    searchOpenverseImages(cleanQuery, max),
+    searchWikimediaImages(cleanQuery, max),
+  ]);
+  const candidates = settled.flatMap((entry) => entry.status === 'fulfilled' ? entry.value : []);
+  const seen = new Set();
+  const results = [];
+  for (const candidate of candidates) {
+    if (!candidate || seen.has(candidate.imageUrl)) continue;
+    seen.add(candidate.imageUrl);
+    results.push(cacheImageSearchResult(candidate));
+    if (results.length >= max) break;
+  }
+  return results;
+}
+
+function isPrivateIpAddress(address) {
+  const value = String(address || '').toLowerCase();
+  const family = net.isIP(value);
+  if (family === 4) {
+    const [a, b] = value.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && (b === 0 || b === 168)) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51) || (a === 203 && b === 0);
+  }
+  if (family === 6) {
+    const mapped = value.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+    if (mapped) return isPrivateIpAddress(mapped[1]);
+    return value === '::' || value === '::1' || value.startsWith('fc') || value.startsWith('fd') ||
+      value.startsWith('fe80:') || value.startsWith('ff') || value.startsWith('2001:db8');
+  }
+  return true;
+}
+
+async function assertPublicImageTarget(rawUrl) {
+  const safe = publicHttpUrl(rawUrl);
+  if (!safe) throw new Error('URL image non publique ou invalide.');
+  const host = new URL(safe).hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(host)) {
+    if (isPrivateIpAddress(host)) throw new Error('Hôte image privé bloqué.');
+    return safe;
+  }
+  let addresses;
+  try {
+    addresses = await dns.lookup(host, { all: true, verbatim: true });
+  } catch {
+    throw new Error('Hôte image introuvable.');
+  }
+  if (!addresses.length || addresses.some((entry) => isPrivateIpAddress(entry.address))) {
+    throw new Error('Hôte image non public bloqué.');
+  }
+  return safe;
+}
+
+async function readImageResponseBytes(response) {
+  const declaredLength = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_IMAGE_DOWNLOAD_BYTES) {
+    throw new Error(`Image trop lourde (maximum ${Math.round(MAX_IMAGE_DOWNLOAD_BYTES / 1024 / 1024)} Mo).`);
+  }
+  if (!response.body) throw new Error('Réponse image vide.');
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_IMAGE_DOWNLOAD_BYTES) {
+      try { await reader.cancel(); } catch {}
+      throw new Error(`Image trop lourde (maximum ${Math.round(MAX_IMAGE_DOWNLOAD_BYTES / 1024 / 1024)} Mo).`);
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks, total);
+}
+
+async function fetchPublicImageBytes(rawUrl) {
+  let target = publicHttpUrl(rawUrl);
+  if (!target) throw new Error('URL image non publique ou invalide.');
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 15_000);
+  try {
+    for (let redirectCount = 0; redirectCount <= 4; redirectCount++) {
+      target = await assertPublicImageTarget(target);
+      const response = await fetch(target, {
+        method: 'GET',
+        redirect: 'manual',
+        signal: ctrl.signal,
+        headers: {
+          'User-Agent': SEARCH_USER_AGENT,
+          Accept: 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        },
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) throw new Error('Redirection image invalide.');
+        target = publicHttpUrl(new URL(location, target).toString());
+        if (!target) throw new Error('Redirection vers une URL non publique bloquée.');
+        continue;
+      }
+      if (!response.ok) throw new Error(`Téléchargement image HTTP ${response.status}.`);
+      const bytes = await readImageResponseBytes(response);
+      const mime = imageMimeFromBytes(bytes);
+      if (!IMAGE_TYPE_BY_MIME[mime]) throw new Error('Le fichier téléchargé n’est pas une image raster prise en charge.');
+      const declaredMime = String(response.headers.get('content-type') || '').toLowerCase().split(';')[0].trim();
+      if (declaredMime.startsWith('image/') && IMAGE_TYPE_BY_MIME[declaredMime] && declaredMime !== mime) {
+        throw new Error('Le type MIME déclaré ne correspond pas au contenu image.');
+      }
+      return { bytes, mime };
+    }
+    throw new Error('Trop de redirections image.');
+  } catch (err) {
+    if (err && err.name === 'AbortError') throw new Error('Téléchargement image expiré.');
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function normaliseImageDestination(root, requestedPath) {
+  const base = path.resolve(root);
+  let relative = String(requestedPath || '').trim().replace(/^['"`]+|['"`]+$/g, '').replace(/\\/g, '/');
+  if (!relative || relative.startsWith('/') || /^[A-Za-z]:\//.test(relative)) throw new Error('Chemin image relatif requis.');
+  const parts = relative.split('/');
+  if (parts.some((part) => !part || part === '.' || part === '..')) throw new Error('Chemin image invalide.');
+  relative = parts.join('/');
+  if (!allowedImageDestinationType(relative)) throw new Error('L’image doit avoir une extension .jpg, .png, .webp, .gif ou .avif.');
+  const full = path.resolve(base, relative);
+  if (!isInsideBase(base, full)) throw new Error('Chemin image hors projet refusé.');
+  return { base, relative, full };
+}
+
+function ensureSafeImageDestination(destination) {
+  const baseReal = fs.realpathSync(destination.base);
+  fs.mkdirSync(path.dirname(destination.full), { recursive: true });
+  const parentReal = fs.realpathSync(path.dirname(destination.full));
+  if (!isInsideBase(baseReal, parentReal)) throw new Error('Dossier image hors projet refusé.');
+  if (fs.existsSync(destination.full) && fs.lstatSync(destination.full).isSymbolicLink()) {
+    throw new Error('Lien symbolique image refusé.');
+  }
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[|\\{}()[\]^$+*?.]/g, '\\$&');
+}
+
+function writeImageAttribution(destination, record) {
+  const directory = path.posix.dirname(destination.relative);
+  const relativePath = directory === '.' ? 'ATTRIBUTIONS.md' : `${directory}/ATTRIBUTIONS.md`;
+  const fullPath = path.resolve(destination.base, relativePath);
+  if (!isInsideBase(destination.base, fullPath)) throw new Error('Chemin d’attribution hors projet refusé.');
+  if (fs.existsSync(fullPath) && fs.lstatSync(fullPath).isSymbolicLink()) throw new Error('Lien symbolique d’attribution refusé.');
+  const start = `<!-- zaalis-image:${destination.relative.replace(/--/g, '-') } -->`;
+  const end = '<!-- /zaalis-image -->';
+  const lines = [
+    start,
+    `Image : ${compactImageText(record.title || destination.relative, 180)}`,
+    `Source : ${record.sourcePage || record.imageUrl}`,
+    `Licence : ${compactImageText(record.license || 'non précisée', 120)}${record.licenseUrl ? ` — ${record.licenseUrl}` : ''}`,
+    `Attribution : ${compactImageText(record.attribution || record.creator || 'voir la page source', 500)}`,
+    end,
+  ];
+  const block = lines.join('\n');
+  let current = '';
+  try { current = fs.readFileSync(fullPath, 'utf8'); } catch {}
+  const existingBlock = new RegExp(`${escapeRegExp(start)}[\\s\\S]*?${escapeRegExp(end)}`, 'g');
+  const next = existingBlock.test(current)
+    ? current.replace(existingBlock, block)
+    : `${current.trimEnd()}${current.trim() ? '\n\n' : ''}# Image attributions\n\n${block}\n`;
+  fs.writeFileSync(fullPath, next, 'utf8');
+  return relativePath;
+}
+
+async function downloadProjectImage({ id, path: requestedPath, root }) {
+  const record = imageSearchResults.get(String(id || ''));
+  if (!record || record.expiresAt <= Date.now()) {
+    if (record) imageSearchResults.delete(String(id || ''));
+    throw new Error('Résultat image expiré : relance image_search avant le téléchargement.');
+  }
+  const destination = normaliseImageDestination(root, requestedPath);
+  const { bytes, mime } = await fetchPublicImageBytes(record.imageUrl);
+  const expectedType = allowedImageDestinationType(destination.relative);
+  if (IMAGE_TYPE_BY_MIME[mime] !== expectedType) {
+    throw new Error(`Extension ${path.extname(destination.relative)} incompatible avec l’image ${IMAGE_TYPE_BY_MIME[mime]}.`);
+  }
+  ensureSafeImageDestination(destination);
+  fs.writeFileSync(destination.full, bytes);
+  const attributionPath = writeImageAttribution(destination, record);
+  return { path: destination.relative, bytes: bytes.length, mime, attributionPath };
+}
+
 function pageTitle(html) {
   const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return m ? stripHtml(m[1]).slice(0, 180) : '';
@@ -1001,13 +2398,12 @@ app.get('/api/favicon', async (req, res) => {
 
 app.get('/api/browser-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
-  if (!q) return res.status(400).json({ error: 'q is required' });
+  if (!q) return res.status(400).json({ error: 'Missing q' });
 
-  const mode = String(req.query.mode || 'newtab').toLowerCase();
-  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
+  const mode = String(req.query.mode || 'same').toLowerCase();
+  const background = mode === 'background';
+  const endpoint = mode === 'newtab' || background ? 'search-newtab?q=' : 'search?q=';
   const visibleParam = background ? '&background=1' : '';
-  const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
-  const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
 
   const running = await ensureZaalisBrowserRunning();
   if (!running) {
@@ -1020,6 +2416,7 @@ app.get('/api/browser-search', async (req, res) => {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
+    const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
     const r = await fetch(url, { signal: ctrl.signal });
     const body = await r.json().catch(() => ({}));
     if (body.error === 'offline_mode') {
@@ -1032,11 +2429,11 @@ app.get('/api/browser-search', async (req, res) => {
       return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
     }
     res.json({ ok: true, query: q, mode, background, browser: body });
-  } catch (e) {
-    const msg = e && e.name === 'AbortError'
+  } catch (err) {
+    const msg = err && err.name === 'AbortError'
       ? 'zaalis browser ne repond pas'
       : 'zaalis browser est indisponible';
-    res.status(502).json({ error: msg, detail: e && e.message });
+    res.status(502).json({ error: msg, detail: err.message });
   } finally {
     clearTimeout(timer);
   }
@@ -1059,8 +2456,6 @@ app.post('/api/deep-search', async (req, res) => {
   const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
   const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
 
-  // First open the search page in zaalis browser. If secure local mode blocks it,
-  // do not perform server-side web requests behind the user's back.
   const firstOpen = await openInZaalisBrowser(searchPageUrl(query), { background: false, timeoutMs: 5000 });
   if (!firstOpen.ok) return res.status(firstOpen.status).json(firstOpen.body);
 
@@ -1098,6 +2493,12 @@ app.post('/api/deep-search', async (req, res) => {
   res.json({ ok: true, query, searchedQueries, results: all, opened });
 });
 
+// ---------------------------------------------------------------------------
+// AGENT TOOLS — read-only search & diagnostics (Grep / Glob / GitDiff / Doctor)
+// ---------------------------------------------------------------------------
+// These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
+// are strictly read-only, bounded in output, and path-guarded to the project.
+
 // Detect a CLI tool once (node/npm/git/rg). Cached promise so /doctor and the
 // grep fallback don't re-spawn the same probe repeatedly.
 const _cliCache = new Map();
@@ -1112,7 +2513,10 @@ function detectCli(name) {
       if (process.platform === 'win32') {
         execFile('cmd.exe', ['/c', `${name} --version`], { timeout: 5000, windowsHide: true }, done);
       } else {
-        execFile(name, ['--version'], { timeout: 5000 }, done);
+        // execFile bypasses the shell, so it resolves `name` against this
+        // process's PATH — which is minimal under Finder/Electron. Use the
+        // augmented env so installed tools (git, python3, node…) are found.
+        execFile(name, ['--version'], { timeout: 5000, env: execEnv() }, done);
       }
     } catch { resolve({ available: false, version: '' }); }
   });
@@ -1231,7 +2635,7 @@ function jsGrep(searchAbs, base, pattern, ignoreCase, glob, max) {
   return { list, truncated };
 }
 
-// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults }
+// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults? }
 app.post('/api/grep', async (req, res) => {
   try {
     const b = req.body || {};
@@ -1257,7 +2661,7 @@ app.post('/api/grep', async (req, res) => {
       if (ic) args.push('-i');
       if (glob) args.push('-g', glob);
       args.push('--regexp', pat, rel || '.');
-      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true }, (err, stdout, stderr) => {
+      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true, env: execEnv() }, (err, stdout, stderr) => {
         if (err && err.code === 1 && !stdout) return res.json({ tool: 'ripgrep', pattern: pat, results: [], count: 0, truncated: false });
         if (err && err.code !== 1 && !stdout) return res.status(500).json({ error: String(stderr || err.message || 'ripgrep error').slice(0, 300) });
         const r = parseRgOutput(stdout, maxResults);
@@ -1300,7 +2704,7 @@ app.get('/api/gitdiff', async (req, res) => {
     const git = await detectCli('git');
     if (!git.available) return res.json({ available: false, error: 'git introuvable' });
     const run = (args) => new Promise((resolve) => {
-      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true },
+      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true, env: execEnv() },
         (e, so) => resolve(e && !so ? '' : String(so || '')));
     });
     const inside = (await run(['rev-parse', '--is-inside-work-tree'])).trim();
@@ -1334,11 +2738,11 @@ app.get('/api/doctor', async (req, res) => {
     } catch {}
 
     let gguf = { variant: '', installed: false };
-    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), 'llama-server.exe') }; } catch {}
+    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), engineBinaryName()) }; } catch {}
 
     const installerPaths = [
-      path.join(APP_DIR, 'native', 'installer', 'zaalis-setup.exe'),
-      path.join(process.cwd(), 'native', 'installer', 'zaalis-setup.exe'),
+      path.join(APP_DIR, 'native', 'installer', 'zaalis-macos-universal-installer.tar.gz'),
+      path.join(process.cwd(), 'native', 'installer', 'zaalis-macos-universal-installer.tar.gz'),
     ];
     const installer = installerPaths.some((p) => { try { return fs.existsSync(p); } catch { return false; } });
 
@@ -1348,7 +2752,7 @@ app.get('/api/doctor', async (req, res) => {
     let projectGit = null;
     if (base && git.available) {
       projectGit = await new Promise((resolve) => {
-        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true },
+        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true, env: execEnv() },
           (e, so) => resolve(e ? null : String(so || '').trim()));
       });
     }
@@ -1357,6 +2761,7 @@ app.get('/api/doctor', async (req, res) => {
       version: APP_VERSION,
       node: process.version,
       npm, git, rg, ollama, gguf, installer,
+      installerPath: 'native/installer/zaalis-macos-universal-installer.tar.gz',
       scripts, projectGit,
       platform: process.platform,
     });
@@ -1368,8 +2773,25 @@ app.get('/api/doctor', async (req, res) => {
 // ---------------------------------------------------------------------------
 // POST /api/pick-folder  -> { path } | { cancelled: true }
 app.post('/api/pick-folder', (req, res) => {
+  // In the packaged Electron app the renderer picks the folder through the
+  // native IPC bridge (window.zaalisNative.pickFolder); this HTTP endpoint is
+  // the browser/dev fallback. Provide a real dialog on macOS via osascript.
+  if (process.platform === 'darwin') {
+    const script = 'POSIX path of (choose folder with prompt "Choisissez le dossier du projet")';
+    execFile('osascript', ['-e', script], { timeout: 180000, env: execEnv() }, (err, stdout) => {
+      if (err) {
+        // -128 / "User canceled" = the user dismissed the dialog: not an error.
+        if (/User canceled|-128/i.test(err.message || '')) return res.json({ cancelled: true });
+        return res.status(500).json({ error: err.message });
+      }
+      const selected = (stdout || '').trim();
+      if (!selected) return res.json({ cancelled: true });
+      res.json({ path: selected });
+    });
+    return;
+  }
   if (process.platform !== 'win32') {
-    return res.status(501).json({ error: 'Folder picker only available on Windows.' });
+    return res.status(501).json({ error: 'Folder picker only available on Windows/macOS.' });
   }
 
   // Prefer the bundled modern Explorer-style picker (pickfolder.exe).
@@ -1414,7 +2836,9 @@ app.get('/api/ollama-models', async (req, res) => {
     const models = (data.models || []).map((m) => m.name).filter(Boolean);
     res.json({ models });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    // Ollama is optional. An unavailable local runtime must not look like an
+    // IDE server failure in DevTools, nor flood the console while polling.
+    res.json({ models: [], unavailable: true });
   }
 });
 
@@ -1536,8 +2960,8 @@ app.get('/api/ollama-pull', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // LOCAL GGUF ENGINE (llama.cpp) — run GGUF models directly, NO Ollama needed.
-// We download the official llama.cpp `llama-server.exe` build that matches the
-// machine (CUDA / Vulkan / CPU) into %LOCALAPPDATA%\zaalis\engine, spawn it as a
+// We download the official llama.cpp `llama-server` build that matches the
+// machine (Metal / CUDA / Vulkan / CPU) into the local zaalis engine dir, spawn it as a
 // child process, and proxy chat to its OpenAI-compatible /v1/chat/completions.
 // This is exactly how LM Studio / Jan work, but fully self-contained.
 // ---------------------------------------------------------------------------
@@ -1553,6 +2977,7 @@ ensureDir(MODELS_DIR);
 let _gpuVariant = null;
 function detectEngineVariant() {
   if (_gpuVariant) return _gpuVariant;
+  if (process.platform === 'darwin') { _gpuVariant = 'metal'; return _gpuVariant; }
   if (process.platform !== 'win32') { _gpuVariant = 'cpu'; return _gpuVariant; }
   let names = '';
   try {
@@ -1570,8 +2995,28 @@ function execSyncSafe(cmd) {
   return execSync(cmd, { timeout: 9000, windowsHide: true }).toString();
 }
 
+function engineBinaryName() {
+  return process.platform === 'win32' ? 'llama-server.exe' : 'llama-server';
+}
+
+function normalizeEngineVariant(variant) {
+  const v = String(variant || '').toLowerCase();
+  if (process.platform === 'darwin') return (v === 'metal' || v === 'cpu') ? v : detectEngineVariant();
+  if (process.platform === 'win32') return (v === 'cuda' || v === 'vulkan' || v === 'cpu') ? v : detectEngineVariant();
+  return v === 'cpu' ? 'cpu' : detectEngineVariant();
+}
+
+function macosEngineArch() {
+  return process.arch === 'arm64' ? 'arm64' : 'x64';
+}
+
 function engineAssetUrls(variant) {
+  variant = normalizeEngineVariant(variant);
   const base = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
+  if (process.platform === 'darwin') {
+    // The macOS release asset includes Metal support; CPU mode is enforced at launch with -ngl 0.
+    return [base + `llama-${LLAMA_TAG}-bin-macos-${macosEngineArch()}.tar.gz`];
+  }
   if (variant === 'cuda') return [
     base + `llama-${LLAMA_TAG}-bin-win-cuda-12.4-x64.zip`,
     base + `cudart-llama-bin-win-cuda-12.4-x64.zip`,   // CUDA runtime DLLs
@@ -1594,6 +3039,11 @@ function findExeRecursive(dir, name) {
   };
   walk(dir);
   return found;
+}
+
+function ensureExecutable(file) {
+  if (process.platform === 'win32' || !file) return;
+  try { fs.chmodSync(file, 0o755); } catch {}
 }
 
 function terminalGgufPullStatus(status) {
@@ -1715,37 +3165,46 @@ function startGgufPullTask({ repo, file, url }) {
   return task;
 }
 
-// Extract a .zip. Tricky on Windows:
+// Extract a .zip or .tar.gz. Tricky on Windows:
 //  - the SYSTEM tar (C:\Windows\System32\tar.exe = bsdtar) reads zip, but a bare
 //    "tar" may resolve to Git's GNU tar (no zip support), so we call it by full
 //    path. bsdtar also reads "C:\path" as host:path, so we cd into the folder
 //    and pass a relative name (no colon).
 //  - if that fails, fall back to PowerShell's Expand-Archive (always present).
-function extractZip(zipPath, destDir) {
+function extractArchive(archivePath, destDir) {
   ensureDir(destDir);
   const { execSync } = require('child_process');
+  if (/\.tar\.gz$/i.test(archivePath) || /\.tgz$/i.test(archivePath)) {
+    execSync(`tar -xzf "${archivePath}" -C "${destDir}"`, { timeout: 300000, windowsHide: true });
+    return;
+  }
   const sysTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
   if (fs.existsSync(sysTar)) {
     try {
-      execSync(`"${sysTar}" -xf "${path.basename(zipPath)}" -C .`, {
-        cwd: path.dirname(zipPath), timeout: 180000, windowsHide: true,
+      execSync(`"${sysTar}" -xf "${path.basename(archivePath)}" -C .`, {
+        cwd: path.dirname(archivePath), timeout: 180000, windowsHide: true,
       });
       return;
     } catch { /* fall through to PowerShell */ }
   }
   const q = (s) => s.replace(/'/g, "''");
-  const ps = `Expand-Archive -LiteralPath '${q(zipPath)}' -DestinationPath '${q(destDir)}' -Force`;
+  const ps = `Expand-Archive -LiteralPath '${q(archivePath)}' -DestinationPath '${q(destDir)}' -Force`;
   execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${ps}"`, { timeout: 300000, windowsHide: true });
 }
 
-// Ensure the engine binary for `variant` exists; returns the llama-server.exe path.
+// Ensure the engine binary for `variant` exists; returns the llama-server path.
 // Downloads + extracts on first use, reporting progress via onLog({stage, pct}).
 const engineExePaths = {};
 async function ensureEngineBinary(variant, onLog) {
-  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return engineExePaths[variant];
+  variant = normalizeEngineVariant(variant);
+  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) {
+    ensureExecutable(engineExePaths[variant]);
+    return engineExePaths[variant];
+  }
   const vdir = path.join(ENGINE_DIR, variant);
-  let exe = findExeRecursive(vdir, 'llama-server.exe');
-  if (exe) { engineExePaths[variant] = exe; return exe; }
+  const binName = engineBinaryName();
+  let exe = findExeRecursive(vdir, binName);
+  if (exe) { ensureExecutable(exe); engineExePaths[variant] = exe; return exe; }
   ensureDir(vdir);
   const urls = engineAssetUrls(variant);
   for (let i = 0; i < urls.length; i++) {
@@ -1756,11 +3215,12 @@ async function ensureEngineBinary(variant, onLog) {
       if (onLog && tot) onLog({ stage: 'engine', pct: Math.round((rec / tot) * 100), part: i + 1, parts: urls.length });
     });
     if (onLog) onLog({ stage: 'extract', pct: 100, part: i + 1, parts: urls.length });
-    extractZip(zip, vdir);
+    extractArchive(zip, vdir);
     try { fs.unlinkSync(zip); } catch {}
   }
-  exe = findExeRecursive(vdir, 'llama-server.exe');
-  if (!exe) throw new Error('llama-server.exe introuvable après extraction.');
+  exe = findExeRecursive(vdir, binName);
+  if (!exe) throw new Error(`${binName} introuvable après extraction.`);
+  ensureExecutable(exe);
   engineExePaths[variant] = exe;
   return exe;
 }
@@ -1771,7 +3231,7 @@ let engineProc = null, engineModelFile = null, engineVariant = null, engineStart
 function stopEngine() {
   return new Promise((resolve) => {
     if (!engineProc) return resolve();
-    const p = engineProc; engineProc = null; engineModelFile = null;
+    const p = engineProc; engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
     let done = false;
     const fin = () => { if (!done) { done = true; resolve(); } };
     try { p.once('exit', fin); p.kill(); setTimeout(fin, 2000); } catch { fin(); }
@@ -1793,6 +3253,7 @@ async function waitForHealth(port, timeoutMs) {
 // Track the engine options the running process was started with, so a change in
 // context size / GPU layers forces a restart even when the model is unchanged.
 let engineOpts = '';
+let engineRequestedVariant = null;
 
 // Make sure the engine is running and serving `modelFile`. Swaps model if needed.
 // `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
@@ -1805,25 +3266,37 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
-  const desiredVariant = preferredVariant || detectEngineVariant();
   const optsKey = `${ctx}|${ngl}`;
-  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
+  const requestedVariant = normalizeEngineVariant(preferredVariant || detectEngineVariant());
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return; }
   engineStarting = (async () => {
     await stopEngine();
-    let variant = desiredVariant;
-    let exe;
-    try { exe = await ensureEngineBinary(variant); }
-    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
-    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
-    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
-    if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
-    engineOpts = optsKey;
-    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
-    proc.on('error', () => {});
-    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
-    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
-    await waitForHealth(ENGINE_PORT, 180000);
+    const variant = requestedVariant;
+    const startVariant = async (v) => {
+      const exe = await ensureEngineBinary(v);
+      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx), '--jinja'];
+      // CPU mode must not offload layers, even when the macOS binary includes Metal.
+      if (v === 'cpu') args.push('-ngl', '0');
+      else if (ngl > 0) args.push('-ngl', String(ngl));
+      engineOpts = optsKey;
+      const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+      proc.on('error', () => {});
+      engineProc = proc; engineModelFile = modelFile; engineVariant = v; engineRequestedVariant = requestedVariant;
+      proc.once('exit', () => {
+        if (engineProc === proc) {
+          engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
+        }
+      });
+      await waitForHealth(ENGINE_PORT, 180000);
+    };
+    try {
+      await startVariant(variant);
+    } catch (e) {
+      await stopEngine();
+      if (variant === 'cpu') throw e;
+      await startVariant('cpu');
+    }
   })();
   try { await engineStarting; } finally { engineStarting = null; }
 }
@@ -1846,7 +3319,7 @@ app.get('/api/gguf-engine', (req, res) => {
   const variant = detectEngineVariant();
   res.json({
     variant,
-    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), 'llama-server.exe'),
+    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), engineBinaryName()),
     running: !!engineProc, current: engineModelFile,
   });
 });
@@ -1880,6 +3353,309 @@ app.post('/api/gguf-load', async (req, res) => {
 app.post('/api/gguf-unload', async (req, res) => {
   try { await stopEngine(); res.json({ success: true }); }
   catch (e) { res.status(500).json({ error: (e && e.message) || String(e) }); }
+});
+
+// ---------------------------------------------------------------------------
+// VOICE — briques locales du mode vocal du navigateur.
+// Sur macOS, le transcripteur Speech est inclus dans l'application : ni
+// Homebrew ni téléchargement d'un modèle n'est requis. Whisper reste un
+// secours pour les anciennes installations et les autres plateformes.
+// La synthèse repose sur les voix macOS déjà disponibles, ou Piper ailleurs.
+// ---------------------------------------------------------------------------
+const VOICE_DIR = path.join(DATA_DIR, 'voice');
+const WHISPER_MODEL_FILE = 'ggml-small.bin';        // plan Intel : whisper small
+const WHISPER_MODEL_URL =
+  'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/' + WHISPER_MODEL_FILE;
+
+// Cherche un exécutable : d'abord dans DATA_DIR/voice (dépôt manuel), puis
+// dans les emplacements Homebrew/usuels, puis via PATH.
+function findVoiceBinary(names) {
+  const dirs = [
+    VOICE_DIR,
+    '/opt/homebrew/bin', '/usr/local/bin', '/usr/bin',
+    path.join(os.homedir(), '.local', 'bin'),
+  ];
+  for (const n of names) {
+    const inVoice = findExeRecursive(VOICE_DIR, n);
+    if (inVoice) return inVoice;
+    for (const d of dirs) {
+      const p = path.join(d, n);
+      try { fs.accessSync(p, fs.constants.X_OK); return p; } catch {}
+    }
+  }
+  return null;
+}
+function whisperBinary() { return findVoiceBinary(['whisper-cli', 'whisper-cpp']); }
+function piperBinary()   { return findVoiceBinary(['piper']); }
+function whisperModelPath() { return path.join(VOICE_DIR, WHISPER_MODEL_FILE); }
+
+function macSpeechHelper() {
+  if (process.platform !== 'darwin') return null;
+  // Dans l'application empaquetée, le serveur est dans Resources/app/bundle
+  // et le binaire Speech est placé dans Resources/app. Le second chemin rend
+  // aussi le lancement depuis une arborescence de développement tolérant.
+  const candidates = [
+    path.join(APP_DIR, '..', 'macos-speech-transcriber'),
+    path.join(APP_DIR, 'macos-speech-transcriber'),
+    path.join(APP_DIR, 'native', 'macos-speech-transcriber'),
+  ];
+  for (const candidate of candidates) {
+    try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
+  }
+  return null;
+}
+
+function macSpeechLocale(language) {
+  const lang = String(language || '').toLowerCase();
+  if (lang === 'fr') return 'fr-FR';
+  if (lang === 'en') return 'en-US';
+  return /^[a-z]{2}(?:-[a-z]{2})?$/i.test(lang) ? lang : 'fr-FR';
+}
+
+function transcribeWithMacSpeech(helper, wav, language) {
+  return new Promise((resolve, reject) => {
+    execFile(helper, ['--file', wav, '--language', macSpeechLocale(language)], {
+      timeout: 120000,
+      maxBuffer: 4 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      const events = String(stdout || '').split(/\r?\n/).map((line) => {
+        try { return JSON.parse(line); } catch { return null; }
+      }).filter(Boolean);
+      const transcript = events.reverse().find((event) => event.status === 'transcript' && event.text);
+      if (transcript) return resolve(String(transcript.text).replace(/\s+/g, ' ').trim());
+      const eventError = events.find((event) => event.status === 'error' && event.error);
+      const reason = (eventError && eventError.error) || String(stderr || '').trim() ||
+        (err && err.message) || 'speech-transcription-failed';
+      reject(new Error(reason));
+    });
+  });
+}
+
+function transcribeWithWindowsSpeech(wav, language) {
+  const locale = language === 'en' ? 'en-US' : 'fr-FR';
+  const script = [
+    'Add-Type -AssemblyName System.Speech',
+    `$culture = [System.Globalization.CultureInfo]::GetCultureInfo('${locale}')`,
+    '$recognizer = [System.Speech.Recognition.SpeechRecognitionEngine]::InstalledRecognizers() | Where-Object { $_.Culture.Name -eq $culture.Name } | Select-Object -First 1',
+    'if (-not $recognizer) { throw "windows-speech-language-unavailable:$($culture.Name)" }',
+    '$engine = New-Object System.Speech.Recognition.SpeechRecognitionEngine($recognizer)',
+    '$engine.LoadGrammar((New-Object System.Speech.Recognition.DictationGrammar))',
+    '$engine.SetInputToWaveFile($env:ZAALIS_STT_WAV)',
+    '$result = $engine.Recognize()',
+    'if ($result) { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; [Console]::Write($result.Text) }',
+    '$engine.Dispose()'
+  ].join('; ');
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      timeout: 120000, maxBuffer: 1024 * 1024, windowsHide: true,
+      env: { ...process.env, ZAALIS_STT_WAV: wav },
+    }, (err, stdout, stderr) => {
+      if (err) reject(new Error(String(stderr || err.message || err).trim()));
+      else resolve(String(stdout || ''));
+    });
+  });
+}
+
+// Téléchargement (unique) du modèle whisper, dans l'esprit des pulls gguf.
+let whisperPull = null;   // { status, completed, total, error }
+function startWhisperModelPull() {
+  if (whisperPull && whisperPull.status === 'downloading') return whisperPull;
+  if (fs.existsSync(whisperModelPath())) return { status: 'success' };
+  whisperPull = { status: 'downloading', completed: 0, total: 0, error: '' };
+  const tmp = whisperModelPath() + '.part';
+  ensureDir(VOICE_DIR);
+  downloadTo(WHISPER_MODEL_URL, tmp, (rec, tot) => {
+    whisperPull.completed = rec; whisperPull.total = tot;
+  }).then(() => {
+    fs.renameSync(tmp, whisperModelPath());
+    whisperPull.status = 'success';
+  }).catch((e) => {
+    whisperPull.status = 'error';
+    whisperPull.error = (e && e.message) || String(e);
+    try { fs.unlinkSync(tmp); } catch {}
+  });
+  return whisperPull;
+}
+
+// Première voix française installée pour `say` (fallback voix système sinon).
+let _sayVoice = null;
+function macSayVoice() {
+  if (_sayVoice !== null) return _sayVoice;
+  _sayVoice = '';
+  try {
+    const out = execSyncSafe('say -v ? 2>/dev/null || true');
+    for (const line of String(out).split('\n')) {
+      if (/fr_FR|fr-FR/.test(line)) { _sayVoice = line.trim().split(/\s{2,}|\s(?=fr)/)[0].trim(); break; }
+    }
+  } catch {}
+  return _sayVoice;
+}
+
+// Six voix françaises présentes par défaut sur les versions récentes de
+// macOS. Le catalogue reste stable dans les réglages ; les voix réellement
+// installées sont marquées disponibles afin de retomber sans erreur sur la
+// voix système si une variante a été retirée par Apple.
+const MAC_VOICE_CATALOG = [
+  { id: 'amelie', name: 'Amélie', label: 'Amélie', gender: 'female' },
+  { id: 'flo', name: 'Flo (Français (Canada))', label: 'Flo', gender: 'female' },
+  { id: 'sandy', name: 'Sandy (Français (France))', label: 'Sandy', gender: 'female' },
+  { id: 'thomas', name: 'Thomas', label: 'Thomas', gender: 'male' },
+  { id: 'jacques', name: 'Jacques', label: 'Jacques', gender: 'male' },
+  { id: 'eddy', name: 'Eddy (Français (France))', label: 'Eddy', gender: 'male' },
+];
+
+let _macVoices = null;
+function macInstalledVoices() {
+  if (_macVoices) return _macVoices;
+  _macVoices = new Set();
+  if (process.platform !== 'darwin') return _macVoices;
+  try {
+    const out = execSyncSafe('say -v ? 2>/dev/null || true');
+    for (const line of String(out).split('\n')) {
+      const match = line.match(/^(.*?)\s+fr_(?:FR|CA)\s+#/);
+      if (match) _macVoices.add(match[1].trim());
+    }
+  } catch {}
+  return _macVoices;
+}
+
+function macVoiceOptions() {
+  const installed = macInstalledVoices();
+  return MAC_VOICE_CATALOG.map((voice) => ({
+    id: voice.id, label: voice.label, gender: voice.gender,
+    available: installed.has(voice.name),
+  }));
+}
+
+function macVoiceName(selection) {
+  const wanted = MAC_VOICE_CATALOG.find((voice) => voice.id === String(selection || ''));
+  if (wanted && macInstalledVoices().has(wanted.name)) return wanted.name;
+  return macSayVoice();
+}
+// Voix Piper française : premier fichier *.onnx contenant "fr" dans voice/.
+function piperVoicePath() {
+  try {
+    const files = fs.readdirSync(VOICE_DIR).filter((f) => f.endsWith('.onnx'));
+    return files.length
+      ? path.join(VOICE_DIR, files.find((f) => /(^|[-_])fr/i.test(f)) || files[0])
+      : null;
+  } catch { return null; }
+}
+
+function voiceStatusSnapshot() {
+  const macSpeech = macSpeechHelper();
+  const windowsSpeech = process.platform === 'win32';
+  const bin = whisperBinary();
+  const model = fs.existsSync(whisperModelPath());
+  const pull = whisperPull && whisperPull.status === 'downloading' ? {
+    downloading: true, completed: whisperPull.completed, total: whisperPull.total,
+  } : null;
+  const piper = piperBinary();
+  const piperVoice = piper ? piperVoicePath() : null;
+  return {
+    stt: {
+      ready: !!macSpeech || windowsSpeech || !!(bin && model),
+      engine: macSpeech ? 'macos-speech' : (windowsSpeech ? 'windows-speech' : (bin ? 'whisper' : 'none')),
+      binary: !!(macSpeech || windowsSpeech || bin), model, pull,
+      hint: (macSpeech || windowsSpeech) ? '' : (bin ? (model ? '' : 'Modèle vocal en cours d\'installation…')
+                                                         : 'La reconnaissance vocale n’est pas installée sur ce PC.'),
+    },
+    tts: {
+      ready: process.platform === 'darwin' || !!(piper && piperVoice),
+      engine: (piper && piperVoice) ? 'piper' : (process.platform === 'darwin' ? 'say' : 'none'),
+      voices: process.platform === 'darwin' ? macVoiceOptions() : [],
+    },
+  };
+}
+
+// GET /api/voice-status -> état des briques vocales ; lance le téléchargement
+// du modèle whisper si le binaire est là mais pas le modèle.
+app.get('/api/voice-status', (req, res) => {
+  try {
+    if (!macSpeechHelper() && whisperBinary() && !fs.existsSync(whisperModelPath())) startWhisperModelPull();
+    res.json(voiceStatusSnapshot());
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/voice-options -> six voix proposées au navigateur avec leur état.
+app.get('/api/voice-options', (_req, res) => {
+  res.json({ voices: process.platform === 'darwin' ? macVoiceOptions() : [] });
+});
+
+// POST /api/stt { audio: <base64 WAV 16 kHz mono>, language? } -> { text }
+app.post('/api/stt', async (req, res) => {
+  const macSpeech = macSpeechHelper();
+  const windowsSpeech = process.platform === 'win32';
+  const bin = whisperBinary();
+  if (!macSpeech && !windowsSpeech && !bin) return res.status(409).json({ error: 'stt-unavailable', hint: 'La reconnaissance vocale n’est pas installée sur ce PC.' });
+  if (!macSpeech && !windowsSpeech && !fs.existsSync(whisperModelPath())) {
+    const pull = startWhisperModelPull();
+    return res.status(409).json({ error: 'model-downloading',
+      completed: pull.completed || 0, total: pull.total || 0 });
+  }
+  const b64 = String((req.body && req.body.audio) || '');
+  if (!b64) return res.status(400).json({ error: 'audio requis' });
+  const lang = /^[a-z]{2}$/.test(String(req.body.language || '')) ? req.body.language : 'fr';
+  ensureDir(VOICE_DIR);
+  const wav = path.join(VOICE_DIR, 'stt-' + process.pid + '-' + Date.now() + '.wav');
+  try {
+    fs.writeFileSync(wav, Buffer.from(b64, 'base64'));
+    let text;
+    if (macSpeech) {
+      text = await transcribeWithMacSpeech(macSpeech, wav, lang);
+    } else if (windowsSpeech) {
+      text = await transcribeWithWindowsSpeech(wav, lang);
+    } else {
+      text = await new Promise((resolve, reject) => {
+        execFile(bin, [
+          '-m', whisperModelPath(), '-f', wav, '-l', lang,
+          '-nt', '-np', '-t', String(Math.max(2, Math.min(8, os.cpus().length - 1))),
+        ], { timeout: 120000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+          if (err) reject(err); else resolve(String(stdout || ''));
+        });
+      });
+    }
+    res.json({ text: String(text).replace(/\s+/g, ' ').trim() });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || String(e) });
+  } finally {
+    try { fs.unlinkSync(wav); } catch {}
+  }
+});
+
+// POST /api/tts { text } -> { audio: <base64 WAV> }
+// Piper (voix neurale) si installé avec une voix, sinon `say` macOS.
+app.post('/api/tts', async (req, res) => {
+  const text = String((req.body && req.body.text) || '').trim().slice(0, 1200);
+  if (!text) return res.status(400).json({ error: 'text requis' });
+  ensureDir(VOICE_DIR);
+  const out = path.join(VOICE_DIR, 'tts-' + process.pid + '-' + Date.now() + '.wav');
+  const { execFile } = require('child_process');
+  const run = (cmd, args, input) => new Promise((resolve, reject) => {
+    const child = execFile(cmd, args, { timeout: 60000 }, (err) => err ? reject(err) : resolve());
+    if (input != null && child.stdin) { child.stdin.write(input); child.stdin.end(); }
+  });
+  try {
+    const piper = piperBinary();
+    const voice = piper ? piperVoicePath() : null;
+    if (piper && voice) {
+      await run(piper, ['--model', voice, '--output_file', out], text);
+    } else if (process.platform === 'darwin') {
+      const args = ['-o', out, '--data-format=LEI16@22050'];
+      const v = macVoiceName(req.body && req.body.voice);
+      if (v) args.push('-v', v);
+      args.push(text);
+      await run('/usr/bin/say', args);
+    } else {
+      return res.status(409).json({ error: 'tts-missing', hint: 'Installez Piper (binaire + voix .onnx dans le dossier voice).' });
+    }
+    const audio = fs.readFileSync(out).toString('base64');
+    res.json({ audio });
+  } catch (e) {
+    res.status(500).json({ error: (e && e.message) || String(e) });
+  } finally {
+    try { fs.unlinkSync(out); } catch {}
+  }
 });
 
 // POST /api/gguf-delete { name }
@@ -1943,11 +3719,11 @@ app.post('/api/gguf-pull-cancel', (req, res) => {
   res.json({ success: true, task: ggufPullSnapshot(task) });
 });
 
-// GET /api/gguf-engine-pull?variant=cpu|cuda|vulkan -> download the engine, NDJSON progress
+// GET /api/gguf-engine-pull?variant=cpu|metal|cuda|vulkan -> download the engine, NDJSON progress
 app.get('/api/gguf-engine-pull', async (req, res) => {
   res.setHeader('Content-Type', 'application/x-ndjson');
   try {
-    const variant = String(req.query.variant || detectEngineVariant());
+    const variant = normalizeEngineVariant(req.query.variant || detectEngineVariant());
     await ensureEngineBinary(variant, (p) => { try { res.write(JSON.stringify({ status: p.stage, pct: p.pct, part: p.part, parts: p.parts }) + '\n'); } catch {} });
     res.write(JSON.stringify({ status: 'success', variant }) + '\n');
     res.end();
@@ -1965,9 +3741,14 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // Shared Claude-Code-style loop used by both the Windows app and the CLI.
 // It keeps the provider dispatch in /api/chat, but centralizes project context
 // and local tools here so every client sees the same files and behavior.
+app.get('/api/agent-tools', (req, res) => {
+  res.json({ protocol: 'zaalis.tool.v1', tools: TOOL_CATALOG });
+});
+
 app.post('/api/agent-chat', async (req, res) => {
   let wantsStream = false;
   let streamOpen = false;
+  let computerSession = null;
   const openStream = (status = 200) => {
     if (streamOpen) return;
     streamOpen = true;
@@ -2002,6 +3783,11 @@ app.post('/api/agent-chat', async (req, res) => {
     if (!model || !message.trim()) {
       return respondError(400, 'model and message are required');
     }
+    const computerControl = b.computerControl === true;
+    if (computerControl && req.isBrowser) return respondError(403, 'Le contrôle du PC est indisponible depuis Zaalis Browser.');
+    if (computerControl && !['codex', 'claude', 'gemini', 'grok', 'mistral', 'local', 'gguf'].includes(String(model))) {
+      return respondError(400, 'Le contrôle du PC est indisponible pour ce modèle.');
+    }
 
     const root = resolveBase(b.root || b.projectRoot);
     const cookie = req.headers.cookie || '';
@@ -2027,11 +3813,24 @@ app.post('/api/agent-chat', async (req, res) => {
         });
       } catch (e) {
         if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
-        throw e;
+        throw new Error(`[${String(payload.model || 'modele')}/${String(payload.submodel || 'defaut')}] ${e && e.message ? e.message : String(e)}`);
       } finally {
         if (timer) clearTimeout(timer);
       }
     };
+
+    // The agent's `browser` tool previews a URL in the zaalis browser. Runs on
+    // the same machine as the server (both talk to localhost:8715), so opening
+    // server-side works identically for the desktop IDE and the CLI.
+    const openBrowser = async (url) => {
+      const r = await openInZaalisBrowser(url, { background: false });
+      return r.ok ? { ok: true } : { ok: false, error: r.body && (r.body.message || r.body.error) };
+    };
+    const imageDownload = ({ id, path: imagePath }) => downloadProjectImage({ id, path: imagePath, root });
+    if (computerControl) {
+      computerSession = await automationManager.start({ userId: req.user.id, permissionMode: b.permissionMode || 'supervised' });
+      if (wantsStream) writeStreamEvent({ type: 'automation', session: automationManager.snapshot(computerSession) });
+    }
 
     const result = await runAgentTurn({
       root,
@@ -2046,8 +3845,19 @@ app.post('/api/agent-chat', async (req, res) => {
       language: b.language || 'fr',
       subAgentTimeoutMs: b.subAgentTimeoutMs,
       callModel,
+      openBrowser,
+      imageSearch: searchOpenLicensedImages,
+      imageDownload,
+      brainMcp: b.useBrain === true && brainMcpForUser(req.user)
+        ? { callTool: (tool, args) => brainMcp.callTool(brainMcpForUser(req.user), tool, args) }
+        : null,
+      computerControl: computerControl ? automationManager : null,
+      computerSession,
+      terminalControl: terminalManager,
+      terminalUserId: req.user.id,
       emitEvent: wantsStream ? writeStreamEvent : undefined,
     });
+    if (computerSession) await automationManager.complete(computerSession);
     if (wantsStream) {
       writeStreamEvent({ type: 'done', result });
       try { res.end(); } catch {}
@@ -2055,6 +3865,7 @@ app.post('/api/agent-chat', async (req, res) => {
       res.json(result);
     }
   } catch (err) {
+    if (computerSession) await automationManager.stop(computerSession, 'Tâche interrompue par une erreur.');
     if (wantsStream) {
       openStream(res.headersSent ? 200 : 500);
       try { res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n'); } catch {}
@@ -2065,17 +3876,88 @@ app.post('/api/agent-chat', async (req, res) => {
   }
 });
 
+function boundedReasoningLevel(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, Math.floor(n)) : 0;
+}
+
+function pickReasoningValue(values, level) {
+  if (!Array.isArray(values) || !values.length) return undefined;
+  return values[Math.min(boundedReasoningLevel(level), values.length - 1)];
+}
+
+function openAIReasoningEffort(modelName, level) {
+  if (/^gpt-5\.6/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high', 'xhigh', 'max'], level);
+  if (/^gpt-5\.(5|4|2)/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high', 'xhigh'], level);
+  if (/^gpt-5\.1/.test(modelName)) return pickReasoningValue(['none', 'low', 'medium', 'high'], level);
+  if (/^(o1|o3-mini)/.test(modelName)) return pickReasoningValue(['low', 'medium', 'high'], level);
+  return undefined;
+}
+
+function xaiReasoningEffort(modelName, level) {
+  if (modelName === 'grok-4.5') return pickReasoningValue(['low', 'medium', 'high'], level);
+  if (modelName === 'grok-4.3') return pickReasoningValue(['none', 'low', 'medium', 'high'], level);
+  if (modelName === 'grok-4.20-multi-agent-0309') return pickReasoningValue(['low', 'medium', 'high', 'xhigh'], level);
+  return undefined;
+}
+
+function parseMistralContent(content) {
+  if (typeof content === 'string') return { text: content, thinking: '' };
+  if (!Array.isArray(content)) return { text: '', thinking: '' };
+  const text = [], thinking = [];
+  for (const chunk of content) {
+    if (!chunk || typeof chunk !== 'object') continue;
+    if (chunk.type === 'text' && typeof chunk.text === 'string') text.push(chunk.text);
+    if (chunk.type === 'thinking') {
+      if (typeof chunk.thinking === 'string') thinking.push(chunk.thinking);
+      const pieces = Array.isArray(chunk.thinking) ? chunk.thinking : [];
+      for (const piece of pieces) if (piece && typeof piece.text === 'string') thinking.push(piece.text);
+    }
+  }
+  return { text: text.join(''), thinking: thinking.join('\n') };
+}
+
+function normalizeProviderHistory(history) {
+  if (!Array.isArray(history)) return [];
+  const safeCall = (call) => {
+    if (!call || typeof call !== 'object') return null;
+    const id = String(call.id || '').trim().slice(0, 200);
+    const fn = call.function && typeof call.function === 'object' ? call.function : null;
+    const name = String(fn && fn.name || '').trim();
+    const args = fn && fn.arguments;
+    if (!id || !name || (typeof args !== 'string' && typeof args !== 'object')) return null;
+    return { id, type: 'function', function: { name, arguments: typeof args === 'string' ? args.slice(0, 32000) : JSON.stringify(args).slice(0, 32000) } };
+  };
+  return history.flatMap((message) => {
+    if (!message || typeof message !== 'object') return [];
+    const role = String(message.role || '');
+    if (role === 'user') return typeof message.content === 'string' ? [{ role, content: message.content }] : [];
+    if (role === 'assistant') {
+      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls.map(safeCall).filter(Boolean) : [];
+      const content = message.content;
+      if (typeof content !== 'string' && !(toolCalls.length && content === null)) return [];
+      return [{ role, content, ...(toolCalls.length ? { tool_calls: toolCalls } : {}) }];
+    }
+    if (role === 'tool') {
+      const name = String(message.name || '').trim();
+      const toolCallId = String(message.tool_call_id || '').trim().slice(0, 200);
+      if (!name || !toolCallId || typeof message.content !== 'string') return [];
+      return [{ role, name, tool_call_id: toolCallId, content: message.content.slice(0, 32000) }];
+    }
+    return [];
+  });
+}
+
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 app.post('/api/chat', async (req, res) => {
   try {
     const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
     const images = Array.isArray(req.body.images) ? req.body.images : [];
+    const continueAfterToolResult = req.body.continueAfterToolResult === true;
     // Prior conversation turns (memory). Each: { role: 'user'|'assistant', content: string }
-    const history = Array.isArray(req.body.history)
-      ? req.body.history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-      : [];
-    if (!model || !message) {
+    const history = normalizeProviderHistory(req.body.history);
+    if (!model || (!message && !continueAfterToolResult)) {
       return res.status(400).json({ error: 'model and message are required' });
     }
 
@@ -2088,6 +3970,8 @@ app.post('/api/chat', async (req, res) => {
     let responseText = '';
     let thinkingText = '';
     let usage = null;
+    let nativeToolCalls = null;
+    let nativeAssistantMessage = null;
 
     // ----- OpenAI (Codex) -----
     if (model === 'codex') {
@@ -2095,7 +3979,9 @@ app.post('/api/chat', async (req, res) => {
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of history) messages.push({ role: h.role, content: h.content });
+      // Keep native tool_calls and tool_call_id intact for providers that
+      // require a correlated assistant/tool exchange on the next request.
+      for (const h of history) messages.push(h);
       messages.push({
         role: 'user',
         content: images.length
@@ -2106,13 +3992,15 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
-      const payload = { model: submodel || 'gpt-5.5', messages };
-
-      const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
-      if (isReasoningModel && reasoningLevel !== undefined) {
-        const efforts = ['low', 'low', 'medium', 'high'];
-        payload.reasoning_effort = efforts[reasoningLevel] || 'medium';
+      const openAIModel = submodel || 'gpt-5.6-sol';
+      const payload = { model: openAIModel, messages };
+      if (req.body.computerTools === true) {
+        payload.tools = [COMPUTER_FUNCTION_TOOL];
+        payload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+        payload.parallel_tool_calls = false;
       }
+      const openAIEffort = openAIReasoningEffort(openAIModel, reasoningLevel);
+      if (openAIEffort) payload.reasoning_effort = openAIEffort;
 
       const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
@@ -2123,7 +4011,8 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify(payload),
       });
 
-      responseText = data.choices?.[0]?.message?.content || '';
+      const openAIMessage = data.choices?.[0]?.message || {};
+      responseText = nativeComputerCallsAsText(openAIMessage.content || '', openAIMessage.tool_calls);
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
@@ -2143,20 +4032,36 @@ app.post('/api/chat', async (req, res) => {
       claudeMessages.push({ role: 'user', content: claudeContent });
 
       const body = {
-        model: submodel || 'claude-3-5-sonnet',
+        model: submodel || 'claude-fable-5',
         max_tokens: 4096,
         messages: claudeMessages,
       };
       if (systemPrompt) body.system = systemPrompt;
+      if (req.body.computerTools === true) {
+        body.tools = [{
+          name: COMPUTER_FUNCTION_TOOL.function.name,
+          description: COMPUTER_FUNCTION_TOOL.function.description,
+          input_schema: COMPUTER_FUNCTION_TOOL.function.parameters,
+        }];
+        body.tool_choice = { type: req.body.computerToolChoice === 'any' ? 'any' : 'auto' };
+      }
 
-      const isThinkingModel = submodel && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('fable'));
-      if (isThinkingModel && reasoningLevel !== undefined && reasoningLevel > 0) {
-        const budgets = [0, 1024, 2048, 4096, 8192];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          body.max_tokens = 10000; // Increase max tokens when thinking is enabled
-          body.thinking = { type: 'enabled', budget_tokens: budget };
-        }
+      const claudeModel = body.model;
+      const claudeLevel = boundedReasoningLevel(reasoningLevel);
+      if (claudeModel === 'claude-fable-5') {
+        body.thinking = { type: 'adaptive', display: 'summarized' };
+        body.output_config = { effort: pickReasoningValue(['low', 'medium', 'high', 'xhigh', 'max'], claudeLevel) };
+        body.max_tokens = 16000;
+      } else if (claudeModel === 'claude-opus-4-8' || claudeModel === 'claude-sonnet-5') {
+        if (claudeLevel > 0) {
+          body.thinking = { type: 'adaptive', display: 'summarized' };
+          body.output_config = { effort: pickReasoningValue(['low', 'low', 'medium', 'high', 'xhigh', 'max'], claudeLevel) };
+          body.max_tokens = 16000;
+        } else body.thinking = { type: 'disabled' };
+      } else if (claudeModel === 'claude-haiku-4-5' && claudeLevel > 0) {
+        const budget = pickReasoningValue([0, 1024, 2048, 4096, 8192], claudeLevel);
+        body.max_tokens = 16000;
+        body.thinking = { type: 'enabled', budget_tokens: budget };
       }
 
       const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
@@ -2170,7 +4075,10 @@ app.post('/api/chat', async (req, res) => {
       });
 
       // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
-      responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+      responseText = nativeComputerCallsAsText(
+        (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join(''),
+        (data.content || []).filter((c) => c.type === 'tool_use'),
+      );
       thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
       if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
     }
@@ -2179,7 +4087,7 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'gemini') {
       if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
 
-      const modelName = submodel || 'gemini-2.5-flash';
+      const modelName = submodel || 'gemini-3.5-flash';
 
       const parts = [{ text: message }];
       images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
@@ -2190,18 +4098,37 @@ app.post('/api/chat', async (req, res) => {
 
       const payload = { contents };
       if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
+      if (req.body.computerTools === true) {
+        const { additionalProperties, ...geminiParameters } = COMPUTER_FUNCTION_TOOL.function.parameters;
+        payload.tools = [{ functionDeclarations: [{
+          name: COMPUTER_FUNCTION_TOOL.function.name,
+          description: COMPUTER_FUNCTION_TOOL.function.description,
+          parameters: geminiParameters,
+        }] }];
+        const geminiMode = req.body.computerToolChoice === 'any' ? 'ANY' : 'AUTO';
+        payload.toolConfig = { functionCallingConfig: {
+          mode: geminiMode,
+          ...(geminiMode === 'ANY' ? { allowedFunctionNames: ['computer'] } : {}),
+        } };
+      }
 
-      // Native thinking is supported by Gemini 2.5 / 3.x. The thinkingConfig
-      // MUST be nested inside generationConfig — placing it at the payload root
-      // makes the Gemini REST API reject the request (400 INVALID_ARGUMENT),
-      // which this server then surfaces as a 500.
-      const geminiSupportsThinking = /(^|[^a-z])(2\.5|3)/.test(modelName) || modelName.includes('thinking');
-      if (reasoningLevel !== undefined && reasoningLevel > 0 && geminiSupportsThinking) {
-        const budgets = [0, 1024, 2048, 4096];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          payload.generationConfig = { ...(payload.generationConfig || {}), thinkingConfig: { thinkingBudget: budget } };
-        }
+      const geminiLevel = boundedReasoningLevel(reasoningLevel);
+      if (modelName.startsWith('gemini-3')) {
+        const levels = modelName === 'gemini-3.1-pro-preview'
+          ? ['low', 'medium', 'high']
+          : ['minimal', 'low', 'medium', 'high'];
+        payload.generationConfig = {
+          ...(payload.generationConfig || {}),
+          thinkingConfig: { thinkingLevel: pickReasoningValue(levels, geminiLevel), includeThoughts: true },
+        };
+      } else if (modelName.startsWith('gemini-2.5')) {
+        const budgets = modelName === 'gemini-2.5-pro'
+          ? [1024, 8192, 24576]
+          : [0, 1024, 8192, 24576];
+        payload.generationConfig = {
+          ...(payload.generationConfig || {}),
+          thinkingConfig: { thinkingBudget: pickReasoningValue(budgets, geminiLevel), includeThoughts: true },
+        };
       }
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
@@ -2211,7 +4138,12 @@ app.post('/api/chat', async (req, res) => {
         body: JSON.stringify(payload),
       });
 
-      responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+      const geminiParts = data.candidates?.[0]?.content?.parts || [];
+      responseText = nativeComputerCallsAsText(
+        geminiParts.filter((p) => !p.thought).map((p) => p.text || '').join(''),
+        geminiParts.filter((p) => p.functionCall),
+      );
+      thinkingText = geminiParts.filter((p) => p.thought).map((p) => p.text || '').join('\n');
       if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
     }
 
@@ -2219,13 +4151,12 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'grok') {
       if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
 
-      const isImageModel = submodel && (submodel === 'grok-2-image-gen' || submodel === 'grok-image-gen');
+      const isImageModel = submodel && (submodel === 'grok-imagine-image-quality' || submodel === 'grok-imagine-image');
 
       if (isImageModel) {
-        const grokModelName = submodel === 'grok-2-image-gen' ? 'grok-imagine-image-pro' : 'grok-imagine-image';
         const grokPayload = {
           prompt: message,
-          model: grokModelName,
+          model: submodel,
           n: 1,
           response_format: 'b64_json'
         };
@@ -2239,11 +4170,13 @@ app.post('/api/chat', async (req, res) => {
           body: JSON.stringify(grokPayload),
         });
 
-        const b64 = data.data?.[0]?.b64_json;
+        const generatedImage = data.data?.[0];
+        const b64 = generatedImage?.b64_json;
         if (b64) {
           // Use the user's prompt as the image title (sanitized for markdown).
           const title = String(message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
-          responseText = `![${title}](data:image/png;base64,${b64})`;
+          const mime = typeof generatedImage.mime_type === 'string' ? generatedImage.mime_type : 'image/jpeg';
+          responseText = `![${title}](data:${mime};base64,${b64})`;
         } else {
           responseText = "Erreur: Aucune image n'a été générée par l'API.";
         }
@@ -2261,11 +4194,15 @@ app.post('/api/chat', async (req, res) => {
             : message,
         });
 
-        // The grok-4.x reasoning models reason natively and REJECT the
-        // reasoning_effort parameter ("does not support parameter reasoningEffort").
-        // Only the small grok-3-mini-style models accept it, and none are in our
-        // catalog, so we never send it.
-        const grokPayload = { model: submodel || 'grok-4.3', messages };
+        const grokModel = submodel || 'grok-4.5';
+        const grokPayload = { model: grokModel, messages };
+        if (req.body.computerTools === true) {
+          grokPayload.tools = [COMPUTER_FUNCTION_TOOL];
+          grokPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+          grokPayload.parallel_tool_calls = false;
+        }
+        const grokEffort = xaiReasoningEffort(grokModel, reasoningLevel);
+        if (grokEffort) grokPayload.reasoning_effort = grokEffort;
 
         const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
           method: 'POST',
@@ -2276,7 +4213,9 @@ app.post('/api/chat', async (req, res) => {
           body: JSON.stringify(grokPayload),
         });
 
-        responseText = data.choices?.[0]?.message?.content || '';
+        const grokMessage = data.choices?.[0]?.message || {};
+        responseText = nativeComputerCallsAsText(grokMessage.content || '', grokMessage.tool_calls);
+        thinkingText = grokMessage.reasoning_content || '';
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
       }
     }
@@ -2287,16 +4226,33 @@ app.post('/api/chat', async (req, res) => {
 
       const messages = [];
       if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of history) messages.push({ role: h.role, content: h.content });
-      messages.push({
-        role: 'user',
-        content: images.length
-          ? [
-              { type: 'text', text: message },
-              ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
-            ]
-          : message,
-      });
+      // Mistral requires the assistant tool-call message and its matching
+      // tool result verbatim before it can continue the conversation.
+      for (const h of history) messages.push(h);
+      if (!continueAfterToolResult) {
+        messages.push({
+          role: 'user',
+          content: images.length
+            ? [
+                { type: 'text', text: message },
+                ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
+              ]
+            : message,
+        });
+      }
+
+      const mistralModel = submodel || 'mistral-medium-3-5';
+      const mistralPayload = { model: mistralModel, messages };
+      if (req.body.computerTools === true) {
+        mistralPayload.tools = [COMPUTER_FUNCTION_TOOL];
+        mistralPayload.tool_choice = req.body.computerToolChoice === 'any' ? 'any' : 'auto';
+        // Desktop steps depend on the previous result (activate, observe,
+        // interact), so ask for one ordered call at a time.
+        mistralPayload.parallel_tool_calls = false;
+      }
+      if (mistralModel === 'mistral-medium-3-5' || mistralModel === 'mistral-small-latest') {
+        mistralPayload.reasoning_effort = pickReasoningValue(['none', 'high'], reasoningLevel);
+      }
 
       const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
         method: 'POST',
@@ -2304,10 +4260,21 @@ app.post('/api/chat', async (req, res) => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${keys.mistral}`,
         },
-        body: JSON.stringify({ model: submodel || 'mistral-large-latest', messages }),
+        body: JSON.stringify(mistralPayload),
       });
 
-      responseText = data.choices?.[0]?.message?.content || '';
+      const mistralMessage = data.choices?.[0]?.message || {};
+      const mistralContent = parseMistralContent(mistralMessage.content);
+      responseText = nativeComputerCallsAsText(mistralContent.text, mistralMessage.tool_calls);
+      thinkingText = mistralContent.thinking;
+      if (Array.isArray(mistralMessage.tool_calls) && mistralMessage.tool_calls.length) {
+        nativeToolCalls = mistralMessage.tool_calls;
+        nativeAssistantMessage = {
+          role: 'assistant',
+          content: mistralMessage.content == null ? null : mistralMessage.content,
+          tool_calls: mistralMessage.tool_calls,
+        };
+      }
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
     }
 
@@ -2330,7 +4297,7 @@ app.post('/api/chat', async (req, res) => {
       const olModel = submodel || ollamaModel;
 
       // Estimate total tokens to pick an appropriate num_ctx.
-      // Rough estimate: 1 token = ~4 chars.
+      // Rough estimate: 1 token ≈ 4 chars.
       const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
       const estimatedTokens = Math.ceil(totalChars / 4);
       // Pick num_ctx from fixed BUCKETS rather than a value that changes on every
@@ -2351,6 +4318,7 @@ app.post('/api/chat', async (req, res) => {
         options: { num_ctx: numCtx, num_predict: Math.max(512, numPredict) },
         keep_alive: '10m'
       };
+      if (req.body.computerTools === true) ollamaBody.tools = [COMPUTER_FUNCTION_TOOL];
 
       // Abort if Ollama takes longer than 5 minutes.
       const ollamaAC = new AbortController();
@@ -2364,7 +4332,7 @@ app.post('/api/chat', async (req, res) => {
         });
         clearTimeout(ollamaTimeout);
 
-        responseText = data.message?.content || '';
+        responseText = nativeComputerCallsAsText(data.message?.content || '', data.message?.tool_calls);
 
         // deepseek-r1 etc. embed reasoning inside <think>...</think>.
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
@@ -2428,14 +4396,21 @@ app.post('/api/chat', async (req, res) => {
       const ggufAC = new AbortController();
       const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
       try {
+        const ggufBody = { model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 };
+        if (req.body.computerTools === true) {
+          ggufBody.tools = [COMPUTER_FUNCTION_TOOL];
+          ggufBody.tool_choice = req.body.computerToolChoice === 'any' ? 'required' : 'auto';
+          ggufBody.parallel_tool_calls = false;
+        }
         const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 }),
+          body: JSON.stringify(ggufBody),
           signal: ggufAC.signal,
         });
         clearTimeout(ggufTimeout);
-        responseText = data.choices?.[0]?.message?.content || '';
+        const ggufMessage = data.choices?.[0]?.message || {};
+        responseText = nativeComputerCallsAsText(ggufMessage.content || '', ggufMessage.tool_calls);
         const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
         if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
         if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
@@ -2467,7 +4442,13 @@ app.post('/api/chat', async (req, res) => {
       }
     }
 
-    res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined });
+    res.json({
+      response: responseText,
+      thinking: thinkingText || undefined,
+      usage: usage || undefined,
+      nativeToolCalls: nativeToolCalls || undefined,
+      nativeAssistantMessage: nativeAssistantMessage || undefined,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2543,7 +4524,7 @@ app.get('/api/check-update', async (req, res) => {
     });
     if (!ghRes.ok) return res.status(502).json({ error: 'GitHub API error ' + ghRes.status });
     const release = await ghRes.json();
-    const asset = (release.assets || []).find(a => a.name === 'zaalis-setup.exe');
+    const asset = (release.assets || []).find(a => a.name === 'zaalis-macos-universal-installer.tar.gz');
     const latestVersion = release.tag_name || null;
     res.json({
       tag_name: latestVersion,
@@ -2577,7 +4558,7 @@ app.post('/api/update/download', (req, res) => {
     if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
-    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
+    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-macos-universal-installer.tar.gz');
     downloadProgress = 0;
     downloadedInstallerPath = null;
     try { fs.unlinkSync(dest); } catch {}
@@ -2624,17 +4605,15 @@ app.get('/api/update/progress', (req, res) => {
 
 app.post('/api/update/install', (req, res) => {
   try {
-    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
+    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-macos-universal-installer.tar.gz');
     if (!fs.existsSync(installerPath)) {
       return res.status(409).json({ error: 'Installer not downloaded yet.' });
     }
 
-    // Ask Explorer to open the installer. Explorer owns the process, so it is
-    // independent from the IDE/server process tree if the app needs to close.
-    const child = spawn('explorer.exe', [installerPath], {
+    // Ask Finder to open the downloaded installer archive.
+    const child = spawn('open', [installerPath], {
       detached: true,
-      stdio: 'ignore',
-      windowsHide: true
+      stdio: 'ignore'
     });
     child.unref();
 
@@ -2659,13 +4638,69 @@ let cfStartedAt = 0;
 let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
 let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
 
-function cloudflaredPath() {
+// Where an auto-downloaded tunnel binary is cached (writable per-user dir).
+const CF_DIR = path.join(DATA_DIR, 'bin');
+const CF_EXE = process.platform === 'win32' ? 'cloudflared.exe' : 'cloudflared';
+
+// Look for an already-present cloudflared: bundled next to the app, vendored in
+// the repo, previously auto-downloaded, or installed system-wide (Homebrew…).
+function findCloudflared() {
   const candidates = [
-    path.join(APP_DIR, 'cloudflared.exe'),          // next to the packaged app
-    path.join(APP_DIR, 'native', 'cloudflared.exe'), // dev (repo root)
+    path.join(APP_DIR, CF_EXE),
+    path.join(APP_DIR, 'native', CF_EXE),
+    path.join(CF_DIR, CF_EXE),
   ];
+  if (process.platform === 'darwin') {
+    candidates.push('/opt/homebrew/bin/cloudflared', '/usr/local/bin/cloudflared');
+  } else if (process.platform === 'linux') {
+    candidates.push('/usr/local/bin/cloudflared', '/usr/bin/cloudflared');
+  }
   for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
-  return 'cloudflared'; // last resort: rely on PATH
+  return null;
+}
+
+// Official cloudflared release asset for this OS/arch. macOS ships a .tgz;
+// Linux/Windows ship a raw binary.
+function cloudflaredDownloadUrl() {
+  const base = 'https://github.com/cloudflare/cloudflared/releases/latest/download/';
+  if (process.platform === 'darwin') {
+    return base + (process.arch === 'arm64' ? 'cloudflared-darwin-arm64.tgz' : 'cloudflared-darwin-amd64.tgz');
+  }
+  if (process.platform === 'linux') {
+    const a = process.arch === 'arm64' ? 'arm64' : (process.arch === 'arm' ? 'arm' : 'amd64');
+    return base + 'cloudflared-linux-' + a;
+  }
+  return base + 'cloudflared-windows-amd64.exe';
+}
+
+// Return a usable cloudflared path, auto-downloading it into CF_DIR on first
+// use if none is bundled or installed. Throws a user-actionable error on
+// failure (e.g. offline) so the pairing modal can show it.
+async function ensureCloudflared() {
+  const existing = findCloudflared();
+  if (existing) { ensureExecutable(existing); return existing; }
+  ensureDir(CF_DIR);
+  const url = cloudflaredDownloadUrl();
+  const dest = path.join(CF_DIR, CF_EXE);
+  try {
+    if (/\.tgz$/i.test(url)) {
+      const tgz = path.join(CF_DIR, 'cloudflared.tgz');
+      await downloadTo(url, tgz);
+      const { execSync } = require('child_process');
+      execSync(`tar -xzf "${tgz}" -C "${CF_DIR}"`, { timeout: 120000 });
+      try { fs.unlinkSync(tgz); } catch {}
+    } else {
+      await downloadTo(url, dest);
+    }
+  } catch (e) {
+    const hint = process.platform === 'darwin'
+      ? ' Installez-le manuellement : brew install cloudflared.'
+      : '';
+    throw new Error('Impossible de télécharger cloudflared.' + hint);
+  }
+  if (!fs.existsSync(dest)) throw new Error('cloudflared introuvable après installation.');
+  ensureExecutable(dest);
+  return dest;
 }
 
 function makeMobileToken(userId) {
@@ -2706,29 +4741,34 @@ function stopTunnel() {
 function startTunnel() {
   if (cfUrl) return Promise.resolve(cfUrl);
   if (cfStarting) return cfStarting;
-  cfStarting = new Promise((resolve, reject) => {
-    let settled = false, proc;
-    try {
-      proc = spawn(cloudflaredPath(),
-        ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
-        { windowsHide: true });
-    } catch (e) { cfStarting = null; return reject(e); }
-    cfProc = proc;
-    const onData = (buf) => {
-      const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
-      if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
-    };
-    proc.stdout && proc.stdout.on('data', onData);
-    proc.stderr && proc.stderr.on('data', onData);
-    proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
-    proc.on('exit', () => {
-      if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
-      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+  cfStarting = (async () => {
+    const bin = await ensureCloudflared(); // may auto-download; throws if unavailable
+    return await new Promise((resolve, reject) => {
+      let settled = false, proc;
+      try {
+        proc = spawn(bin,
+          ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
+          { windowsHide: true });
+      } catch (e) { return reject(e); }
+      cfProc = proc;
+      const onData = (buf) => {
+        const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+        if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
+      };
+      proc.stdout && proc.stdout.on('data', onData);
+      proc.stderr && proc.stderr.on('data', onData);
+      proc.on('error', (e) => { if (!settled) { settled = true; cfProc = null; reject(e); } });
+      proc.on('exit', () => {
+        if (!settled) { settled = true; cfProc = null; reject(new Error('cloudflared exited')); }
+        else { cfUrl = null; cfProc = null; } // tunnel died after being up
+      });
+      setTimeout(() => {
+        if (!settled) { settled = true; try { proc.kill(); } catch {} cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
+      }, 30000);
     });
-    setTimeout(() => {
-      if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
-    }, 30000);
-  });
+  })();
+  // On any failure, clear the in-flight promise so the next attempt retries.
+  cfStarting.catch(() => { cfStarting = null; });
   return cfStarting;
 }
 
@@ -2778,18 +4818,19 @@ app.get('/m', (req, res) => {
 // Kill the tunnel when the server exits.
 process.on('exit', () => { try { if (cfProc) cfProc.kill(); } catch {} });
 
-// Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
-// Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
-// fichiers avant que l'utilisateur lance l'installateur manuellement.
+// Ferme totalement l'IDE. Sous Electron Linux/macOS, la fenetre observe l'arret
+// du serveur et quitte aussi l'app; sous Windows, on ferme le shell WebView.
 app.post('/api/app/close', (req, res) => {
   res.json({ success: true });
   setTimeout(() => {
     try { if (engineProc) engineProc.kill(); } catch {}
-    try {
-      spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
-        detached: true, stdio: 'ignore', windowsHide: true
-      }).unref();
-    } catch {}
+    if (process.platform === 'win32') {
+      try {
+        spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
+          detached: true, stdio: 'ignore', windowsHide: true
+        }).unref();
+      } catch {}
+    }
     process.exit(0);
   }, 300);
 });
@@ -2811,9 +4852,13 @@ async function startOllamaIfNeeded() {
     path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
     'ollama',
   ];
-  // Prefer the standard install path; otherwise fall back to `ollama` on the
-  // PATH (the 'error' handler below makes a missing binary harmless).
-  const exe = candidates.find((p) => p !== 'ollama' && p && fs.existsSync(p)) || 'ollama';
+  // Only try executables that actually exist on disk (skip the bare 'ollama'
+  // fallback unless it's the only candidate, AND it resolves in PATH).
+  const exe = candidates.find((p) => {
+    if (p === 'ollama') return false; // skip bare name; checked below
+    return p && fs.existsSync(p);
+  });
+  if (!exe) return; // Ollama not installed -> silently skip
   try {
     const child = spawn(exe, ['serve'], {
       detached: true,
@@ -2840,3 +4885,7 @@ app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT} (local access only)`);
   startOllamaIfNeeded();
 });
+
+// Exposed for the Windows end-to-end control smoke test. The HTTP API remains
+// authenticated; this export is not reachable from the browser.
+module.exports.windowsComputerAction = windowsComputerAction;

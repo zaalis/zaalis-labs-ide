@@ -11,7 +11,7 @@ call npm install --save-dev @yao-pkg/pkg
 if errorlevel 1 goto :error
 
 echo [2/2] Packaging cli.js -^> native\dist\zaalis-cli.exe ...
-call npx pkg cli.js --targets node22-win-x64 --output native\dist\zaalis-cli.exe
+call npm run build:cli
 if errorlevel 1 goto :error
 
 echo.

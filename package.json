@@ -6,13 +6,15 @@
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test test/*.test.js",
     "check:mojibake": "node scripts/check-mojibake.js",
-    "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
-    "build:cli": "npm run check:mojibake && pkg cli.js --targets node22-win-x64 --output native/dist/zaalis-cli.exe"
+    "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --public-packages \"*\" --output native/dist/zaalis-server.exe",
+    "build:cli": "npm run check:mojibake && pkg cli.js --targets node22-win-x64 --no-bytecode --public --public-packages \"*\" --output native/dist/zaalis-cli.exe"
   },
   "pkg": {
     "assets": [
-      "interface/**/*"
+      "interface/**/*",
+      "node_modules/node-pty/build/Release/*"
     ]
   },
   "keywords": [],
@@ -23,6 +25,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "node-pty": "^1.0.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
