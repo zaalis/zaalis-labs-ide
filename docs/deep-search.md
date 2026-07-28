@@ -1,50 +1,65 @@
-# Deep search — note de conception (a faire plus tard)
+# Deep search — note de conception
 
-La recherche web simple existe deja : outils natifs `web_search` (DuckDuckGo,
+Statut : IMPLEMENTE. Outil natif `deep_search` dans `agent-engine.js`
+(fonctions `runDeepSearch` / `planSubQuestions` / `planGaps` /
+`runResearchTask` / `synthesizeDeep`) et defini dans `tool-protocol.js`.
+Ce document garde le raisonnement de conception et les pistes d'evolution.
+
+La recherche web simple existe aussi : outils natifs `web_search` (DuckDuckGo,
 gratuit, sans cle) et `web_fetch` (lecture d'une page publique), definis dans
 `web.js` et cables dans `agent-engine.js` / `tool-protocol.js`. Une passe :
 `web_search` -> quelques `web_fetch` -> reponse.
 
 Le « deep search » (style Gemini Deep Research / ChatGPT) n'est PAS un autre
 moteur : c'est une **boucle d'agent qui s'auto-relance** jusqu'a ce que le sujet
-soit couvert. Ce qui reste a construire, ce sont quatre curseurs.
+soit couvert. Les quatre curseurs ci-dessous sont deja branches ; les valeurs
+par defaut sont les constantes `DEEP_*` en haut de `agent-engine.js`.
 
-## Les 4 curseurs a ouvrir
+## Les 4 curseurs (etat actuel)
 
-1. **Iterations** — aujourd'hui `MAX_TOOL_ROUNDS = 6` dans `agent-engine.js`.
-   Un mode deep doit relancer la boucle tant que le modele signale des trous
-   (ex. balise `[ENCORE]` en fin de reponse) avec un plafond dur plus haut.
-2. **Budget de tokens** — lire 30+ pages sature le contexte. Solution deja
-   disponible : l'outil `task` (sous-agent lecture seule) qui a maintenant acces
-   a `web_search` / `web_fetch`. Chaque sous-agent recherche un sous-sujet et
-   **remonte un resume**, pas les pages brutes.
-3. **Largeur** — nombre de resultats par requete et nombre de requetes/sujets
-   lances en parallele. Prevoir un fan-out de sous-agents `task`.
-4. **Critere d'arret** — le modele continue tant qu'il reste des questions,
-   s'arrete quand c'est couvert, avec un budget max (temps ou nombre de pages)
-   pour ne jamais tourner a l'infini.
+1. **Iterations** — `DEEP_MAX_ROUNDS = 2` : une passe initiale + une passe de
+   comblement des trous decidee par `planGaps` (qui peut repondre `[]` pour
+   arreter plus tot).
+2. **Budget de tokens** — chaque sous-question part dans un sous-agent
+   `runResearchTask` (base sur `runSubAgentTask`, lecture seule, web_search /
+   web_fetch) qui **remonte un resume court + ses sources**, pas les pages
+   brutes. La synthese ne voit que ces resumes.
+3. **Largeur** — `DEEP_MAX_SUBQUESTIONS = 4` sous-questions par passe, lancees
+   en parallele (`Promise.all`), avec un plafond absolu `DEEP_MAX_TASKS_TOTAL = 6`
+   sur le nombre total de sous-agents.
+4. **Critere d'arret** — la boucle s'arrete quand `planGaps` renvoie `[]`,
+   quand le plafond de taches est atteint, ou apres `DEEP_MAX_ROUNDS`.
 
-## Architecture proposee
+## Architecture livree
 
 ```
-Agent principal (planificateur)
-  -> decoupe la question en N sous-sujets
-  -> lance N sous-agents `task` en parallele (fan-out)
-       chaque task: web_search -> web_fetch xK -> resume court + sources
-  -> lit les resumes, detecte les trous
-  -> relance des task cibles sur les trous (boucle)
-  -> synthese finale citee (URLs)
+runDeepSearch (agent-engine.js)
+  planSubQuestions   -> decoupe la question en N sous-questions (JSON)
+  Promise.all(runResearchTask)  -> fan-out lecture seule
+       chaque task: web_search -> web_fetch xK -> resume + Sources
+  planGaps           -> 0 a 2 sous-questions de comblement, sinon []
+  synthesizeDeep     -> synthese citee, langue = ctx.language
+  -> texte final + liste de sources dedupliquees
 ```
 
-Le sous-agent `task` est deja la brique : lecture seule, resume, sources. Le
-mode deep = un orchestrateur au-dessus + le desserrage des 4 curseurs.
+`deep_search` est un outil natif en lecture seule (actif dans tous les modes de
+permission). Il n'est PAS disponible aux sous-agents, ce qui empeche toute
+recursion. Les sous-agents de recherche ne peuvent appeler ni `task` ni
+`deep_search`.
 
-## Points d'attention
+## Points d'attention (respectes)
 
-- Garder le garde-fou SSRF de `web.js` (adresses privees / metadata bloquees).
-- Plafonner le cout : budget global de pages/temps affiche a l'utilisateur.
-- Deduplication des URLs entre sous-agents.
-- Toujours citer les sources dans la synthese ; ne jamais inventer un contenu.
+- Garde-fou SSRF de `web.js` conserve (adresses privees / metadata bloquees).
+- Budgets bornes par les constantes `DEEP_*` (temps via `DEEP_TIMEOUT_MS`).
+- Deduplication des URLs entre sous-agents (`dedupe`).
+- Synthese citee, jamais de contenu invente (consigne dans `synthesizeDeep`).
+
+## Pistes d'evolution
+
+- Streaming des evenements de sous-agents vers l'UI (aujourd'hui remontes en
+  bloc dans `result.events`).
+- Rendre les budgets `DEEP_*` configurables par requete / par utilisateur.
+- Cache de pages entre sous-agents pour eviter de relire une meme URL.
 
 ## Option moteur payant (facultatif, plus tard)
 
