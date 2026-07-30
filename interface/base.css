@@ -218,6 +218,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .msg-label.codex{color:#3b82f6;}                 /* GPT : bleu */
 .msg-label.claude{color:#f97316;}                /* Claude : orange */
 .msg-label.grok{color:#9ca3af;}                  /* Grok : gris */
+.msg-label.kimi{color:#38bdf8;}                  /* Kimi / Moonshot AI */
 .msg-label.ollama{color:#fafafa;}                /* Ollama : blanc */
 /* Gemini : dégradé bleu -> violet */
 .msg-label.gemini{
@@ -508,6 +509,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 #ai-model option[value="gemini"]{color:#7c6cf0;}
 #ai-model option[value="grok"]{color:#9ca3af;}
 #ai-model option[value="mistral"]{color:#f59e0b;}
+#ai-model option[value="kimi"]{color:#38bdf8;}
 #ai-model option[value="local"]{color:#fafafa;}
 #ai-model option[value="gguf"]{color:#34d399;}
 /* Agent names match their AI color */
@@ -515,6 +517,7 @@ input,select,textarea{font-family:inherit;color:inherit;}
 .agent-card[data-agent="claude"] .agent-name{color:#f97316;}
 .agent-card[data-agent="grok"] .agent-name{color:#9ca3af;}
 .agent-card[data-agent="mistral"] .agent-name{background:linear-gradient(90deg,#facc15,#f97316);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}
+.agent-card[data-agent="kimi"] .agent-name{color:#38bdf8;}
 .agent-card[data-agent="local"] .agent-name{color:#fafafa;}
 .agent-card[data-agent="gguf"] .agent-name{color:#34d399;}
 .agent-card[data-agent="gemini"] .agent-name{background:linear-gradient(90deg,#4285f4,#a855f7);-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;}

@@ -175,7 +175,7 @@ $('#close-modal').addEventListener('click', () => $('#settings-modal').classList
 $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.remove('active'));
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
-const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -220,7 +220,7 @@ async function migrateLegacyApiKeys() {
         });
         if (res.ok) {
             legacyApiKeysForMigration = null;
-            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+            state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
             saveState();
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
@@ -470,7 +470,7 @@ if (clearKeysBtn) clearKeysBtn.addEventListener('click', async () => {
         const nulls = {}; API_KEY_FIELDS.forEach(p => nulls[p] = null);
         const res = await fetch('/api/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keys: nulls }) });
         if (res.ok) { const data = await res.json(); updateApiKeyInputs(data.keys || {}); }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
         toast(state.language === 'en' ? 'API keys deleted.' : 'Clés API supprimées.');
     } catch {}
 });

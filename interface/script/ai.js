@@ -405,7 +405,7 @@ document.addEventListener('click', async e => {
 
 function formatAIResponse(text) {
     const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
 
     if (isImageGen) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
@@ -1787,7 +1787,7 @@ async function sendAgentTask(input) {
         return;
     }
 
-    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama', gguf: 'GGUF' };
+    const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', kimi: 'Kimi', local: 'Ollama', gguf: 'GGUF' };
     const activeAgents = [];
     $$('.agent-check:checked').forEach(cb => {
         const agent = cb.dataset.agent;
@@ -2560,7 +2560,8 @@ function isVisionCompatible(model, submodel) {
         case 'codex':                               // OpenAI: vision except the *-mini reasoning models
             return !(s.includes('o3-mini') || s.includes('o1-mini'));
         case 'grok':  return s.includes('grok-4');  // xAI: Grok 4 has vision, Grok 3 does not
-        case 'mistral': return s.includes('pixtral'); // Mistral: only Pixtral models have vision
+        case 'mistral': return false;                 // current text/code catalog has no vision model
+        case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default: return false;
@@ -2633,6 +2634,11 @@ const REASONING_MODES = {
         { label: 'ON', budget: 1 },
         { label: 'OFF', budget: 0 }
     ],
+    kimi: [
+        { label: 'MAX', budget: 2 },
+        { label: 'HIGH', budget: 1 },
+        { label: 'LOW', budget: 0 }
+    ],
     local: [
         { label: 'MAX', budget: 2048 },
         { label: 'MED', budget: 1024 },
@@ -2676,13 +2682,14 @@ function reasoningContext() {
 
 function isReasoningCompatible(model, submodel) {
     if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-4') || submodel.includes('fable'))) return true;
+    if (model === 'claude' && (submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-5') || submodel.includes('fable'))) return true;
     // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
     if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
     if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
     // Grok 4.x reasoning models reason natively and reject reasoning_effort,
     // so there is no controllable budget to expose — keep the slider locked.
-    if (model === 'mistral' && submodel.includes('magistral')) return true; // Magistral = reasoning model
+    if (model === 'mistral' && (submodel === 'mistral-medium-3-5' || submodel === 'mistral-small-latest')) return true;
+    if (model === 'kimi') return true;
     return false;
 }
 

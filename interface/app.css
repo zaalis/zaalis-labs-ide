@@ -97,6 +97,7 @@
 .agent-dot.gemini{background:#7c6cf0;}
 .agent-dot.grok{background:#9ca3af;}
 .agent-dot.mistral{background:#f59e0b;}
+.agent-dot.kimi{background:#38bdf8;}
 .agent-dot.local{background:var(--green);}
 .agent-dot.gguf{background:#34d399;}
 

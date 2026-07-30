@@ -10,7 +10,7 @@ const state = {
     responseStyle: 'normal', // 'normal' | 'fast' | 'deep'  (/fast, /deep)
     config: {
         aiModel: 'codex',
-        aiSubmodel: 'gpt-5.5',
+        aiSubmodel: 'gpt-5.6-sol',
         ollamaUrl: 'http://127.0.0.1:11434',
         ollamaModel: 'qwen3:8b',
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
@@ -34,7 +34,7 @@ const state = {
         // ----- Advanced hardware (GGUF engine) -----
         ggufCtx: 8192,                  // default context size for the local engine
         ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
-        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '' }
+        keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' }
     },
     profile: { pseudo: 'Utilisateur', photo: '' },
     conversations: [],        // single-chat history
@@ -52,35 +52,39 @@ let legacyApiKeysForMigration = null;
 // Sub-model options per provider — real/current API models only, NEWEST FIRST.
 // The first entry of each list is the default selection when that provider is chosen.
 const SUBMODELS = {
-    codex:  ['gpt-5.5', 'gpt-5.4', 'gpt-5.1-codex', 'gpt-5.1', 'gpt-4.5', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
-    claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-3-7-sonnet', 'claude-3-5-sonnet', 'claude-3-5-haiku'],
-    gemini: ['gemini-3.5-flash', 'gemini-3.1-pro', 'gemini-3-flash', 'gemini-2.5-pro', 'gemini-2.5-flash'],
-    grok:   ['grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-2-image-gen', 'grok-image-gen'],
-    mistral:['mistral-large-latest', 'mistral-medium-latest', 'mistral-small-latest', 'codestral-latest', 'pixtral-large-latest'],
+    codex:  ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
+    claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
+    grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
+    mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+    kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
     local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
     gguf:   []   // populated from installed .gguf files via /api/gguf-models
 };
 
 // Human-friendly display names (dots, not dashes). Falls back to the raw id.
 const MODEL_LABELS = {
-    'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.1-codex': 'GPT-5.1 Codex', 'gpt-5.1': 'GPT-5.1',
-    'gpt-4.5': 'GPT-4.5', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
+    'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
+    'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
+    'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
     'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-    'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-4-6': 'Claude Sonnet 4.6',
-    'claude-haiku-4-5': 'Claude Haiku 4.5', 'claude-3-7-sonnet': 'Claude Sonnet 3.7',
-    'claude-3-5-sonnet': 'Claude Sonnet 3.5', 'claude-3-5-haiku': 'Claude Haiku 3.5',
-    'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro': 'Gemini 3.1 Pro', 'gemini-3-flash': 'Gemini 3 Flash',
-    'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash',
-    'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
+    'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5', 'claude-haiku-4-5': 'Claude Haiku 4.5',
+    'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
+    'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
+    'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
+    'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
     'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-    'grok-build-0.1': 'Grok Build 0.1', 'grok-2-image-gen': 'Grok 2 Image', 'grok-image-gen': 'Grok Image',
-    'mistral-large-latest': 'Mistral Large', 'mistral-medium-latest': 'Mistral Medium',
-    'mistral-small-latest': 'Mistral Small', 'codestral-latest': 'Codestral', 'pixtral-large-latest': 'Pixtral Large'
+    'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
+    'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
+    'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
+    'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
+    'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
+    'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6'
 };
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
 // Maker names per provider, used to tell the model its own identity.
-const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', local: 'Ollama', gguf: 'llama.cpp' };
+const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google', grok: 'xAI', mistral: 'Mistral', kimi: 'Moonshot AI', local: 'Ollama', gguf: 'llama.cpp' };
 
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
@@ -107,9 +111,14 @@ function modelIdentity(model, submodel, lang) {
 // Context window (tokens) per model — aligned with official developer API key limits.
 const CONTEXT_WINDOWS = {
     codex: {
+        'gpt-5.6-sol': 1050000,
+        'gpt-5.6-terra': 1050000,
+        'gpt-5.6-luna': 1050000,
         'gpt-5.5': 1050000,
         'gpt-5.4': 1050000,
-        'gpt-5.1-codex': 400000,
+        'gpt-5.4-mini': 400000,
+        'gpt-5.4-nano': 400000,
+        'gpt-5.2': 400000,
         'gpt-5.1': 400000,
         'gpt-4.5': 128000,
         'o3-mini': 200000,
@@ -122,37 +131,46 @@ const CONTEXT_WINDOWS = {
     claude: {
         'claude-fable-5': 1000000,
         'claude-opus-4-8': 1000000,
-        'claude-sonnet-4-6': 1000000,
+        'claude-sonnet-5': 1000000,
         'claude-haiku-4-5': 200000,
-        'claude-3-7-sonnet': 200000,
-        'claude-3-5-sonnet': 200000,
-        'claude-3-5-haiku': 200000,
         _default: 200000
     },
     gemini: {
         'gemini-3.5-flash': 1048576,
-        'gemini-3.1-pro': 1048576,
-        'gemini-3-flash': 1048576,
+        'gemini-3.1-pro-preview': 1048576,
+        'gemini-3.1-flash-lite': 1048576,
+        'gemini-3-flash-preview': 1048576,
         'gemini-2.5-pro': 1048576,
         'gemini-2.5-flash': 1048576,
+        'gemini-2.5-flash-lite': 1048576,
         _default: 1048576
     },
     grok: {
+        'grok-4.5': 500000,
         'grok-4.3': 1000000,
         'grok-4.20-multi-agent-0309': 1000000,
         'grok-4.20-0309-reasoning': 1000000,
         'grok-4.20-0309-non-reasoning': 1000000,
         'grok-build-0.1': 256000,
-        'grok-2-image-gen': 1000000,
-        'grok-image-gen': 1000000,
+        'grok-imagine-image-quality': 1024,
+        'grok-imagine-image': 1024,
         _default: 1000000
     },
     mistral: {
-        'mistral-large-latest': 256000,
-        'mistral-medium-latest': 256000,
+        'mistral-medium-3-5': 256000,
         'mistral-small-latest': 256000,
+        'mistral-large-latest': 256000,
+        'ministral-14b-2512': 256000,
+        'ministral-8b-2512': 256000,
+        'ministral-3b-2512': 256000,
         'codestral-latest': 128000,
-        'pixtral-large-latest': 128000,
+        _default: 256000
+    },
+    kimi: {
+        'kimi-k3': 1000000,
+        'kimi-k2.7-code': 256000,
+        'kimi-k2.7-code-highspeed': 256000,
+        'kimi-k2.6': 256000,
         _default: 256000
     },
     local: {
@@ -830,7 +848,7 @@ function startThinking(el) {
     if (!el) return;
     
     const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-2-image-gen' || state.config.aiSubmodel === 'grok-image-gen');
+        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
 
     if (isImageGen) {
         // Single rectangle (no chat bubble around it) with the same wavy-dot
@@ -1294,7 +1312,7 @@ function loadState() {
             // not in localStorage, to avoid leaking chats between accounts.
             if (s.language) state.language = s.language;
         }
-        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '' };
+        state.config.keys = { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' };
     } catch {}
 }
 

@@ -11,7 +11,7 @@ const MAX_TOOL_TEXT = 24000;
 const MAX_GLOB_RESULTS = 5000;
 // Models whose provider API accepts TOOL_DEFINITIONS as-is (OpenAI-style
 // chat-completions tools). Keep in sync with the `tools:` payloads in server.js.
-const NATIVE_TOOL_MODELS = new Set(['mistral', 'codex']);
+const NATIVE_TOOL_MODELS = new Set(['mistral', 'codex', 'kimi']);
 const MAX_TASKS_PER_TURN = 2;
 const MAX_SUBAGENT_ROUNDS = 3;
 const SUBAGENT_TIMEOUT_MS = 60000;

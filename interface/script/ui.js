@@ -4,7 +4,7 @@ const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
 // Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
+const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', kimi: '#38bdf8', local: '#fafafa', gguf: '#34d399' };
 function applyModelColor() {
     modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
 }

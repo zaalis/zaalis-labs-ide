@@ -11,6 +11,7 @@ const mcpRegistry = require('./mcp-registry');
 const { AutomationManager } = require('./automation-manager');
 const windowsComputer = require('./windows-computer');
 const { TerminalManager } = require('./terminal-manager');
+const { buildKimiPayload, parseKimiResponse } = require('./kimi-provider');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -79,7 +80,7 @@ try {
 // API key vault — keys are encrypted at rest (AES-256-GCM) with a key derived
 // from the local install secret, stored per user and never sent back in clear.
 // ---------------------------------------------------------------------------
-const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral'];
+const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
 
 function encryptSecret(plain) {
@@ -579,9 +580,30 @@ function isInsideBase(base, target) {
 }
 
 async function fetchJSON(url, options) {
-  // Dynamic import of node-fetch is avoided; use the global fetch available
-  // in Node 18+. For older versions, install node-fetch.
-  const res = await fetch(url, options);
+  // A desktop-agent turn makes several ordered provider calls. Honour a
+  // provider's short 429 cooldown instead of failing the whole task after one
+  // desktop action. Retrying only 429 is safe: the provider rejected it before
+  // processing and the original request was not executed.
+  const wait = (ms) => new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const signal = options && options.signal;
+    if (!signal) return;
+    const abort = () => { clearTimeout(timer); reject(signal.reason || new Error('Requete interrompue.')); };
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  let res;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    res = await fetch(url, options);
+    if (res.status !== 429 || attempt === 3) break;
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 30000)
+      : Math.min(1000 * (2 ** attempt), 8000);
+    // Consume the rejected body before retrying so the connection can be reused.
+    try { await res.arrayBuffer(); } catch {}
+    await wait(delayMs);
+  }
   // Read the body as text first: a non-JSON error (empty body, OOM, an HTML 500,
   // an Ollama plain-text error) then surfaces the REAL message instead of
   // throwing on res.json() and bubbling up as a generic "connection error".
@@ -2256,7 +2278,7 @@ app.post('/api/chat', async (req, res) => {
           : message,
       });
 
-      const payload = { model: submodel || 'gpt-5.5', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) };
+      const payload = { model: submodel || 'gpt-5.6-sol', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) };
 
       const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
       if (isReasoningModel && reasoningLevel !== undefined) {
@@ -2298,7 +2320,7 @@ app.post('/api/chat', async (req, res) => {
       claudeMessages.push({ role: 'user', content: claudeContent });
 
       const body = {
-        model: submodel || 'claude-3-5-sonnet',
+        model: submodel || 'claude-fable-5',
         max_tokens: 4096,
         messages: claudeMessages,
       };
@@ -2334,7 +2356,7 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'gemini') {
       if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
 
-      const modelName = submodel || 'gemini-2.5-flash';
+      const modelName = submodel || 'gemini-3.5-flash';
 
       const parts = [{ text: message }];
       images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
@@ -2374,13 +2396,12 @@ app.post('/api/chat', async (req, res) => {
     else if (model === 'grok') {
       if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
 
-      const isImageModel = submodel && (submodel === 'grok-2-image-gen' || submodel === 'grok-image-gen');
+      const isImageModel = submodel && (submodel === 'grok-imagine-image-quality' || submodel === 'grok-imagine-image');
 
       if (isImageModel) {
-        const grokModelName = submodel === 'grok-2-image-gen' ? 'grok-imagine-image-pro' : 'grok-imagine-image';
         const grokPayload = {
           prompt: message,
-          model: grokModelName,
+          model: submodel,
           n: 1,
           response_format: 'b64_json'
         };
@@ -2420,7 +2441,7 @@ app.post('/api/chat', async (req, res) => {
         // reasoning_effort parameter ("does not support parameter reasoningEffort").
         // Only the small grok-3-mini-style models accept it, and none are in our
         // catalog, so we never send it.
-        const grokPayload = { model: submodel || 'grok-4.3', messages };
+        const grokPayload = { model: submodel || 'grok-4.5', messages };
 
         const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
           method: 'POST',
@@ -2463,7 +2484,7 @@ app.post('/api/chat', async (req, res) => {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${keys.mistral}`,
         },
-        body: JSON.stringify({ model: submodel || 'mistral-large-latest', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) }),
+        body: JSON.stringify({ model: submodel || 'mistral-medium-3-5', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) }),
       });
 
       const mistralMessage = data.choices?.[0]?.message || {};
@@ -2473,6 +2494,42 @@ app.post('/api/chat', async (req, res) => {
         res.locals.nativeAssistantMessage = { role: 'assistant', content: mistralMessage.content || '', tool_calls: mistralMessage.tool_calls };
       }
       if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
+    }
+
+    // ----- Moonshot AI (Kimi) -----
+    else if (model === 'kimi') {
+      if (!keys.moonshot) return res.json({ response: '[Kimi] Aucune cle API Moonshot configuree.' });
+
+      const messages = [];
+      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
+      for (const h of (nativeTools ? nativeHistory : history)) messages.push(h.role === 'assistant' && Array.isArray(h.tool_calls)
+        ? { role: 'assistant', content: h.content || '', tool_calls: h.tool_calls }
+        : h.role === 'tool'
+          ? { role: 'tool', tool_call_id: h.tool_call_id, content: h.content }
+          : { role: h.role, content: h.content });
+      if (message) messages.push({
+        role: 'user',
+        content: images.length
+          ? [{ type: 'text', text: message }, ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } }))]
+          : message,
+      });
+
+      const data = await fetchJSON('https://api.moonshot.ai/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${keys.moonshot}` },
+        body: JSON.stringify(buildKimiPayload({
+          model: submodel || 'kimi-k3', messages, reasoningLevel,
+          tools: nativeTools ? TOOL_DEFINITIONS : undefined,
+        })),
+      });
+      const kimi = parseKimiResponse(data);
+      responseText = kimi.content;
+      thinkingText = kimi.thinking;
+      if (Array.isArray(kimi.toolCalls) && kimi.toolCalls.length) {
+        res.locals.nativeToolCalls = kimi.toolCalls;
+        res.locals.nativeAssistantMessage = { role: 'assistant', content: kimi.content || '', tool_calls: kimi.toolCalls };
+      }
+      if (kimi.usage) usage = kimi.usage;
     }
 
     // ----- Ollama (Local) -----
