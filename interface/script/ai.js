@@ -482,7 +482,9 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
             model, submodel, message, systemPrompt,
+            root: state.projectRoot,
             config: safeConfig,
+            language: state.language || 'fr',
             reasoningLevel: state.reasoningLevel,
             images, history
         }),
@@ -568,11 +570,42 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
         }),
         signal
     });
-    if (wantsStream) return readAgentEventStream(res, options.onEvent);
+    if (wantsStream) return readAgentEventStream(res, (event) => {
+        handleRustInteractiveEvent(event).catch((error) => {
+            if (typeof showToast === 'function') showToast('Rust core', error.message || String(error), { icon: '!' });
+        });
+        options.onEvent(event);
+    });
     try {
         return await res.json();
     } catch {
         return { error: `Reponse invalide du serveur (HTTP ${res.status} ${res.statusText})` };
+    }
+}
+
+async function handleRustInteractiveEvent(event) {
+    if (!event || !event.sessionId || !event.requestId) return;
+    const lang = state.language || 'fr';
+    let body = null;
+    if (event.type === 'permission_required') {
+        const detail = [event.target, ...(event.risks || [])].filter(Boolean).join('\n');
+        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail);
+        body = { kind: 'permission', allow, scope: 'once' };
+    } else if (event.type === 'plan_required') {
+        const allow = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implementation ?", event.content || '');
+        body = { kind: 'plan', allow };
+    } else if (event.type === 'budget_required') {
+        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '');
+        body = { kind: 'budget', stop: !allow, additionalTokens: allow ? 50000 : undefined };
+    }
+    if (!body) return;
+    const response = await fetch('/api/rust-core/decision', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...body, sessionId: event.sessionId, requestId: event.requestId })
+    });
+    if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || `Decision Rust HTTP ${response.status}`);
     }
 }
 
@@ -895,15 +928,14 @@ async function sendChat(input) {
             const responseText = data.response || '';
             const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
-            const providerInputTokens = Number(data.usage && data.usage.input);
-            const providerOutputTokens = Number(data.usage && data.usage.output);
-            const liveInputTokens = Number.isFinite(providerInputTokens)
-                ? Math.max(0, providerInputTokens)
-                : contextTokensBeforeTurn + estimateTokens(aiMessage);
+            // `usage` from the Rust agent is the billable total of every
+            // provider round (including tool-follow-up rounds). It is not the
+            // size of the final provider context and can therefore be larger
+            // than the model window. Keep the meter tied to the active chat
+            // history instead.
+            const liveInputTokens = contextTokensBeforeTurn + estimateTokens(aiMessage);
             const updateLiveTokens = (visibleText, final) => {
-                const output = final && Number.isFinite(providerOutputTokens)
-                    ? Math.max(0, providerOutputTokens)
-                    : estimateTokens(visibleText);
+                const output = estimateTokens(visibleText);
                 state.contextTokens = liveInputTokens + output;
                 updateTokenMeter();
             };
@@ -941,12 +973,7 @@ async function sendChat(input) {
                 assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
             }
             state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
-            if (data.usage && data.usage.input != null) {
-                // Use actual token counts from the API when available.
-                state.contextTokens = (data.usage.input || 0) + (data.usage.output || 0);
-            } else {
-                state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
-            }
+            state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
             updateTokenMeter();
         }
     } catch (err) {
@@ -1779,6 +1806,88 @@ $('#send-btn').addEventListener('click', () => {
 // ==========================================================
 //  AGENTS MODE - MULTI AI
 // ==========================================================
+async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
+    if (state.config.rustAgentCore === false) return false;
+    const lang = state.language || 'fr';
+    const lead = activeAgents.find(agent => agent.role === 'lead') || activeAgents[0];
+    const workers = activeAgents.filter(agent => agent !== lead);
+    const team = [
+        ...workers.map((agent, index) => ({
+            role: {
+                name: `worker_${index}_${agent.agent}`,
+                label: `${labels[agent.agent] || agent.agent} · ${TRANSLATIONS[lang]['role-' + agent.role] || agent.role}`,
+                instructions: `${ROLE_PROMPTS[agent.role]}\n${AGENT_COLLABORATION_PROMPT}\n${modelIdentity(agent.agent, agent.submodel, lang)}`,
+                mutating: false
+            },
+            model: { provider: agent.agent, model: agent.submodel, reasoning: state.reasoningLevel },
+            permissions: { mode: 'read-only' },
+            depends_on: [], may_spawn: false
+        })),
+        {
+            role: {
+                name: 'lead',
+                label: `${labels[lead.agent] || lead.agent} · ${TRANSLATIONS[lang]['role-' + lead.role] || lead.role}`,
+                instructions: `${ROLE_PROMPTS[lead.role]}\n${AGENT_COLLABORATION_PROMPT}\n${modelIdentity(lead.agent, lead.submodel, lang)}\nSynthétise les contributions de tes dépendances et livre le résultat final.`,
+                mutating: true
+            },
+            model: { provider: lead.agent, model: lead.submodel, reasoning: state.reasoningLevel },
+            permissions: { mode: state.permissionMode },
+            depends_on: workers.map((agent, index) => `worker_${index}_${agent.agent}`), may_spawn: true
+        }
+    ];
+    const { aiText = '', names = [], images = [] } = taskDraft;
+    const response = await fetch('/api/rust-agent-team', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
+        body: JSON.stringify({
+            team, message: task + aiText, root: state.projectRoot,
+            permissionMode: state.permissionMode, language: lang,
+            reasoningLevel: state.reasoningLevel, images, stream: true
+        })
+    });
+    if (response.status === 404 || response.status === 503) return false;
+
+    addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', task + (names.length ? `\n📎 ${names.join(', ')}` : ''));
+    const body = addTypingMsg($('#agents-log'), labels[lead.agent] || lead.agent);
+    const activity = createLiveAgentActivity($('#agents-log'));
+    const byId = new Map();
+    const data = await readAgentEventStream(response, (event) => {
+        handleRustInteractiveEvent(event).catch(() => {});
+        if (activity) activity.onEvent(event);
+        if (event.type === 'rust_event' && event.event) {
+            const frame = event.event;
+            if (frame.type === 'agent_spawned' && frame.agent) {
+                byId.set(frame.agent.id, frame.agent.role && frame.agent.role.name);
+            }
+            if (frame.type === 'agent_state_changed') {
+                const roleName = byId.get(frame.agent_id);
+                const selected = roleName === 'lead' ? lead : workers.find((agent, index) => roleName === `worker_${index}_${agent.agent}`);
+                const card = selected && $(`.agent-card[data-agent="${selected.agent}"]`);
+                if (card) {
+                    const badge = card.querySelector('.agent-badge');
+                    const stateName = frame.state && frame.state.state || 'running';
+                    card.classList.toggle('working', stateName === 'running');
+                    if (badge) { badge.textContent = stateName; badge.className = `agent-badge ${stateName === 'done' ? 'done' : 'working'}`; }
+                }
+            }
+        }
+    });
+    stopThinking(body);
+    if (data.error) {
+        if (activity) activity.fail(data.error);
+        body.textContent = data.error;
+        body.classList.add('error');
+    } else {
+        if (activity) activity.finish(data);
+        const reasoning = data.thinking ? reasoningBlock(data.thinking, 0) : '';
+        body.innerHTML = reasoning + formatAIResponse(data.response || '');
+        if (Array.isArray(data.toolResults) && data.toolResults.length) body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
+    }
+    followScroll($('#agents-log'));
+    saveConversation('agents');
+    return true;
+}
+
 async function sendAgentTask(input) {
     const lang = state.language || 'fr';
     let task = (input && typeof input === 'object') ? String(input.message || '').trim() : String(input || '').trim();
@@ -1814,6 +1923,9 @@ async function sendAgentTask(input) {
 
     agentTaskRunning = true;
     try {
+
+    const rustDraft = (input && typeof input === 'object') ? input : createAgentDraft(task);
+    if (await sendRustAgentTeam(task, rustDraft, activeAgents, labels)) return;
 
     // Identify lead agent
     const leadIdx = activeAgents.findIndex(a => a.role === 'lead');
@@ -2278,12 +2390,14 @@ function recentPathByName(name) {
 function applyConversationProject(conv) {
     if (!conv) return;
     if (!conv.project) {                       // classic chat -> no project
-        if (state.projectRoot && typeof clearProject === 'function') clearProject();
+        if (state.projectRoot && typeof clearProject === 'function') {
+            clearProject({ preserveConversation: true });
+        }
         return;
     }
     const target = conv.projectPath || recentPathByName(conv.project);
     if (target && target !== state.projectRoot && typeof openProject === 'function') {
-        openProject(target, false);            // async; the file tree loads in the background
+        openProject(target, false, { preserveConversation: true });
     }
 }
 
@@ -2350,6 +2464,7 @@ function renderHistory() {
         }
         renderProjectPanelHistory('chat');
         renderProjectPanelHistory('agents');
+        if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
         return;
     }
     if (typeof initRecentProjects === 'function') {
@@ -2357,6 +2472,7 @@ function renderHistory() {
     }
     renderProjectPanelHistory('chat');
     renderProjectPanelHistory('agents');
+    if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
 }
 
 // Start a brand-new conversation for the given kind (in the current context).

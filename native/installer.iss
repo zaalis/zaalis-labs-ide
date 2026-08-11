@@ -36,13 +36,15 @@ Name: "french"; MessagesFile: "compiler:Languages\French.isl"
 [Files]
 Source: "dist\zaalis.exe";        DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\zaalis-server.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Core Rust partage par Chat, Agents et le CLI.
+Source: "dist\zaalis-agentd.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\pickfolder.exe";    DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\cloudflared.exe";   DestDir: "{app}"; Flags: ignoreversion
 ; node-pty : addon natif du terminal integre. Un .node ne peut pas vivre dans le
 ; snapshot pkg, il doit rester sur le disque a cote de zaalis-server.exe.
 Source: "dist\node_modules\node-pty\*"; DestDir: "{app}\node_modules\node-pty"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\interface\*";       DestDir: "{app}\interface"; Flags: ignoreversion recursesubdirs createallsubdirs
-; CLI : depose dans {app}\bin et renomme zaalis.exe -> commande `zaalis` dans le terminal.
+; CLI Rust : depose dans {app}\bin et renomme zaalis.exe -> commande `zaalis` dans le terminal.
 ; (La GUI {app}\zaalis.exe n'est PAS sur le PATH ; seul {app}\bin l'est.)
 Source: "dist\zaalis-cli.exe";    DestDir: "{app}\bin"; DestName: "zaalis.exe"; Flags: ignoreversion
 

@@ -1,6 +1,6 @@
 # zaalis labs IDE
 
-Local IDE by zaalis labs with a web interface, local Node.js server, and native Windows application powered by WebView2.
+Local IDE by zaalis labs with a shared Rust agent core, a thin local Node.js HTTP adapter, and a native Windows application powered by WebView2.
 
 ## Launch with the Windows installer
 
@@ -12,10 +12,11 @@ The installer adds the application to Windows and creates launch shortcuts.
 
 ## Launch manually
 
-Prerequisite: Node.js.
+Prerequisites: Node.js and Rust 1.90 or newer.
 
 ```bash
 npm install
+cargo build --manifest-path rust/Cargo.toml -p zaalis-agentd
 npm start
 ```
 
@@ -25,16 +26,29 @@ Then open:
 http://localhost:3000
 ```
 
+## Command sandbox
+
+Commands always run with a minimal environment and process-tree cleanup. Set
+`ZAALIS_SANDBOX_MODE=strict` to require native filesystem and network isolation;
+startup fails closed when the platform backend is unavailable. A workspace
+release build places `zaalis-sandbox` beside the daemon on Linux/macOS. The
+strict Unix helper uses Landlock plus network seccomp on Linux and Seatbelt on
+macOS. Windows probes the available AppContainer/Windows Sandbox backend and
+otherwise keeps the default Job Object containment without claiming strict
+isolation.
+
 ## Rebuild the Windows application
 
 Prerequisites:
 
 - Node.js
+- Rust 1.90 or newer
 - Visual Studio with the Desktop C++ workload
 - Inno Setup 6
 
 ```bat
 native\build_server.bat
+native\build_cli.bat
 native\build_shell.bat
 native\build_installer.bat
 ```

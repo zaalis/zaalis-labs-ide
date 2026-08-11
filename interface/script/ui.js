@@ -173,21 +173,8 @@ document.addEventListener('click', () => {
 $('#open-project-btn').addEventListener('click', async e => {
     e.stopPropagation();
     projectDropdown.classList.remove('open');
-    // Open the native OS folder picker via the local server.
-    try {
-        const res = await fetch('/api/pick-folder', { method: 'POST' });
-        const data = await res.json();
-        if (data && data.path) {
-            openProject(data.path, true);
-            return;
-        }
-        if (data && data.cancelled) return; // user closed the dialog
-        throw new Error(data && data.error ? data.error : 'picker unavailable');
-    } catch {
-        // Fallback: manual path input modal.
-        $('#project-modal').classList.add('active');
-        $('#project-path-input').focus();
-    }
+    const selected = await pickProjectFolder();
+    if (selected) openProject(selected, true);
 });
 
 const noProjBtn = $('#no-project-btn');
@@ -199,21 +186,105 @@ if (noProjBtn) {
     });
 }
 
-// Project modal
-$('#close-project-modal').addEventListener('click', () => $('#project-modal').classList.remove('active'));
-$('#cancel-project-btn').addEventListener('click', () => $('#project-modal').classList.remove('active'));
-$('#project-modal').addEventListener('click', e => { if (e.target.id === 'project-modal') $('#project-modal').classList.remove('active'); });
-
+// Project modal. It is also the safe manual fallback when a native folder
+// picker is not available on the current platform.
+let projectPathModalResolve = null;
+function closeProjectPathModal(value = null) {
+    $('#project-modal').classList.remove('active');
+    const resolve = projectPathModalResolve;
+    projectPathModalResolve = null;
+    if (resolve) resolve(value);
+}
+function promptProjectPath(initialPath = '') {
+    const input = $('#project-path-input');
+    input.value = initialPath;
+    $('#project-modal').classList.add('active');
+    input.focus();
+    return new Promise(resolve => { projectPathModalResolve = resolve; });
+}
+async function pickProjectFolder(initialPath = '') {
+    try {
+        const res = await fetch('/api/pick-folder', { method: 'POST' });
+        const data = await res.json();
+        if (data && data.path) return data.path;
+        if (data && data.cancelled) return null;
+    } catch {}
+    return promptProjectPath(initialPath);
+}
+$('#close-project-modal').addEventListener('click', () => closeProjectPathModal());
+$('#cancel-project-btn').addEventListener('click', () => closeProjectPathModal());
+$('#project-modal').addEventListener('click', e => { if (e.target.id === 'project-modal') closeProjectPathModal(); });
 $('#confirm-project-btn').addEventListener('click', () => {
-    const p = $('#project-path-input').value.trim();
-    if (p) {
-        openProject(p, true);
-        $('#project-modal').classList.remove('active');
-    }
+    const path = $('#project-path-input').value.trim();
+    if (path) closeProjectPathModal(path);
 });
-
 $('#project-path-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') $('#confirm-project-btn').click();
+});
+
+let movedProjectPath = null;
+function showMovedProjectPathModal(path) {
+    movedProjectPath = path;
+    const lang = state.language || 'fr';
+    const title = $('#project-path-moved-title');
+    const message = $('#project-path-moved-message');
+    const update = $('#update-moved-project-btn');
+    const remove = $('#delete-moved-project-btn');
+    if (title) title.textContent = lang === 'en' ? 'Project path changed' : 'Chemin du projet modifie';
+    if (message) message.textContent = lang === 'en'
+        ? `The folder "${path}" can no longer be found. Update the saved path or remove this project from the recent list.`
+        : `Le dossier "${path}" est introuvable. Mettez a jour son chemin en choisissant le nouvel emplacement, ou retirez ce projet de la liste recente.`;
+    if (update) update.textContent = lang === 'en' ? 'Update path' : 'Mettre a jour le chemin';
+    if (remove) remove.textContent = lang === 'en' ? 'Remove project' : 'Supprimer le projet';
+    $('#project-path-moved-modal').classList.add('active');
+}
+function closeMovedProjectPathModal() {
+    $('#project-path-moved-modal').classList.remove('active');
+    movedProjectPath = null;
+}
+async function projectPathStatus(rootPath) {
+    try {
+        const res = await fetch(`/api/files?root=${encodeURIComponent(rootPath)}`);
+        if (res.ok) return 'available';
+        return res.status === 404 ? 'missing' : 'unavailable';
+    } catch {
+        return 'unavailable';
+    }
+}
+function replaceRecentProjectPath(previousPath, nextPath) {
+    const previous = normalizeProjectPath(previousPath);
+    const recent = getRecentProjects()
+        .filter(path => normalizeProjectPath(path) !== previous && normalizeProjectPath(path) !== normalizeProjectPath(nextPath));
+    recent.unshift(nextPath);
+    localStorage.setItem('zaalis-recent', JSON.stringify(recent.slice(0, 8)));
+    syncRecentProjects(recent.slice(0, 8));
+
+    const project = String(nextPath).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null;
+    for (const kind of ['chat', 'agents']) {
+        const store = kind === 'agents' ? 'agentConversations' : 'conversations';
+        let changed = false;
+        (state[store] || []).forEach(conversation => {
+            if (normalizeProjectPath(conversation.projectPath) !== previous) return;
+            conversation.projectPath = nextPath;
+            conversation.project = project;
+            changed = true;
+        });
+        if (changed && typeof persistChats === 'function') persistChats(kind);
+    }
+}
+$('#update-moved-project-btn').addEventListener('click', async () => {
+    const previousPath = movedProjectPath;
+    if (!previousPath) return;
+    const nextPath = await pickProjectFolder(previousPath);
+    if (!nextPath) return;
+    replaceRecentProjectPath(previousPath, nextPath);
+    closeMovedProjectPathModal();
+    await openProject(nextPath, true, { skipPathValidation: true, preserveConversation: true });
+});
+$('#delete-moved-project-btn').addEventListener('click', () => {
+    const previousPath = movedProjectPath;
+    closeMovedProjectPathModal();
+    if (previousPath) removeRecentProject(previousPath);
 });
 
 function removeRecentProject(path) {
@@ -291,11 +362,7 @@ function initRecentProjects() {
         pencilBtn.addEventListener('click', async e => {
             e.stopPropagation();
             projectDropdown.classList.remove('open');
-            await openProject(p, true);
-            const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
-            if (typeof newConversation === 'function') {
-                newConversation(kind);
-            }
+            await openProject(p, true); // direct project switches already start a fresh chat
         });
 
         // Trash button (Supprimer)
@@ -360,10 +427,9 @@ function initRecentProjects() {
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
                     projectDropdown.classList.remove('open');
-                    openProject(p, false);
-                    if (typeof loadConversation === 'function') {
-                        loadConversation(kind, conv.id);
-                    }
+                    openProject(p, false, { preserveConversation: true }).then(opened => {
+                        if (opened && typeof loadConversation === 'function') loadConversation(kind, conv.id);
+                    });
                 });
                 chatsContainer.appendChild(chatRow);
             });
@@ -372,8 +438,24 @@ function initRecentProjects() {
     });
 }
 
-async function openProject(rootPath, isNew) {
-    const switchingProject = state.projectRoot && state.projectRoot !== rootPath;
+async function openProject(rootPath, isNew, options = {}) {
+    rootPath = String(rootPath || '').trim();
+    if (!rootPath) return false;
+    if (!options.skipPathValidation) {
+        const status = await projectPathStatus(rootPath);
+        if (status === 'missing') {
+            showMovedProjectPathModal(rootPath);
+            return false;
+        }
+        if (status === 'unavailable') {
+            const lang = state.language || 'fr';
+            showToast(lang === 'en' ? 'Project unavailable' : 'Projet indisponible',
+                lang === 'en' ? 'The folder could not be checked. Please try again.' : 'Le dossier n a pas pu etre verifie. Reessayez.',
+                { icon: '!' });
+            return false;
+        }
+    }
+    const switchingProject = normalizeProjectPath(state.projectRoot) !== normalizeProjectPath(rootPath);
 
     state.projectRoot = rootPath;
     if (isNew) addRecentProject(rootPath);
@@ -398,11 +480,15 @@ async function openProject(rootPath, isNew) {
     nameEl.textContent = rootPath.split(/[\\/]/).pop();
     await loadFileTree();
     initRecentProjects();
+    if (switchingProject && !options.preserveConversation && typeof newConversation === 'function') {
+        newConversation(typeof activeKind === 'function' ? activeKind() : 'chat');
+    }
+    return true;
 }
 
 // Drop the open project and return to a clean "no project" state — used by the
 // classic "Aucun projet" chat group so the AI answers with no project context.
-function clearProject() {
+function clearProject(options = {}) {
     if (!state.projectRoot) return;
     const lang = state.language || 'fr';
     state.projectRoot = null;
@@ -419,6 +505,9 @@ function clearProject() {
     saveState();
     loadFileTree();        // empties the explorer (handles null root)
     initRecentProjects();
+    if (!options.preserveConversation && typeof newConversation === 'function') {
+        newConversation(typeof activeKind === 'function' ? activeKind() : 'chat');
+    }
 }
 
 // ==========================================================
@@ -1230,7 +1319,7 @@ function showAuthOverlay() {
 
 // Reopen the last project once the user is authenticated.
 function openSavedProject() {
-    if (state.projectRoot) openProject(state.projectRoot, false);
+    if (state.projectRoot) openProject(state.projectRoot, false, { preserveConversation: true });
 }
 
 function setupAuth() {

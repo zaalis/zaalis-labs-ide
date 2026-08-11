@@ -1,0 +1,17 @@
+[package]
+name = "zaalis-guard"
+description = "The single permission engine every zaalis surface goes through: rule matching, shell command analysis, grants and audit."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+globset = "0.4"
+
+[lints]
+workspace = true

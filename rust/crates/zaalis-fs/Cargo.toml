@@ -1,0 +1,28 @@
+[package]
+name = "zaalis-fs"
+description = "Workspace-confined filesystem access for zaalis: path resolution, reading, search, and atomic edits."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Directory walking with .gitignore semantics. The engine behind ripgrep, so a
+# search no longer depends on an `rg` binary happening to be installed.
+ignore = "0.4"
+# Glob matching for tool patterns and permission rules alike.
+globset = "0.4"
+regex = "1"
+# Windows canonicalisation without the `\\?\` verbatim prefix, which otherwise
+# leaks into every path shown to the user and breaks naive comparisons.
+dunce = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

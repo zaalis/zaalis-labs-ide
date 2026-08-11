@@ -14,6 +14,7 @@ if not exist "%ISCC%" goto :noiscc
 
 if not exist dist\zaalis.exe goto :nobuild
 if not exist dist\zaalis-server.exe goto :nobuild
+if not exist dist\zaalis-agentd.exe goto :norust
 if not exist dist\zaalis-cli.exe goto :nocli
 
 "%ISCC%" installer.iss
@@ -26,7 +27,10 @@ goto :eof
 echo ERROR: Inno Setup not found. Install it with:  winget install JRSoftware.InnoSetup
 exit /b 1
 :nocli
-echo ERROR: dist\zaalis-cli.exe missing. Run build_cli.bat first.
+echo ERROR: Rust CLI dist\zaalis-cli.exe missing. Run build_cli.bat first.
+exit /b 1
+:norust
+echo ERROR: dist\zaalis-agentd.exe missing. Run build_server.bat then build_cli.bat first.
 exit /b 1
 :nobuild
 echo ERROR: dist\zaalis.exe or dist\zaalis-server.exe missing. Run build_server.bat then build_shell.bat first.

@@ -31,6 +31,7 @@ const state = {
         // ----- Updates -----
         autoCheckUpdates: true,         // check for updates at startup
         updateChannel: 'stable',        // 'stable' | 'beta'
+        rustAgentCore: true,            // shared Rust runtime; server keeps a rollback flag
         // ----- Advanced hardware (GGUF engine) -----
         ggufCtx: 8192,                  // default context size for the local engine
         ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
@@ -777,14 +778,14 @@ Format obligatoire:
 
   developer: `
 Tu es le Développeur principal.
-Ton rôle est de proposer une implémentation concrète, minimale et maintenable.
+Implémente concrètement avec les outils (écris/édite les fichiers, relis-les, teste), puis rapporte ce que tu as RÉELLEMENT fait.
+Ne présente jamais comme « à faire » ou « je vais » une action déjà exécutée et confirmée par un outil : décris-la au passé.
 Ne modifie jamais l'auth, les secrets, les sessions, les clés, le consensus blockchain ou les fichiers .env sans demande explicite.
 Format obligatoire:
-- Solution proposée
-- Fichiers à modifier
-- Patch ou pseudo-patch
+- Ce qui a été fait (fichiers créés/modifiés)
+- Ce qui reste à faire
 - Risques techniques
-- Tests à lancer
+- Vérifications/tests effectués ou à lancer
 `,
 
   architect: `

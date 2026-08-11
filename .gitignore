@@ -1,5 +1,6 @@
 # Dependencies
 node_modules/
+rust/target/
 
 # Local runtime data: accounts, session secret, chats
 server-data/

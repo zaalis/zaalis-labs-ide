@@ -1,17 +1,17 @@
 ﻿const express = require('express');
 const fs = require('fs');
+const http = require('http');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
-const { runAgentTurn } = require('./agent-engine');
-const { TOOL_DEFINITIONS } = require('./tool-protocol');
 const brainMcp = require('./brain-mcp-client');
 const mcpRegistry = require('./mcp-registry');
 const { AutomationManager } = require('./automation-manager');
 const windowsComputer = require('./windows-computer');
 const { TerminalManager } = require('./terminal-manager');
-const { buildKimiPayload, parseKimiResponse } = require('./kimi-provider');
+const { RustAgentBridge } = require('./rust-agent-bridge');
+const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -20,8 +20,10 @@ try { QRCode = require('qrcode'); } catch {}
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 const automationManager = new AutomationManager({ actionHandler: windowsComputer.call });
+const computerRuns = new Map();
 const terminalManager = new TerminalManager();
-const activeAgentRuns = new Map();
+const TUNNEL_HEADER = 'x-zaalis-tunnel-origin';
+const TUNNEL_ORIGIN_TOKEN = crypto.randomBytes(32).toString('base64url');
 
 // Base directory for static assets and writable data.
 // When packaged into an .exe (pkg), __dirname points inside the read-only
@@ -46,6 +48,9 @@ try {
 // stable per-user location that survives app updates and reinstalls
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() {
+  if (process.env.ZAALIS_DATA_DIR) {
+    return path.resolve(process.env.ZAALIS_DATA_DIR);
+  }
   if (process.pkg && process.platform === 'win32' && process.env.LOCALAPPDATA) {
     return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
   }
@@ -56,11 +61,16 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
 const COOKIE_NAME = 'zaalis_session';
+const rustAgentBridge = new RustAgentBridge({
+  baseDir: APP_DIR,
+  dataDir: DATA_DIR,
+  enabled: !/^(0|false|off)$/i.test(String(process.env.ZAALIS_RUST_CORE || 'on')),
+});
 
 // One-time migration: copy data from the old location (next to the exe)
 // so existing accounts and chats are kept.
 const LEGACY_DATA_DIR = path.join(APP_DIR, 'server-data');
-if (path.resolve(DATA_DIR) !== path.resolve(LEGACY_DATA_DIR) &&
+if (!process.env.ZAALIS_DATA_DIR && path.resolve(DATA_DIR) !== path.resolve(LEGACY_DATA_DIR) &&
     !fs.existsSync(USERS_FILE) && fs.existsSync(path.join(LEGACY_DATA_DIR, 'users.json'))) {
   try { fs.cpSync(LEGACY_DATA_DIR, DATA_DIR, { recursive: true, force: false }); } catch {}
 }
@@ -176,6 +186,67 @@ function currentUser(req) {
   if (!userId) return null;
   return loadUsers().find((u) => u.id === userId) || null;
 }
+
+// ---------------------------------------------------------------------------
+// BROWSER BRIDGE — restricted access for zaalis browser (same machine).
+// A shared secret is written to the stable per-user folder (the same one
+// DATA_DIR uses when packaged). zaalis browser reads it from disk and sends it
+// in the x-zaalis-browser header. Loopback only (already enforced by the global
+// middleware) and limited to chat — never files/exec/tunnel. Same trust model
+// as the `secret` file: any local process of this user can read it, so this
+// exposes nothing beyond what the local vault already allows.
+// ---------------------------------------------------------------------------
+function browserBridgeDir() {
+  if (process.env.ZAALIS_DATA_DIR) return DATA_DIR;
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'zaalis', 'server-data');
+}
+const BROWSER_SECRET_FILE = path.join(browserBridgeDir(), 'browser-secret');
+let BROWSER_SECRET;
+try {
+  BROWSER_SECRET = fs.readFileSync(BROWSER_SECRET_FILE, 'utf-8').trim();
+  if (!BROWSER_SECRET) throw new Error('empty');
+} catch {
+  BROWSER_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(BROWSER_SECRET_FILE, BROWSER_SECRET, { mode: 0o600 });
+  } catch {}
+}
+// Last account seen driving the IDE itself (valid session cookie). The browser
+// has no session of its own, so this is the most accurate answer to "whose
+// account is this machine using right now".
+let lastActiveUserId = '';
+function browserUser(req) {
+  const header = String(req.headers['x-zaalis-browser'] || '');
+  if (!header || !safeEqual(header, BROWSER_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  const active = users.find((u) => u.id === lastActiveUserId);
+  if (active) return active;
+  // No IDE session seen yet: fall back to the most recently used real account.
+  // Accounts with no API key and no recorded login (throwaway/test accounts)
+  // rank last — binding the browser to one of those means every request comes
+  // back "no API key configured" even though a configured account exists.
+  return users.slice().sort((a, b) => {
+    const ka = a.apiKeys && Object.keys(a.apiKeys).length ? 1 : 0;
+    const kb = b.apiKeys && Object.keys(b.apiKeys).length ? 1 : 0;
+    if (ka !== kb) return kb - ka;
+    return String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''));
+  })[0];
+}
+// The browser only reaches chat, the local model lists (to fill its menus) and
+// the local voice bricks — never files, exec or keys.
+function browserAllowed(p) {
+  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models' ||
+         p === '/stt' || p === '/tts' || p === '/voice-status' || p === '/voice-options';
+}
 function chatsFile(userId, kind) {
   // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
   const k = kind === 'agents' ? 'agents' : 'chat';
@@ -249,6 +320,14 @@ app.use((req, res, next) => {
   const remote = req.socket.remoteAddress;
   if (!LOOPBACK.has(remote)) {
     return res.status(403).json({ error: 'Forbidden: local access only' });
+  }
+  const tunnelMarker = String(req.headers[TUNNEL_HEADER] || '');
+  if (tunnelMarker && !safeEqual(tunnelMarker, TUNNEL_ORIGIN_TOKEN)) {
+    return res.status(403).json({ error: 'Forbidden: invalid tunnel origin' });
+  }
+  req.isTunnel = !!tunnelMarker;
+  if (req.isTunnel && !tunnelRouteAllowed(req.method, req.path)) {
+    return res.status(403).json({ error: 'Action indisponible via le tunnel.' });
   }
 
   // Never serve the accounts/secret/chats store as a static file.
@@ -330,6 +409,14 @@ app.post('/api/auth/login', (req, res) => {
   if (!user || !safeEqual(candidate, user.hash)) {
     return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
   }
+  // Remember the last login (used by the zaalis browser bridge to pick which
+  // account to answer for when no IDE session has been seen yet).
+  try {
+    const users = loadUsers();
+    const i = users.findIndex((u) => u.id === user.id);
+    if (i >= 0) { users[i].lastLoginAt = new Date().toISOString(); saveUsers(users); }
+  } catch {}
+  lastActiveUserId = user.id;
   setSessionCookie(res, makeToken(user.id));
   res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
 });
@@ -341,7 +428,7 @@ app.post('/api/auth/logout', (req, res) => {
 
 app.get('/api/auth/me', (req, res) => {
   // Status check: always 200 so the browser console isn't polluted with a 401.
-  const user = currentUser(req);
+  const user = req.isTunnel ? mobileUser(req) : currentUser(req);
   res.json({
     authenticated: !!user,
     email: user ? user.email : null,
@@ -349,20 +436,41 @@ app.get('/api/auth/me', (req, res) => {
   });
 });
 
+// Private loopback bridge used only by the Rust `computer` tool. Tokens are
+// random, per-run, memory-only, and never enter MCP or persisted config.
+app.post('/api/internal/rust-computer', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = computerRuns.get(raw);
+  if (!entry || raw.length < 32) return res.status(401).json({ error: 'Jeton computer invalide.' });
+  try {
+    return res.json(await automationManager.execute(entry.session, req.body || {}));
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
-  const user = currentUser(req);
-  if (user) { req.user = user; return next(); }
+  const user = req.isTunnel ? null : currentUser(req);
+  if (user) { lastActiveUserId = user.id; req.user = user; return next(); }
   // Phone remote-control session: a signed pairing cookie, restricted to a safe
   // subset of endpoints (chat only — never files/exec/tunnel-start).
   const mUser = mobileUser(req);
   if (mUser) {
-    if (!mobileAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    if (!mobileAllowed(req.method, req.path)) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
     req.user = mUser;
     req.isMobile = true;
+    return next();
+  }
+  // zaalis browser bridge: shared local secret, chat endpoints only.
+  const bUser = browserUser(req);
+  if (bUser) {
+    if (!browserAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour le navigateur.' });
+    req.user = bUser;
+    req.isBrowser = true;
     return next();
   }
   return res.status(401).json({ error: 'Authentification requise.' });
@@ -474,6 +582,9 @@ app.get('/api/keys', (req, res) => {
 // PUT /api/keys  { keys: { openai: 'sk-...', anthropic: null, ... } }
 // Non-empty string = set/replace (encrypted). null = delete. Absent/'' = keep.
 app.put('/api/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) {
+    return res.status(403).json({ error: 'Modification des cles reservee au desktop.' });
+  }
   try {
     const incoming = (req.body && req.body.keys) || {};
     const users = loadUsers();
@@ -496,6 +607,14 @@ app.put('/api/keys', (req, res) => {
 
 // MCP configuration: Zaalis Brain is distinct from personal MCP servers.
 function publicMcpServers(user) { return (user.mcpServers || []).map((s) => ({ ...s, token: undefined, tokenConfigured: !!s.token })); }
+function rustMcpServersFor(user) {
+  return [
+    ...(user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' })),
+    ...(user.brainMcp && user.brainMcp.enabled && user.brainMcp.endpoint && user.brainMcp.token
+      ? [{ id: 'zaalis-brain', name: 'Zaalis Brain', endpoint: user.brainMcp.endpoint, token: decryptSecret(user.brainMcp.token), enabled: true, allow: [], deny: [] }]
+      : []),
+  ];
+}
 app.get('/api/brain-mcp', (req, res) => { const s = req.user.brainMcp || {}; res.json({ configured: !!(s.endpoint && s.token), enabled: !!s.enabled, endpoint: s.endpoint || '', state: s.enabled ? 'disconnected' : 'not_configured' }); });
 app.put('/api/brain-mcp', (req, res) => {
   try { const b = req.body || {}, users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = users[i].brainMcp || {}; const endpoint = String(b.endpoint === undefined ? old.endpoint || '' : b.endpoint).trim(); const token = String(b.token || '') || (old.token ? decryptSecret(old.token) : ''); if ((b.enabled || endpoint || token) && !brainMcp.validateConfig({ endpoint, token })) return res.status(400).json({ error: 'Route ou jeton Zaalis Brain invalide.' }); users[i].brainMcp = { enabled: !!b.enabled, endpoint, token: token ? encryptSecret(token) : '' }; saveUsers(users); res.json({ configured: !!(endpoint && token), enabled: !!b.enabled, endpoint, state: b.enabled ? 'disconnected' : 'not_configured' }); } catch (e) { res.status(500).json({ error: e.message }); }
@@ -503,12 +622,12 @@ app.put('/api/brain-mcp', (req, res) => {
 app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
 app.get('/api/automation/status', (req, res) => res.json(automationManager.snapshot()));
 app.post('/api/automation/stop', async (req, res) => res.json(await automationManager.stop()));
-app.post('/api/agent-runs/:id/cancel', (req, res) => {
-  const run = activeAgentRuns.get(String(req.params.id || ''));
-  if (!run || run.userId !== req.user.id) return res.status(404).json({ error: 'Tache introuvable.' });
-  run.cancelled = true;
-  try { run.controller.abort(); } catch {}
-  res.json({ cancelled: true });
+app.post('/api/agent-runs/:id/cancel', async (req, res) => {
+  try {
+    res.json(await rustAgentBridge.cancel(req.user.id, req.params.id));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
 });
 app.put('/api/mcp', (req, res) => {
   try { const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null; if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' }); const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = new Map((users[i].mcpServers || []).map((s) => [s.id, s])); users[i].mcpServers = incoming.slice(0, 32).map((s) => { const n = mcpRegistry.normaliseServer(s); if (!n) throw new Error('Serveur MCP invalide. HTTPS requis sauf loopback HTTP.'); const token = String(s.token || '') || (old.get(n.id) && decryptSecret(old.get(n.id).token)) || ''; return { ...n, token: token ? encryptSecret(token) : '' }; }); saveUsers(users); res.json({ servers: publicMcpServers(users[i]) }); } catch (e) { res.status(400).json({ error: e.message }); }
@@ -1519,7 +1638,8 @@ app.post('/api/pick-folder', (req, res) => {
 // GET /api/ollama-models?url=...  -> { models: [names] }
 app.get('/api/ollama-models', async (req, res) => {
   try {
-    const url = (req.query.url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+    const configured = sharedConfigForUser(req.user).ollamaUrl || 'http://127.0.0.1:11434';
+    const url = (req.isMobile ? configured : (req.query.url || configured)).replace(/\/+$/, '');
     const r = await fetch(`${url}/api/tags`);
     const data = await r.json();
     const models = (data.models || []).map((m) => m.name).filter(Boolean);
@@ -2072,625 +2192,176 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 // AI CHAT API
 // ---------------------------------------------------------------------------
 
-// POST /api/agent-chat
-// Shared Claude-Code-style loop used by both the Windows app and the CLI.
-// It keeps the provider dispatch in /api/chat, but centralizes project context
-// and local tools here so every client sees the same files and behavior.
-app.post('/api/agent-chat', async (req, res) => {
-  let wantsStream = false;
+app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
+
+app.post('/api/rust-core/decision', async (req, res) => {
+  try {
+    const result = await rustAgentBridge.decide(req.user.id, req.body || {});
+    res.json(result || { resolved: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+async function rustAgentHttp(req, res, next) {
+  const status = rustAgentBridge.status();
+  if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
+  if (!status.available) {
+    return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
+  }
   let streamOpen = false;
-  let activeRunId = '';
-  let activeComputerSession = null;
-  const openStream = (status = 200) => {
+  const wantsStream = req.body && req.body.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
+  const openStream = (statusCode = 200) => {
     if (streamOpen) return;
     streamOpen = true;
-    if (res.headersSent) return;
-    res.status(status);
+    res.status(statusCode);
     res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('X-Accel-Buffering', 'no');
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
   };
-  const writeStreamEvent = (event) => {
-    try {
-      openStream();
-      res.write(JSON.stringify(event) + '\n');
-    } catch {}
+  const emit = (event) => {
+    if (!wantsStream) return;
+    try { openStream(); res.write(JSON.stringify(event) + '\n'); } catch {}
   };
-  const respondError = (status, message) => {
-    if (wantsStream) {
-      openStream(status);
-      try { res.write(JSON.stringify({ type: 'error', error: message }) + '\n'); } catch {}
-      try { res.end(); } catch {}
-      return;
-    }
-    res.status(status).json({ error: message });
-  };
+  const controller = new AbortController();
+  let computerToken = '';
+  let computerSession = null;
+  req.once('aborted', () => controller.abort());
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
-    const b = req.body || {};
-    wantsStream = b.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
-    if (req.isMobile) return respondError(403, 'Action indisponible en mode mobile.');
-    const model = b.model;
-    const message = String(b.message || '');
-    const computerControl = b.computerControl === true;
-    const runId = crypto.randomUUID();
-    activeRunId = runId;
-    const run = { userId: req.user.id, cancelled: false, controller: new AbortController() };
-    activeAgentRuns.set(runId, run);
-    if (!model || !message.trim()) {
-      return respondError(400, 'model and message are required');
+    const body = req.body || {};
+    const model = String(body.model || '');
+    const message = String(body.message || '');
+    if ((!model && !Array.isArray(body.team)) || !message.trim()) {
+      if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
+      return res.status(400).json({ error: 'model/team and message are required' });
     }
-
-    const root = resolveBase(b.root || b.projectRoot);
-    let computerSession = null;
-    if (computerControl) computerSession = await automationManager.start({ userId: req.user.id, permissionMode: b.permissionMode || 'supervised' });
-    activeComputerSession = computerSession;
-    const personalMcp = (req.user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' }));
-    const brainConfig = req.user.brainMcp && req.user.brainMcp.enabled && req.user.brainMcp.endpoint && req.user.brainMcp.token
-      ? { endpoint: req.user.brainMcp.endpoint, token: decryptSecret(req.user.brainMcp.token) }
-      : null;
-    const mcpSummary = [
-      ...(brainConfig ? ['- zaalis-brain : outils du Cerveau local'] : []),
-      ...personalMcp.map((server) => `- ${server.id} : ${server.name}`)
-    ].join('\n');
-    const mcpCall = async (input) => {
-      const serverId = String(input && input.server || '').trim();
-      const tool = String(input && input.tool || '').trim();
-      const args = input && input.arguments && typeof input.arguments === 'object' ? input.arguments : {};
-      if (!serverId || !tool) return { name: 'mcp_call', blocked: true, summary: 'MCP invalide', text: 'Le serveur et le nom d’outil MCP sont requis.' };
-      try {
-        const value = serverId === 'zaalis-brain'
-          ? (brainConfig ? await brainMcp.callTool(brainConfig, tool, args) : Promise.reject(new Error('Zaalis Brain n’est pas activé.')))
-          : await mcpRegistry.call(personalMcp.find((server) => server.id === serverId) || {}, tool, args);
-        const output = Array.isArray(value && value.content)
-          ? value.content.map((item) => item && (item.text || JSON.stringify(item))).filter(Boolean).join('\n')
-          : JSON.stringify(value || {});
-        return { name: 'mcp_call', summary: `MCP ${serverId}.${tool}`, text: output.slice(0, 24000) || '(réponse vide)' };
-      } catch (error) {
-        return { name: 'mcp_call', summary: `MCP ${serverId}.${tool} erreur`, text: error.message || String(error), error: true };
-      }
-    };
-    const cookie = req.headers.cookie || '';
-    const callModel = async (payload) => {
-      const requestedTimeout = parseInt(payload.timeoutMs, 10);
-      const timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout > 0
-        ? Math.max(1000, Math.min(requestedTimeout, 120000))
-        : 0;
-      const ac = timeoutMs ? new AbortController() : null;
-      const timer = timeoutMs ? setTimeout(() => ac.abort(), timeoutMs) : null;
-      if (timer && timer.unref) timer.unref();
-      try {
-        const cleanPayload = { ...payload };
-        delete cleanPayload.timeoutMs;
-        return await fetchJSON(`http://127.0.0.1:${PORT}/api/chat`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            ...(cookie ? { Cookie: cookie } : {}),
-          },
-          body: JSON.stringify(cleanPayload),
-          signal: ac ? ac.signal : run.controller.signal,
-        });
-      } catch (e) {
-        if (e && e.name === 'AbortError') throw new Error(`Appel modele interrompu apres ${Math.round(timeoutMs / 1000)}s.`);
-        throw e;
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    };
-
-    const result = await runAgentTurn({
-      root,
+    if (body.computerControl === true) {
+      if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+      computerSession = await automationManager.start({ userId: req.user.id, permissionMode: body.permissionMode || 'supervised' });
+      computerToken = crypto.randomBytes(32).toString('base64url');
+      computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
+    }
+    const result = await rustAgentBridge.run({
+      userId: req.user.id,
+      keys: userApiKeys(req.user),
+      root: resolveBase(body.root || body.projectRoot),
       model,
-      submodel: b.submodel,
+      submodel: body.submodel,
       message,
-      config: b.config || {},
-      reasoningLevel: b.reasoningLevel,
-      images: Array.isArray(b.images) ? b.images : [],
-      history: Array.isArray(b.history) ? b.history : [],
-      permissionMode: b.permissionMode || 'supervised',
-      language: b.language || 'fr',
-      rolePrompt: b.rolePrompt,
-      subAgentTimeoutMs: b.subAgentTimeoutMs,
-      computerControl: computerControl ? automationManager : null,
-      computerSession,
-      mcpCall,
-      mcpSummary,
-      callModel,
-      isCancelled: () => run.cancelled,
-      emitEvent: wantsStream ? writeStreamEvent : undefined,
-    });
-    result.runId = runId;
-    if (computerSession) await automationManager.complete(computerSession);
+      permissionMode: body.permissionMode || 'supervised',
+      language: body.language || 'fr',
+      reasoningLevel: body.reasoningLevel,
+      images: Array.isArray(body.images) ? body.images : [],
+      history: Array.isArray(body.history) ? body.history : [],
+      team: Array.isArray(body.team) ? body.team : null,
+      mcpServers: rustMcpServersFor(req.user),
+      runtimeConfig: computerToken ? {
+        computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
+        computerToken,
+      } : undefined,
+      signal: controller.signal,
+    }, emit);
     if (wantsStream) {
-      writeStreamEvent({ type: 'done', result });
-      try { res.end(); } catch {}
-    } else {
-      res.json(result);
+      emit({ type: 'done', result });
+      return res.end();
     }
-    activeAgentRuns.delete(runId);
-    activeRunId = '';
-  } catch (err) {
-    if (activeRunId) activeAgentRuns.delete(activeRunId);
-    if (activeComputerSession) { try { await automationManager.stop(activeComputerSession, 'Tâche interrompue.'); } catch {} }
+    return res.json(result);
+  } catch (error) {
     if (wantsStream) {
-      openStream(res.headersSent ? 200 : 500);
-      try { res.write(JSON.stringify({ type: 'error', error: err.message }) + '\n'); } catch {}
-      try { res.end(); } catch {}
-    } else {
-      res.status(500).json({ error: err.message });
+      openStream(res.headersSent ? 200 : (error.status || 500));
+      try { res.write(JSON.stringify({ type: 'error', error: error.message || String(error) }) + '\n'); } catch {}
+      return res.end();
+    }
+    return res.status(error.status || 500).json({ error: error.message || String(error) });
+  } finally {
+    if (computerToken) computerRuns.delete(computerToken);
+    if (computerSession) {
+      try { await automationManager.complete(computerSession); } catch { try { await automationManager.stop(computerSession, 'Tache interrompue.'); } catch {} }
     }
   }
-});
+}
+
+app.post('/api/agent-chat', rustAgentHttp);
+app.post('/api/rust-agent-team', rustAgentHttp);
 
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
-app.post('/api/chat', async (req, res) => {
+async function rustChatHttp(req, res, next) {
+  const status = rustAgentBridge.status();
+  const body = req.body || {};
+  const grokImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
+  if (grokImage) return next();
+  if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
+  if (!status.available) {
+    return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
+  }
   try {
-    const { model, submodel, message, systemPrompt, config, reasoningLevel } = req.body;
-    const nativeTools = req.body && req.body.nativeTools === true;
-    const images = Array.isArray(req.body.images) ? req.body.images : [];
-    // Prior conversation turns (memory). Each: { role: 'user'|'assistant', content: string }
-    const history = Array.isArray(req.body.history)
-      ? req.body.history.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
-      : [];
-    const nativeHistory = Array.isArray(req.body.history)
-      ? req.body.history.filter((m) => m && typeof m === 'object' && (
-        ((m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string') ||
-        (m.role === 'assistant' && Array.isArray(m.tool_calls)) ||
-        (m.role === 'tool' && typeof m.tool_call_id === 'string' && typeof m.content === 'string')
-      )).slice(-60)
-      : [];
-    if (!model || (!message && !nativeHistory.some((m) => m.role === 'tool'))) {
-      return res.status(400).json({ error: 'model and message are required' });
+    if (!body.model || !String(body.message || '').trim()) return res.status(400).json({ error: 'model and message are required' });
+    if (body.model === 'gguf') {
+      if (!body.submodel) return res.status(400).json({ error: 'Aucun modèle GGUF sélectionné.' });
+      await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
+    const result = await rustAgentBridge.run({
+      userId: req.user.id,
+      keys: userApiKeys(req.user),
+      root: resolveBase(body.root),
+      model: String(body.model),
+      submodel: body.submodel,
+      message: String(body.message),
+      systemPrompt: body.systemPrompt,
+      permissionMode: 'read-only',
+      language: body.language || 'fr',
+      reasoningLevel: body.reasoningLevel,
+      images: Array.isArray(body.images) ? body.images : [],
+      history: Array.isArray(body.history) ? body.history : [],
+      mcpServers: rustMcpServersFor(req.user),
+      runtimeConfig: {
+        ollamaUrl: req.isMobile
+          ? sharedConfigForUser(req.user).ollamaUrl
+          : body.config && body.config.ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+      },
+      signal: (() => {
+        const controller = new AbortController();
+        req.once('aborted', () => controller.abort());
+        res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+        return controller.signal;
+      })(),
+    }, () => {});
+    return res.json({
+      response: result.response || '',
+      thinking: result.thinking || undefined,
+      usage: result.usage || undefined,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+}
+app.post('/api/chat', rustChatHttp);
 
-    // API keys come from the encrypted per-user vault. Keys still sent by an
-    // older client (pre-1.0.9 localStorage) are accepted as a fallback only.
-    const keys = { ...(config?.keys || {}), ...userApiKeys(req.user) };
-    const ollamaUrl = config?.ollamaUrl || 'http://127.0.0.1:11434';
-    const ollamaModel = config?.ollamaModel || 'llama3';
-
-    let responseText = '';
-    let thinkingText = '';
-    let usage = null;
-
-    // ----- OpenAI (Codex) -----
-    if (model === 'codex') {
-      if (!keys.openai) return res.json({ response: '[OpenAI] Aucune cle API configuree.' });
-
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      // Same shape as Mistral: OpenAI speaks the identical chat-completions
-      // tool dialect, so native tool calls need no separate translation layer.
-      for (const h of (nativeTools ? nativeHistory : history)) messages.push(h.role === 'assistant' && Array.isArray(h.tool_calls)
-        ? { role: 'assistant', content: h.content || '', tool_calls: h.tool_calls }
-        : h.role === 'tool'
-          ? { role: 'tool', tool_call_id: h.tool_call_id, content: h.content }
-          : { role: h.role, content: h.content });
-      if (message) messages.push({
-        role: 'user',
-        content: images.length
-          ? [
-              { type: 'text', text: message },
-              ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
-            ]
-          : message,
-      });
-
-      const payload = { model: submodel || 'gpt-5.6-sol', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) };
-
-      const isReasoningModel = submodel && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'));
-      if (isReasoningModel && reasoningLevel !== undefined) {
-        const efforts = ['low', 'low', 'medium', 'high'];
-        payload.reasoning_effort = efforts[reasoningLevel] || 'medium';
-      }
-
-      const data = await fetchJSON('https://api.openai.com/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${keys.openai}`,
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const openaiMessage = data.choices?.[0]?.message || {};
-      responseText = openaiMessage.content || '';
-      if (Array.isArray(openaiMessage.tool_calls) && openaiMessage.tool_calls.length) {
-        res.locals.nativeToolCalls = openaiMessage.tool_calls;
-        res.locals.nativeAssistantMessage = { role: 'assistant', content: openaiMessage.content || '', tool_calls: openaiMessage.tool_calls };
-      }
-      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
-    }
-
-    // ----- Anthropic (Claude) -----
-    else if (model === 'claude') {
-      if (!keys.anthropic) return res.json({ response: '[Claude] Aucune cle API configuree.' });
-
-      const claudeContent = images.length
-        ? [
-            { type: 'text', text: message },
-            ...images.map((img) => ({ type: 'image', source: { type: 'base64', media_type: img.mime, data: img.data } })),
-          ]
-        : message;
-
-      const claudeMessages = [];
-      for (const h of history) claudeMessages.push({ role: h.role, content: h.content });
-      claudeMessages.push({ role: 'user', content: claudeContent });
-
-      const body = {
-        model: submodel || 'claude-fable-5',
-        max_tokens: 4096,
-        messages: claudeMessages,
-      };
-      if (systemPrompt) body.system = systemPrompt;
-
-      const isThinkingModel = submodel && (submodel.includes('3.7') || submodel.includes('3-7') || submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('fable'));
-      if (isThinkingModel && reasoningLevel !== undefined && reasoningLevel > 0) {
-        const budgets = [0, 1024, 2048, 4096, 8192];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          body.max_tokens = 10000; // Increase max tokens when thinking is enabled
-          body.thinking = { type: 'enabled', budget_tokens: budget };
-        }
-      }
-
-      const data = await fetchJSON('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': keys.anthropic,
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify(body),
-      });
-
-      // Separate the visible answer (text blocks) from the reasoning (thinking blocks).
-      responseText = (data.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
-      thinkingText = (data.content || []).filter((c) => c.type === 'thinking').map((c) => c.thinking || '').join('\n');
-      if (data.usage) usage = { input: data.usage.input_tokens, output: data.usage.output_tokens };
-    }
-
-    // ----- Google Gemini -----
-    else if (model === 'gemini') {
-      if (!keys.google) return res.json({ response: '[Gemini] Aucune cle API configuree.' });
-
-      const modelName = submodel || 'gemini-3.5-flash';
-
-      const parts = [{ text: message }];
-      images.forEach((img) => parts.push({ inline_data: { mime_type: img.mime, data: img.data } }));
-
-      const contents = [];
-      for (const h of history) contents.push({ role: h.role === 'assistant' ? 'model' : 'user', parts: [{ text: h.content }] });
-      contents.push({ role: 'user', parts });
-
-      const payload = { contents };
-      if (systemPrompt) payload.system_instruction = { parts: [{ text: systemPrompt }] };
-
-      // Native thinking is supported by Gemini 2.5 / 3.x. The thinkingConfig
-      // MUST be nested inside generationConfig — placing it at the payload root
-      // makes the Gemini REST API reject the request (400 INVALID_ARGUMENT),
-      // which this server then surfaces as a 500.
-      const geminiSupportsThinking = /(^|[^a-z])(2\.5|3)/.test(modelName) || modelName.includes('thinking');
-      if (reasoningLevel !== undefined && reasoningLevel > 0 && geminiSupportsThinking) {
-        const budgets = [0, 1024, 2048, 4096];
-        const budget = budgets[reasoningLevel] || 1024;
-        if (budget > 0) {
-          payload.generationConfig = { ...(payload.generationConfig || {}), thinkingConfig: { thinkingBudget: budget } };
-        }
-      }
-
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${keys.google}`;
-      const data = await fetchJSON(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      responseText = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
-      if (data.usageMetadata) usage = { input: data.usageMetadata.promptTokenCount, output: data.usageMetadata.candidatesTokenCount };
-    }
-
-    // ----- xAI (Grok) -----
-    else if (model === 'grok') {
-      if (!keys.grok) return res.json({ response: '[Grok] Aucune cle API configuree.' });
-
-      const isImageModel = submodel && (submodel === 'grok-imagine-image-quality' || submodel === 'grok-imagine-image');
-
-      if (isImageModel) {
-        const grokPayload = {
-          prompt: message,
-          model: submodel,
-          n: 1,
-          response_format: 'b64_json'
-        };
-
-        const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${keys.grok}`,
-          },
-          body: JSON.stringify(grokPayload),
-        });
-
-        const b64 = data.data?.[0]?.b64_json;
-        if (b64) {
-          // Use the user's prompt as the image title (sanitized for markdown).
-          const title = String(message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
-          responseText = `![${title}](data:image/png;base64,${b64})`;
-        } else {
-          responseText = "Erreur: Aucune image n'a été générée par l'API.";
-        }
-      } else {
-        const messages = [];
-        if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-        for (const h of history) messages.push({ role: h.role, content: h.content });
-        messages.push({
-          role: 'user',
-          content: images.length
-            ? [
-                { type: 'text', text: message },
-                ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } })),
-              ]
-            : message,
-        });
-
-        // The grok-4.x reasoning models reason natively and REJECT the
-        // reasoning_effort parameter ("does not support parameter reasoningEffort").
-        // Only the small grok-3-mini-style models accept it, and none are in our
-        // catalog, so we never send it.
-        const grokPayload = { model: submodel || 'grok-4.5', messages };
-
-        const data = await fetchJSON('https://api.x.ai/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${keys.grok}`,
-          },
-          body: JSON.stringify(grokPayload),
-        });
-
-        responseText = data.choices?.[0]?.message?.content || '';
-        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
-      }
-    }
-
-    // ----- Mistral (Le Chat) -----
-    else if (model === 'mistral') {
-      if (!keys.mistral) return res.json({ response: '[Mistral] Aucune cle API configuree.' });
-
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of (nativeTools ? nativeHistory : history)) messages.push(h.role === 'assistant' && Array.isArray(h.tool_calls)
-        ? { role: 'assistant', content: h.content || '', tool_calls: h.tool_calls }
-        : h.role === 'tool'
-          ? { role: 'tool', tool_call_id: h.tool_call_id, content: h.content }
-          : { role: h.role, content: h.content });
-      if (message) messages.push({
-        role: 'user',
-        content: images.length
-          ? [
-              { type: 'text', text: message },
-              ...images.map((img) => ({ type: 'image_url', image_url: `data:${img.mime};base64,${img.data}` })),
-            ]
-          : message,
-      });
-
-      const data = await fetchJSON('https://api.mistral.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${keys.mistral}`,
-        },
-        body: JSON.stringify({ model: submodel || 'mistral-medium-3-5', messages, ...(nativeTools ? { tools: TOOL_DEFINITIONS, tool_choice: 'auto' } : {}) }),
-      });
-
-      const mistralMessage = data.choices?.[0]?.message || {};
-      responseText = mistralMessage.content || '';
-      if (Array.isArray(mistralMessage.tool_calls) && mistralMessage.tool_calls.length) {
-        res.locals.nativeToolCalls = mistralMessage.tool_calls;
-        res.locals.nativeAssistantMessage = { role: 'assistant', content: mistralMessage.content || '', tool_calls: mistralMessage.tool_calls };
-      }
-      if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
-    }
-
-    // ----- Moonshot AI (Kimi) -----
-    else if (model === 'kimi') {
-      if (!keys.moonshot) return res.json({ response: '[Kimi] Aucune cle API Moonshot configuree.' });
-
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of (nativeTools ? nativeHistory : history)) messages.push(h.role === 'assistant' && Array.isArray(h.tool_calls)
-        ? { role: 'assistant', content: h.content || '', tool_calls: h.tool_calls }
-        : h.role === 'tool'
-          ? { role: 'tool', tool_call_id: h.tool_call_id, content: h.content }
-          : { role: h.role, content: h.content });
-      if (message) messages.push({
-        role: 'user',
-        content: images.length
-          ? [{ type: 'text', text: message }, ...images.map((img) => ({ type: 'image_url', image_url: { url: `data:${img.mime};base64,${img.data}` } }))]
-          : message,
-      });
-
-      const data = await fetchJSON('https://api.moonshot.ai/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${keys.moonshot}` },
-        body: JSON.stringify(buildKimiPayload({
-          model: submodel || 'kimi-k3', messages, reasoningLevel,
-          tools: nativeTools ? TOOL_DEFINITIONS : undefined,
-        })),
-      });
-      const kimi = parseKimiResponse(data);
-      responseText = kimi.content;
-      thinkingText = kimi.thinking;
-      if (Array.isArray(kimi.toolCalls) && kimi.toolCalls.length) {
-        res.locals.nativeToolCalls = kimi.toolCalls;
-        res.locals.nativeAssistantMessage = { role: 'assistant', content: kimi.content || '', tool_calls: kimi.toolCalls };
-      }
-      if (kimi.usage) usage = kimi.usage;
-    }
-
-    // ----- Ollama (Local) -----
-    else if (model === 'local') {
-      const messages = [];
-      if (systemPrompt) {
-        messages.push({ role: 'system', content: systemPrompt });
-      }
-      for (const h of history) {
-        messages.push({ role: h.role, content: h.content });
-      }
-      messages.push({
-        role: 'user',
-        content: message,
-        ...(images.length ? { images: images.map((img) => img.data) } : {})
-      });
-
-      // Use the chosen sub-model if provided, else the configured default model.
-      const olModel = submodel || ollamaModel;
-
-      // Estimate total tokens to pick an appropriate num_ctx.
-      // Rough estimate: 1 token = ~4 chars.
-      const totalChars = messages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
-      const estimatedTokens = Math.ceil(totalChars / 4);
-      // Pick num_ctx from fixed BUCKETS rather than a value that changes on every
-      // message. Ollama keeps the model loaded (keep_alive) only while the
-      // options stay identical — a num_ctx that varies each turn forces it to
-      // evict and reload the model on every request (long freezes / apparent
-      // hangs). Buckets keep it stable across turns while still growing for big
-      // prompts, which is the single biggest reliability win for local models.
-      const needed = estimatedTokens + 2048; // reserve room for the answer
-      const numCtx = [8192, 16384, 32768].find((b) => b >= needed) || 32768;
-      // num_predict: leave room but don't exceed what the context allows.
-      const numPredict = Math.min(8192, Math.max(512, numCtx - estimatedTokens));
-
-      const ollamaBody = {
-        model: olModel,
-        messages,
-        stream: false,
-        options: { num_ctx: numCtx, num_predict: Math.max(512, numPredict) },
-        keep_alive: '10m'
-      };
-
-      // Abort if Ollama takes longer than 5 minutes.
-      const ollamaAC = new AbortController();
-      const ollamaTimeout = setTimeout(() => ollamaAC.abort(), 300000);
-      try {
-        const data = await fetchJSON(`${ollamaUrl}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(ollamaBody),
-          signal: ollamaAC.signal,
-        });
-        clearTimeout(ollamaTimeout);
-
-        responseText = data.message?.content || '';
-
-        // deepseek-r1 etc. embed reasoning inside <think>...</think>.
-        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
-        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
-
-        // Strip system prompt echo — some models regurgitate the instructions.
-        // Detect and remove if the response starts with a large chunk of the system prompt.
-        if (systemPrompt && responseText.length > 0) {
-          const sysNorm = systemPrompt.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
-          const resNorm = responseText.replace(/\s+/g, ' ').slice(0, 200).toLowerCase();
-          if (resNorm.startsWith(sysNorm.slice(0, 80))) {
-            // Find where the echo ends and keep only the original content.
-            const idx = responseText.toLowerCase().indexOf(message.slice(0, 40).toLowerCase());
-            if (idx > 0) {
-              responseText = responseText.slice(idx + message.slice(0, 40).length).trim();
-            } else {
-              // Brute-force: strip up to the first real paragraph that doesn't match the prompt.
-              const lines = responseText.split('\n');
-              let cut = 0;
-              for (let i = 0; i < lines.length && i < 30; i++) {
-                if (systemPrompt.includes(lines[i].trim()) && lines[i].trim().length > 10) cut = i + 1;
-                else break;
-              }
-              if (cut > 0) responseText = lines.slice(cut).join('\n').trim();
-            }
-          }
-        }
-
-        if (data.prompt_eval_count !== undefined) usage = { input: data.prompt_eval_count, output: data.eval_count };
-      } catch (ollamaErr) {
-        clearTimeout(ollamaTimeout);
-        if (ollamaErr.name === 'AbortError') {
-          throw new Error('Ollama: délai d\'attente dépassé (5 min). Le modèle est peut-être trop lent ou bloqué.');
-        }
-        const msg = String((ollamaErr && ollamaErr.message) || ollamaErr);
-        if (/ECONNREFUSED|fetch failed|ENOTFOUND|ECONNRESET|network|socket hang/i.test(msg)) {
-          throw new Error("Ollama est introuvable ou arrêté. Vérifie qu'Ollama tourne (l'app tente de le démarrer automatiquement au lancement).");
-        }
-        if (/not found|try pulling|no such model/i.test(msg)) {
-          throw new Error(`Modèle « ${olModel} » introuvable dans Ollama. Installe-le d'abord depuis le catalogue de modèles.`);
-        }
-        throw new Error('Ollama: ' + msg);
-      }
-    }
-
-    // ----- GGUF (local, llama.cpp engine — no Ollama) -----
-    else if (model === 'gguf') {
-      const ggufFile = submodel;
-      if (!ggufFile) throw new Error('Aucun modèle GGUF sélectionné.');
-      try {
-        await ensureEngine(ggufFile, config?.ggufVariant, { ctx: config?.ggufCtx, gpuLayers: config?.ggufGpuLayers });
-      } catch (e) {
-        throw new Error('Moteur GGUF : ' + (e.message || e));
-      }
-
-      const messages = [];
-      if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
-      for (const h of history) messages.push({ role: h.role, content: h.content });
-      messages.push({ role: 'user', content: message });
-
-      const ggufAC = new AbortController();
-      const ggufTimeout = setTimeout(() => ggufAC.abort(), 300000);
-      try {
-        const data = await fetchJSON(`http://127.0.0.1:${ENGINE_PORT}/v1/chat/completions`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: 'local', messages, stream: false, temperature: 0.7, max_tokens: 2048 }),
-          signal: ggufAC.signal,
-        });
-        clearTimeout(ggufTimeout);
-        responseText = data.choices?.[0]?.message?.content || '';
-        const tm = responseText.match(/<think>([\s\S]*?)<\/think>/i);
-        if (tm) { thinkingText = tm[1].trim(); responseText = responseText.replace(/<think>[\s\S]*?<\/think>/i, '').trim(); }
-        if (data.usage) usage = { input: data.usage.prompt_tokens, output: data.usage.completion_tokens };
-      } catch (ggufErr) {
-        clearTimeout(ggufTimeout);
-        if (ggufErr.name === 'AbortError') throw new Error('Moteur GGUF : délai dépassé (5 min). Modèle trop lent ?');
-        throw new Error('Moteur GGUF : ' + (ggufErr.message || ggufErr));
-      }
-    }
-
-    // ----- Unknown model -----
-    else {
-      return res.status(400).json({ error: `Unknown model: ${model}` });
-    }
-
-    // Final safety net: strip any response that begins with the anti-leak marker
-    // or echoes the system instructions (applies to ALL providers).
-    if (systemPrompt && responseText) {
-      const markers = ['[REGLE ABSOLUE]', '[ABSOLUTE RULE]', 'Tu es un agent de code', 'You are a coding agent', 'Tu es un assistant de code', 'You are a coding assistant'];
-      for (const mk of markers) {
-        if (responseText.startsWith(mk)) {
-          // Find where the actual answer starts (after the echoed prompt).
-          const newlineIdx = responseText.indexOf('\n\n', mk.length);
-          if (newlineIdx > 0) {
-            responseText = responseText.slice(newlineIdx + 2).trim();
-          }
-          break;
-        }
-      }
-    }
-
-    res.json({ response: responseText, thinking: thinkingText || undefined, usage: usage || undefined, nativeToolCalls: res.locals.nativeToolCalls, nativeAssistantMessage: res.locals.nativeAssistantMessage });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
+// Image generation is intentionally separate from the conversational core:
+// xAI's image endpoint has no agent/tool loop to migrate.
+app.post('/api/chat', async (req, res) => {
+  const body = req.body || {};
+  const isImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
+  if (!isImage) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
+  try {
+    const key = userApiKeys(req.user).grok || (body.config && body.config.keys && body.config.keys.grok);
+    if (!key) return res.json({ response: '[Grok] Aucune cle API configuree.' });
+    const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ prompt: String(body.message || ''), model: body.submodel, n: 1, response_format: 'b64_json' }),
+    });
+    const b64 = data.data && data.data[0] && data.data[0].b64_json;
+    if (!b64) return res.json({ response: "Erreur: Aucune image n'a ete generee par l'API." });
+    const title = String(body.message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
+    return res.json({ response: `![${title}](data:image/png;base64,${b64})` });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
   }
 });
 
@@ -2879,6 +2550,8 @@ let cfUrl = null;         // https://xxx.trycloudflare.com (null when down)
 let cfStartedAt = 0;
 let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
 let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
+let tunnelProxy = null;
+let tunnelProxyPort = 0;
 
 function cloudflaredPath() {
   const candidates = [
@@ -2913,25 +2586,68 @@ function mobileUser(req) {
 }
 // Endpoints an internet-facing mobile session may call. Everything else
 // (files, exec, grep, glob, gitdiff, tunnel start, profile…) stays desktop-only.
-function mobileAllowed(p) {
-  return /^\/(chat|chats|recent-projects|ollama-models|gguf-models|keys)(\/|$|\?|$)/.test(p)
-      || p === '/remote/stop' || p === '/remote/status';
+function ensureTunnelProxy() {
+  if (tunnelProxy && tunnelProxyPort) return Promise.resolve(tunnelProxyPort);
+  return new Promise((resolve, reject) => {
+    const proxy = http.createServer((incoming, outgoing) => {
+      let parsed;
+      try { parsed = new URL(incoming.url || '/', 'http://tunnel.invalid'); }
+      catch { outgoing.writeHead(400).end(); return; }
+      if (!tunnelRouteAllowed(incoming.method, parsed.pathname)) {
+        outgoing.writeHead(403, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify({ error: 'Action indisponible via le tunnel.' }));
+        return;
+      }
+      const headers = {
+        ...incoming.headers,
+        host: `127.0.0.1:${PORT}`,
+        [TUNNEL_HEADER]: TUNNEL_ORIGIN_TOKEN,
+      };
+      delete headers.connection;
+      const upstream = http.request({
+        host: '127.0.0.1', port: PORT, method: incoming.method,
+        path: incoming.url, headers,
+      }, (response) => {
+        outgoing.writeHead(response.statusCode || 502, response.headers);
+        response.pipe(outgoing);
+      });
+      upstream.on('error', () => {
+        if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify({ error: 'Tunnel local indisponible.' }));
+      });
+      incoming.pipe(upstream);
+    });
+    proxy.once('error', reject);
+    proxy.listen(0, '127.0.0.1', () => {
+      const address = proxy.address();
+      if (!address || typeof address === 'string') {
+        proxy.close();
+        reject(new Error('Port proxy tunnel invalide.'));
+        return;
+      }
+      tunnelProxy = proxy;
+      tunnelProxyPort = address.port;
+      resolve(tunnelProxyPort);
+    });
+  });
 }
 
 function stopTunnel() {
   mobileEpoch++;                       // every paired phone is now logged out
   if (cfProc) { try { cfProc.kill(); } catch {} }
+  if (tunnelProxy) { try { tunnelProxy.close(); } catch {} }
+  tunnelProxy = null; tunnelProxyPort = 0;
   cfProc = null; cfUrl = null; cfStartedAt = 0; cfStarting = null;
 }
 
 function startTunnel() {
   if (cfUrl) return Promise.resolve(cfUrl);
   if (cfStarting) return cfStarting;
-  cfStarting = new Promise((resolve, reject) => {
+  cfStarting = ensureTunnelProxy().then((proxyPort) => new Promise((resolve, reject) => {
     let settled = false, proc;
     try {
       proc = spawn(cloudflaredPath(),
-        ['tunnel', '--no-autoupdate', '--url', `http://localhost:${PORT}`],
+        ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${proxyPort}`],
         { windowsHide: true });
     } catch (e) { cfStarting = null; return reject(e); }
     cfProc = proc;
@@ -2949,7 +2665,7 @@ function startTunnel() {
     setTimeout(() => {
       if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
     }, 30000);
-  });
+  }));
   return cfStarting;
 }
 

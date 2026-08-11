@@ -1,14 +1,16 @@
 {
   "name": "connexion-ide",
   "version": "1.0.14",
-  "description": "This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).",
+  "description": "Local Zaalis IDE with an Express server, CLI, and native Windows shell.",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
+    "test": "node --test \"test/*.test.js\"",
     "check:mojibake": "node scripts/check-mojibake.js",
     "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
-    "build:cli": "npm run check:mojibake && pkg cli.js --targets node22-win-x64 --output native/dist/zaalis-cli.exe"
+    "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
+    "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1"
   },
   "pkg": {
     "assets": [
@@ -26,7 +28,7 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@yao-pkg/pkg": "^6.21.0",
+    "@yao-pkg/pkg": "^6.22.0",
     "node-pty": "^1.1.0"
   }
 }

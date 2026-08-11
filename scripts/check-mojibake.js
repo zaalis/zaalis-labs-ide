@@ -3,7 +3,8 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const TARGETS = [
-  'agent-engine.js',
+  'rust-agent-bridge.js',
+  'rust',
   'cli.js',
   'server.js',
   'README.md',
@@ -18,8 +19,8 @@ const TARGETS = [
   path.join('native', 'build_shell.bat'),
 ];
 
-const TEXT_EXTS = new Set(['.js', '.html', '.css', '.md', '.json', '.cpp', '.h', '.hpp', '.iss', '.bat', '.rc', '.txt']);
-const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'packages', 'installer']);
+const TEXT_EXTS = new Set(['.js', '.rs', '.toml', '.html', '.css', '.md', '.json', '.cpp', '.h', '.hpp', '.iss', '.bat', '.ps1', '.rc', '.txt']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', 'dist', 'target', 'packages', 'installer']);
 
 // "\u00e2" (U+00E2) followed by ANY char windows-1252 maps a 0x80-0xBF byte to
 // (C1 controls, smart punctuation, tildes\u2026) \u2014 this catches double-encoded
