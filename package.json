@@ -1,21 +1,21 @@
 {
   "name": "connexion-ide",
   "version": "1.0.14",
-  "description": "This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).",
+  "description": "Local Zaalis IDE with an Express server, CLI, and native Linux shell (Electron).",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test \"test/*.test.js\"",
     "check:mojibake": "node scripts/check-mojibake.js",
-    "build:server": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/zaalis-server",
-    "build:cli": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-linux-x64 --output native/dist-linux/bin/zaalis",
-    "build:linux": "native/build_linux.bat"
+    "build:server": "npm run check:mojibake && pkg . --targets node22-linux-x64 --no-bytecode --public --public-packages \"*\" --output native/dist-linux-server/zaalis-server",
+    "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && sh scripts/stage-rust-binaries.sh",
+    "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper && sh scripts/stage-rust-binaries.sh",
+    "build:linux": "sh native/build_linux.sh"
   },
   "pkg": {
     "assets": [
-      "interface/**/*",
-      "node_modules/node-pty/build/Release/*"
+      "interface/**/*"
     ]
   },
   "keywords": [],
@@ -26,13 +26,13 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "node-pty": "^1.0.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.1",
-    "@yao-pkg/pkg": "^6.21.0",
+    "@yao-pkg/pkg": "^6.22.0",
     "electron": "^42.5.0",
+    "node-pty": "^1.1.0",
     "png2icons": "^2.0.1"
   }
 }

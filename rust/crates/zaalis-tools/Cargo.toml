@@ -1,0 +1,28 @@
+[package]
+name = "zaalis-tools"
+description = "Typed, permission-gated universal tool runtime for zaalis agents."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+zaalis-fs = { workspace = true }
+zaalis-guard = { workspace = true }
+zaalis-git = { workspace = true }
+zaalis-exec = { workspace = true }
+zaalis-checkpoint = { workspace = true }
+zaalis-protocol = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio-util = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true

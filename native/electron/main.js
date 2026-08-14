@@ -125,6 +125,13 @@ async function startServer(port, reuseExisting) {
   const logs = logDir();
   const out = fs.openSync(path.join(logs, 'zaalis-server.out.log'), 'a');
   const err = fs.openSync(path.join(logs, 'zaalis-server.err.log'), 'a');
+  // Le coeur Rust est livre dans le bundle, a cote de zaalis-server. Le shell
+  // pose ici son propre PID : /api/app/close s'en sert pour fermer la fenetre
+  // avant d'arreter le serveur (equivalent du taskkill de l'edition Windows).
+  const agentdPath = path.join(BUNDLE_DIR, 'zaalis-agentd');
+  try { fs.chmodSync(agentdPath, 0o755); } catch {}
+  try { fs.chmodSync(path.join(BUNDLE_DIR, 'zaalis-sandbox'), 0o755); } catch {}
+
   serverProcess = spawn(SERVER_PATH, [], {
     cwd: BUNDLE_DIR,
     env: {
@@ -132,6 +139,8 @@ async function startServer(port, reuseExisting) {
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
+      ZAALIS_SHELL_PID: String(process.pid),
+      ...(fs.existsSync(agentdPath) ? { ZAALIS_AGENTD_PATH: agentdPath } : {}),
     },
     stdio: ['ignore', out, err],
     detached: false,

@@ -37,7 +37,8 @@ EOF
 cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/usr/bin/env sh
 set -e
-chmod +x /opt/zaalis-ide/zaalis-ide /opt/zaalis-ide/chrome_crashpad_handler /opt/zaalis-ide/resources/app/bundle/zaalis-server /opt/zaalis-ide/resources/app/bundle/bin/zaalis /usr/local/bin/zaalis 2>/dev/null || true
+chmod +x /opt/zaalis-ide/zaalis-ide /opt/zaalis-ide/chrome_crashpad_handler /opt/zaalis-ide/resources/app/bundle/zaalis-server /opt/zaalis-ide/resources/app/bundle/bin/zaalis /opt/zaalis-ide/resources/app/bundle/zaalis-agentd /usr/local/bin/zaalis 2>/dev/null || true
+chmod +x /opt/zaalis-ide/resources/app/bundle/zaalis-sandbox 2>/dev/null || true
 if [ -f /opt/zaalis-ide/chrome-sandbox ]; then
   chmod 4755 /opt/zaalis-ide/chrome-sandbox 2>/dev/null || true
 fi
@@ -77,7 +78,12 @@ chmod 755 "$PKG/DEBIAN/postinst" \
   "$PKG/usr/local/bin/zaalis-ide" \
   "$PKG/opt/zaalis-ide/zaalis-ide" \
   "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-server" \
-  "$PKG/opt/zaalis-ide/resources/app/bundle/bin/zaalis"
+  "$PKG/opt/zaalis-ide/resources/app/bundle/bin/zaalis" \
+  "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-agentd"
+# Bac a sable strict : optionnel, absent d'une build faite sans cargo.
+if [ -f "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-sandbox" ]; then
+  chmod 755 "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-sandbox"
+fi
 if [ -f "$PKG/opt/zaalis-ide/chrome_crashpad_handler" ]; then
   chmod 755 "$PKG/opt/zaalis-ide/chrome_crashpad_handler"
 fi

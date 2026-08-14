@@ -37,46 +37,32 @@ const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 // one file per working directory, like Claude Code's per-project sessions.
 const SESSIONS_DIR = path.join(CFG_DIR, 'sessions');
 
-// When packaged, this CLI lives in {app}/bin while the other binaries
-// (zaalis-server, zaalis-ide.command) sit in {app} - i.e. the PARENT folder.
+// When packaged, this CLI lives in {app}/bin/ while the other binaries
+// (zaalis-server, zaalis) sit in {app}/ — i.e. the PARENT folder.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
-const IS_WIN = process.platform === 'win32';
 
 // Locate a sibling binary, looking in this folder then its parent (so the CLI
-// in {app}/bin finds zaalis-server / zaalis-ide.command in {app}). Returns the
-// first existing path, or null.
-function findBinary(names) {
-  const list = Array.isArray(names) ? names : [names];
-  for (const name of list) {
-    const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
-    for (const p of candidates) {
-      try { if (fs.existsSync(p)) return p; } catch {}
-    }
+// in {app}/bin finds zaalis-server / zaalis in {app}). Returns the first
+// existing path, or null.
+function findBinary(name) {
+  const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
   }
   return null;
 }
 
-function spawnDetached(file, args = [], options = {}) {
-  const isShellScript = process.platform !== 'win32' && /\.(command|sh)$/i.test(file);
-  const command = isShellScript ? '/bin/sh' : file;
-  const finalArgs = isShellScript ? [file, ...args] : args;
-  const child = spawn(command, finalArgs, { detached: true, stdio: 'ignore', ...options });
-  child.unref();
-  return child;
-}
-
 // ---------------------------------------------------------------------------
-// Colors (ANSI 256, with a NO_COLOR / non-TTY fallback)
+// Colors (truecolor ANSI, with a NO_COLOR / non-TTY fallback)
 // ---------------------------------------------------------------------------
-const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
-const FG = (code) => (s) => (COLOR ? `\x1b[38;5;${code}m${s}\x1b[39m` : String(s));
-const brand = FG(99);   // zaalis purple, ANSI-256 for better macOS Terminal compatibility.
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const RGB = (r, g, b) => (s) => (COLOR ? `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m` : String(s));
+const brand = RGB(99, 102, 241);   // zaalis purple — matches IDE --accent #6366f1
 const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : String(s));
 const bold = (s) => (COLOR ? `\x1b[1m${s}\x1b[0m` : String(s));
-const green = FG(107);
-const yellow = FG(179);
-const gray = FG(246);
-const red = FG(203);
+const green = RGB(126, 200, 120);
+const yellow = RGB(220, 180, 90);
+const gray = RGB(150, 150, 150);
 
 // Visible length, ignoring ANSI escapes — needed to pad inside the box.
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
@@ -99,7 +85,7 @@ function clipText(s, width) {
 const mdBold  = (s) => (COLOR ? `\x1b[1m${s}\x1b[22m` : String(s));
 const mdItal  = (s) => (COLOR ? `\x1b[3m${s}\x1b[23m` : String(s));
 const mdUnder = (s) => (COLOR ? `\x1b[4m${s}\x1b[24m` : String(s));
-const mdCode  = (s) => (COLOR ? `\x1b[38;5;179m${s}\x1b[39m` : String(s));
+const mdCode  = (s) => (COLOR ? `\x1b[38;2;220;180;90m${s}\x1b[39m` : String(s));
 
 function mdInline(s) {
   s = String(s);
@@ -354,11 +340,11 @@ async function ensureServer({ quiet } = {}) {
   if (await ping()) return true;
   if (!quiet) process.stderr.write(dim('Démarrage du serveur zaalis…\n'));
 
-  const serverExe = findBinary(IS_WIN ? 'zaalis-server.exe' : 'zaalis-server');
+  const serverExe = findBinary('zaalis-server');
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
-    child = spawnDetached(serverExe, [], { cwd: path.dirname(serverExe) });
+    child = spawn(serverExe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(serverExe) });
   } else {
     // Dev: run the Node source directly. (cwd must be a real folder, not the
     // pkg virtual snapshot — hence __dirname only matters when not packaged.)
@@ -366,7 +352,7 @@ async function ensureServer({ quiet } = {}) {
       detached: true, stdio: 'ignore', cwd: __dirname,
     });
   }
-  if (child && child.unref) child.unref();
+  child.unref();
 
   for (let i = 0; i < 60; i++) {            // up to ~15s
     await new Promise((r) => setTimeout(r, 250));
@@ -436,12 +422,8 @@ const SUBMODELS = {
   gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
   grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
   mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+  kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
 };
-if (Object.prototype.hasOwnProperty.call(SUBMODELS, session.model)
-    && !SUBMODELS[session.model].includes(session.submodel)) {
-  session.submodel = SUBMODELS[session.model][0];
-  saveSession(session);
-}
 const MODEL_LABELS = {
   'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
   'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
@@ -457,6 +439,8 @@ const MODEL_LABELS = {
   'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
   'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
   'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
+  'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
+  'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6',
 };
 function modelLabel(id) { return MODEL_LABELS[id] || id; }
 
@@ -466,6 +450,7 @@ const CLOUD = [
   { id: 'gemini',  label: 'Gemini',       keyName: 'google',    submodel: SUBMODELS.gemini[0] },
   { id: 'grok',    label: 'Grok',         keyName: 'grok',      submodel: SUBMODELS.grok[0] },
   { id: 'mistral', label: 'Mistral',      keyName: 'mistral',   submodel: SUBMODELS.mistral[0] },
+  { id: 'kimi',    label: 'Kimi (Moonshot AI)', keyName: 'moonshot', submodel: SUBMODELS.kimi[0] },
 ];
 
 async function gatherModels() {
@@ -682,12 +667,12 @@ src/app.js
 package.json
 \`\`\`
 
-4) Exécuter une commande Linux via le shell POSIX (/bin/sh):
+4) Executer une commande shell Linux (/bin/sh):
 \`\`\`run
 npm test
 \`\`\`
 
-Règles: lis un fichier avant de modifier une zone que tu ne connais pas; préfère edit à une réécriture complète; utilise les commandes Linux et des chemins relatifs avec des slashs; ne montre pas l'arborescence complète sauf si l'utilisateur la demande.`;
+Regles: lis un fichier avant de modifier une zone que tu ne connais pas; prefere edit a une reecriture complete; chemins relatifs avec slashs avant; ne montre pas l'arborescence complete sauf si l'utilisateur la demande.`;
   return short ? base.replace(/\n\n+/g, '\n\n') : base;
 }
 
@@ -960,91 +945,6 @@ async function applyTools(response, events) {
   return editErrors;
 }
 
-// Rejoue les actions bloquees par le serveur en mode supervise/semi apres
-// validation explicite de l'utilisateur (parite IDE / Claude Code). Chaque
-// tool_done bloque porte son input complet (path/hunks/content/command/image).
-async function applyBlockedAgentTools(tools) {
-  const perm = currentPermission().id;
-  if (perm === 'plan') return;
-  const blocked = (Array.isArray(tools) ? tools : [])
-    .filter((t) => t && t.blocked && ['write', 'edit', 'run', 'image_download'].includes(t.tool) && t.input);
-  for (const t of blocked) {
-    const input = t.input || {};
-    if (t.tool === 'image_download') {
-      const id = String(input.id || '').trim();
-      const target = String(input.path || '').trim();
-      if (!id || !target) continue;
-      if (!(await confirmAction(`Telecharger une image dans ${target}`, `Resultat: ${id}\nDestination: ${target}`))) {
-        console.log(dim(`  ⊘ Telechargement image refuse: ${target}`));
-        continue;
-      }
-      try {
-        const result = await apiPost('/api/agent-image-download', { root: projectRoot(), id, path: target });
-        console.log(dim(`  ✓ Image telechargee: ${result.path || target}${result.attributionPath ? `\n    Attribution: ${result.attributionPath}` : ''}`));
-      } catch (e) {
-        console.log(red(`  ✗ Telechargement image echoue: ${target} (${e.message})`));
-      }
-      continue;
-    }
-    if (t.tool === 'run') {
-      const cmd = String(input.command || '').trim();
-      if (!cmd) continue;
-      const dangerous = isDangerousCommand(cmd);
-      if (!(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
-        console.log(dim(`  ⊘ Commande refusee: ${cmd}`));
-        continue;
-      }
-      try {
-        const out = await apiPost('/api/exec', { command: cmd, cwd: projectRoot() });
-        const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
-        console.log(dim(`  ✓ Commande executee: ${cmd}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
-      } catch (e) {
-        console.log(red(`  ✗ Commande echouee: ${cmd} (${e.message})`));
-      }
-      continue;
-    }
-    const rel = String(input.path || '');
-    if (!rel) continue;
-    let content;
-    if (t.tool === 'write') {
-      content = String(input.content || '');
-      if (!(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
-        console.log(dim(`  ⊘ Ecriture refusee: ${rel}`));
-        continue;
-      }
-    } else {
-      let current = '';
-      try {
-        const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=${encodeURIComponent(rel)}`);
-        current = d.content || '';
-      } catch (e) {
-        console.log(red(`  ✗ Edition echouee: ${rel} (${e.message})`));
-        continue;
-      }
-      let next = current;
-      let failed = null;
-      for (const h of (input.hunks || [])) {
-        const r = applyOneHunk(next, h.search || '', h.replace || '');
-        if (!r.ok) { failed = r.error; break; }
-        next = r.content;
-      }
-      if (failed) { console.log(red(`  ✗ Edition echouee: ${rel} (${failed})`)); continue; }
-      if (next === current) continue;
-      if (!(await confirmAction(`Modifier ${rel}`, (input.hunks || []).map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
-        console.log(dim(`  ⊘ Modification refusee: ${rel}`));
-        continue;
-      }
-      content = next;
-    }
-    try {
-      await apiPost('/api/file', { root: projectRoot(), path: rel, content });
-      console.log(dim(`  ✓ Fichier ${t.tool === 'write' ? 'ecrit' : 'modifie'}: ${rel}`));
-    } catch (e) {
-      console.log(red(`  ✗ Ecriture echouee: ${rel} (${e.message})`));
-    }
-  }
-}
-
 async function callChat(message, systemPrompt, hist) {
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
@@ -1052,7 +952,7 @@ async function callChat(message, systemPrompt, hist) {
     submodel: session.submodel || undefined,
     message,
     systemPrompt,
-    config: { ...runtimeConfig, toolPermissions: session.toolPermissions || { allow: [], deny: [] } },
+    config: runtimeConfig,
     history: (hist || history).slice(-20),
     reasoningLevel: currentEffort().level,
   };
@@ -1104,7 +1004,7 @@ async function resolveReadRequests(response, systemPrompt, events, hooks, depth 
 function agentToolLabel(event) {
   const tool = event.tool || 'outil';
   const input = event.input || {};
-  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || input.url || '';
+  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || '';
   return hint ? `${tool} ${String(hint).replace(/\n/g, ' ').slice(0, 60)}` : tool;
 }
 
@@ -1127,11 +1027,10 @@ function describeAgentEvent(event) {
     case 'tool_started':
       return { status: agentToolLabel(event) };
     case 'tool_done': {
-      // No per-tool line here: the REPL loop accumulates tool_done events and
-      // prints one compact summary at the end of the turn (see renderToolSummary).
-      // `/show` then dumps the full outputs of the last batch on demand.
       const name = agentToolLabel(event);
-      return { status: name };
+      const mark = event.error ? brand('✗') : (event.blocked ? dim('⊘') : brand('✓'));
+      const summary = String(event.summary || name).replace(/\n/g, ' ');
+      return { line: '  ' + mark + dim(' ' + summary), status: name };
     }
     default:
       return {};
@@ -1157,7 +1056,6 @@ async function sendChat(message, hooks = {}) {
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
     stream: true,
-    useBrain: !!session.useBrain,
   };
   const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
@@ -1190,39 +1088,22 @@ async function sendChat(message, hooks = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Effort / reasoning — model-specific because each official API exposes a
-// different set of levels (and some reasoning models cannot turn it off).
+// Effort / reasoning — mirrors the IDE's REASONING_MODES per model family.
+// `level` is the index sent to the server (0 = off, higher = more thinking).
 // ---------------------------------------------------------------------------
-function effortLevels(labels) { return labels.map((label, level) => ({ label, level })); }
-function effortListFor(modelId, submodel = session.submodel || '') {
-  const s = String(submodel).toLowerCase();
-  if (modelId === 'codex') {
-    if (s.startsWith('gpt-5.6')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (/^gpt-5\.(5|4|2)/.test(s)) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH']);
-    if (s.startsWith('gpt-5.1')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-    if (/^(o1|o3-mini)/.test(s)) return effortLevels(['LOW', 'MED', 'HIGH']);
-  }
-  if (modelId === 'claude') {
-    if (s === 'claude-fable-5') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (s === 'claude-opus-4-8' || s === 'claude-sonnet-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (s === 'claude-haiku-4-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'MAX']);
-  }
-  if (modelId === 'gemini') {
-    if (s === 'gemini-3.1-pro-preview' || s === 'gemini-2.5-pro') return effortLevels(['LOW', 'MED', 'HIGH']);
-    if (s.startsWith('gemini-3')) return effortLevels(['MIN', 'LOW', 'MED', 'HIGH']);
-    if (s.startsWith('gemini-2.5')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-  }
-  if (modelId === 'grok') {
-    if (s === 'grok-4.5') return effortLevels(['LOW', 'MED', 'HIGH']);
-    if (s === 'grok-4.3') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-    if (s === 'grok-4.20-multi-agent-0309') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH']);
-  }
-  if (modelId === 'mistral' && (s === 'mistral-medium-3-5' || s === 'mistral-small-latest')) return effortLevels(['OFF', 'HIGH']);
-  if (modelId === 'local' || modelId === 'gguf') return effortLevels(['OFF', 'MED', 'MAX']);
-  return effortLevels(['OFF']);
-}
+const EFFORT = {
+  claude:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }, { label: 'MAX', level: 4 }],
+  gemini:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
+  grok:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
+  codex:   [{ label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }],
+  mistral: [{ label: 'OFF', level: 0 }, { label: 'ON', level: 1 }],
+  kimi:    [{ label: 'LOW', level: 0 }, { label: 'HIGH', level: 1 }, { label: 'MAX', level: 2 }],
+  local:   [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
+  gguf:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
+};
+function effortListFor(modelId) { return EFFORT[modelId] || EFFORT.local; }
 function currentEffort() {
-  const list = effortListFor(session.model || 'claude', session.submodel);
+  const list = effortListFor(session.model || 'claude');
   return list.find((e) => e.level === session.reasoningLevel)
     || list.find((e) => e.label === 'MED') || list[Math.floor(list.length / 2)] || list[0];
 }
@@ -1409,13 +1290,12 @@ const SLASH = [
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
-  { name: 'show', category: 'misc', desc: 'afficher les sorties des derniers outils' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
   { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
   { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
   { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
-  { name: 'mcp', category: 'mode', desc: 'activer Zaalis Brain MCP', usage: '[on|off|status]' },
+  { name: 'mcp', category: 'soon', desc: 'serveurs MCP', stub: true },
   { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
   { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
   { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
@@ -1426,51 +1306,6 @@ const SLASH = [
 
 // Last reasoning text from the model, kept folded — `/think` expands it.
 let lastThinking = '';
-
-// Tool events from the last agent turn. The REPL prints a compact one-line
-// summary at the end of every turn (renderToolSummary); `/show` reveals the
-// full outputs of each tool from this batch.
-let lastToolBatch = [];
-let lastToolBatchElapsedMs = 0;
-
-// Compact one-line recap of every tool the agent ran during a turn.
-// Success:  › analyse • 5 commandes, 1 lecture (2.1s) · /show pour le détail
-// Failure:  › analyse • 4 commandes (1.4s) — 1 échec: run npm test   (red)
-function renderToolSummary(tools, elapsedMs) {
-  const list = Array.isArray(tools) ? tools.filter(Boolean) : [];
-  if (!list.length) return '';
-  const buckets = { run: 0, read: 0, look: 0, write: 0, task: 0, todo: 0, other: 0 };
-  const failed = [];
-  for (const t of list) {
-    const kind = String(t.tool || 'other').toLowerCase();
-    if (kind === 'run') buckets.run++;
-    else if (kind === 'read') buckets.read++;
-    else if (kind === 'glob' || kind === 'grep') buckets.look++;
-    else if (kind === 'edit' || kind === 'write') buckets.write++;
-    else if (kind === 'task') buckets.task++;
-    else if (kind === 'todo') buckets.todo++;
-    else buckets.other++;
-    if (t.error || t.blocked) failed.push(t);
-  }
-  const parts = [];
-  const push = (n, one, many) => { if (n) parts.push(`${n} ${n === 1 ? one : many}`); };
-  push(buckets.run, 'commande', 'commandes');
-  push(buckets.read + buckets.look, 'lecture', 'lectures');
-  push(buckets.write, 'écriture', 'écritures');
-  push(buckets.task, 'sous-agent', 'sous-agents');
-  push(buckets.todo, 'todo', 'todos');
-  push(buckets.other, 'action', 'actions');
-  const dur = elapsedMs > 0 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
-  const bullet = COLOR ? '›' : '>';
-  const body = `analyse • ${parts.join(', ')}${dur}`;
-  if (failed.length) {
-    const first = failed[0];
-    const cmd = agentToolLabel(first).replace(/\s+/g, ' ').slice(0, 50);
-    const suffix = ` — ${failed.length} ${failed.length === 1 ? 'échec' : 'échecs'}: ${cmd}`;
-    return red(`  ${bullet} ${body}${suffix}`) + '\n' + dim('    /show pour le détail');
-  }
-  return dim(`  ${bullet} ${body} · /show pour le détail`);
-}
 
 // Picker: choose source (provider or local model) → for a cloud provider,
 // choose the exact sub-model (Grok 4.3, Claude Opus 4.8, …) → choose the
@@ -1506,7 +1341,7 @@ async function rawPickModel() {
   }
 
   // Final step — reasoning effort for the chosen model
-  const list = effortListFor(model, submodel);
+  const list = effortListFor(model);
   const med = list.findIndex((e) => e.label === 'MED');
   const def = med >= 0 ? med : Math.floor(list.length / 2);
   const ei = await rawSelect({
@@ -1523,7 +1358,7 @@ async function rawPickModel() {
 
 // Arrow-key effort picker for the current model.
 async function pickEffort() {
-  const list = effortListFor(session.model || 'claude', session.submodel);
+  const list = effortListFor(session.model || 'claude');
   const items = list.map((e) => ({ label: e.label, level: e.level }));
   const cur = list.findIndex((e) => e.level === currentEffort().level);
   const idx = await rawSelect({
@@ -1685,23 +1520,6 @@ async function runSlashCommand(ev, me) {
     else console.log(dim('Aucune réflexion pour le dernier message.'));
     return;
   }
-  if (name === 'show') {
-    if (!lastToolBatch.length) { console.log(dim('Aucun outil pour le dernier message.')); return; }
-    console.log('');
-    for (const t of lastToolBatch) {
-      const failed = !!(t.error || t.blocked);
-      const label = agentToolLabel(t);
-      const mark = failed ? red('✗') : (t.blocked ? dim('⊘') : green('✓'));
-      console.log('  ' + mark + ' ' + bold(label));
-      const body = String(t.text || t.error || '').trim();
-      if (body) {
-        const capped = body.length > 4000 ? body.slice(0, 4000) + '\n… (tronqué)' : body;
-        console.log(dim(capped.split('\n').map((l) => '    ' + l).join('\n')));
-      }
-      console.log('');
-    }
-    return;
-  }
   if (name === 'clear') {
     history.length = 0; lastThinking = ''; transcript.length = 0; persistConversation();
     emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
@@ -1719,35 +1537,12 @@ async function runSlashCommand(ev, me) {
       ['permission', currentPermission().label],
       ['effort', currentEffort().label],
       ['style', session.responseStyle || 'normal'],
-      ['zaalis brain', session.useBrain ? 'actif' : 'inactif'],
       ['messages', String(history.length)],
     ]);
     return;
   }
   if (name === 'permissions') {
-    const ruleMatch = String(arg || '').trim().match(/^(allow|deny)\s+(.+)$/i);
-    if (ruleMatch) {
-      const bucket = ruleMatch[1].toLowerCase();
-      const rule = ruleMatch[2].trim();
-      if (!/^[A-Za-z]+(?:\([^\n()]+\))?$/.test(rule)) { console.log(brand('✗ ') + 'Règle invalide. Exemple : allow Bash(npm test:*)'); return; }
-      session.toolPermissions = session.toolPermissions || { allow: [], deny: [] };
-      const list = session.toolPermissions[bucket] || (session.toolPermissions[bucket] = []);
-      if (!list.includes(rule)) list.push(rule);
-      saveSession(session);
-      console.log(green('✓ ') + `${bucket} → ${rule}`);
-      return;
-    }
     const mode = arg.toLowerCase();
-    if (mode === 'rules' || mode === 'list') {
-      const rules = session.toolPermissions || { allow: [], deny: [] };
-      printRows('Règles outils', [['allow', (rules.allow || []).join(', ') || '—'], ['deny', (rules.deny || []).join(', ') || '—']]);
-      return;
-    }
-    if (mode === 'rules reset') {
-      session.toolPermissions = { allow: [], deny: [] }; saveSession(session);
-      console.log(green('✓ ') + 'Règles outils effacées.');
-      return;
-    }
     if (!mode) {
       printRows('Permissions', PERMISSIONS.map((p) => [p.id === currentPermission().id ? '-> ' + p.id : p.id, p.label]));
       return;
@@ -1760,27 +1555,6 @@ async function runSlashCommand(ev, me) {
   if (name === 'plan') {
     session.permissionMode = 'plan'; saveSession(session);
     console.log(green('✓ ') + 'Mode Plan active : lectures et propositions, sans modifications.');
-    return;
-  }
-  if (name === 'mcp') {
-    const mode = String(arg || '').trim().toLowerCase();
-    if (!mode || mode === 'status') {
-      try {
-        const r = await authed('GET', '/api/brain-mcp');
-        const d = r.json || {};
-        printRows('Zaalis Brain MCP', [['usage CLI', session.useBrain ? 'actif' : 'inactif'], ['route', d.endpoint || '—'], ['etat', d.detail || d.state || 'inconnu']]);
-      } catch { console.log(brand('✗ ') + 'Impossible de vérifier Zaalis Brain MCP.'); }
-      return;
-    }
-    if (mode !== 'on' && mode !== 'off') { console.log(dim('Usage: /mcp on | off | status')); return; }
-    if (mode === 'on') {
-      try {
-        const r = await authed('GET', '/api/brain-mcp'); const d = r.json || {};
-        if (r.status !== 200 || d.state !== 'connected' || !d.enabled) throw new Error(d.detail || 'MCP non connecté');
-      } catch (err) { console.log(brand('✗ ') + (err.message || 'Configurez Zaalis Brain dans Paramètres → MCP.')); return; }
-    }
-    session.useBrain = mode === 'on'; saveSession(session);
-    console.log(green('✓ ') + `Zaalis Brain MCP ${session.useBrain ? 'activé' : 'désactivé'} pour les prochains messages.`);
     return;
   }
   if (name === 'fast' || name === 'deep') {
@@ -2383,7 +2157,7 @@ function nextInput(opts = {}) {
       const menu = menuMatches();
       if (key.ctrl && key.name === 'c') return finish({ kind: 'exit' });
       // Shift+Tab cycles the AI permission level, live (no Enter to validate).
-      // (Alt+Tab can't be used — the desktop environment captures it for app switching.)
+      // (Alt+Tab can't be used — Windows captures it for app switching.)
       if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
       if (key.name === 'return' || key.name === 'enter') {
         // With the suggestion menu open, Enter only accepts the highlighted
@@ -2543,20 +2317,15 @@ async function repl(opts = {}) {
     followTail = true; scrollOffset = 0;
     emit('\n');
     let stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)');
-    // Accumulate completed tool events for the compact end-of-turn summary
-    // (and for `/show`, which dumps their full outputs on demand).
-    const roundTools = [];
-    const roundStart = Date.now();
     const hooks = {
       stop: () => { if (stopWait) { stopWait(); stopWait = null; } },
       start: () => { if (!stopWait) stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)'); },
-      // Live agent events: assistant notes stay inline (they're the model
-      // thinking aloud), tool completions are silent until the recap.
+      // Live agent events: completed tools/notes are logged permanently, the
+      // current activity drives the spinner label.
       onEvent: (event) => {
         const d = describeAgentEvent(event);
         if (d.line) emit(d.line);
         if (d.status && stopWait && stopWait.setLabel) stopWait.setLabel(d.status);
-        if (event && event.type === 'tool_done') roundTools.push(event);
       },
     };
     // Keep the prompt active while the AI is answering: Enter queues one next
@@ -2585,17 +2354,6 @@ async function repl(opts = {}) {
       if (!res.streamed && res.events && res.events.length) {
         for (const ev of res.events) console.log(dim('  ▸ ' + ev.replace(/\n/g, '\n    ')));
       }
-      // Compact recap of the tools this turn used — one line by default,
-      // `/show` prints the details. Failure lines are tinted red.
-      lastToolBatch = roundTools;
-      lastToolBatchElapsedMs = Date.now() - roundStart;
-      if (roundTools.length) {
-        const recap = renderToolSummary(roundTools, lastToolBatchElapsedMs);
-        if (recap) emit(recap);
-      }
-      // Actions bloquees par le serveur (supervise/semi) : demander la
-      // permission puis les appliquer, comme Claude Code.
-      try { await applyBlockedAgentTools(roundTools); } catch {}
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
     }
@@ -2726,47 +2484,18 @@ async function main() {
   }
 
   if (cmd === 'ide') {
-    const self = process.execPath.toLowerCase();
-    if (IS_WIN) {
-      const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
-        .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-      if (exe) spawnDetached(exe);
-      else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
-      return;
-    }
-    if (process.platform === 'darwin') {
-      // In the packaged .app the CLI lives at
-      //   <App>/Contents/Resources/app/bundle/bin/zaalis
-      // and the Electron binary at
-      //   <App>/Contents/MacOS/zaalis-ide
-      // Try the bundle-relative path first, then fall back to `open -a` which
-      // asks Launch Services to locate an installed "zaalis IDE.app".
-      const bundleExe = path.join(APP_DIR, '..', '..', '..', '..', 'MacOS', 'zaalis-ide');
-      if (fs.existsSync(bundleExe) && bundleExe.toLowerCase() !== self) {
-        spawnDetached(bundleExe);
-        return;
-      }
-      const also = [
-        path.join(APP_DIR, '..', 'zaalis-ide.command'),
-        path.join(APP_DIR, 'zaalis-ide.command'),
-        path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-        path.join(APP_DIR, 'zaalis-ide.sh'),
-      ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-      if (also) { spawnDetached(also); return; }
-      try {
-        spawnDetached('/usr/bin/open', ['-a', 'zaalis IDE']);
-        return;
-      } catch {}
-      console.log(brand('✗ ') + 'zaalis IDE introuvable. Installez l\'app puis relancez.');
-      return;
-    }
+    // The GUI is {app}/zaalis (parent of {app}/bin), or the system-wide
+    // /opt/zaalis-ide/zaalis installed by the .deb. Never relaunch the CLI
+    // itself, which is also named zaalis inside bin.
+    const self = process.execPath;
     const exe = [
-      path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-      path.join(APP_DIR, 'zaalis-ide.sh'),
-      path.join(APP_DIR, '..', '..', '..', '..', 'zaalis-ide'),
-    ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-    if (exe) spawnDetached(exe);
-    else console.log(brand('✗ ') + 'zaalis IDE introuvable.');
+      path.join(APP_DIR, '..', 'zaalis'),
+      path.join(APP_DIR, 'zaalis'),
+      '/opt/zaalis-ide/zaalis',
+      '/usr/bin/zaalis-ide',
+    ].find((p) => { try { return fs.existsSync(p) && p !== self; } catch { return false; } });
+    if (exe) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
+    else console.log(brand('✗ ') + 'zaalis (IDE) introuvable.');
     return;
   }
 

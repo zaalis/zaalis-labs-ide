@@ -1,0 +1,35 @@
+[package]
+name = "zaalis-agentd"
+description = "Local authenticated JSON-RPC daemon for the shared Zaalis agent runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zaalis-core.workspace = true
+zaalis-protocol.workspace = true
+zaalis-agent.workspace = true
+zaalis-providers.workspace = true
+zaalis-tools.workspace = true
+zaalis-fs.workspace = true
+zaalis-guard.workspace = true
+zaalis-exec.workspace = true
+zaalis-checkpoint.workspace = true
+zaalis-store.workspace = true
+zaalis-extensions.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+dunce.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "io-std", "net"] }
+tokio-tungstenite = "0.28"
+futures-util = "0.3"
+subtle = "2"
+zeroize.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile = "3"
+tokio-util.workspace = true
+
+[lints]
+workspace = true

@@ -20,18 +20,20 @@
   function L(k) { return (STR[lang] || STR.fr)[k]; }
 
   // ---- model config (mirrors desktop providers) ----
-  var MODEL_LABELS = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', local: 'Ollama', gguf: 'GGUF' };
+  var MODEL_LABELS = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', kimi: 'Kimi', local: 'Ollama', gguf: 'GGUF' };
   var SUBMODELS = {
     codex: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
     claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
     gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
     grok: ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
     mistral: ['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+    kimi: ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
     local: [], gguf: []
   };
   var AGENTS = [
     { nm: 'Codex', rl: 'Développeur', c: '#6366f1' }, { nm: 'Claude', rl: 'Reviewer', c: '#a855f7' },
     { nm: 'Gemini', rl: 'Architecte', c: '#3b82f6' }, { nm: 'Grok', rl: 'Optimiseur', c: '#22d3ee' },
+    { nm: 'Kimi', rl: 'Développeur', c: '#38bdf8' },
     { nm: 'Ollama', rl: 'Testeur', c: '#f59e0b' }
   ];
   var SYS = "Tu es l'assistant de zaalis IDE, accessible à distance depuis le téléphone de l'utilisateur. " +
@@ -112,14 +114,6 @@
     m.innerHTML = '<div class="bubble"><span class="typing-dots"><i></i><i></i><i></i></span></div>';
     messagesEl.appendChild(m); scrollBottom();
     return m;
-  }
-
-  function recordModelChange(previous) {
-    if (!previous || previous === submodel || !currentConvId || !messagesEl.querySelector('.msg.user')) return;
-    var before = previous;
-    var after = submodel;
-    addMsg('system', null, lang === 'en' ? 'Model changed: ' + before + ' → ' + after : 'Modèle changé : ' + before + ' → ' + after);
-    saveConv();
   }
 
   // ---- conversations (same storage format as desktop) ----
@@ -464,17 +458,8 @@
     ta.addEventListener('input', autoGrow);
     ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 
-    $('#model-select').addEventListener('change', function (e) {
-      var previous = submodel;
-      model = e.target.value;
-      fillSubmodels();
-      recordModelChange(previous);
-    });
-    $('#submodel-select').addEventListener('change', function (e) {
-      var previous = submodel;
-      submodel = e.target.value;
-      recordModelChange(previous);
-    });
+    $('#model-select').addEventListener('change', function (e) { model = e.target.value; fillSubmodels(); });
+    $('#submodel-select').addEventListener('change', function (e) { submodel = e.target.value; });
 
     $('#set-lang').value = lang;
     $('#set-lang').addEventListener('change', function (e) { lang = e.target.value; localStorage.setItem('zaalis-mobile-lang', lang); document.documentElement.lang = lang; refreshRemote(); });

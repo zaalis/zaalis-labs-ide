@@ -88,6 +88,18 @@ async function main() {
 
   copyFile(path.join(sourceDist, 'zaalis-server'), path.join(bundleDir, 'zaalis-server'));
   copyFile(path.join(sourceDist, 'bin', 'zaalis'), path.join(bundleDir, 'bin', 'zaalis'));
+
+  // Coeur Rust : zaalis-agentd est requis (server.js le lance pour Chat, Agents
+  // et le CLI), zaalis-sandbox est optionnel — son absence degrade le
+  // confinement des commandes sans empecher leur execution.
+  const agentd = path.join(sourceDist, 'zaalis-agentd');
+  if (!fs.existsSync(agentd)) {
+    throw new Error(`Coeur Rust manquant : ${agentd}\nLancez « npm run build:cli » (cargo) avant l'empaquetage.`);
+  }
+  copyFile(agentd, path.join(bundleDir, 'zaalis-agentd'));
+  const sandbox = path.join(sourceDist, 'zaalis-sandbox');
+  if (fs.existsSync(sandbox)) copyFile(sandbox, path.join(bundleDir, 'zaalis-sandbox'));
+
   if (fs.existsSync(path.join(sourceDist, 'node_modules'))) {
     copyDir(path.join(sourceDist, 'node_modules'), path.join(bundleDir, 'node_modules'));
   }

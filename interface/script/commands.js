@@ -87,6 +87,7 @@ function _needProject(out, lang) {
     _sysMsg(out, lang === 'en' ? 'Open a project folder first.' : "Ouvre d'abord un dossier de projet.");
     return false;
 }
+
 // Split an argument string into tokens, honoring "double" and 'single' quotes.
 function _parseArgs(s) {
     const out = [];
@@ -518,16 +519,6 @@ SLASH_HANDLERS.run = async (arg, out, lang) => {
         const res = await _postJSON('/api/exec', { command: cmd, cwd: state.projectRoot });
         const text = ((res.stdout || '') + (res.stderr ? '\n' + res.stderr : '')).trim();
         const dur = Math.round((Date.now() - t0) / 100) / 10;
-        if (res.error || res.timedOut || Number(res.exitCode) !== 0) {
-            const error = typeof commandFailure === 'function'
-                ? commandFailure(res)
-                : (res.error || `[exit code ${res.exitCode}]`);
-            const html = (typeof commandCardHTML === 'function')
-                ? commandCardHTML(cmd, '', { lang, error, duration: dur })
-                : _toolCard(lang === 'en' ? 'Command' : 'Commande', lang === 'en' ? 'error' : 'erreur', `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(error)}</pre>`, false);
-            _sysHTML(out, html);
-            return;
-        }
         const html = (typeof commandCardHTML === 'function')
             ? commandCardHTML(cmd, text, { lang, duration: dur })
             : _toolCard(lang === 'en' ? 'Command' : 'Commande', `ok · ${dur}s`, `<pre class="tool-pre">$ ${_esc(cmd)}\n\n${_esc(text || (lang === 'en' ? '(no output)' : '(aucune sortie)'))}</pre>`, false);
@@ -574,7 +565,7 @@ SLASH_HANDLERS.doctor = async (arg, out, lang) => {
     html += line(data.rg && data.rg.available, 'ripgrep', (data.rg && data.rg.available) ? data.rg.version : (lang === 'en' ? 'absent (JS fallback used)' : 'absent (repli JS utilisé)'), data.rg && !data.rg.available);
     html += line(data.ollama && data.ollama.reachable, 'Ollama', data.ollama && data.ollama.reachable ? `${data.ollama.models} ${lang === 'en' ? 'models' : 'modèles'}` : (lang === 'en' ? 'unreachable' : 'injoignable'), data.ollama && !data.ollama.reachable);
     html += line(data.gguf && data.gguf.installed, 'GGUF', data.gguf ? `${data.gguf.variant}${data.gguf.installed ? '' : (lang === 'en' ? ' (not installed)' : ' (non installé)')}` : '', data.gguf && !data.gguf.installed);
-    html += line(!!data.installer, lang === 'en' ? 'Installer' : 'Installateur', data.installer ? (data.installerPath || 'native/installer/zaalis-macos-universal-installer.tar.gz') : (lang === 'en' ? 'missing' : 'absent'), !data.installer);
+    html += line(!!data.installer, lang === 'en' ? 'Installer' : 'Installateur', data.installer ? 'native/installer/zaalis-setup.exe' : (lang === 'en' ? 'missing' : 'absent'), !data.installer);
     html += line((data.scripts || []).length > 0, lang === 'en' ? 'npm scripts' : 'scripts npm', (data.scripts || []).join(', '));
     html += line(!!data.projectGit, lang === 'en' ? 'Project git' : 'Git projet', data.projectGit ? `branch ${data.projectGit}` : (lang === 'en' ? 'not a repo / no project' : 'pas un dépôt / pas de projet'), !data.projectGit);
     html += line(cfgKeys.length > 0, lang === 'en' ? 'API keys' : 'Clés API', cfgKeys.length ? cfgKeys.join(', ') : (lang === 'en' ? 'none configured' : 'aucune configurée'), cfgKeys.length === 0);
@@ -634,40 +625,10 @@ SLASH_HANDLERS.plan = async (arg, out, lang) => {
 
 SLASH_HANDLERS.permissions = async (arg, out, lang) => {
     const mode = (arg || '').trim().toLowerCase();
-    const ruleMatch = String(arg || '').trim().match(/^(allow|deny)\s+(.+)$/i);
-    if (ruleMatch) {
-        const bucket = ruleMatch[1].toLowerCase();
-        const rule = ruleMatch[2].trim();
-        if (!/^[A-Za-z]+(?:\([^\n()]+\))?$/.test(rule)) {
-            _sysMsg(out, lang === 'en' ? 'Invalid rule. Example: allow Bash(npm test:*)' : 'Règle invalide. Exemple : allow Bash(npm test:*)');
-            return;
-        }
-        state.config.toolPermissions = state.config.toolPermissions || { allow: [], deny: [] };
-        const list = state.config.toolPermissions[bucket] || (state.config.toolPermissions[bucket] = []);
-        if (!list.includes(rule)) list.push(rule);
-        if (typeof saveState === 'function') saveState();
-        _sysMsg(out, `${bucket} → ${rule}`);
-        return;
-    }
-    if (mode === 'rules' || mode === 'list') {
-        const rules = state.config.toolPermissions || { allow: [], deny: [] };
-        const rows = [
-            ['allow', (rules.allow || []).join(', ') || '—'],
-            ['deny', (rules.deny || []).join(', ') || '—']
-        ];
-        _sysHTML(out, _toolCard(lang === 'en' ? 'Tool rules' : 'Règles outils', null, _kvRows(rows) + `<div class="tool-more">/permissions allow Bash(npm test:*) · /permissions deny Bash(rm -rf*)</div>`));
-        return;
-    }
-    if (mode === 'rules reset') {
-        state.config.toolPermissions = { allow: [], deny: [] };
-        if (typeof saveState === 'function') saveState();
-        _sysMsg(out, lang === 'en' ? 'Tool rules cleared.' : 'Règles outils effacées.');
-        return;
-    }
     if (!mode) {
         const rows = PERMISSION_MODES.map((m) => [m === state.permissionMode ? '→ ' + m : m, permissionLabel(m, lang)]);
         _sysHTML(out, _toolCard(lang === 'en' ? 'Permission modes' : 'Modes de permission', permissionLabel(state.permissionMode, lang),
-            _kvRows(rows) + `<div class="tool-more">${lang === 'en' ? 'Usage: /permissions <mode> · /permissions rules' : 'Usage : /permissions <mode> · /permissions rules'}</div>`));
+            _kvRows(rows) + `<div class="tool-more">${lang === 'en' ? 'Usage: /permissions <mode>' : 'Usage : /permissions <mode>'}</div>`));
         return;
     }
     if (!PERMISSION_MODES.includes(mode)) {

@@ -1,0 +1,21 @@
+[package]
+name = "zaalis-cli"
+description = "French terminal client for zaalis-agentd; contains no agent runtime."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zaalis"
+path = "src/main.rs"
+
+[dependencies]
+zaalis-core.workspace = true
+zaalis-protocol.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive"] }
+rustyline = "17"
+
+[lints]
+workspace = true

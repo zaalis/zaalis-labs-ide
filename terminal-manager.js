@@ -11,14 +11,23 @@ const fs = require('fs');
 // down the local server (and therefore Electron) at boot.
 let pty = null;
 let ptyLoadError = null;
+// Resolved at runtime so the packager never tries to bundle node-pty: its
+// prebuilds weigh ~64 MB and a .node addon cannot run from inside a snapshot
+// anyway.  The installer ships it on disk next to zaalis-server.exe instead.
+//
+// For the same reason node-pty is declared in devDependencies, not
+// dependencies: pkg bundles every declared dependency, which added ~65 MB to
+// each .exe for a file that could never be loaded from there.  Moving it back
+// to dependencies silently doubles both binaries.
+const dynamicRequire = eval('require');
 function ptyModule() {
   if (pty || ptyLoadError) return pty;
   try {
     // pkg keeps JS in its snapshot but a .node addon must live on disk. The
-    // Each platform packager places the matching architecture beside zaalis-server.
+    // Windows packager places the matching architecture beside zaalis-server.
     // Never use pkg's cache extraction: it may contain a different Node ABI.
     const packagedModule = process.pkg && path.join(path.dirname(process.execPath), 'node_modules', 'node-pty');
-    pty = packagedModule ? require(packagedModule) : require('node-pty');
+    pty = packagedModule ? dynamicRequire(packagedModule) : dynamicRequire('node-pty');
   }
   catch (error) { ptyLoadError = error; }
   return pty;
@@ -52,31 +61,64 @@ function windowsTerminalProfiles() {
   ];
 }
 
-function posixTerminalProfile() {
-  const requested = process.env.SHELL || '';
-  const shell = (requested && path.isAbsolute(requested) && fs.existsSync(requested))
-    ? requested
-    : (executableOnPath('bash') || executableOnPath('zsh') || '/bin/sh');
-  const name = path.basename(shell);
-  return { id: 'system', label: `Terminal système (${name})`, shell, args: name === 'sh' ? ['-i'] : ['-il'], available: true };
+// Profils POSIX (Linux et macOS).  L'ordre porte le sens : le premier est le
+// shell par défaut de la plateforme, donc celui retenu quand la configuration
+// utilisateur ne désigne rien de disponible.  On résout chaque shell en chemin
+// absolu (chemin usuel puis PATH) pour ne jamais dépendre du PATH du service.
+function unixTerminalProfiles() {
+  const darwin = process.platform === 'darwin';
+  const candidates = [
+    { id: 'zsh', label: 'zsh', paths: ['/bin/zsh', '/usr/bin/zsh'], args: ['-il'] },
+    { id: 'bash', label: 'bash', paths: ['/bin/bash', '/usr/bin/bash', '/opt/homebrew/bin/bash'], args: ['-il'] },
+    { id: 'fish', label: 'fish', paths: ['/usr/bin/fish', '/usr/local/bin/fish', '/opt/homebrew/bin/fish'], args: ['-i'] },
+    { id: 'sh', label: 'sh', paths: ['/bin/sh', '/usr/bin/sh'], args: ['-i'] },
+  ];
+  // macOS livre zsh par défaut depuis Catalina, les distributions Linux bash.
+  const order = darwin ? ['zsh', 'bash', 'fish', 'sh'] : ['bash', 'zsh', 'fish', 'sh'];
+  const resolved = order.map((id) => {
+    const entry = candidates.find((candidate) => candidate.id === id);
+    const shell = entry.paths.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+      || executableOnPath(entry.id);
+    return { id: entry.id, label: entry.label, shell, args: entry.args, available: !!shell };
+  });
+  // « Shell de connexion » suit $SHELL : c'est ce que l'utilisateur a choisi
+  // pour sa session, et il peut pointer ailleurs que les quatre ci-dessus.
+  const login = String(process.env.SHELL || '');
+  const loginAvailable = !!login && (() => { try { return fs.existsSync(login); } catch { return false; } })();
+  resolved.push({
+    id: 'login-shell',
+    label: loginAvailable ? `Shell de connexion (${path.basename(login)})` : 'Shell de connexion',
+    shell: loginAvailable ? login : '',
+    args: ['-il'],
+    available: loginAvailable,
+  });
+  return resolved;
 }
+
+function platformTerminalProfiles() {
+  return process.platform === 'win32' ? windowsTerminalProfiles() : unixTerminalProfiles();
+}
+
+// Identifiants acceptés par l'API de configuration et profil retenu par défaut.
+// Exportés pour que server.js n'ait pas à redéclarer une liste par plateforme.
+const TERMINAL_PROFILE_IDS = platformTerminalProfiles().map((profile) => profile.id);
+const DEFAULT_TERMINAL_PROFILE = process.platform === 'win32'
+  ? 'cmd'
+  : (process.platform === 'darwin' ? 'zsh' : 'bash');
 
 class TerminalManager {
   constructor() { this.sessions = new Map(); }
 
   profiles() {
-    if (process.platform !== 'win32') {
-      const { id, label, available } = posixTerminalProfile();
-      return [{ id, label, available }];
-    }
-    return windowsTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
+    return platformTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
   }
 
   profile(profileId) {
-    if (process.platform !== 'win32') return posixTerminalProfile();
-    const profiles = windowsTerminalProfiles();
+    const profiles = platformTerminalProfiles();
     return profiles.find((profile) => profile.id === profileId && profile.available)
-      || profiles.find((profile) => profile.id === 'cmd');
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE && profile.available)
+      || profiles.find((profile) => profile.available)
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE);
   }
 
   create({ userId, cwd, profileId, origin = 'agent' }) {
@@ -135,4 +177,4 @@ class TerminalManager {
   }
 }
 
-module.exports = { TerminalManager };
+module.exports = { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE };

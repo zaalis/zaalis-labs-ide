@@ -39,8 +39,12 @@ function run(file, args = [], options = {}) {
 
 async function commandPath(names) {
   for (const name of names) {
+    if (!name) continue;
     try {
-      const found = String(await run('sh', ['-lc', `command -v ${name}`])).trim();
+      // Le nom est passe en argument positionnel ($1), jamais interpole dans le
+      // script : aucune injection possible meme si le modele demande un nom
+      // exotique. On accepte donc des noms d'app varies selon la distribution.
+      const found = String(await run('sh', ['-lc', 'command -v "$1" 2>/dev/null || true', 'sh', String(name)])).trim();
       if (found) return found;
     } catch {}
   }
@@ -178,18 +182,68 @@ function shortcutMenus(processName) {
     .map(([name, shortcut]) => ({ name, type: 'Shortcut', shortcut, source: 'linux-standard' }));
 }
 
+// Alias generiques -> type MIME freedesktop. Sert a resoudre « l'app par defaut
+// du bureau » via xdg-mime, quel que soit l'environnement (GNOME, KDE, XFCE,
+// MATE, Cinnamon, LXQt...) et donc quelle que soit la distribution.
+const SEMANTIC_MIME = {
+  notepad: 'text/plain', 'notepad.exe': 'text/plain', notes: 'text/plain', note: 'text/plain',
+  editor: 'text/plain', texteditor: 'text/plain', 'text editor': 'text/plain',
+  editeur: 'text/plain', 'editeur de texte': 'text/plain', 'bloc-notes': 'text/plain', 'bloc notes': 'text/plain',
+  browser: 'x-scheme-handler/https', 'web browser': 'x-scheme-handler/https', web: 'x-scheme-handler/https',
+  navigateur: 'x-scheme-handler/https', 'navigateur web': 'x-scheme-handler/https', internet: 'x-scheme-handler/https',
+  files: 'inode/directory', explorer: 'inode/directory', 'file manager': 'inode/directory',
+  fichiers: 'inode/directory', 'gestionnaire de fichiers': 'inode/directory',
+};
+
 function appCandidates(input) {
   const alias = String(input || '').trim().toLowerCase();
+  // Une liste par famille, couvrant les grands bureaux Linux. On essaie chaque
+  // variante et on garde la premiere reellement installee : peu importe la
+  // distribution, le nom exact demande par le modele, ou le bureau utilise.
+  const editors = ['xed', 'gnome-text-editor', 'org.gnome.TextEditor', 'gedit', 'pluma', 'kate', 'kwrite', 'mousepad', 'leafpad', 'l3afpad', 'geany'];
+  const browsers = ['firefox', 'firefox-esr', 'org.mozilla.firefox', 'google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser', 'brave-browser', 'microsoft-edge-stable', 'microsoft-edge', 'vivaldi-stable', 'epiphany', 'falkon', 'midori'];
+  const fileManagers = ['nemo', 'nautilus', 'org.gnome.Nautilus', 'dolphin', 'thunar', 'caja', 'pcmanfm', 'pcmanfm-qt'];
+  const terminals = ['x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal', 'mate-terminal', 'tilix', 'kitty', 'alacritty', 'xterm'];
   const map = {
-    chrome: ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'],
-    'chrome.exe': ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'],
-    chromium: ['chromium', 'chromium-browser'], firefox: ['firefox'],
-    edge: ['microsoft-edge', 'microsoft-edge-stable'], msedge: ['microsoft-edge', 'microsoft-edge-stable'],
-    code: ['code'], notepad: ['gnome-text-editor', 'gedit', 'kate', 'mousepad'],
-    'notepad.exe': ['gnome-text-editor', 'gedit', 'kate', 'mousepad'],
-    explorer: ['nautilus', 'dolphin', 'thunar'], terminal: ['x-terminal-emulator', 'gnome-terminal', 'konsole', 'xfce4-terminal'],
+    chrome: ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'],
+    'chrome.exe': ['google-chrome-stable', 'google-chrome', 'chromium', 'chromium-browser'],
+    chromium: ['chromium', 'chromium-browser'],
+    firefox: browsers, 'firefox.exe': browsers,
+    edge: ['microsoft-edge-stable', 'microsoft-edge'], msedge: ['microsoft-edge-stable', 'microsoft-edge'],
+    browser: browsers, navigateur: browsers, web: browsers, internet: browsers, 'web browser': browsers, 'navigateur web': browsers,
+    code: ['code', 'codium', 'code-oss'],
+    notepad: editors, 'notepad.exe': editors, notes: editors, note: editors, editor: editors, texteditor: editors,
+    'text editor': editors, editeur: editors, 'editeur de texte': editors, 'bloc-notes': editors, 'bloc notes': editors,
+    'gnome-text-editor': editors, gedit: editors, pluma: editors, kate: editors, mousepad: editors, xed: editors, leafpad: editors,
+    explorer: fileManagers, files: fileManagers, fichiers: fileManagers, 'file manager': fileManagers, 'gestionnaire de fichiers': fileManagers,
+    nautilus: fileManagers, nemo: fileManagers, dolphin: fileManagers, thunar: fileManagers,
+    terminal: terminals, terminale: terminals, console: terminals,
   };
   return map[alias] || [input];
+}
+
+// Application par defaut du bureau pour un type MIME (freedesktop). Retourne un
+// identifiant .desktop, ex. « org.x.editor.desktop ». Universel toutes distros.
+async function xdgDefaultDesktop(mime) {
+  if (!mime) return '';
+  try { return String(await run('sh', ['-lc', 'xdg-mime query default "$1" 2>/dev/null || true', 'sh', String(mime)])).trim(); }
+  catch { return ''; }
+}
+
+// Localise un fichier .desktop dans les emplacements standards (systeme, XDG,
+// Flatpak, Snap). Permet de lancer une app par son id meme si son binaire n'est
+// pas sur le PATH (cas frequent des paquets Flatpak/Snap).
+function desktopFilePath(id) {
+  const file = String(id || '').endsWith('.desktop') ? String(id) : `${id}.desktop`;
+  const dirs = [
+    path.join(os.homedir(), '.local', 'share', 'applications'),
+    '/usr/local/share/applications', '/usr/share/applications',
+    '/var/lib/flatpak/exports/share/applications',
+    path.join(os.homedir(), '.local', 'share', 'flatpak', 'exports', 'share', 'applications'),
+    '/var/lib/snapd/desktop/applications',
+  ];
+  for (const d of dirs) { const p = path.join(d, file); try { if (fs.existsSync(p)) return p; } catch {} }
+  return '';
 }
 
 function createLinuxComputerAction({ port, secret }) {
@@ -212,8 +266,17 @@ function createLinuxComputerAction({ port, secret }) {
     if (overlayProcess && overlayProcess.exitCode == null) return { ok: true, pid: overlayProcess.pid };
     overlayState = path.join(os.tmpdir(), `zaalis-linux-overlay-${process.pid}-${Date.now()}.json`);
     fs.writeFileSync(overlayState, '{}', 'utf8');
+    // Rendu strictement aligne sur l'overlay macOS (Electron/CSS) et sur celui
+    // de Windows (WPF) : memes couleurs, memes proportions, memes cadences.
+    //   bordure  : 28 px, degrade 135 deg, opacite .9 respirant vers .55 en 5,5 s
+    //   brume    : deux halos dans les coins haut-gauche et bas-droit, alpha .28,
+    //              derive de 3% / -2% et zoom 1.06 en 12 s, aller-retour
+    //   barre    : 320x58, centree en bas de la zone de travail, marge 34 px
+    // La geometrie des halos vient de « .mist{inset:-25%} » cote CSS : ramenes
+    // en coordonnees d'ecran, les degrades radiaux se logent dans les coins, pas
+    // au milieu de l'ecran.
     const script = String.raw`
-import gi, json, os, signal, urllib.request, cairo, math
+import gi, os, signal, time, urllib.request, cairo
 gi.require_version('Gtk','3.0')
 from gi.repository import Gtk, Gdk, GLib
 screen=Gdk.Screen.get_default(); visual=screen.get_rgba_visual()
@@ -221,26 +284,75 @@ border=Gtk.Window(type=Gtk.WindowType.TOPLEVEL); border.set_decorated(False); bo
 if visual: border.set_visual(visual)
 border.set_default_size(screen.get_width(),screen.get_height()); border.move(0,0)
 box=Gtk.EventBox(); box.set_visible_window(False); box.set_app_paintable(True); border.add(box)
-phase=[0.0]
+start=time.monotonic()
+def wave(period):
+ # Triangle 0->1->0 sur une periode, equivalent d'une animation CSS alternate.
+ t=(time.monotonic()-start)%(2*period)/period
+ return t if t<=1 else 2-t
 def mist(cr, cx, cy, rx, ry, color):
  cr.save(); cr.translate(cx,cy); cr.scale(rx,ry)
- g=cairo.RadialGradient(0,0,0,0,0,1); g.add_color_stop_rgba(0,*color); g.add_color_stop_rgba(.32,color[0],color[1],color[2],0); g.add_color_stop_rgba(1,0,0,0,0)
+ g=cairo.RadialGradient(0,0,0,0,0,1); g.add_color_stop_rgba(0,*color); g.add_color_stop_rgba(1,color[0],color[1],color[2],0)
  cr.set_source(g); cr.rectangle(-1,-1,2,2); cr.fill(); cr.restore()
+def edge_mask(x0,y0,x1,y1,peak):
+ # Une bande « plume » le long d'un bord : transparente au ras (0), opaque au
+ # pic (20 px), re-transparente a 80 px. EXTEND_PAD par defaut hors [0,1] ->
+ # le reste de l'ecran reste transparent. Transpose au double du -webkit-mask
+ # du navigateur (transparent, #000 10px, transparent 40px).
+ m=cairo.LinearGradient(x0,y0,x1,y1)
+ m.add_color_stop_rgba(0,1,1,1,0); m.add_color_stop_rgba(peak,1,1,1,1); m.add_color_stop_rgba(1,1,1,1,0)
+ return m
 def draw_overlay(widget, cr):
- w=widget.get_allocated_width(); h=widget.get_allocated_height(); p=phase[0]
- mist(cr, .15*w + math.sin(p)*.03*w, .20*h + math.cos(p)*.02*h, .72*w, .58*h, (.615,.349,1,.28))
- mist(cr, .80*w - math.sin(p)*.03*w, .84*h - math.cos(p)*.02*h, .82*w, .62*h, (.400,.176,.824,.28))
- g=cairo.LinearGradient(0,0,w,h); g.add_color_stop_rgba(0,.471,.243,.871,.58); g.add_color_stop_rgba(.5,.678,.341,1,.16); g.add_color_stop_rgba(1,.357,.133,.686,.54)
- cr.set_source(g); cr.set_line_width(28); cr.rectangle(14,14,max(1,w-28),max(1,h-28)); cr.stroke()
+ w=widget.get_allocated_width(); h=widget.get_allocated_height()
+ d=wave(12.0)
+ cr.save(); cr.translate(.03*w*d, -.02*h*d); cr.translate(w/2,h/2); cr.scale(1+.06*d,1+.06*d); cr.translate(-w/2,-h/2)
+ mist(cr, .95*w, 1.01*h, .456*w, .479*h, (.400,.176,.824,.28))
+ cr.restore()
+ # Bordure = halo « setAiControlBorder » du navigateur zaalis, en violet et
+ # deux fois plus epais : un degrade horizontal qui DEFILE (repete deux fois sur
+ # la largeur -> background-size 200%, translate anime -> background-position),
+ # decoupe en cadre par quatre masques plume (haut/bas/gauche/droite). La
+ # douceur vient du fondu des masques, exactement comme le blur+mask CSS.
+ tile=max(1.0,w/2.0)
+ flow=cairo.LinearGradient(0,0,tile,0)
+ flow.add_color_stop_rgba(0.0,.357,.133,.686,.85)
+ flow.add_color_stop_rgba(0.25,.615,.349,1.0,.85)
+ flow.add_color_stop_rgba(0.5,.780,.549,1.0,.85)
+ flow.add_color_stop_rgba(0.75,.615,.349,1.0,.85)
+ flow.add_color_stop_rgba(1.0,.357,.133,.686,.85)
+ flow.set_extend(cairo.Extend.REPEAT)
+ ph=((time.monotonic()-start)/7.0)%1.0*tile
+ flow.set_matrix(cairo.Matrix(1,0,0,1,ph,0))
+ cr.push_group()
+ for m in (edge_mask(0,0,0,80,0.25), edge_mask(0,h-80,0,h,0.75), edge_mask(0,0,80,0,0.25), edge_mask(w-80,0,w,0,0.75)):
+  cr.set_source(flow); cr.mask(m)
+ cr.pop_group_to_source(); cr.paint_with_alpha(0.8)
  return False
 box.connect('draw',draw_overlay)
-def tick(): phase[0]+=.07; box.queue_draw(); return True
-GLib.timeout_add(60,tick)
-css=Gtk.CssProvider(); css.load_from_data(b'#dock { background: rgba(24,14,42,0.88); border: 1px solid rgba(214,187,255,0.36); border-radius: 18px; padding: 10px 14px; color: #f4ecff; }')
+css=Gtk.CssProvider(); css.load_from_data(b'#dock { background: rgba(24,14,42,0.88); border: 1px solid rgba(214,187,255,0.36); border-radius: 18px; color: #f4ecff; } #dock label { font-size: 12px; font-weight: 650; } #stop { background-image: none; background-color: #db3d56; color: #ffffff; font-size: 12px; font-weight: 700; border: 0; border-radius: 11px; padding: 8px 12px; min-height: 0; } #stop:hover { background-color: #f05068; }')
 Gtk.StyleContext.add_provider_for_screen(screen,css,Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 border.realize(); border.get_window().set_pass_through(True); border.show_all()
-dock=Gtk.Window(type=Gtk.WindowType.TOPLEVEL); dock.set_decorated(False); dock.set_keep_above(True); dock.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-panel=Gtk.Box(spacing=14); panel.set_name('dock'); label=Gtk.Label(label="L'IA travaille sur ce PC Linux"); button=Gtk.Button(label='Arrêter le travail'); panel.pack_start(label,True,True,0); panel.pack_start(button,False,False,0); dock.add(panel); dock.show_all(); dock.move(max(20,screen.get_width()-420),30)
+dock=Gtk.Window(type=Gtk.WindowType.TOPLEVEL); dock.set_decorated(False); dock.set_keep_above(True); dock.set_accept_focus(False); dock.set_app_paintable(True); dock.set_type_hint(Gdk.WindowTypeHint.UTILITY)
+if visual: dock.set_visual(visual)
+dock.set_size_request(320,58)
+panel=Gtk.Box(spacing=12); panel.set_name('dock'); panel.set_margin_start(13); panel.set_margin_end(13)
+pulse=Gtk.DrawingArea(); pulse.set_size_request(9,9); pulse.set_valign(Gtk.Align.CENTER)
+def draw_pulse(widget, cr):
+ # Point qui bat, comme le .pulse de la barre macOS (1,6 s, aller-retour).
+ k=wave(.8); r=4.5*(1-.4*k)
+ cr.set_source_rgba(.702,.424,1,1-.55*k); cr.arc(4.5,4.5,r,0,6.2832); cr.fill()
+ return False
+pulse.connect('draw',draw_pulse)
+label=Gtk.Label(label="L'IA travaille sur ce PC Linux"); label.set_xalign(0.0); label.set_ellipsize(3)
+button=Gtk.Button(label='Arrêter le travail'); button.set_name('stop'); button.set_valign(Gtk.Align.CENTER)
+panel.pack_start(pulse,False,False,0); panel.pack_start(label,True,True,0); panel.pack_start(button,False,False,0)
+dock.add(panel); dock.show_all()
+mon=Gdk.Display.get_default().get_primary_monitor()
+area=mon.get_workarea() if mon else None
+if area: dock.move(area.x+max(0,(area.width-320)//2), area.y+area.height-58-34)
+else: dock.move(max(0,(screen.get_width()-320)//2), screen.get_height()-58-34)
+def tick():
+ box.queue_draw(); pulse.queue_draw(); return True
+GLib.timeout_add(40,tick)
 def stop(*args): Gtk.main_quit(); return False
 def clicked(*args):
  try:
@@ -301,21 +413,68 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         const child = spawn(terminal, [], { detached: true, stdio: 'ignore' }); child.unref(); return { ok: true, processId: child.pid };
       }
       if (action.action === 'activate_app') {
-        let target = '';
-        for (const candidate of appCandidates(action.path)) {
+        const requested = String(action.path || '');
+        const candidates = appCandidates(requested);
+        let launched = null; // { pid, name, byDesktop }
+        // 1) Executable direct : chemin absolu, ou commande trouvee sur le PATH.
+        for (const candidate of candidates) {
           if (candidate && path.isAbsolute(candidate) && fs.existsSync(candidate)) {
-            try { fs.accessSync(candidate, fs.constants.X_OK); target = candidate; break; } catch {}
+            try { fs.accessSync(candidate, fs.constants.X_OK); const c = spawn(candidate, [], { detached: true, stdio: 'ignore' }); c.unref(); launched = { pid: c.pid, name: path.basename(candidate).replace(/-stable$/, '') }; break; } catch {}
           }
-          target = await commandPath([candidate]); if (target) break;
+          const found = await commandPath([candidate]);
+          if (found) { const c = spawn(found, [], { detached: true, stdio: 'ignore' }); c.unref(); launched = { pid: c.pid, name: path.basename(found).replace(/-stable$/, '') }; break; }
         }
-        if (!target) throw new Error(`application-not-found:${action.path}`);
-        const child = spawn(target, [], { detached: true, stdio: 'ignore' }); child.unref();
-        await new Promise((resolve) => setTimeout(resolve, 900));
-        const name = path.basename(target).replace(/-stable$/, '');
-        await run('xdotool', ['search', '--sync', '--onlyvisible', '--pid', String(child.pid), 'windowactivate'], { timeout: 5000 })
-          .catch(() => run('xdotool', ['search', '--sync', '--onlyvisible', '--class', name, 'windowactivate'], { timeout: 5000 }).catch(() => {}));
+        // 2) Repli universel freedesktop : lancer le .desktop de l'app par defaut
+        //    du bureau (via xdg-mime) ou celui portant le nom demande, avec
+        //    gtk-launch puis gio. Couvre Flatpak/Snap et toute distribution.
+        if (!launched) {
+          const ids = [];
+          const mime = SEMANTIC_MIME[requested.trim().toLowerCase()];
+          if (mime) { const def = await xdgDefaultDesktop(mime); if (def) ids.push(def); }
+          for (const c of candidates) ids.push(c);
+          ids.push(requested);
+          const gtk = await commandPath(['gtk-launch']);
+          for (const id of ids) {
+            const deskPath = desktopFilePath(id);
+            if (!deskPath) continue;
+            const base = path.basename(deskPath).replace(/\.desktop$/, '');
+            try {
+              const c = gtk
+                ? spawn(gtk, [base], { detached: true, stdio: 'ignore', env: process.env })
+                : spawn('gio', ['launch', deskPath], { detached: true, stdio: 'ignore', env: process.env });
+              c.unref(); launched = { pid: c.pid, name: base, byDesktop: true }; break;
+            } catch {}
+          }
+        }
+        if (!launched) throw new Error(`application-not-found:${requested}`);
+        // On attend que la fenetre soit reellement visible avant de rendre la
+        // main : une app qui demarre a froid (Firefox, LibreOffice, un Flatpak)
+        // peut mettre plusieurs secondes, et un type/key envoye trop tot partirait
+        // dans le vide. On sonde jusqu'a ~8 s, par PID (executable direct) puis
+        // par classe/nom (lancement .desktop, ou le PID est celui du lanceur).
+        const selectors = launched.byDesktop
+          ? [['--class', launched.name], ['--classname', launched.name], ['--name', launched.name]]
+          : [['--pid', String(launched.pid)], ['--class', launched.name], ['--classname', launched.name]];
+        let windowId = '';
+        for (let i = 0; i < 40 && !windowId; i += 1) {
+          for (const sel of selectors) {
+            try {
+              const ids = String(await run('xdotool', ['search', '--onlyvisible', ...sel], { timeout: 3000 })).trim().split(/\s+/).filter(Boolean);
+              if (ids.length) { windowId = ids[ids.length - 1]; break; }
+            } catch {}
+          }
+          if (!windowId) await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (windowId) {
+          await run('xdotool', ['windowactivate', '--sync', windowId], { timeout: 4000 }).catch(() => {});
+          // Laisse le gestionnaire de fenetres donner le focus clavier avant que
+          // le modele n'enchaine un type/key.
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
         const win = await activeWindow().catch(() => null);
-        return { ok: true, processId: child.pid, windowTitle: win && win.title, application: win && win.process };
+        return { ok: true, processId: launched.pid, windowTitle: win && win.title, application: win && win.process, ready: !!windowId };
       }
       const win = await activeWindow();
       if (action.action === 'menus') {

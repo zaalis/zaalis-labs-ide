@@ -1,0 +1,19 @@
+[package]
+name = "zaalis-git"
+description = "Bounded Git and managed worktree operations for zaalis agents."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+serde = { workspace = true }
+dunce = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

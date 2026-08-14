@@ -6,6 +6,9 @@ const STATES = new Set(['running', 'waiting_user', 'stopping', 'stopped', 'faile
 const ACTIONS = new Set(['observe', 'inspect', 'menus', 'move', 'click', 'scroll', 'type', 'key', 'open_terminal', 'activate_app', 'ask']);
 const ALWAYS_CONFIRM = new Set(['open_terminal']);
 
+// Nom du bureau piloté, utilisé dans les messages rendus à l'utilisateur. Le
+// même module sert les trois éditions (Windows, Linux, macOS) : seule cette
+// étiquette et la validation de `activate_app` dépendent de la plateforme.
 function desktopLabel() {
   if (process.platform === 'linux') return 'Linux';
   if (process.platform === 'darwin') return 'macOS';
@@ -60,7 +63,16 @@ function normalizeAction(input) {
       ? (/^(?:[A-Za-z]:\\|\\\\).+\.(?:exe|bat|cmd)$/i.test(out.path) || /^(?:notepad|calc|mspaint|chrome|edge|msedge|firefox|code|explorer|cmd|powershell)(?:\.exe)?$/i.test(out.path))
       : process.platform === 'darwin'
         ? (/^\/.*\.app$/.test(out.path) || /^[A-Za-z0-9._ -]{1,120}$/.test(out.path))
-        : (/^\/(?:[^\0\r\n]+)$/.test(out.path) || /^(?:notepad|chrome|chromium|edge|msedge|firefox|code|explorer|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path));
+        // Linux (branche specifique a l'edition Linux) : on n'enferme pas
+        // l'activation dans une liste blanche d'applications — chaque
+        // distribution a les siennes. On accepte tout identifiant sur : un
+        // chemin absolu, un nom de commande / id .desktop, ou un alias generique
+        // (« text editor », « navigateur web »). La resolution reelle est faite
+        // par linux-computer-control.js (PATH + xdg-mime + .desktop), qui passe
+        // toujours ces noms en argument, donc sans risque d'injection shell.
+        : (/^\/[^\0\r\n]+$/.test(out.path)
+          || /^[A-Za-z0-9][A-Za-z0-9._+-]{0,126}$/.test(out.path)
+          || /^[A-Za-z][A-Za-z ]{1,48}$/.test(out.path));
     if (!validPath) return null;
   }
   if (action === 'ask') {
@@ -112,7 +124,7 @@ class AutomationManager {
     if (this.active && ['running', 'waiting_user', 'stopping'].includes(this.active.state)) throw new Error(`Une tâche de contrôle ${platform} est déjà active.`);
     const permissions = await this.status();
     if (!permissions.ok) throw new Error(permissions.error || `Pont ${platform} indisponible.`);
-    const session = { id: crypto.randomUUID(), userId, permissionMode, state: 'running', events: [], lastAction: null, question: null, answer: null, answerResolve: null, lastPerception: null, pendingVerification: null };
+    const session = { id: crypto.randomUUID(), userId, permissionMode, state: 'running', events: [], lastAction: null, question: null, answer: null, answerResolve: null, lastPerception: null, pendingVerification: null, lastCapture: null };
     this.active = session;
     await this.bridge({ action: 'overlay_start' });
     this.record(session, 'session_started', `Contrôle ${platform} activé`);
@@ -153,6 +165,21 @@ class AutomationManager {
     return new Promise((resolve) => { session.answerResolve = resolve; });
   }
 
+  // Translate image-space coordinates into screen pixels using the geometry of
+  // the last capture.  With no capture yet the coordinates pass through, which
+  // matches the old behaviour exactly.
+  toScreenCoordinates(session, action) {
+    const capture = session && session.lastCapture;
+    if (!capture) return action;
+    if (Math.abs(capture.scaleX - 1) < 0.001 && Math.abs(capture.scaleY - 1) < 0.001
+      && !capture.x && !capture.y) return action;
+    return {
+      ...action,
+      x: Math.round(capture.x + action.x * capture.scaleX),
+      y: Math.round(capture.y + action.y * capture.scaleY),
+    };
+  }
+
   async execute(session, input) {
     if (!this.owns(session, session.userId) || session.state === 'stopped') return { name: 'computer', blocked: true, summary: 'computer arrêté', text: 'computer: tâche arrêtée' };
     const action = normalizeAction(input);
@@ -166,13 +193,24 @@ class AutomationManager {
     }
     // Do not replace automatic work with a confirmation dialog.  Actions that
     // are intrinsically unsafe remain blocked rather than putting the session
-    // into waiting_user (passwords, 2FA, payments, destructive submissions…).
+    // into waiting_user (passwords, 2FA, payments, destructive submissions?).
     if (isSensitive(action)) {
       this.record(session, 'sensitive_blocked', `computer ${action.action} bloqué`, action);
       return { name: 'computer', blocked: true, summary: 'computer action sensible bloquée', text: 'computer: action sensible bloquée en contrôle automatique.' };
     }
     this.record(session, 'action', `computer ${action.action}`, action);
-    const result = await this.bridge(action);
+    // Screenshots are downscaled to keep them affordable, so the model points at
+    // coordinates in the image it saw.  Map them back to real screen pixels here
+    // rather than asking the model to do arithmetic it usually gets wrong.
+    const sent = ['move', 'click'].includes(action.action) ? this.toScreenCoordinates(session, action) : action;
+    const result = await this.bridge(sent);
+    if (['observe', 'inspect'].includes(action.action) && result.ok && result.capture && result.image_width) {
+      const scaleX = Number(result.capture.width) / Number(result.image_width);
+      const scaleY = Number(result.capture.height) / Number(result.image_height || result.image_width);
+      session.lastCapture = Number.isFinite(scaleX) && Number.isFinite(scaleY) && scaleX > 0 && scaleY > 0
+        ? { x: Number(result.capture.x) || 0, y: Number(result.capture.y) || 0, scaleX, scaleY }
+        : null;
+    }
     if (!result.ok) return { name: 'computer', error: true, summary: `computer ${action.action} échec`, text: `computer: ${result.error || 'échec'}` };
     if (['click', 'scroll', 'type', 'key', 'activate_app', 'open_terminal'].includes(action.action)) {
       session.pendingVerification = { action: action.action, at: new Date().toISOString() };
