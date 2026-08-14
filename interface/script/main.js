@@ -6,7 +6,6 @@ const SETTINGS_SECTION_TITLES = {
     mcp: 'MCP',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
-    instructions: 'settings-instructions-title',
     hardware: 'settings-hardware-title',
     project: 'settings-project-title',
     privacy: 'settings-privacy-title',
@@ -26,7 +25,7 @@ function setSettingsSection(section) {
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
         title.dataset.i18n = i18nKey;
-        title.textContent = i18nKey === 'MCP' ? 'MCP' : ((TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent);
+        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
     }
 }
 
@@ -52,16 +51,12 @@ function applyAppearance() {
 // IDs of the settings <select> elements that should render as rounded custom
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
-    'settings-lang-select', 'gguf-variant-select', 'gguf-ngl-select',
+    'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
-function normalizeGgufVariant(value) {
-    return value === 'metal' || value === 'cpu' ? value : '';
-}
-
 function initSettingsCustomSelects() {
     if (_settingsSelectsReady) return;
     if (typeof createCustomSelect !== 'function') return;
@@ -75,10 +70,27 @@ function sharedHardwareConfigPayload() {
         ollamaUrl: (c.ollamaUrl || 'http://127.0.0.1:11434').trim(),
         ollamaModel: c.ollamaModel || 'qwen3:8b',
         ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
-        ggufVariant: normalizeGgufVariant(c.ggufVariant),
+        ggufVariant: c.ggufVariant || '',
         ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
-        customSystemInstructions: String(c.customSystemInstructions || '').trim().slice(0, 12000)
+        terminalProfile: c.terminalProfile || 'cmd'
     };
+}
+
+// The server reports which shells actually exist on this PC; the missing ones
+// stay listed but disabled so the choice is explainable rather than silent.
+function populateTerminalProfiles(profiles) {
+    const select = $('#settings-terminal-profile');
+    if (!select || !Array.isArray(profiles)) return;
+    select.replaceChildren(...profiles.map((profile) => {
+        const option = document.createElement('option');
+        option.value = profile.id;
+        option.textContent = profile.label + (profile.available ? '' : ' (non installé)');
+        option.disabled = !profile.available;
+        return option;
+    }));
+    const saved = state.config.terminalProfile || 'cmd';
+    state.config.terminalProfile = select.querySelector(`option[value="${saved}"]:not(:disabled)`) ? saved : 'cmd';
+    select.value = state.config.terminalProfile;
 }
 
 function applySharedHardwareConfig(config) {
@@ -87,12 +99,12 @@ function applySharedHardwareConfig(config) {
     if ('ollamaUrl' in config) c.ollamaUrl = String(config.ollamaUrl || '').trim() || 'http://127.0.0.1:11434';
     if ('ollamaModel' in config) c.ollamaModel = String(config.ollamaModel || '').trim() || 'qwen3:8b';
     if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 8192);
-    if ('ggufVariant' in config) c.ggufVariant = normalizeGgufVariant(String(config.ggufVariant || '').trim().toLowerCase());
+    if ('ggufVariant' in config) c.ggufVariant = String(config.ggufVariant || '').trim().toLowerCase();
     if ('ggufGpuLayers' in config) {
         const raw = config.ggufGpuLayers;
         c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
     }
-    if ('customSystemInstructions' in config) c.customSystemInstructions = String(config.customSystemInstructions || '').trim().slice(0, 12000);
+    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || 'cmd');
 }
 
 async function syncSharedHardwareConfig() {
@@ -110,8 +122,10 @@ async function loadSharedHardwareConfig() {
         const res = await fetch('/api/config');
         if (!res.ok) return;
         const data = await res.json();
+        if (data) populateTerminalProfiles(data.terminalProfiles);
         if (data && data.configured && data.config) {
             applySharedHardwareConfig(data.config);
+            populateTerminalProfiles(data.terminalProfiles);
             saveState();
         } else {
             await syncSharedHardwareConfig();
@@ -130,7 +144,7 @@ function populateSettingsControls() {
         el.dispatchEvent(new Event('change')); // refresh custom-select display
     };
     setVal('settings-lang-select', state.language || 'fr');
-    setVal('gguf-variant-select', normalizeGgufVariant(c.ggufVariant));
+    setVal('gguf-variant-select', c.ggufVariant || '');
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
     setVal('settings-theme-select', c.theme || 'dark');
@@ -139,8 +153,6 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
-    const customInstructions = $('#settings-custom-system-instructions');
-    if (customInstructions) customInstructions.value = c.customSystemInstructions || '';
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -155,6 +167,7 @@ $('#settings-btn').addEventListener('click', () => {
     // time the panel opens, so they persist across restarts (the keys are stored
     // server-side; the badge state isn't in localStorage).
     if (typeof refreshSecureSettings === 'function') refreshSecureSettings();
+    loadMcpSettings();
     setSettingsSection('general');
     $('#settings-modal').classList.add('active');
 });
@@ -218,50 +231,110 @@ async function migrateLegacyApiKeys() {
 async function refreshSecureSettings() {
     await migrateLegacyApiKeys();
     await loadApiKeyStatus();
-    await loadBrainMcpStatus();
-    await loadGenericMcpServers();
 }
 
-let brainMcpWasConfigured = false;
-let genericMcpLoaded = false;
-async function loadGenericMcpServers() {
-    const field = $('#mcp-servers-json');
-    if (!field) return [];
-    try {
-        const res = await fetch('/api/mcp');
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-        const servers = Array.isArray(data.servers) ? data.servers : [];
-        field.value = JSON.stringify(servers, null, 2);
-        genericMcpLoaded = true;
-        return servers;
-    } catch { genericMcpLoaded = false; return []; }
+let personalMcpServers = [];
+function mcpId(value) {
+    return String(value || 'mcp').toLowerCase().trim().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'mcp';
 }
-function setBrainMcpStatus(status) {
-    const el = $('#brain-mcp-status');
-    if (!el) return;
-    const stateName = status && status.state;
-    el.textContent = stateName === 'connected' ? '● Connecté' : stateName === 'error' ? '● Erreur' : '● Déconnecté';
-    el.style.color = stateName === 'connected' ? 'var(--green)' : stateName === 'error' ? 'var(--red)' : 'var(--text-2)';
+function mcpEscape(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 }
-async function loadBrainMcpStatus() {
+function newPersonalMcp(seed = {}) {
+    return {
+        id: seed.id || mcpId(seed.name || 'mcp-' + (personalMcpServers.length + 1)),
+        name: seed.name || 'Nouveau MCP',
+        endpoint: seed.endpoint || seed.url || '',
+        enabled: seed.enabled !== false,
+        token: '',
+        tokenConfigured: !!seed.tokenConfigured,
+        allow: Array.isArray(seed.allow) ? seed.allow : [],
+        deny: Array.isArray(seed.deny) ? seed.deny : []
+    };
+}
+function renderPersonalMcpServers() {
+    const list = $('#mcp-personal-list');
+    if (!list) return;
+    if (!personalMcpServers.length) {
+        list.innerHTML = '<div class="settings-status-row"><span>Aucun serveur personnel</span><strong>Prêt à ajouter</strong></div>';
+        return;
+    }
+    list.innerHTML = personalMcpServers.map((server, index) => `
+        <article class="mcp-server-card" data-mcp-index="${index}">
+            <div class="form-group settings-row-group">
+                <div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>Serveur Streamable HTTP personnel</p></div>
+                <label class="zs-switch"><input class="mcp-enabled" type="checkbox" ${server.enabled ? 'checked' : ''}><span class="zs-slider"></span></label>
+            </div>
+            <div class="mcp-server-grid">
+                <div class="form-group"><label>Nom</label><input class="mcp-name" value="${mcpEscape(server.name)}" maxlength="120"></div>
+                <div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:9876/mcp" spellcheck="false"></div>
+            </div>
+            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>
+            <details class="form-group"><summary>Règles avancées</summary><div class="mcp-server-grid"><div class="form-group"><label>Autoriser (noms d’outils, séparés par virgules)</label><input class="mcp-allow" value="${mcpEscape(server.allow.join(', '))}"></div><div class="form-group"><label>Refuser</label><input class="mcp-deny" value="${mcpEscape(server.deny.join(', '))}"></div></div></details>
+            <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
+        </article>`).join('');
+    list.querySelectorAll('.mcp-server-card').forEach(card => {
+        const index = Number(card.dataset.mcpIndex);
+        const server = personalMcpServers[index];
+        const sync = () => {
+            server.name = card.querySelector('.mcp-name').value.trim() || 'MCP personnel';
+            server.endpoint = card.querySelector('.mcp-endpoint').value.trim();
+            server.enabled = card.querySelector('.mcp-enabled').checked;
+            server.token = card.querySelector('.mcp-token').value.trim();
+            server.allow = card.querySelector('.mcp-allow').value.split(',').map(v => v.trim()).filter(Boolean);
+            server.deny = card.querySelector('.mcp-deny').value.split(',').map(v => v.trim()).filter(Boolean);
+            server.id = server.id || mcpId(server.name);
+        };
+        card.querySelectorAll('input').forEach(input => input.addEventListener('change', sync));
+        card.querySelector('.mcp-remove').addEventListener('click', () => { personalMcpServers.splice(index, 1); renderPersonalMcpServers(); });
+    });
+}
+function parseImportedMcpConfig(value) {
+    const raw = value && typeof value === 'object' ? value : {};
+    if (Array.isArray(raw)) return raw;
+    if (Array.isArray(raw.servers)) return raw.servers;
+    if (raw.mcpServers && typeof raw.mcpServers === 'object') return Object.entries(raw.mcpServers).map(([name, config]) => ({ name, ...(config || {}) }));
+    return [];
+}
+async function loadMcpSettings() {
     try {
-        const res = await fetch('/api/brain-mcp');
-        const status = await res.json().catch(() => ({}));
-        if (!res.ok) {
-            const failed = { configured: false, enabled: false, state: 'error', detail: status.error || `HTTP ${res.status}` };
-            brainMcpWasConfigured = false;
-            setBrainMcpStatus(failed);
-            return failed;
+        const [brainRes, mcpRes] = await Promise.all([fetch('/api/brain-mcp'), fetch('/api/mcp')]);
+        if (brainRes.ok) {
+            const brain = await brainRes.json();
+            const status = $('#brain-mcp-status');
+            if (status) status.textContent = brain.enabled ? (brain.configured ? '● Configuré' : '● À compléter') : 'Non configuré';
+            if ($('#brain-mcp-enabled')) $('#brain-mcp-enabled').checked = !!brain.enabled;
+            if ($('#brain-mcp-endpoint')) $('#brain-mcp-endpoint').value = brain.endpoint || '';
+            if ($('#brain-mcp-token')) { $('#brain-mcp-token').value = ''; $('#brain-mcp-token').placeholder = brain.configured ? 'Laisser vide pour conserver le jeton' : 'Coller le jeton à 64 caractères'; }
         }
-        brainMcpWasConfigured = !!status.configured;
-        setBrainMcpStatus(status);
-        const enabled = $('#brain-mcp-enabled'); if (enabled) enabled.checked = !!status.enabled;
-        const endpoint = $('#brain-mcp-endpoint'); if (endpoint && status.endpoint) endpoint.value = status.endpoint;
-        const token = $('#brain-mcp-token'); if (token && status.configured) token.placeholder = 'Jeton enregistré (coller pour le remplacer)';
-        return status;
-    } catch { setBrainMcpStatus({ state: 'error' }); return null; }
+        if (mcpRes.ok) {
+            const data = await mcpRes.json();
+            personalMcpServers = Array.isArray(data.servers) ? data.servers.map(newPersonalMcp) : [];
+            renderPersonalMcpServers();
+        }
+    } catch {}
 }
+
+$('#mcp-add-personal').addEventListener('click', () => { personalMcpServers.push(newPersonalMcp()); renderPersonalMcpServers(); });
+$('#mcp-add-blender').addEventListener('click', () => {
+    personalMcpServers.push(newPersonalMcp({ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp', enabled: false }));
+    renderPersonalMcpServers();
+});
+$('#mcp-import-config').addEventListener('click', () => $('#mcp-config-file').click());
+$('#mcp-config-file').addEventListener('change', async event => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    try {
+        const imported = parseImportedMcpConfig(JSON.parse(await file.text()));
+        const usable = imported.filter(item => item && (item.url || item.endpoint));
+        if (!usable.length) throw new Error('Aucun serveur HTTP importable');
+        personalMcpServers.push(...usable.map(newPersonalMcp));
+        renderPersonalMcpServers();
+        toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}.`);
+    } catch {
+        toast('Ce fichier ne contient pas de serveurs MCP HTTP importables. Les configurations stdio (command/args) doivent être exposées via une URL MCP.', { icon: '!' });
+    } finally { event.target.value = ''; }
+});
 
 API_KEY_FIELDS.forEach(provider => {
     const input = $('#key-' + provider);
@@ -277,7 +350,7 @@ $('#save-btn').addEventListener('click', async () => {
     const settingsLang = $('#settings-lang-select');
     if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
     const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) state.config.ggufVariant = normalizeGgufVariant(variantSelect.value);
+    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
     const ollamaUrlInput = $('#ollama-url');
     state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
     // Default Ollama model = first of the managed list.
@@ -295,11 +368,15 @@ $('#save-btn').addEventListener('click', async () => {
     if (defChat) c.aiModel = defChat;
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
-    c.customSystemInstructions = ($('#settings-custom-system-instructions')?.value || '').trim().slice(0, 12000);
     // ----- Hardware advanced -----
     c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
     c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
+    // ----- Integrated terminal -----
+    const previousTerminalProfile = c.terminalProfile || 'cmd';
+    const terminalProfileSelect = $('#settings-terminal-profile');
+    if (terminalProfileSelect && terminalProfileSelect.value) c.terminalProfile = terminalProfileSelect.value;
+    if (c.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
     // ----- Project -----
     c.defaultProjectFolder = ($('#settings-default-folder')?.value || '').trim();
     c.reopenLastProject = !!$('#settings-reopen-toggle')?.checked;
@@ -312,41 +389,11 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
+        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers }) });
+        if (!mcpRes.ok) throw new Error('MCP');
+        const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!$('#brain-mcp-enabled')?.checked, endpoint: ($('#brain-mcp-endpoint')?.value || '').trim(), token: ($('#brain-mcp-token')?.value || '').trim() }) });
+        if (!brainRes.ok) throw new Error('MCP');
         await syncSharedHardwareConfig();
-        let genericMcpSaveError = '';
-        const genericMcpField = $('#mcp-servers-json');
-        if (genericMcpField && genericMcpLoaded) {
-            try {
-                const raw = genericMcpField.value.trim();
-                const servers = raw ? JSON.parse(raw) : [];
-                if (!Array.isArray(servers)) throw new Error('La configuration MCP doit être une liste JSON.');
-                const response = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers }) });
-                const data = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
-                genericMcpField.value = JSON.stringify(data.servers || [], null, 2);
-            } catch (err) { genericMcpSaveError = err.message || 'Configuration MCP invalide.'; }
-        }
-        let brainSaveError = '';
-        const brainEnabled = !!$('#brain-mcp-enabled')?.checked;
-        const brainEndpoint = ($('#brain-mcp-endpoint')?.value || '').trim();
-        const brainToken = ($('#brain-mcp-token')?.value || '').trim();
-        if (brainEnabled || brainEndpoint || brainToken || brainMcpWasConfigured) {
-            try {
-                const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: brainEnabled, endpoint: brainEndpoint || undefined, token: brainToken || undefined }) });
-                const brainStatus = await brainRes.json().catch(() => ({}));
-                if (!brainRes.ok) {
-                    brainSaveError = brainStatus.error || `HTTP ${brainRes.status}`;
-                    setBrainMcpStatus({ state: 'error', detail: brainSaveError });
-                } else {
-                    brainMcpWasConfigured = !!brainStatus.configured;
-                    setBrainMcpStatus(brainStatus);
-                    if (brainStatus.state === 'error') brainSaveError = brainStatus.detail || 'Connexion MCP Zaalis Brain impossible.';
-                }
-            } catch (err) {
-                brainSaveError = err.message || 'Connexion MCP Zaalis Brain impossible.';
-                setBrainMcpStatus({ state: 'error', detail: brainSaveError });
-            }
-        }
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
                 method: 'PUT',
@@ -357,12 +404,7 @@ $('#save-btn').addEventListener('click', async () => {
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
         }
-        if (brainSaveError || genericMcpSaveError) {
-            btn.textContent = state.language === 'en' ? 'Saved · MCP error' : 'Enregistré · erreur MCP';
-            toast([brainSaveError, genericMcpSaveError].filter(Boolean).join(' · '));
-        } else {
-            btn.textContent = 'OK';
-        }
+        btn.textContent = 'OK';
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
     } catch {
         btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
@@ -386,7 +428,8 @@ $('#save-btn').addEventListener('click', async () => {
 const pickFolderBtn = $('#settings-pick-folder-btn');
 if (pickFolderBtn) pickFolderBtn.addEventListener('click', async () => {
     try {
-        const data = await pickZaalisFolder();
+        const res = await fetch('/api/pick-folder', { method: 'POST' });
+        const data = await res.json();
         if (data && data.path) {
             const inp = $('#settings-default-folder');
             if (inp) inp.value = data.path;
@@ -821,13 +864,11 @@ async function loadGgufModels() {
         if (!res.ok) return;
         const data = await res.json();
         state.config.ggufModels = (data.models || []).map(m => m.name);
-        const normalizedVariant = normalizeGgufVariant(state.config.ggufVariant);
-        if (state.config.ggufVariant !== normalizedVariant) state.config.ggufVariant = normalizedVariant;
         saveState();
         const st = $('#gguf-engine-status');
         if (st) {
             const v = (data.variant || 'cpu').toUpperCase();
-            const selected = normalizedVariant ? normalizedVariant.toUpperCase() : v;
+            const selected = state.config.ggufVariant ? state.config.ggufVariant.toUpperCase() : v;
             st.textContent = (state.language === 'en' ? 'Engine: ' : 'Moteur : ') + selected + (data.running ? ' • ON' : '');
         }
         const detected = $('#gguf-detected-variant');
@@ -1197,13 +1238,13 @@ if (confirmUpdateBtn) {
                         if (progContainer) progContainer.classList.remove('hidden');
                         if (waiting) waiting.classList.add('hidden');
                         progressBar.style.width = '100%';
-                        downloadedUpdatePath = pData.dest || data.dest || "";
+                        downloadedUpdatePath = pData.dest || data.dest || "C:\\Users\\boque\\Downloads\\zaalis-update.exe";
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis ouvrez le fichier d'installation telecharge.";
+                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis lancez zaalis-update.exe depuis votre dossier Telechargements.";
                         // Un seul bouton orange "Fermer l'IDE" qui ferme totalement l'app.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
@@ -1625,7 +1666,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');
-    _set('#gguf-variant-select', normalizeGgufVariant(state.config.ggufVariant));
+    _set('#gguf-variant-select', state.config.ggufVariant || '');
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
@@ -1774,7 +1815,7 @@ function openLoaderConfig(name) {
     if (num) num.value = ctx;
     if (hint) hint.textContent = _fmtCtx(ctx);
     const gpu = $('#ml-gpu-select'); if (gpu) gpu.value = state.config.ggufGpuLayers || '';
-    const variant = $('#ml-variant-select'); if (variant) variant.value = normalizeGgufVariant(state.config.ggufVariant);
+    const variant = $('#ml-variant-select'); if (variant) variant.value = state.config.ggufVariant || '';
 
     // Activate the config tab.
     $$('.ml-tab').forEach(t => t.classList.toggle('active', t.dataset.mlTab === 'config'));
@@ -1809,7 +1850,7 @@ async function loadLoaderModel() {
     const lang = state.language || 'fr';
     const ctx = clampGgufCtx($('#ml-ctx-num').value);
     const gpuLayers = $('#ml-gpu-select') ? $('#ml-gpu-select').value : '';
-    const variant = $('#ml-variant-select') ? normalizeGgufVariant($('#ml-variant-select').value) : '';
+    const variant = $('#ml-variant-select') ? $('#ml-variant-select').value : '';
 
     // Persist the chosen options so the chat path reuses the same engine state.
     state.config.ggufCtx = ctx;

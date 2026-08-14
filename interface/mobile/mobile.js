@@ -116,14 +116,6 @@
     return m;
   }
 
-  function recordModelChange(previous) {
-    if (!previous || previous === submodel || !currentConvId || !messagesEl.querySelector('.msg.user')) return;
-    var before = previous;
-    var after = submodel;
-    addMsg('system', null, lang === 'en' ? 'Model changed: ' + before + ' → ' + after : 'Modèle changé : ' + before + ' → ' + after);
-    saveConv();
-  }
-
   // ---- conversations (same storage format as desktop) ----
   // Persist immediately: remote control must never "lose" a chat.
   function persist() {
@@ -291,10 +283,7 @@
       else {
         var resp = data.response || '';
         addMsg('ai', MODEL_LABELS[model] || model, resp);
-        chatHistory.push(
-          { role: 'user', content: text },
-          { role: 'assistant', content: resp, reasoning_content: data.thinking || undefined }
-        );
+        chatHistory.push({ role: 'user', content: text }, { role: 'assistant', content: resp });
         saveConv();
       }
     } catch (e) {
@@ -469,17 +458,8 @@
     ta.addEventListener('input', autoGrow);
     ta.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
 
-    $('#model-select').addEventListener('change', function (e) {
-      var previous = submodel;
-      model = e.target.value;
-      fillSubmodels();
-      recordModelChange(previous);
-    });
-    $('#submodel-select').addEventListener('change', function (e) {
-      var previous = submodel;
-      submodel = e.target.value;
-      recordModelChange(previous);
-    });
+    $('#model-select').addEventListener('change', function (e) { model = e.target.value; fillSubmodels(); });
+    $('#submodel-select').addEventListener('change', function (e) { submodel = e.target.value; });
 
     $('#set-lang').value = lang;
     $('#set-lang').addEventListener('change', function (e) { lang = e.target.value; localStorage.setItem('zaalis-mobile-lang', lang); document.documentElement.lang = lang; refreshRemote(); });

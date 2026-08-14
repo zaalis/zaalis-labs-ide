@@ -1,23 +1,24 @@
 {
   "name": "connexion-ide",
   "version": "1.0.14",
-  "description": "This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).",
+  "description": "Local Zaalis IDE with an Express server, CLI, and native macOS shell (Electron).",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js",
+    "test": "node --test \"test/*.test.js\"",
     "check:mojibake": "node scripts/check-mojibake.js",
-    "build:server": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/zaalis-server",
-    "build:cli": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-x64 --output native/dist-macos-x64/bin/zaalis",
-    "build:server:arm64": "npm run check:mojibake && pkg . --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/zaalis-server",
-    "build:cli:arm64": "npm run check:mojibake && pkg cli.js --no-bytecode --public --public-packages \"*\" --targets node22-macos-arm64 --output native/dist-macos-arm64/bin/zaalis",
-    "build:macos": "native/build_macos.bat"
+    "build:server": "npm run check:mojibake && pkg . --targets node22-macos-x64 --no-bytecode --public --public-packages \"*\" --output native/dist-macos-x64-server/zaalis-server",
+    "build:server:arm64": "npm run check:mojibake && pkg . --targets node22-macos-arm64 --no-bytecode --public --public-packages \"*\" --output native/dist-macos-arm64-server/zaalis-server",
+    "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && sh scripts/stage-rust-binaries.sh",
+    "build:rust:x64": "cargo build --manifest-path rust/Cargo.toml --workspace --release --target x86_64-apple-darwin && sh scripts/stage-rust-binaries.sh native/dist-macos-x64-server",
+    "build:rust:arm64": "cargo build --manifest-path rust/Cargo.toml --workspace --release --target aarch64-apple-darwin && sh scripts/stage-rust-binaries.sh native/dist-macos-arm64-server",
+    "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper && sh scripts/stage-rust-binaries.sh",
+    "build:macos": "sh native/build_macos_dmg.sh"
   },
   "pkg": {
     "assets": [
-      "interface/**/*",
-      "node_modules/node-pty/build/Release/*"
+      "interface/**/*"
     ]
   },
   "keywords": [],
@@ -28,13 +29,13 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "node-pty": "^1.0.0",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.1",
-    "@yao-pkg/pkg": "^6.20.0",
+    "@yao-pkg/pkg": "^6.22.0",
     "electron": "^42.5.0",
+    "node-pty": "^1.1.0",
     "png2icons": "^2.0.1"
   }
 }

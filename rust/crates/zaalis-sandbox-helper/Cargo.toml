@@ -1,0 +1,18 @@
+[package]
+name = "zaalis-sandbox-helper"
+description = "Single-threaded Unix sandbox worker for Zaalis commands."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "zaalis-sandbox"
+path = "src/main.rs"
+
+[target.'cfg(unix)'.dependencies]
+nono = { version = "0.53", default-features = false }
+
+[lints]
+workspace = true

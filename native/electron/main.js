@@ -154,6 +154,13 @@ async function startServer(port, reuseExisting) {
   const logs = logDir();
   const out = fs.openSync(path.join(logs, 'zaalis-server.out.log'), 'a');
   const err = fs.openSync(path.join(logs, 'zaalis-server.err.log'), 'a');
+  // Le coeur Rust est livre dans le bundle, a cote de zaalis-server. Le shell
+  // pose ici son propre PID : /api/app/close s'en sert pour fermer la fenetre
+  // avant d'arreter le serveur (equivalent du taskkill de l'edition Windows).
+  const agentdPath = path.join(BUNDLE_DIR, 'zaalis-agentd');
+  try { fs.chmodSync(agentdPath, 0o755); } catch {}
+  try { fs.chmodSync(path.join(BUNDLE_DIR, 'zaalis-sandbox'), 0o755); } catch {}
+
   serverProcess = spawn(SERVER_PATH, [], {
     cwd: BUNDLE_DIR,
     env: {
@@ -161,8 +168,10 @@ async function startServer(port, reuseExisting) {
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
+      ZAALIS_SHELL_PID: String(process.pid),
       ZAALIS_COMPUTER_BRIDGE_URL: computerBridgePort ? `http://127.0.0.1:${computerBridgePort}` : '',
       ZAALIS_COMPUTER_BRIDGE_SECRET: computerBridgeSecret,
+      ...(fs.existsSync(agentdPath) ? { ZAALIS_AGENTD_PATH: agentdPath } : {}),
     },
     stdio: ['ignore', out, err],
     detached: false,
@@ -287,12 +296,23 @@ async function computerPermissionStatus(prompt = false) {
 }
 
 function overlayHTML() {
+  // Bordure d'activité = le halo lumineux « setAiControlBorder » du navigateur
+  // zaalis, porté ici trait pour trait : un dégradé horizontal qui défile en
+  // continu (7 s), diffusé par un blur, découpé en cadre par un masque en
+  // plumes (transparent au ras du bord, opaque un peu plus loin, puis
+  // re-transparent vers l'intérieur). Deux différences voulues avec le
+  // navigateur : les tons sont VIOLETS (au lieu de bleu/cyan), et tout est
+  // DEUX FOIS plus épais — masque 20→80 px au lieu de 10→40, blur 28 au lieu
+  // de 14, inset -6 au lieu de -3.
+  const feather = ['right', 'left', 'bottom', 'top']
+    .map((dir) => `linear-gradient(to ${dir},transparent,#000 20px,transparent 80px)`).join(',');
+  const flow = 'linear-gradient(90deg,rgba(91,34,175,.85),rgba(157,89,255,.85),rgba(199,140,255,.85),rgba(157,89,255,.85),rgba(91,34,175,.85))';
   return `<!doctype html><html><head><style>
     html,body{margin:0;width:100%;height:100%;overflow:hidden;background:transparent;pointer-events:none}
-    .edge{position:fixed;inset:0;border:28px solid transparent;border-image:linear-gradient(135deg,rgba(120,62,222,.58),rgba(173,87,255,.16),rgba(91,34,175,.54)) 1;filter:blur(2px);opacity:.9;animation:breathe 5.5s ease-in-out infinite}
+    .edge{position:fixed;inset:-6px;pointer-events:none;opacity:.8;filter:blur(28px);background:${flow};background-size:200% 100%;animation:zflow 7s linear infinite;-webkit-mask:${feather};mask:${feather}}
     .mist{position:fixed;inset:-25%;background:radial-gradient(ellipse at 15% 20%,rgba(157,89,255,.28),transparent 32%),radial-gradient(ellipse at 80% 84%,rgba(102,45,210,.28),transparent 38%);filter:blur(20px);animation:drift 12s ease-in-out infinite alternate}
-    @keyframes breathe{50%{opacity:.55;filter:blur(5px)}}@keyframes drift{to{transform:translate3d(3%, -2%, 0) scale(1.06)}}
-  </style></head><body><div class="edge"></div><div class="mist"></div></body></html>`;
+    @keyframes zflow{from{background-position:0% 50%}to{background-position:200% 50%}}@keyframes drift{to{transform:translate3d(3%, -2%, 0) scale(1.06)}}
+  </style></head><body><div class="mist"></div><div class="edge"></div></body></html>`;
 }
 
 function dockHTML() {

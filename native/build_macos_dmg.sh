@@ -79,6 +79,15 @@ sign_app() {
 VERSION=$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ROOT/package.json" | head -n 1)
 VERSION=${VERSION:-1.0.0}
 
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "ERROR: cargo not found. The Rust core (zaalis-agentd) is required." >&2
+  echo "       Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh" >&2
+  exit 1
+fi
+# Chaque DMG est mono-architecture : la cible Rust correspondante doit etre
+# installee, meme quand on construit l'autre architecture depuis ce Mac.
+rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || true
+
 echo "[1/3] Preparing Electron icon (.icns)..."
 npm run check:mojibake
 node native/make_icns.js
@@ -86,6 +95,8 @@ node native/make_icns.js
 build_arch() {
   arch="$1"          # x64 | arm64
   pkg_target="$2"    # node22-macos-x64 | node22-macos-arm64
+  rust_target="aarch64-apple-darwin"
+  [ "$arch" = "x64" ] && rust_target="x86_64-apple-darwin"
 
   serverdist="native/dist-macos-${arch}-server"
   dist="native/dist-macos-${arch}"
@@ -107,9 +118,17 @@ build_arch() {
   npx pkg . --no-bytecode --public --public-packages "*" \
     --targets "$pkg_target" --output "$serverdist/zaalis-server"
 
-  echo "    - packaging CLI"
-  npx pkg cli.js --no-bytecode --public --public-packages "*" \
-    --targets "$pkg_target" --output "$serverdist/bin/zaalis"
+  # Le CLI livre est celui du coeur Rust, comme sur Windows et Linux : Chat,
+  # Agents et le terminal partagent ainsi exactement le meme moteur.
+  # zaalis-agentd est indispensable au serveur, donc cette etape n'est pas
+  # optionnelle.
+  echo "    - building the Rust core (agentd, CLI, sandbox) for ${arch}"
+  cargo build --manifest-path rust/Cargo.toml --release --target "$rust_target" \
+    -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper
+
+  echo "    - staging the Rust binaries"
+  ZAALIS_RUST_RELEASE_DIR="$ROOT/rust/target/$rust_target/release" \
+    sh scripts/stage-rust-binaries.sh "$ROOT/$serverdist"
 
   echo "    - copying assets"
   cp -R interface "$serverdist/interface"

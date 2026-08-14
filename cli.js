@@ -20,7 +20,6 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const { spawn, spawnSync } = require('child_process');
-const { loadCookie: loadKeychainCookie, saveCookie: saveKeychainCookie, clearCookie: clearKeychainCookie } = require('./credential-store');
 
 // ---------------------------------------------------------------------------
 // Constants & paths
@@ -38,46 +37,32 @@ const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 // one file per working directory, like Claude Code's per-project sessions.
 const SESSIONS_DIR = path.join(CFG_DIR, 'sessions');
 
-// When packaged, this CLI lives in {app}/bin while the other binaries
-// (zaalis-server, zaalis-ide.command) sit in {app} - i.e. the PARENT folder.
+// When packaged, this CLI lives in {app}/bin/ while the other binaries
+// (zaalis-server, zaalis) sit in {app}/ — i.e. the PARENT folder.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
-const IS_WIN = process.platform === 'win32';
 
 // Locate a sibling binary, looking in this folder then its parent (so the CLI
-// in {app}/bin finds zaalis-server / zaalis-ide.command in {app}). Returns the
-// first existing path, or null.
-function findBinary(names) {
-  const list = Array.isArray(names) ? names : [names];
-  for (const name of list) {
-    const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
-    for (const p of candidates) {
-      try { if (fs.existsSync(p)) return p; } catch {}
-    }
+// in {app}/bin finds zaalis-server / zaalis in {app}). Returns the first
+// existing path, or null.
+function findBinary(name) {
+  const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
+  for (const p of candidates) {
+    try { if (fs.existsSync(p)) return p; } catch {}
   }
   return null;
 }
 
-function spawnDetached(file, args = [], options = {}) {
-  const isShellScript = process.platform !== 'win32' && /\.(command|sh)$/i.test(file);
-  const command = isShellScript ? '/bin/sh' : file;
-  const finalArgs = isShellScript ? [file, ...args] : args;
-  const child = spawn(command, finalArgs, { detached: true, stdio: 'ignore', ...options });
-  child.unref();
-  return child;
-}
-
 // ---------------------------------------------------------------------------
-// Colors (ANSI 256, with a NO_COLOR / non-TTY fallback)
+// Colors (truecolor ANSI, with a NO_COLOR / non-TTY fallback)
 // ---------------------------------------------------------------------------
-const COLOR = process.stdout.isTTY && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
-const FG = (code) => (s) => (COLOR ? `\x1b[38;5;${code}m${s}\x1b[39m` : String(s));
-const brand = FG(99);   // zaalis purple, ANSI-256 for better macOS Terminal compatibility.
+const COLOR = process.stdout.isTTY && !process.env.NO_COLOR;
+const RGB = (r, g, b) => (s) => (COLOR ? `\x1b[38;2;${r};${g};${b}m${s}\x1b[0m` : String(s));
+const brand = RGB(99, 102, 241);   // zaalis purple — matches IDE --accent #6366f1
 const dim = (s) => (COLOR ? `\x1b[2m${s}\x1b[0m` : String(s));
 const bold = (s) => (COLOR ? `\x1b[1m${s}\x1b[0m` : String(s));
-const green = FG(107);
-const yellow = FG(179);
-const gray = FG(246);
-const red = FG(203);
+const green = RGB(126, 200, 120);
+const yellow = RGB(220, 180, 90);
+const gray = RGB(150, 150, 150);
 
 // Visible length, ignoring ANSI escapes — needed to pad inside the box.
 const stripAnsi = (s) => String(s).replace(/\x1b\[[0-9;]*m/g, '');
@@ -100,7 +85,7 @@ function clipText(s, width) {
 const mdBold  = (s) => (COLOR ? `\x1b[1m${s}\x1b[22m` : String(s));
 const mdItal  = (s) => (COLOR ? `\x1b[3m${s}\x1b[23m` : String(s));
 const mdUnder = (s) => (COLOR ? `\x1b[4m${s}\x1b[24m` : String(s));
-const mdCode  = (s) => (COLOR ? `\x1b[38;5;179m${s}\x1b[39m` : String(s));
+const mdCode  = (s) => (COLOR ? `\x1b[38;2;220;180;90m${s}\x1b[39m` : String(s));
 
 function mdInline(s) {
   s = String(s);
@@ -271,34 +256,11 @@ function requestStream(method, pathname, { body, cookie, onEvent } = {}) {
 // Session persistence
 // ---------------------------------------------------------------------------
 function loadSession() {
-  let loaded = {};
-  try { loaded = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8')); } catch {}
-  // Migrate a legacy plaintext cookie into the macOS Keychain on first use.
-  const keychainCookie = loadKeychainCookie();
-  if (keychainCookie) loaded.cookie = keychainCookie;
-  else if (process.platform === 'darwin' && loaded.cookie) {
-    const legacy = loaded.cookie;
-    // Keep a legacy cookie in memory if Keychain is unavailable, rather than
-    // silently signing the user out on the next launch.
-    if (saveKeychainCookie(legacy)) {
-      delete loaded.cookie;
-      try { fs.writeFileSync(SESSION_FILE, JSON.stringify(loaded, null, 2), { mode: 0o600 }); } catch {}
-      loaded.cookie = legacy;
-    }
-  }
-  return loaded;
+  try { return JSON.parse(fs.readFileSync(SESSION_FILE, 'utf-8')); } catch { return {}; }
 }
 function saveSession(s) {
-  try { fs.mkdirSync(CFG_DIR, { recursive: true, mode: 0o700 }); fs.chmodSync(CFG_DIR, 0o700); } catch {}
-  const next = { ...(s || {}) };
-  if (process.platform === 'darwin' && next.cookie) {
-    saveKeychainCookie(next.cookie);
-    delete next.cookie;
-  }
-  const temp = `${SESSION_FILE}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify(next, null, 2), { mode: 0o600 });
-  fs.renameSync(temp, SESSION_FILE);
-  try { fs.chmodSync(SESSION_FILE, 0o600); } catch {}
+  try { fs.mkdirSync(CFG_DIR, { recursive: true }); } catch {}
+  fs.writeFileSync(SESSION_FILE, JSON.stringify(s, null, 2));
 }
 let session = loadSession();
 // session = { cookie, email, pseudo, model, submodel }
@@ -378,11 +340,11 @@ async function ensureServer({ quiet } = {}) {
   if (await ping()) return true;
   if (!quiet) process.stderr.write(dim('Démarrage du serveur zaalis…\n'));
 
-  const serverExe = findBinary(IS_WIN ? 'zaalis-server.exe' : 'zaalis-server');
+  const serverExe = findBinary('zaalis-server');
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
-    child = spawnDetached(serverExe, [], { cwd: path.dirname(serverExe) });
+    child = spawn(serverExe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(serverExe) });
   } else {
     // Dev: run the Node source directly. (cwd must be a real folder, not the
     // pkg virtual snapshot — hence __dirname only matters when not packaged.)
@@ -390,7 +352,7 @@ async function ensureServer({ quiet } = {}) {
       detached: true, stdio: 'ignore', cwd: __dirname,
     });
   }
-  if (child && child.unref) child.unref();
+  child.unref();
 
   for (let i = 0; i < 60; i++) {            // up to ~15s
     await new Promise((r) => setTimeout(r, 250));
@@ -462,11 +424,6 @@ const SUBMODELS = {
   mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
   kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
 };
-if (Object.prototype.hasOwnProperty.call(SUBMODELS, session.model)
-    && !SUBMODELS[session.model].includes(session.submodel)) {
-  session.submodel = SUBMODELS[session.model][0];
-  saveSession(session);
-}
 const MODEL_LABELS = {
   'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
   'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
@@ -641,34 +598,6 @@ function restoreConversation() {
   } catch { return null; }
 }
 
-function restoreHistoryFromEvents(events) {
-  const rows = Array.isArray(events) ? events : [];
-  const restored = [];
-  for (const event of rows) {
-    if (!event || event.type !== 'message' || !['user', 'assistant'].includes(event.role)) continue;
-    const content = String(event.content || '');
-    if (content) restored.push({ role: event.role, content });
-  }
-  history.length = 0;
-  history.push(...restored.slice(-80));
-  return history.length;
-}
-
-async function restoreDurableSession(id) {
-  let sessionId = String(id || session.agentSessionId || '').trim();
-  if (!sessionId) {
-    const list = await apiGet(`/api/agent-sessions?root=${encodeURIComponent(projectRoot())}&limit=1`);
-    sessionId = list.sessions && list.sessions[0] && list.sessions[0].id || '';
-  }
-  if (!sessionId) return null;
-  const data = await apiGet(`/api/agent-sessions/${encodeURIComponent(sessionId)}`);
-  const count = restoreHistoryFromEvents(data.events);
-  session.agentSessionId = data.session.id;
-  if (data.session.model) { session.model = data.session.model; session.submodel = data.session.submodel; }
-  saveSession(session);
-  return { session: data.session, count };
-}
-
 function isLocalModel(model) {
   return model === 'local' || model === 'gguf';
 }
@@ -738,7 +667,7 @@ src/app.js
 package.json
 \`\`\`
 
-4) Executer une commande macOS/Unix via le shell POSIX:
+4) Executer une commande shell macOS (/bin/sh):
 \`\`\`run
 npm test
 \`\`\`
@@ -918,22 +847,8 @@ function isDangerousCommand(cmd) {
   ].some((re) => re.test(c));
 }
 
-// Real secret-bearing files (mirrors the server SECRET_FILE guard) — NOT
-// ordinary source. Used to force a confirmation before touching a secret file.
-function isSecretFilePath(p) {
-  return /(?:^|[\\/])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials(?:\.(?:json|ya?ml))?|client_secret[^\\/]*\.json|service[-_]?account[^\\/]*\.json|[^\\/]*\.(?:pem|key|pfx|p12|keystore|jks|asc|ppk))$/i
-    .test(String(p || '').replace(/\\/g, '/'));
-}
-function commandTouchesSecretFile(cmd) {
-  return /(?:^|[\s"'=<>|(])(?:\.env(?:\.[\w-]+)?|\.npmrc|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|[^\s"']+\.(?:pem|key|pfx|p12|keystore|jks|ppk))(?=$|[\s"'/<>|)])/i
-    .test(String(cmd || ''));
-}
-
 async function confirmAction(desc, detail) {
-  const permId = currentPermission().id;
-  // Unrestricted mode never asks; autonomous mode asks only for dangerous ones.
-  if (permId === 'bypass') return true;
-  if (permId === 'auto' && !/DANGEREUSE/i.test(desc)) return true;
+  if (currentPermission().id === 'auto' && !/DANGEREUSE/i.test(desc)) return true;
   if (!process.stdin.isTTY) return false;
   const wasRaw = !!(process.stdin.isTTY && process.stdin.isRaw);
   // This drops to a plain (non-raw) readline prompt, which owns stdin/stdout
@@ -985,7 +900,7 @@ async function applyTools(response, events) {
       continue;
     }
     if (next === current) continue;
-    if ((perm === 'supervised' || (isSecretFilePath(rel) && perm !== 'bypass')) && !(await confirmAction(`Modifier ${rel}`, hunks.map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
+    if (perm === 'supervised' && !(await confirmAction(`Modifier ${rel}`, hunks.map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
       events.push(`Modification refusee: ${rel}`);
       continue;
     }
@@ -999,7 +914,7 @@ async function applyTools(response, events) {
   }
 
   for (const { path: rel, content } of fileBlocks) {
-    if ((perm === 'supervised' || (isSecretFilePath(rel) && perm !== 'bypass')) && !(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
+    if (perm === 'supervised' && !(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
       events.push(`Ecriture refusee: ${rel}`);
       continue;
     }
@@ -1013,9 +928,7 @@ async function applyTools(response, events) {
 
   for (const cmd of commands) {
     const dangerous = isDangerousCommand(cmd);
-    // Commands run freely on every mode; only a dangerous command or one that
-    // touches a secret file still asks, and bypass never asks.
-    const needAsk = (dangerous || commandTouchesSecretFile(cmd)) && perm !== 'bypass';
+    const needAsk = dangerous || perm === 'supervised' || perm === 'semi';
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
       events.push(`Commande refusee: ${cmd}`);
       continue;
@@ -1032,104 +945,6 @@ async function applyTools(response, events) {
   return editErrors;
 }
 
-// Rejoue les actions bloquees par le serveur en mode supervise/semi apres
-// validation explicite de l'utilisateur (parite IDE / Claude Code). Chaque
-// tool_done bloque porte son input complet (path/hunks/content/command/image).
-async function applyBlockedAgentTools(tools) {
-  const perm = currentPermission().id;
-  if (perm === 'plan') return;
-  const blocked = (Array.isArray(tools) ? tools : [])
-    .filter((t) => t && t.blocked && t.code === 'approval_required' && !t.terminal && t.approval && ['write', 'edit', 'run', 'git_write', 'image_download'].includes(t.tool) && t.input);
-  for (const t of blocked) {
-    const input = t.input || {};
-    if (t.tool === 'image_download') {
-      const id = String(input.id || '').trim();
-      const target = String(input.path || '').trim();
-      if (!id || !target) continue;
-      if (!(await confirmAction(`Telecharger une image dans ${target}`, `Resultat: ${id}\nDestination: ${target}`))) {
-        console.log(dim(`  ⊘ Telechargement image refuse: ${target}`));
-        continue;
-      }
-      try {
-        const result = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
-        console.log(dim(`  ✓ Image telechargee: ${result.path || target}${result.attributionPath ? `\n    Attribution: ${result.attributionPath}` : ''}`));
-      } catch (e) {
-        console.log(red(`  ✗ Telechargement image echoue: ${target} (${e.message})`));
-      }
-      continue;
-    }
-    if (t.tool === 'run') {
-      const cmd = String(input.command || '').trim();
-      if (!cmd) continue;
-      const dangerous = isDangerousCommand(cmd);
-      if (!(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, cmd))) {
-        console.log(dim(`  ⊘ Commande refusee: ${cmd}`));
-        continue;
-      }
-      try {
-        const out = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
-        const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
-        console.log(dim(`  ✓ Commande executee: ${cmd}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
-      } catch (e) {
-        console.log(red(`  ✗ Commande echouee: ${cmd} (${e.message})`));
-      }
-      continue;
-    }
-    if (t.tool === 'git_write') {
-      const detail = input.action === 'push'
-        ? `git push ${input.remote || 'origin'} ${input.branch || ''}`
-        : `git ${input.action || ''} ${input.branch || input.message || ''}`;
-      if (!(await confirmAction('Executer une opération Git', detail))) { console.log(dim(`  ⊘ Opération Git refusée: ${detail}`)); continue; }
-      try {
-        const out = await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
-        const text = ((out.stdout || '') + (out.stderr ? '\n' + out.stderr : '')).trim();
-        if (out.error || out.timedOut || Number(out.exitCode) !== 0) throw new Error(out.error || `exit ${out.exitCode}`);
-        console.log(dim(`  ✓ ${detail}${text ? '\n    ' + text.slice(0, 2000).replace(/\n/g, '\n    ') : ''}`));
-      } catch (e) { console.log(red(`  ✗ Opération Git échouée: ${detail} (${e.message})`)); }
-      continue;
-    }
-    const rel = String(input.path || '');
-    if (!rel) continue;
-    let content;
-    if (t.tool === 'write') {
-      content = String(input.content || '');
-      if (!(await confirmAction(`Ecrire ${rel}`, content.slice(0, 1200)))) {
-        console.log(dim(`  ⊘ Ecriture refusee: ${rel}`));
-        continue;
-      }
-    } else {
-      let current = '';
-      try {
-        const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=${encodeURIComponent(rel)}`);
-        current = d.content || '';
-      } catch (e) {
-        console.log(red(`  ✗ Edition echouee: ${rel} (${e.message})`));
-        continue;
-      }
-      let next = current;
-      let failed = null;
-      for (const h of (input.hunks || [])) {
-        const r = applyOneHunk(next, h.search || '', h.replace || '');
-        if (!r.ok) { failed = r.error; break; }
-        next = r.content;
-      }
-      if (failed) { console.log(red(`  ✗ Edition echouee: ${rel} (${failed})`)); continue; }
-      if (next === current) continue;
-      if (!(await confirmAction(`Modifier ${rel}`, (input.hunks || []).map((h) => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n')))) {
-        console.log(dim(`  ⊘ Modification refusee: ${rel}`));
-        continue;
-      }
-      content = next;
-    }
-    try {
-      await apiPost('/api/agent-approval/execute', { tool: t.tool, input, sessionId: session.agentSessionId, callId: t.callId, approvalId: t.approval.approvalId, token: t.approval.token });
-      console.log(dim(`  ✓ Fichier ${t.tool === 'write' ? 'ecrit' : 'modifie'}: ${rel}`));
-    } catch (e) {
-      console.log(red(`  ✗ Ecriture echouee: ${rel} (${e.message})`));
-    }
-  }
-}
-
 async function callChat(message, systemPrompt, hist) {
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
@@ -1137,33 +952,16 @@ async function callChat(message, systemPrompt, hist) {
     submodel: session.submodel || undefined,
     message,
     systemPrompt,
-    config: { ...runtimeConfig, toolPermissions: session.toolPermissions || runtimeConfig.toolPermissions || { allow: [], ask: [], deny: [] } },
+    config: runtimeConfig,
     history: (hist || history).slice(-20),
     reasoningLevel: currentEffort().level,
   };
   const r = await authed('POST', '/api/chat', body);
   if (r.status === 401) return { error: 'Session expirée — relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
-  const payload = r.json || {};
-  // Same rule as the desktop chat and the agent loop: the server decides
-  // (response-integrity.js), the CLI only reacts. A degenerate answer is never
-  // printed, a truncated one is printed with a warning.
-  if (payload.degenerate) {
-    return { text: '', error: `Réponse écartée : ${INTEGRITY_REASONS[payload.degenerateReason] || INTEGRITY_REASONS.no_content}. Rien d’exploitable n’a été produit — relancez, éventuellement avec un autre modèle.` };
-  }
-  let text = cleanModelText(payload.response || '');
-  if (payload.truncated && text) {
-    text += '\n\nNote : le fournisseur a coupé cette réponse à la limite de jetons, elle est donc incomplète. Demandez la suite pour obtenir la fin.';
-  }
-  return { text, thinking: cleanModelText(payload.thinking), usage: payload.usage };
+  const text = cleanModelText((r.json && r.json.response) || '');
+  return { text, thinking: cleanModelText(r.json && r.json.thinking), usage: r.json && r.json.usage };
 }
-
-const INTEGRITY_REASONS = {
-  structure_only: 'le modèle a produit une structure de liste sans contenu',
-  no_content: 'le modèle n’a produit aucun contenu exploitable',
-  no_prose: 'le modèle a produit de la mise en forme sans texte',
-  repetition: 'le modèle a répété la même ligne en boucle',
-};
 
 async function resolveReadRequests(response, systemPrompt, events, hooks, depth = 0) {
   if (depth >= 3) return { texts: [], thinking: '' };
@@ -1206,7 +1004,7 @@ async function resolveReadRequests(response, systemPrompt, events, hooks, depth 
 function agentToolLabel(event) {
   const tool = event.tool || 'outil';
   const input = event.input || {};
-  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || input.url || '';
+  const hint = input.path || input.file || input.pattern || input.command || input.cmd || input.query || '';
   return hint ? `${tool} ${String(hint).replace(/\n/g, ' ').slice(0, 60)}` : tool;
 }
 
@@ -1223,19 +1021,16 @@ function describeAgentEvent(event) {
       return { status: `${n} ${n === 1 ? 'outil prévu' : 'outils prévus'}` };
     }
     case 'assistant_note': {
-      // The model (or engine narrator) thinking out loud: normal white text,
-      // like Claude Code — only the tool rows stay dim.
       const note = String(event.text || '').trim();
-      return note ? { line: '  ' + note.replace(/\n/g, '\n  ') } : {};
+      return note ? { line: dim('  ▸ ' + note.replace(/\n/g, '\n    ')) } : {};
     }
     case 'tool_started':
       return { status: agentToolLabel(event) };
     case 'tool_done': {
-      // No per-tool line here: the REPL loop accumulates tool_done events and
-      // prints one compact summary at the end of the turn (see renderToolSummary).
-      // `/show` then dumps the full outputs of the last batch on demand.
       const name = agentToolLabel(event);
-      return { status: name };
+      const mark = event.error ? brand('✗') : (event.blocked ? dim('⊘') : brand('✓'));
+      const summary = String(event.summary || name).replace(/\n/g, ' ');
+      return { line: '  ' + mark + dim(' ' + summary), status: name };
     }
     default:
       return {};
@@ -1257,13 +1052,10 @@ async function sendChat(message, hooks = {}) {
     root: projectRoot(),
     permissionMode: currentPermission().id,
     language: 'fr',
-    config: { ...runtimeConfig, toolPermissions: session.toolPermissions || runtimeConfig.toolPermissions || { allow: [], ask: [], deny: [] } },
+    config: runtimeConfig,
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
     stream: true,
-    useBrain: !!session.useBrain,
-    sessionId: session.agentSessionId || undefined,
-    nativeTools: true,
   };
   const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
@@ -1273,10 +1065,6 @@ async function sendChat(message, hooks = {}) {
 
   history.push({ role: 'user', content: effectiveMessage });
   const json = r.json || {};
-  if (json.sessionId && json.sessionId !== session.agentSessionId) {
-    session.agentSessionId = json.sessionId;
-    saveSession(session);
-  }
   const toolMemory = Array.isArray(json.toolResults) && json.toolResults.length
     ? '\n\n[Outils utilises]\n' + json.toolResults
         .map((t) => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
@@ -1288,61 +1076,34 @@ async function sendChat(message, hooks = {}) {
         .join('\n')
     : '';
   const text = cleanModelText(json.response || '');
-  history.push({
-    role: 'assistant',
-    content: text + toolMemory + todoMemory,
-    ...(json.reasoning_content ? { reasoning_content: cleanModelText(json.reasoning_content) } : {}),
-  });
+  history.push({ role: 'assistant', content: text + toolMemory + todoMemory });
   persistConversation();
 
   return {
     text: text || '(action effectuee)',
     thinking: cleanModelText(json.thinking || ''),
     events: Array.isArray(json.events) ? json.events : [],
-    toolResults: Array.isArray(json.toolResults) ? json.toolResults : [],
     streamed: !!(onEvent && r.streamed),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Effort / reasoning — model-specific because each official API exposes a
-// different set of levels (and some reasoning models cannot turn it off).
+// Effort / reasoning — mirrors the IDE's REASONING_MODES per model family.
+// `level` is the index sent to the server (0 = off, higher = more thinking).
 // ---------------------------------------------------------------------------
-function effortLevels(labels) { return labels.map((label, level) => ({ label, level })); }
-function effortListFor(modelId, submodel = session.submodel || '') {
-  const s = String(submodel).toLowerCase();
-  if (modelId === 'codex') {
-    if (s.startsWith('gpt-5.6')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (/^gpt-5\.(5|4|2)/.test(s)) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH']);
-    if (s.startsWith('gpt-5.1')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-    if (/^(o1|o3-mini)/.test(s)) return effortLevels(['LOW', 'MED', 'HIGH']);
-  }
-  if (modelId === 'claude') {
-    if (s === 'claude-fable-5') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (s === 'claude-opus-4-8' || s === 'claude-sonnet-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'XHIGH', 'MAX']);
-    if (s === 'claude-haiku-4-5') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH', 'MAX']);
-  }
-  if (modelId === 'gemini') {
-    if (s === 'gemini-3.1-pro-preview' || s === 'gemini-2.5-pro') return effortLevels(['LOW', 'MED', 'HIGH']);
-    if (s.startsWith('gemini-3')) return effortLevels(['MIN', 'LOW', 'MED', 'HIGH']);
-    if (s.startsWith('gemini-2.5')) return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-  }
-  if (modelId === 'grok') {
-    if (s === 'grok-4.5') return effortLevels(['LOW', 'MED', 'HIGH']);
-    if (s === 'grok-4.3') return effortLevels(['OFF', 'LOW', 'MED', 'HIGH']);
-    if (s === 'grok-4.20-multi-agent-0309') return effortLevels(['LOW', 'MED', 'HIGH', 'XHIGH']);
-  }
-  if (modelId === 'mistral' && (s === 'mistral-medium-3-5' || s === 'mistral-small-latest')) return effortLevels(['OFF', 'HIGH']);
-  if (modelId === 'kimi') {
-    if (s === 'kimi-k3') return effortLevels(['LOW', 'HIGH', 'MAX']);
-    if (s === 'kimi-k2.6') return effortLevels(['OFF', 'HIGH']);
-    if (s === 'kimi-k2.7-code' || s === 'kimi-k2.7-code-highspeed') return effortLevels(['MAX']);
-  }
-  if (modelId === 'local' || modelId === 'gguf') return effortLevels(['OFF', 'MED', 'MAX']);
-  return effortLevels(['OFF']);
-}
+const EFFORT = {
+  claude:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }, { label: 'MAX', level: 4 }],
+  gemini:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
+  grok:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
+  codex:   [{ label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }],
+  mistral: [{ label: 'OFF', level: 0 }, { label: 'ON', level: 1 }],
+  kimi:    [{ label: 'LOW', level: 0 }, { label: 'HIGH', level: 1 }, { label: 'MAX', level: 2 }],
+  local:   [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
+  gguf:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
+};
+function effortListFor(modelId) { return EFFORT[modelId] || EFFORT.local; }
 function currentEffort() {
-  const list = effortListFor(session.model || 'claude', session.submodel);
+  const list = effortListFor(session.model || 'claude');
   return list.find((e) => e.level === session.reasoningLevel)
     || list.find((e) => e.label === 'MED') || list[Math.floor(list.length / 2)] || list[0];
 }
@@ -1353,11 +1114,10 @@ function currentEffort() {
 // the IDE's PERMISSION_LABELS (state.js).
 // ---------------------------------------------------------------------------
 const PERMISSIONS = [
-  { id: 'plan',       label: 'Plan',            paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
-  { id: 'supervised', label: 'Supervisé',       paint: (s) => brand(s),  desc: 'commandes libres, écritures de fichiers validées' },
-  { id: 'semi',       label: 'Semi-auto',       paint: (s) => brand(s),  desc: 'large autonomie, seul le sensible est validé' },
-  { id: 'auto',       label: 'Autonome',        paint: (s) => yellow(s), desc: 'agit sans demander' },
-  { id: 'bypass',     label: 'Aucune restriction', paint: (s) => red(s), desc: 'accès aux secrets (.env), zéro validation — danger' },
+  { id: 'plan',       label: 'Plan',      paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
+  { id: 'supervised', label: 'Supervisé', paint: (s) => brand(s),  desc: 'demande avant chaque action' },
+  { id: 'semi',       label: 'Semi-auto', paint: (s) => brand(s),  desc: 'fichiers auto, commandes validées' },
+  { id: 'auto',       label: 'Autonome',  paint: (s) => yellow(s), desc: 'agit sans demander' },
 ];
 function currentPermission() {
   return PERMISSIONS.find((p) => p.id === session.permissionMode) || PERMISSIONS[1];
@@ -1508,7 +1268,6 @@ const SLASH = [
   { name: 'files', category: 'tools', desc: 'lister les fichiers du projet' },
   { name: 'review', category: 'review', desc: 'revue du diff Git' },
   { name: 'security-review', category: 'review', desc: 'revue securite du diff' },
-  { name: 'security', category: 'review', desc: 'pipeline securite (diff|scan|deep|validate|report)', usage: '[diff|scan|deep|validate|report]' },
   { name: 'context', category: 'context', desc: 'afficher le contexte courant' },
   { name: 'status', category: 'context', desc: 'etat du CLI et du projet' },
   { name: 'doctor', category: 'context', desc: 'verifier l environnement' },
@@ -1518,7 +1277,7 @@ const SLASH = [
   { name: 'summary', category: 'context', desc: 'resumer la session' },
   { name: 'memory', category: 'context', desc: 'afficher ZAALIS.md / AGENTS.md' },
   { name: 'plan', category: 'mode', desc: 'mode plan sans modification' },
-  { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto|bypass]' },
+  { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto]' },
   { name: 'model', category: 'mode', desc: 'changer de modele', usage: '[modele]', args: true },
   { name: 'models', category: 'mode', desc: 'lister les modeles' },
   { name: 'effort', category: 'mode', desc: 'niveau de raisonnement' },
@@ -1526,18 +1285,17 @@ const SLASH = [
   { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
   { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
   { name: 'remember', category: 'project', desc: 'ajouter une note a ZAALIS.md', usage: '<note>', args: true },
-  { name: 'resume', category: 'project', desc: 'reprendre une session durable', usage: '[id]' },
+  { name: 'resume', category: 'project', desc: 'reprendre la derniere session de ce dossier' },
   { name: 'export', category: 'project', desc: 'exporter la session' },
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
-  { name: 'show', category: 'misc', desc: 'afficher les sorties des derniers outils' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
-  { name: 'session', category: 'project', desc: 'list|new|rename|fork|archive|search', usage: '<action> [argument]' },
+  { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
   { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
-  { name: 'skills', category: 'project', desc: 'competences disponibles dans le projet' },
-  { name: 'mcp', category: 'mode', desc: 'activer Zaalis Brain MCP', usage: '[on|off|status]' },
+  { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
+  { name: 'mcp', category: 'soon', desc: 'serveurs MCP', stub: true },
   { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
   { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
   { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
@@ -1548,51 +1306,6 @@ const SLASH = [
 
 // Last reasoning text from the model, kept folded — `/think` expands it.
 let lastThinking = '';
-
-// Tool events from the last agent turn. The REPL prints a compact one-line
-// summary at the end of every turn (renderToolSummary); `/show` reveals the
-// full outputs of each tool from this batch.
-let lastToolBatch = [];
-let lastToolBatchElapsedMs = 0;
-
-// Compact one-line recap of every tool the agent ran during a turn.
-// Success:  › analyse • 5 commandes, 1 lecture (2.1s) · /show pour le détail
-// Failure:  › analyse • 4 commandes (1.4s) — 1 échec: run npm test   (red)
-function renderToolSummary(tools, elapsedMs) {
-  const list = Array.isArray(tools) ? tools.filter(Boolean) : [];
-  if (!list.length) return '';
-  const buckets = { run: 0, read: 0, look: 0, write: 0, task: 0, todo: 0, other: 0 };
-  const failed = [];
-  for (const t of list) {
-    const kind = String(t.tool || 'other').toLowerCase();
-    if (kind === 'run') buckets.run++;
-    else if (kind === 'read') buckets.read++;
-    else if (kind === 'glob' || kind === 'grep') buckets.look++;
-    else if (kind === 'edit' || kind === 'write') buckets.write++;
-    else if (kind === 'task') buckets.task++;
-    else if (kind === 'todo') buckets.todo++;
-    else buckets.other++;
-    if (t.error || t.blocked) failed.push(t);
-  }
-  const parts = [];
-  const push = (n, one, many) => { if (n) parts.push(`${n} ${n === 1 ? one : many}`); };
-  push(buckets.run, 'commande', 'commandes');
-  push(buckets.read + buckets.look, 'lecture', 'lectures');
-  push(buckets.write, 'écriture', 'écritures');
-  push(buckets.task, 'sous-agent', 'sous-agents');
-  push(buckets.todo, 'todo', 'todos');
-  push(buckets.other, 'action', 'actions');
-  const dur = elapsedMs > 0 ? ` (${(elapsedMs / 1000).toFixed(1)}s)` : '';
-  const bullet = COLOR ? '›' : '>';
-  const body = `analyse • ${parts.join(', ')}${dur}`;
-  if (failed.length) {
-    const first = failed[0];
-    const cmd = agentToolLabel(first).replace(/\s+/g, ' ').slice(0, 50);
-    const suffix = ` — ${failed.length} ${failed.length === 1 ? 'échec' : 'échecs'}: ${cmd}`;
-    return red(`  ${bullet} ${body}${suffix}`) + '\n' + dim('    /show pour le détail');
-  }
-  return dim(`  ${bullet} ${body} · /show pour le détail`);
-}
 
 // Picker: choose source (provider or local model) → for a cloud provider,
 // choose the exact sub-model (Grok 4.3, Claude Opus 4.8, …) → choose the
@@ -1628,7 +1341,7 @@ async function rawPickModel() {
   }
 
   // Final step — reasoning effort for the chosen model
-  const list = effortListFor(model, submodel);
+  const list = effortListFor(model);
   const med = list.findIndex((e) => e.label === 'MED');
   const def = med >= 0 ? med : Math.floor(list.length / 2);
   const ei = await rawSelect({
@@ -1645,7 +1358,7 @@ async function rawPickModel() {
 
 // Arrow-key effort picker for the current model.
 async function pickEffort() {
-  const list = effortListFor(session.model || 'claude', session.submodel);
+  const list = effortListFor(session.model || 'claude');
   const items = list.map((e) => ({ label: e.label, level: e.level }));
   const cur = list.findIndex((e) => e.level === currentEffort().level);
   const idx = await rawSelect({
@@ -1807,27 +1520,8 @@ async function runSlashCommand(ev, me) {
     else console.log(dim('Aucune réflexion pour le dernier message.'));
     return;
   }
-  if (name === 'show') {
-    if (!lastToolBatch.length) { console.log(dim('Aucun outil pour le dernier message.')); return; }
-    console.log('');
-    for (const t of lastToolBatch) {
-      const failed = !!(t.error || t.blocked);
-      const label = agentToolLabel(t);
-      const mark = failed ? red('✗') : (t.blocked ? dim('⊘') : green('✓'));
-      console.log('  ' + mark + ' ' + bold(label));
-      const body = String(t.text || t.error || '').trim();
-      if (body) {
-        const capped = body.length > 4000 ? body.slice(0, 4000) + '\n… (tronqué)' : body;
-        console.log(dim(capped.split('\n').map((l) => '    ' + l).join('\n')));
-      }
-      console.log('');
-    }
-    return;
-  }
   if (name === 'clear') {
-    // Preserve the durable server-side transcript; the next prompt starts a
-    // fresh session instead of appending to a cleared local display.
-    history.length = 0; lastThinking = ''; transcript.length = 0; delete session.agentSessionId; saveSession(session); persistConversation();
+    history.length = 0; lastThinking = ''; transcript.length = 0; persistConversation();
     emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
     return;
   }
@@ -1843,35 +1537,12 @@ async function runSlashCommand(ev, me) {
       ['permission', currentPermission().label],
       ['effort', currentEffort().label],
       ['style', session.responseStyle || 'normal'],
-      ['zaalis brain', session.useBrain ? 'actif' : 'inactif'],
       ['messages', String(history.length)],
     ]);
     return;
   }
   if (name === 'permissions') {
-    const ruleMatch = String(arg || '').trim().match(/^(allow|ask|deny)\s+(.+)$/i);
-    if (ruleMatch) {
-      const bucket = ruleMatch[1].toLowerCase();
-      const rule = ruleMatch[2].trim();
-      if (!/^[A-Za-z]+(?:\([^\n()]+\))?$/.test(rule)) { console.log(brand('✗ ') + 'Règle invalide. Exemple : allow Bash(npm test:*)'); return; }
-      session.toolPermissions = session.toolPermissions || { allow: [], ask: [], deny: [] };
-      const list = session.toolPermissions[bucket] || (session.toolPermissions[bucket] = []);
-      if (!list.includes(rule)) list.push(rule);
-      saveSession(session);
-      console.log(green('✓ ') + `${bucket} → ${rule}`);
-      return;
-    }
     const mode = arg.toLowerCase();
-    if (mode === 'rules' || mode === 'list') {
-      const rules = session.toolPermissions || { allow: [], ask: [], deny: [] };
-      printRows('Règles outils', [['allow', (rules.allow || []).join(', ') || '—'], ['ask', (rules.ask || []).join(', ') || '—'], ['deny', (rules.deny || []).join(', ') || '—']]);
-      return;
-    }
-    if (mode === 'rules reset') {
-      session.toolPermissions = { allow: [], ask: [], deny: [] }; saveSession(session);
-      console.log(green('✓ ') + 'Règles outils effacées.');
-      return;
-    }
     if (!mode) {
       printRows('Permissions', PERMISSIONS.map((p) => [p.id === currentPermission().id ? '-> ' + p.id : p.id, p.label]));
       return;
@@ -1884,35 +1555,6 @@ async function runSlashCommand(ev, me) {
   if (name === 'plan') {
     session.permissionMode = 'plan'; saveSession(session);
     console.log(green('✓ ') + 'Mode Plan active : lectures et propositions, sans modifications.');
-    return;
-  }
-  if (name === 'mcp') {
-    const mode = String(arg || '').trim().toLowerCase();
-    if (mode === 'servers' || mode === 'list') {
-      try {
-        const data = await apiGet('/api/mcp');
-        const rows = (data.servers || []).map((server) => [server.id, `${server.name} · ${server.enabled ? 'actif' : 'désactivé'} · ${server.endpoint}`]);
-        printRows('Serveurs MCP', rows.length ? rows : [['—', 'Aucun serveur MCP générique configuré.']]);
-      } catch (error) { console.log(brand('✗ ') + error.message); }
-      return;
-    }
-    if (!mode || mode === 'status') {
-      try {
-        const r = await authed('GET', '/api/brain-mcp');
-        const d = r.json || {};
-        printRows('Zaalis Brain MCP', [['usage CLI', session.useBrain ? 'actif' : 'inactif'], ['route', d.endpoint || '—'], ['etat', d.detail || d.state || 'inconnu']]);
-      } catch { console.log(brand('✗ ') + 'Impossible de vérifier Zaalis Brain MCP.'); }
-      return;
-    }
-    if (mode !== 'on' && mode !== 'off') { console.log(dim('Usage: /mcp on | off | status')); return; }
-    if (mode === 'on') {
-      try {
-        const r = await authed('GET', '/api/brain-mcp'); const d = r.json || {};
-        if (r.status !== 200 || d.state !== 'connected' || !d.enabled) throw new Error(d.detail || 'MCP non connecté');
-      } catch (err) { console.log(brand('✗ ') + (err.message || 'Configurez Zaalis Brain dans Paramètres → MCP.')); return; }
-    }
-    session.useBrain = mode === 'on'; saveSession(session);
-    console.log(green('✓ ') + `Zaalis Brain MCP ${session.useBrain ? 'activé' : 'désactivé'} pour les prochains messages.`);
     return;
   }
   if (name === 'fast' || name === 'deep') {
@@ -1982,9 +1624,7 @@ async function runSlashCommand(ev, me) {
   if (name === 'run') {
     if (!arg) { console.log(dim('Usage: /run <commande>')); return; }
     const dangerous = isDangerousCommand(arg);
-    // Commands run freely; only a dangerous one or one touching a secret file
-    // asks — and bypass never asks.
-    const needAsk = (dangerous || commandTouchesSecretFile(arg)) && currentPermission().id !== 'bypass';
+    const needAsk = dangerous || ['supervised', 'semi'].includes(currentPermission().id);
     if (currentPermission().id === 'plan') { console.log(dim('Mode Plan: commande bloquee.')); return; }
     if (needAsk && !(await confirmAction(`Executer ${dangerous ? 'une commande DANGEREUSE' : 'une commande'}`, arg))) return;
     const d = await apiPost('/api/exec', { command: arg, cwd: projectRoot() });
@@ -2005,14 +1645,6 @@ async function runSlashCommand(ev, me) {
       } catch {}
     }
     console.log(dim('Aucun ZAALIS.md / AGENTS.md trouve.'));
-    return;
-  }
-  if (name === 'skills') {
-    try {
-      const data = await apiGet(`/api/skills?root=${encodeURIComponent(projectRoot())}`);
-      const rows = (data.skills || []).map((skill) => [skill.id, `${skill.name}${skill.version ? ' · v' + skill.version : ''}${skill.description ? ' — ' + skill.description : ''}`]);
-      printRows('Skills du projet', rows.length ? rows : [['—', 'Aucun SKILL.md trouvé dans .zaalis/skills ou skills.']]);
-    } catch (error) { console.log(brand('✗ ') + error.message); }
     return;
   }
   if (name === 'init') {
@@ -2038,90 +1670,18 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'resume') {
-    try {
-      const restored = await restoreDurableSession(arg);
-      if (restored) {
-        console.log(green('✓ ') + `Session restaurée : ${Math.ceil(restored.count / 2)} échange(s) — ${restored.session.title}. Modèle : ${currentModelLabel()}`);
-        return;
-      }
-    } catch (error) { console.log(dim(`Reprise durable indisponible : ${error.message}`)); }
     const d = restoreConversation();
-    if (!d) { console.log(dim('Aucune session sauvegardée pour ce dossier.')); return; }
+    if (!d) { console.log(dim('Aucune session sauvegardee pour ce dossier.')); return; }
     const when = new Date(d.savedAt || Date.now()).toLocaleString();
     if (d.model) { session.model = d.model; session.submodel = d.submodel; saveSession(session); }
-    console.log(green('✓ ') + `Session locale restaurée : ${Math.ceil(history.length / 2)} échange(s) (${when}).`);
+    console.log(green('✓ ') + `Session restauree : ${Math.ceil(history.length / 2)} echange(s) (${when}). Modele : ${currentModelLabel()}`);
     return;
   }
   if (name === 'export') {
-    if (session.agentSessionId) {
-      try {
-        const data = await apiGet(`/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}/export`);
-        const file = path.join(projectRoot(), `zaalis-session-${session.agentSessionId}.json`);
-        fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
-        console.log(green('✓ ') + `Export JSONL : ${file}`);
-        return;
-      } catch {}
-    }
     const file = path.join(projectRoot(), `zaalis-cli-${Date.now()}.md`);
     const md = history.map((h) => `**${h.role}**\n\n${h.content}\n`).join('\n---\n\n');
     fs.writeFileSync(file, md, 'utf-8');
     console.log(green('✓ ') + `Export : ${file}`);
-    return;
-  }
-  if (name === 'session') {
-    const [action = 'list', ...rest] = parseArgs(arg);
-    const value = rest.join(' ').trim();
-    if (action === 'list' || action === 'search') {
-      const query = action === 'search' ? value : '';
-      const data = await apiGet(`/api/agent-sessions?root=${encodeURIComponent(projectRoot())}&query=${encodeURIComponent(query)}&archived=${action === 'archived'}&limit=100`);
-      const rows = (data.sessions || []).map((item) => [item.id === session.agentSessionId ? '→ ' + item.id.slice(0, 18) : item.id.slice(0, 20), `${item.title} · ${new Date(item.updatedAt).toLocaleString()}${item.status === 'archived' ? ' · archivée' : ''}`]);
-      printRows('Conversations', rows.length ? rows : [['—', 'Aucune conversation']]);
-      return;
-    }
-    if (action === 'new') {
-      const data = await apiPost('/api/agent-sessions', { root: projectRoot(), title: value || 'Nouvelle conversation', model: session.model, submodel: session.submodel });
-      session.agentSessionId = data.session.id; history.length = 0; saveSession(session);
-      console.log(green('✓ ') + `Nouvelle session : ${data.session.id}`); return;
-    }
-    if (!session.agentSessionId) { console.log(dim('Aucune session active. Utilisez /session new ou /resume.')); return; }
-    if (action === 'rename') {
-      if (!value) { console.log(dim('Usage : /session rename <titre>')); return; }
-      const r = await authed('PATCH', `/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}`, { title: value });
-      if (r.status !== 200) throw new Error((r.json && r.json.error) || `HTTP ${r.status}`);
-      console.log(green('✓ ') + `Session renommée : ${r.json.session.title}`); return;
-    }
-    if (action === 'fork') {
-      const data = await apiPost(`/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}/fork`, { title: value || undefined });
-      session.agentSessionId = data.session.id; await restoreDurableSession(data.session.id); console.log(green('✓ ') + `Branche créée : ${data.session.id}`); return;
-    }
-    if (action === 'archive') {
-      const r = await authed('PATCH', `/api/agent-sessions/${encodeURIComponent(session.agentSessionId)}`, { status: 'archived' });
-      if (r.status !== 200) throw new Error((r.json && r.json.error) || `HTTP ${r.status}`);
-      delete session.agentSessionId; saveSession(session); console.log(green('✓ ') + 'Session archivée.'); return;
-    }
-    console.log(dim('Usage : /session list|new [titre]|rename <titre>|fork [titre]|archive|search <texte>'));
-    return;
-  }
-  if (name === 'security') {
-    const workflow = (arg || 'scan').trim().toLowerCase();
-    if (!['diff', 'scan', 'deep', 'validate', 'fix', 'report'].includes(workflow)) { console.log(dim('Usage : /security diff|scan|deep|validate|fix|report')); return; }
-    const data = await apiPost(`/api/security/${workflow}`, { root: projectRoot(), source: 'slash', format: workflow === 'report' ? 'sarif' : 'json' });
-    const summary = data.summary || {};
-    printRows(`Sécurité · ${workflow}`, [['constats', String(summary.total || 0)], ['haute sévérité', String(summary.high || 0)], ['moyenne', String(summary.medium || 0)], ['généré', data.generatedAt || '—']]);
-    if (workflow === 'report') {
-      const file = path.join(projectRoot(), `zaalis-security-${Date.now()}.sarif`);
-      fs.writeFileSync(file, JSON.stringify(data.report, null, 2), { mode: 0o600 });
-      console.log(green('✓ ') + `SARIF : ${file}`);
-      const markdown = await apiPost('/api/security/report', { root: projectRoot(), source: 'slash', format: 'markdown' });
-      const markdownFile = file.replace(/\.sarif$/, '.md');
-      fs.writeFileSync(markdownFile, String(markdown.report || ''), { mode: 0o600 });
-      console.log(green('✓ ') + `Markdown : ${markdownFile}`);
-    } else if (workflow === 'fix') {
-      const changes = data.report && data.report.changes || [];
-      console.log(dim(`${changes.length} correctif(s) proposés : utilisez l’agent avec edit/write pour les appliquer après approbation.`));
-    } else if (data.report && Array.isArray(data.report.findings)) {
-      data.report.findings.slice(0, 30).forEach((item) => console.log(`  ${item.severity.toUpperCase()} ${item.file}:${item.line} — ${item.message}`));
-    }
     return;
   }
   if (name === 'summary') {
@@ -2137,12 +1697,12 @@ async function runSlashCommand(ev, me) {
     const recent = history.slice(-4);
     const data = await callChat('Resume ce contexte en moins de 250 mots, en gardant fichiers, decisions et faits importants:\n\n' + older.map((h) => `${h.role}: ${h.content}`).join('\n'), 'Tu compactes un historique de conversation.', []);
     if (data.error) console.log(brand('✗ ') + data.error);
-    else { history.length = 0; history.push({ role: 'user', content: '[Resume du contexte precedent] ' + data.text }, ...recent); persistConversation(); console.log(green('✓ ') + 'Contexte compacte.'); }
+    else { history.length = 0; history.push({ role: 'user', content: '[Resume du contexte precedent] ' + data.text }, ...recent); console.log(green('✓ ') + 'Contexte compacte.'); }
     return;
   }
   if (name === 'reset') {
     if (!(await confirmAction('Reinitialiser la session CLI locale', 'Efface le contexte courant, le style de reponse et le mode de permission. La connexion est conservee.'))) return;
-    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; delete session.agentSessionId; persistConversation(); saveSession(session);
+    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; saveSession(session);
     console.log(green('✓ ') + 'Session CLI reinitialisee.');
     return;
   }
@@ -2757,20 +2317,15 @@ async function repl(opts = {}) {
     followTail = true; scrollOffset = 0;
     emit('\n');
     let stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)');
-    // Accumulate completed tool events for the compact end-of-turn summary
-    // (and for `/show`, which dumps their full outputs on demand).
-    const roundTools = [];
-    const roundStart = Date.now();
     const hooks = {
       stop: () => { if (stopWait) { stopWait(); stopWait = null; } },
       start: () => { if (!stopWait) stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)'); },
-      // Live agent events: assistant notes stay inline (they're the model
-      // thinking aloud), tool completions are silent until the recap.
+      // Live agent events: completed tools/notes are logged permanently, the
+      // current activity drives the spinner label.
       onEvent: (event) => {
         const d = describeAgentEvent(event);
         if (d.line) emit(d.line);
         if (d.status && stopWait && stopWait.setLabel) stopWait.setLabel(d.status);
-        if (event && event.type === 'tool_done') roundTools.push(event);
       },
     };
     // Keep the prompt active while the AI is answering: Enter queues one next
@@ -2799,17 +2354,6 @@ async function repl(opts = {}) {
       if (!res.streamed && res.events && res.events.length) {
         for (const ev of res.events) console.log(dim('  ▸ ' + ev.replace(/\n/g, '\n    ')));
       }
-      // Compact recap of the tools this turn used — one line by default,
-      // `/show` prints the details. Failure lines are tinted red.
-      lastToolBatch = roundTools;
-      lastToolBatchElapsedMs = Date.now() - roundStart;
-      if (roundTools.length) {
-        const recap = renderToolSummary(roundTools, lastToolBatchElapsedMs);
-        if (recap) emit(recap);
-      }
-      // Actions bloquees par le serveur (supervise/semi) : demander la
-      // permission puis les appliquer, comme Claude Code.
-      try { await applyBlockedAgentTools(res.toolResults || roundTools); } catch {}
       // Reveal the answer word-by-word (typewriter), like the IDE.
       await streamAnswer(res.text);
     }
@@ -2940,46 +2484,19 @@ async function main() {
   }
 
   if (cmd === 'ide') {
-    const self = process.execPath.toLowerCase();
-    if (IS_WIN) {
-      const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
-        .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-      if (exe) spawnDetached(exe);
-      else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
-      return;
-    }
-    if (process.platform === 'darwin') {
-      // In the packaged .app the CLI lives at
-      //   <App>/Contents/Resources/app/bundle/bin/zaalis
-      // and the Electron binary at
-      //   <App>/Contents/MacOS/zaalis-ide
-      // Try the bundle-relative path first, then fall back to `open -a` which
-      // asks Launch Services to locate an installed "zaalis IDE.app".
-      const bundleExe = path.join(APP_DIR, '..', '..', '..', '..', 'MacOS', 'zaalis-ide');
-      if (fs.existsSync(bundleExe) && bundleExe.toLowerCase() !== self) {
-        spawnDetached(bundleExe);
-        return;
-      }
-      const also = [
-        path.join(APP_DIR, '..', 'zaalis-ide.command'),
-        path.join(APP_DIR, 'zaalis-ide.command'),
-        path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-        path.join(APP_DIR, 'zaalis-ide.sh'),
-      ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-      if (also) { spawnDetached(also); return; }
-      try {
-        spawnDetached('/usr/bin/open', ['-a', 'zaalis IDE']);
-        return;
-      } catch {}
-      console.log(brand('✗ ') + 'zaalis IDE introuvable. Installez l\'app puis relancez.');
-      return;
-    }
-    const exe = [
-      path.join(APP_DIR, '..', 'zaalis-ide.sh'),
-      path.join(APP_DIR, 'zaalis-ide.sh'),
-      path.join(APP_DIR, '..', '..', '..', '..', 'zaalis-ide'),
-    ].find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-    if (exe) spawnDetached(exe);
+    // Sur macOS l'IDE est un bundle .app : `open -a` laisse LaunchServices le
+    // demarrer, ce qui respecte les autorisations (accessibilite, capture
+    // d'ecran) accordees au bundle. On retombe sur le binaire voisin en dev.
+    const bundles = [
+      '/Applications/zaalis IDE.app',
+      path.join(os.homedir(), 'Applications', 'zaalis IDE.app'),
+    ];
+    const bundle = bundles.find((p) => { try { return fs.existsSync(p); } catch { return false; } });
+    if (bundle) { spawn('open', ['-a', bundle], { detached: true, stdio: 'ignore' }).unref(); return; }
+    const self = process.execPath;
+    const exe = [path.join(APP_DIR, '..', 'zaalis'), path.join(APP_DIR, 'zaalis')]
+      .find((p) => { try { return fs.existsSync(p) && p !== self; } catch { return false; } });
+    if (exe) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
     else console.log(brand('✗ ') + 'zaalis IDE introuvable.');
     return;
   }
@@ -2988,7 +2505,7 @@ async function main() {
   if (!(await ensureServer())) { console.error(brand('✗ ') + 'Impossible de joindre le serveur zaalis.'); process.exit(1); }
 
   if (cmd === 'login') { process.exit((await login({ register: argv.includes('--register') })) ? 0 : 1); }
-  if (cmd === 'logout') { await request('POST', '/api/auth/logout'); clearKeychainCookie(); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
+  if (cmd === 'logout') { await request('POST', '/api/auth/logout'); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
 
   // Work out whether this is a one-shot or the interactive REPL.
   const subcommand = cmd === 'models' || cmd === 'pull';

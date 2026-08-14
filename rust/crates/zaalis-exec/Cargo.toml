@@ -1,0 +1,28 @@
+[package]
+name = "zaalis-exec"
+description = "Cancellable, bounded command and background process execution for zaalis."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
+uuid = { workspace = true }
+dunce = { workspace = true }
+portable-pty = "0.9"
+process-wrap = { version = "9.1", default-features = false, features = ["tokio1", "kill-on-drop", "job-object", "process-group", "process-session"] }
+
+[target.'cfg(windows)'.dependencies]
+sandboxrs-windows = "0.1.0"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

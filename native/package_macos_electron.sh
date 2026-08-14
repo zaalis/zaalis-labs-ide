@@ -57,6 +57,13 @@ else
   exit 1
 fi
 cp -R "$SOURCE_DIST/." "$BUNDLE/"
+# zaalis-agentd est le coeur agent : sans lui, Chat, Agents et le CLI n'ont
+# aucun moteur. On echoue tot plutot que de livrer un bundle inutilisable.
+if [ ! -f "$BUNDLE/zaalis-agentd" ]; then
+  echo "ERROR: coeur Rust manquant ($BUNDLE/zaalis-agentd)." >&2
+  echo "       Lancez 'npm run build:cli' (cargo) avant l'empaquetage." >&2
+  exit 1
+fi
 cp "$ROOT/package.json" "$BUNDLE/package.json"
 if [ -f "$ROOT/README_MACOS.md" ]; then
   cp "$ROOT/README_MACOS.md" "$BUNDLE/README.txt"
@@ -97,7 +104,10 @@ chmod +x "$APP/Contents/MacOS/zaalis-ide" \
   "$APP/Contents/Resources/app/macos-speech-transcriber" \
   "$APP/Contents/Resources/app/macos-computer-bridge" \
   "$APP/Contents/Resources/app/bundle/zaalis-server" \
+  "$APP/Contents/Resources/app/bundle/zaalis-agentd" \
   "$APP/Contents/Resources/app/bundle/bin/zaalis" 2>/dev/null || true
+# Bac a sable strict (Seatbelt) : optionnel, absent d'une build sans cargo.
+chmod +x "$APP/Contents/Resources/app/bundle/zaalis-sandbox" 2>/dev/null || true
 
 # Sign only after every bundled resource has been copied.  Signing earlier
 # leaves Electron's resource seal stale and macOS rejects the application.
@@ -112,6 +122,10 @@ if command -v codesign >/dev/null 2>&1; then
   # of treating it as an anonymous executable with a separate, opaque grant.
   codesign --force --identifier fr.zaalis.ide.speech-transcriber --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/macos-speech-transcriber"
   codesign --force --identifier fr.zaalis.ide.computer-bridge --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/macos-computer-bridge"
+  codesign --force --identifier fr.zaalis.ide.agentd --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/bundle/zaalis-agentd"
+  if [ -f "$APP/Contents/Resources/app/bundle/zaalis-sandbox" ]; then
+    codesign --force --identifier fr.zaalis.ide.sandbox --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/bundle/zaalis-sandbox"
+  fi
   codesign --force --deep --sign "$CODESIGN_ID" "$APP"
 fi
 

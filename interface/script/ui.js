@@ -51,24 +51,6 @@ function updateSubmodelDropdown() {
     });
 }
 
-// Keep a durable, low-key trace when a conversation changes model. It is a
-// system message, so it stays visually gray and never enters the AI context.
-function recordChatModelChange(previousModel, previousSubmodel) {
-    const nextModel = modelSelect.value;
-    const nextSubmodel = submodelSelect.value;
-    if (!previousSubmodel || (previousModel === nextModel && previousSubmodel === nextSubmodel)) return;
-    const container = $('#chat-messages');
-    if (!container || !state.currentConvId || !container.querySelector('.msg-user')) return;
-    const labelFor = (provider, submodel) => submodelLabelFor(provider, submodel) || submodel || provider;
-    const lang = state.language || 'fr';
-    const message = lang === 'en'
-        ? `Model changed: ${labelFor(previousModel, previousSubmodel)} → ${labelFor(nextModel, nextSubmodel)}`
-        : `Modèle changé : ${labelFor(previousModel, previousSubmodel)} → ${labelFor(nextModel, nextSubmodel)}`;
-    addMsg(container, 'system', null, message);
-    saveConversation();
-    if (typeof followScroll === 'function') followScroll(container);
-}
-
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
 function showToast(title, msg, opts = {}) {
     let stack = $('#toast-stack');
@@ -129,8 +111,6 @@ function maybeWarnSmallLocalModel() {
 }
 
 modelSelect.addEventListener('change', () => {
-    const previousModel = state.config.aiModel;
-    const previousSubmodel = state.config.aiSubmodel;
     state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
     
@@ -151,11 +131,8 @@ modelSelect.addEventListener('change', () => {
     applyModelColor();
     updateTokenMeter();
     maybeWarnSmallLocalModel();
-    recordChatModelChange(previousModel, previousSubmodel);
 });
 submodelSelect.addEventListener('change', () => {
-    const previousModel = state.config.aiModel;
-    const previousSubmodel = state.config.aiSubmodel;
     state.config.aiSubmodel = submodelSelect.value;
     saveState();
 
@@ -163,7 +140,6 @@ submodelSelect.addEventListener('change', () => {
     updateAttachAvailability();
     updateTokenMeter();
     maybeWarnSmallLocalModel();
-    recordChatModelChange(previousModel, previousSubmodel);
 });
 
 // In agents mode the reasoning slider tracks the lead agent, so re-check it
@@ -180,23 +156,6 @@ $$('.agent-check, .agent-role-select, .agent-model-select').forEach(el => {
 // ==========================================================
 const projectDropdown = $('#project-dropdown');
 
-function positionProjectDropdown() {
-    if (!projectDropdown || !projectDropdown.classList.contains('open')) return;
-    const anchor = $('#project-btn') || $('.sidebar-project');
-    if (!anchor) return;
-
-    const rect = anchor.getBoundingClientRect();
-    const gutter = 12;
-    const preferredWidth = Math.min(560, window.innerWidth - (gutter * 2));
-    const left = Math.max(gutter, Math.min(rect.left + 8, window.innerWidth - preferredWidth - gutter));
-    const top = Math.min(rect.bottom + 8, window.innerHeight - 120);
-
-    projectDropdown.style.left = `${left}px`;
-    projectDropdown.style.top = `${top}px`;
-    projectDropdown.style.width = `${Math.max(280, Math.min(preferredWidth, window.innerWidth - left - gutter))}px`;
-    projectDropdown.style.maxHeight = `${Math.max(160, window.innerHeight - top - gutter)}px`;
-}
-
 $('#project-btn').addEventListener('click', e => {
     e.stopPropagation();
     const willOpen = !projectDropdown.classList.contains('open');
@@ -204,7 +163,6 @@ $('#project-btn').addEventListener('click', e => {
     // history shows up even when no project was auto-reopened at startup.
     if (willOpen) initRecentProjects();
     projectDropdown.classList.toggle('open');
-    positionProjectDropdown();
 });
 
 document.addEventListener('click', () => {
@@ -212,25 +170,11 @@ document.addEventListener('click', () => {
     $('#profile-popup').classList.remove('open');
 });
 
-window.addEventListener('resize', positionProjectDropdown);
-
 $('#open-project-btn').addEventListener('click', async e => {
     e.stopPropagation();
     projectDropdown.classList.remove('open');
-    // Open the native OS folder picker via Electron when available, then fall back.
-    try {
-        const data = await pickZaalisFolder();
-        if (data && data.path) {
-            openProject(data.path, true);
-            return;
-        }
-        if (data && data.cancelled) return; // user closed the dialog
-        throw new Error(data && data.error ? data.error : 'picker unavailable');
-    } catch {
-        // Fallback: manual path input modal.
-        $('#project-modal').classList.add('active');
-        $('#project-path-input').focus();
-    }
+    const selected = await pickProjectFolder();
+    if (selected) openProject(selected, true);
 });
 
 const noProjBtn = $('#no-project-btn');
@@ -242,30 +186,113 @@ if (noProjBtn) {
     });
 }
 
-// Project modal
-$('#close-project-modal').addEventListener('click', () => $('#project-modal').classList.remove('active'));
-$('#cancel-project-btn').addEventListener('click', () => $('#project-modal').classList.remove('active'));
-$('#project-modal').addEventListener('click', e => { if (e.target.id === 'project-modal') $('#project-modal').classList.remove('active'); });
-
+// Project modal. It is also the safe manual fallback when a native folder
+// picker is not available on the current platform.
+let projectPathModalResolve = null;
+function closeProjectPathModal(value = null) {
+    $('#project-modal').classList.remove('active');
+    const resolve = projectPathModalResolve;
+    projectPathModalResolve = null;
+    if (resolve) resolve(value);
+}
+function promptProjectPath(initialPath = '') {
+    const input = $('#project-path-input');
+    input.value = initialPath;
+    $('#project-modal').classList.add('active');
+    input.focus();
+    return new Promise(resolve => { projectPathModalResolve = resolve; });
+}
+async function pickProjectFolder(initialPath = '') {
+    try {
+        const res = await fetch('/api/pick-folder', { method: 'POST' });
+        const data = await res.json();
+        if (data && data.path) return data.path;
+        if (data && data.cancelled) return null;
+    } catch {}
+    return promptProjectPath(initialPath);
+}
+$('#close-project-modal').addEventListener('click', () => closeProjectPathModal());
+$('#cancel-project-btn').addEventListener('click', () => closeProjectPathModal());
+$('#project-modal').addEventListener('click', e => { if (e.target.id === 'project-modal') closeProjectPathModal(); });
 $('#confirm-project-btn').addEventListener('click', () => {
-    const p = $('#project-path-input').value.trim();
-    if (p) {
-        openProject(p, true);
-        $('#project-modal').classList.remove('active');
-    }
+    const path = $('#project-path-input').value.trim();
+    if (path) closeProjectPathModal(path);
 });
-
 $('#project-path-input').addEventListener('keydown', e => {
     if (e.key === 'Enter') $('#confirm-project-btn').click();
 });
 
+let movedProjectPath = null;
+function showMovedProjectPathModal(path) {
+    movedProjectPath = path;
+    const lang = state.language || 'fr';
+    const title = $('#project-path-moved-title');
+    const message = $('#project-path-moved-message');
+    const update = $('#update-moved-project-btn');
+    const remove = $('#delete-moved-project-btn');
+    if (title) title.textContent = lang === 'en' ? 'Project path changed' : 'Chemin du projet modifie';
+    if (message) message.textContent = lang === 'en'
+        ? `The folder "${path}" can no longer be found. Update the saved path or remove this project from the recent list.`
+        : `Le dossier "${path}" est introuvable. Mettez a jour son chemin en choisissant le nouvel emplacement, ou retirez ce projet de la liste recente.`;
+    if (update) update.textContent = lang === 'en' ? 'Update path' : 'Mettre a jour le chemin';
+    if (remove) remove.textContent = lang === 'en' ? 'Remove project' : 'Supprimer le projet';
+    $('#project-path-moved-modal').classList.add('active');
+}
+function closeMovedProjectPathModal() {
+    $('#project-path-moved-modal').classList.remove('active');
+    movedProjectPath = null;
+}
+async function projectPathStatus(rootPath) {
+    try {
+        const res = await fetch(`/api/files?root=${encodeURIComponent(rootPath)}`);
+        if (res.ok) return 'available';
+        return res.status === 404 ? 'missing' : 'unavailable';
+    } catch {
+        return 'unavailable';
+    }
+}
+function replaceRecentProjectPath(previousPath, nextPath) {
+    const previous = normalizeProjectPath(previousPath);
+    const recent = getRecentProjects()
+        .filter(path => normalizeProjectPath(path) !== previous && normalizeProjectPath(path) !== normalizeProjectPath(nextPath));
+    recent.unshift(nextPath);
+    localStorage.setItem('zaalis-recent', JSON.stringify(recent.slice(0, 8)));
+    syncRecentProjects(recent.slice(0, 8));
+
+    const project = String(nextPath).replace(/[\\/]+$/, '').split(/[\\/]/).pop() || null;
+    for (const kind of ['chat', 'agents']) {
+        const store = kind === 'agents' ? 'agentConversations' : 'conversations';
+        let changed = false;
+        (state[store] || []).forEach(conversation => {
+            if (normalizeProjectPath(conversation.projectPath) !== previous) return;
+            conversation.projectPath = nextPath;
+            conversation.project = project;
+            changed = true;
+        });
+        if (changed && typeof persistChats === 'function') persistChats(kind);
+    }
+}
+$('#update-moved-project-btn').addEventListener('click', async () => {
+    const previousPath = movedProjectPath;
+    if (!previousPath) return;
+    const nextPath = await pickProjectFolder(previousPath);
+    if (!nextPath) return;
+    replaceRecentProjectPath(previousPath, nextPath);
+    closeMovedProjectPathModal();
+    await openProject(nextPath, true, { skipPathValidation: true, preserveConversation: true });
+});
+$('#delete-moved-project-btn').addEventListener('click', () => {
+    const previousPath = movedProjectPath;
+    closeMovedProjectPathModal();
+    if (previousPath) removeRecentProject(previousPath);
+});
+
 function removeRecentProject(path) {
-    const removed = normalizeProjectPath(path);
-    let recent = getRecentProjects().filter(p => normalizeProjectPath(p) !== removed);
+    let recent = getRecentProjects().filter(p => p !== path);
     localStorage.setItem('zaalis-recent', JSON.stringify(recent));
     syncRecentProjects(recent);
     initRecentProjects();
-    if (normalizeProjectPath(state.projectRoot) === removed) {
+    if (state.projectRoot === path) {
         clearProject();
     }
 }
@@ -295,14 +322,13 @@ function initRecentProjects() {
     }
     container.innerHTML = '';
     recent.forEach(p => {
-        const projectPath = String(p || '').replace(/[\\/]+$/, '');
-        const folderName = projectPath.split(/[\\/]/).pop();
+        const folderName = p.split(/[\\/]/).pop();
         
         // Row container
         const projectRow = document.createElement('div');
         projectRow.className = 'project-dropdown-row';
-        projectRow.title = projectPath;
-        if (normalizeProjectPath(state.projectRoot) === normalizeProjectPath(projectPath)) projectRow.classList.add('active');
+        projectRow.title = p;
+        if (state.projectRoot === p) projectRow.classList.add('active');
         
         // Chevron button
         const chev = document.createElement('button');
@@ -324,7 +350,7 @@ function initRecentProjects() {
                 return;
             }
             projectDropdown.classList.remove('open');
-            openProject(projectPath, true);
+            openProject(p, true);
         });
 
         // Pencil button (Nouveau chat)
@@ -336,11 +362,7 @@ function initRecentProjects() {
         pencilBtn.addEventListener('click', async e => {
             e.stopPropagation();
             projectDropdown.classList.remove('open');
-            await openProject(projectPath, true);
-            const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
-            if (typeof newConversation === 'function') {
-                newConversation(kind);
-            }
+            await openProject(p, true); // direct project switches already start a fresh chat
         });
 
         // Trash button (Supprimer)
@@ -357,7 +379,7 @@ function initRecentProjects() {
                 danger: true
             });
             if (ok) {
-                removeRecentProject(projectPath);
+                removeRecentProject(p);
             }
         });
 
@@ -384,7 +406,7 @@ function initRecentProjects() {
 
         // Load nested chats
         const kind = (typeof activeKind === 'function') ? activeKind() : 'chat';
-        const projectConvs = conversationsForProject(projectPath, folderName, kind);
+        const projectConvs = conversationsForProject(p, folderName, kind);
 
         if (projectConvs.length === 0) {
             chatsContainer.innerHTML = `<div class="dropdown-chat-empty">${lang === 'fr' ? 'Aucune conversation' : 'No conversations'}</div>`;
@@ -405,10 +427,9 @@ function initRecentProjects() {
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
                     projectDropdown.classList.remove('open');
-                    openProject(projectPath, false);
-                    if (typeof loadConversation === 'function') {
-                        loadConversation(kind, conv.id);
-                    }
+                    openProject(p, false, { preserveConversation: true }).then(opened => {
+                        if (opened && typeof loadConversation === 'function') loadConversation(kind, conv.id);
+                    });
                 });
                 chatsContainer.appendChild(chatRow);
             });
@@ -417,14 +438,27 @@ function initRecentProjects() {
     });
 }
 
-async function openProject(rootPath, isNew) {
-    const cleanRoot = String(rootPath || '').trim().replace(/[\\/]+$/, '');
-    if (!cleanRoot) return;
-    const switchingProject = state.projectRoot && normalizeProjectPath(state.projectRoot) !== normalizeProjectPath(cleanRoot);
+async function openProject(rootPath, isNew, options = {}) {
+    rootPath = String(rootPath || '').trim();
+    if (!rootPath) return false;
+    if (!options.skipPathValidation) {
+        const status = await projectPathStatus(rootPath);
+        if (status === 'missing') {
+            showMovedProjectPathModal(rootPath);
+            return false;
+        }
+        if (status === 'unavailable') {
+            const lang = state.language || 'fr';
+            showToast(lang === 'en' ? 'Project unavailable' : 'Projet indisponible',
+                lang === 'en' ? 'The folder could not be checked. Please try again.' : 'Le dossier n a pas pu etre verifie. Reessayez.',
+                { icon: '!' });
+            return false;
+        }
+    }
+    const switchingProject = normalizeProjectPath(state.projectRoot) !== normalizeProjectPath(rootPath);
 
-    state.projectRoot = cleanRoot;
-    state.lastProjectRoot = cleanRoot;
-    if (isNew) addRecentProject(cleanRoot);
+    state.projectRoot = rootPath;
+    if (isNew) addRecentProject(rootPath);
 
     // Switching to a DIFFERENT project must drop the previous project's open
     // tabs/editor and force the AI context (project tree) to be re-injected on
@@ -443,14 +477,18 @@ async function openProject(rootPath, isNew) {
     // Retire le data-i18n : sinon updateLanguage() (changement de langue) réécrit
     // l'étiquette à « Aucun projet » alors qu'un projet est bien ouvert.
     nameEl.removeAttribute('data-i18n');
-    nameEl.textContent = cleanRoot.split(/[\\/]/).pop();
+    nameEl.textContent = rootPath.split(/[\\/]/).pop();
     await loadFileTree();
     initRecentProjects();
+    if (switchingProject && !options.preserveConversation && typeof newConversation === 'function') {
+        newConversation(typeof activeKind === 'function' ? activeKind() : 'chat');
+    }
+    return true;
 }
 
 // Drop the open project and return to a clean "no project" state — used by the
 // classic "Aucun projet" chat group so the AI answers with no project context.
-function clearProject() {
+function clearProject(options = {}) {
     if (!state.projectRoot) return;
     const lang = state.language || 'fr';
     state.projectRoot = null;
@@ -467,6 +505,9 @@ function clearProject() {
     saveState();
     loadFileTree();        // empties the explorer (handles null root)
     initRecentProjects();
+    if (!options.preserveConversation && typeof newConversation === 'function') {
+        newConversation(typeof activeKind === 'function' ? activeKind() : 'chat');
+    }
 }
 
 // ==========================================================
@@ -772,8 +813,19 @@ function renderTree(files, container, depth) {
 // ==========================================================
 function updateGutter(content) {
     const g = $('#line-gutter');
+    if (!g) return;
     const n = (content || '').split('\n').length;
-    g.innerHTML = Array.from({ length: n }, (_, i) => `<div>${i + 1}</div>`).join('');
+    const cur = g.childElementCount;
+    if (cur === n) return;
+    // Diff instead of rebuild: append/remove only the trailing line numbers, so
+    // typing in a large file no longer recreates thousands of DOM nodes.
+    if (n > cur) {
+        let html = '';
+        for (let i = cur; i < n; i++) html += `<div>${i + 1}</div>`;
+        g.insertAdjacentHTML('beforeend', html);
+    } else {
+        while (g.childElementCount > n) g.removeChild(g.lastElementChild);
+    }
 }
 
 const textarea = $('#code-textarea');
@@ -833,33 +885,6 @@ function renderTabs() {
     tabBar.innerHTML = '';
 
     const filePaths = Object.keys(state.openFiles);
-    const review = state.securityReview || {};
-    const reviewTab = '__security_review__';
-    const reviewWorkspace = $('#security-review-workspace');
-    if (review.open) {
-        const tab = document.createElement('div');
-        const isActive = state.activeFile === reviewTab;
-        tab.className = `tab security-review-tab ${isActive ? 'active' : ''}`;
-        tab.dataset.file = reviewTab;
-        tab.innerHTML = '<span class="tab-icon" aria-hidden="true">◈</span><span class="tab-name">Review sécurité</span>';
-        const close = document.createElement('button');
-        close.className = 'tab-close'; close.innerHTML = '&times;';
-        close.addEventListener('click', (event) => { event.stopPropagation(); if (typeof closeSecurityReview === 'function') closeSecurityReview(); });
-        tab.appendChild(close);
-        tab.addEventListener('click', () => { state.activeFile = reviewTab; renderTabs(); if (typeof renderSecurityReview === 'function') renderSecurityReview(); });
-        tabBar.appendChild(tab);
-    }
-
-    if (review.open && state.activeFile === reviewTab) {
-        $('#welcome-screen').classList.add('hidden');
-        $('#code-editor').classList.add('hidden');
-        if (reviewWorkspace) reviewWorkspace.classList.remove('hidden');
-        $('#status-file').textContent = 'Review sécurité';
-        $('#status-saved').textContent = review.data && review.data.status === 'running' ? 'Analyse en cours' : '';
-        $('#status-saved').style.color = 'var(--green)';
-        return;
-    }
-    if (reviewWorkspace) reviewWorkspace.classList.add('hidden');
     if (filePaths.length === 0) {
         const lang = state.language || 'fr';
         tabBar.innerHTML = `<div class="tab active" data-file="welcome"><span class="tab-name" data-i18n="welcome-tab">${TRANSLATIONS[lang]['welcome-tab']}</span></div>`;
@@ -1294,8 +1319,7 @@ function showAuthOverlay() {
 
 // Reopen the last project once the user is authenticated.
 function openSavedProject() {
-    const savedProject = state.projectRoot || (state.config.reopenLastProject ? state.lastProjectRoot : null);
-    if (savedProject) openProject(savedProject, false);
+    if (state.projectRoot) openProject(state.projectRoot, false, { preserveConversation: true });
 }
 
 function setupAuth() {
@@ -1693,7 +1717,7 @@ function createCustomSelect(selectId, opts) {
 
         // Update color for model select trigger
         if (selectId === 'ai-model') {
-            const colors = MODEL_COLORS;
+            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
             triggerText.style.color = colors[select.value] || 'var(--text-0)';
         }
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
@@ -1709,7 +1733,7 @@ function createCustomSelect(selectId, opts) {
             div.title = opt.title || opt.textContent;
 
             if (selectId === 'ai-model') {
-                const colors = MODEL_COLORS;
+                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
                 div.style.color = colors[opt.value] || 'inherit';
                 div.style.fontWeight = '600';
             }

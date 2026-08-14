@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.18">
-    <link rel="stylesheet" href="app.css?v=1.0.18">
+    <link rel="stylesheet" href="base.css?v=1.0.14">
+    <link rel="stylesheet" href="app.css?v=1.0.14">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
 
@@ -119,7 +120,8 @@
                             <span class="ml-field-label" data-i18n="loader-engine">Moteur</span>
                             <select id="ml-variant-select" class="ml-select">
                                 <option value="" data-i18n="loader-engine-auto">Auto</option>
-                                <option value="metal">Metal</option>
+                                <option value="cuda">CUDA</option>
+                                <option value="vulkan">Vulkan</option>
                                 <option value="cpu">CPU</option>
                             </select>
                         </div>
@@ -258,39 +260,6 @@
                         <textarea id="code-textarea" spellcheck="false" autocomplete="off" autocapitalize="off"></textarea>
                     </div>
                 </div>
-                <!-- Central, live security review workspace. It behaves like an
-                     editor tab so code remains one click away. -->
-                <section class="security-review-workspace hidden" id="security-review-workspace" aria-live="polite">
-                    <header class="security-review-header">
-                        <div class="security-review-title-row">
-                            <span class="security-review-shield" aria-hidden="true">
-                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l7 3v5c0 5-3.1 8.8-7 10-3.9-1.2-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>
-                            </span>
-                            <div><h1>Review sécurité</h1><p id="security-review-meta">En attente d’une revue</p></div>
-                        </div>
-                        <div class="security-review-actions">
-                            <button class="security-review-button danger hidden" id="security-review-cancel" type="button">Annuler</button>
-                        </div>
-                    </header>
-                    <div class="security-review-hero">
-                        <div class="security-review-state"><span class="security-review-spinner" id="security-review-spinner"></span><strong id="security-review-stage-title">Prêt à lancer</strong></div>
-                        <div class="security-review-metrics">
-                            <div><span>Progression</span><strong id="security-review-progress">—</strong></div>
-                            <div><span>Constats signalés</span><strong id="security-review-findings">En attente</strong></div>
-                        </div>
-                    </div>
-                    <div class="security-review-progress-track"><div id="security-review-progress-bar"></div></div>
-                    <div class="security-review-content">
-                        <section class="security-review-stages">
-                            <div class="security-review-section-head"><h2>Progression de la review</h2><span id="security-review-current-stage">Étape courante</span></div>
-                            <ol id="security-review-stage-list"></ol>
-                        </section>
-                        <aside class="security-review-side">
-                            <section class="security-review-agents"><div class="security-review-section-head"><h2>Sous-agents</h2><span id="security-review-agent-count">0</span></div><div id="security-review-agent-list"></div></section>
-                            <section class="security-review-findings-panel"><div class="security-review-section-head"><h2>Constats</h2><span id="security-review-summary"></span></div><div id="security-review-finding-list"><p class="security-review-empty">Les résultats apparaîtront ici.</p></div></section>
-                        </aside>
-                    </div>
-                </section>
             </div>
             <div class="editor-statusbar" id="editor-statusbar">
                 <span id="status-file">--</span>
@@ -373,8 +342,6 @@
                                 <div class="attach-menu" id="chat-attach-menu">
                                     <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
                                     <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
-                                    <button type="button" class="brain-attach-toggle" data-brain-toggle="chat" aria-pressed="false"><span class="brain-toggle-box" aria-hidden="true"></span>Utiliser Zaalis Brain</button>
-                                    <button type="button" class="computer-attach-toggle" data-computer-toggle aria-pressed="false" title="Autoriser l’IA à observer et contrôler ce Mac pour cette tâche"><span class="brain-toggle-box" aria-hidden="true"></span><span>Contrôle Mac</span></button>
                                 </div>
                             </div>
                             <!-- Mode Selector -->
@@ -386,23 +353,25 @@
                                 </button>
                                 <div class="mode-dropdown" id="chat-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
-                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Commandes libres, écritures de fichiers validées</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M13 8.5 10 13h4l-3 4.5"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Large autonomie, seul le sensible est validé</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
                                         <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
                                     </button>
-                                    <button type="button" class="mode-item mode-item-danger" data-perm="bypass">
-                                        <span class="mode-item-title" data-i18n="perm-bypass">Aucune restriction</span>
-                                        <span class="mode-item-desc" data-i18n="perm-bypass-title">Accès aux secrets (.env), zéro validation — danger</span>
-                                    </button>
                                 </div>
                             </div>
+                            <button class="attach-btn computer-control-btn" id="chat-computer-btn" type="button" aria-pressed="false" title="Activer le contrôle explicite du PC pour cette tâche">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2"/></svg>
+                            </button>
                         </div>
                         <div class="chat-input-bottom-right">
                             <button class="voice-btn" id="chat-voice-btn" title="Activer la dictée vocale">
@@ -415,10 +384,16 @@
                     </div>
                 </div>
 
-                <!-- La liste des conversations vit uniquement dans la barre
-                     laterale gauche (section CONVERSATIONS). L'ancien bloc
-                     « Historique » en bas de ce panneau doublonnait cette liste
-                     et a ete retire. -->
+                <!-- Project chat history: shown only when a project is open -->
+                <div class="chat-history project-history" id="chat-history">
+                    <div class="history-label">
+                        <span data-i18n="history-header">Historique</span>
+                        <button class="new-chat-btn" id="new-chat-btn" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
+                    </div>
+                    <div class="history-list project-history-list" id="history-list">
+                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
+                    </div>
+                </div>
             </div>
 
             <!-- ===== AGENTS VIEW ===== -->
@@ -445,9 +420,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="codex">
-                            <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
-                        </select>
+                        <select class="agent-model-select" data-agent="codex"><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Claude -->
@@ -465,9 +438,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="claude">
-                            <option value="claude-fable-5">Claude Fable 5</option>
-                        </select>
+                        <select class="agent-model-select" data-agent="claude"><option value="claude-fable-5">Claude Fable 5</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Gemini -->
@@ -485,9 +456,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="gemini">
-                            <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                        </select>
+                        <select class="agent-model-select" data-agent="gemini"><option value="gemini-3.5-flash">Gemini 3.5 Flash</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Grok -->
@@ -505,9 +474,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="grok">
-                            <option value="grok-4.5">Grok 4.5</option>
-                        </select>
+                        <select class="agent-model-select" data-agent="grok"><option value="grok-4.5">Grok 4.5</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Le Chat (Mistral) -->
@@ -535,12 +502,9 @@
                         <div class="agent-info">
                             <span class="agent-name">Kimi</span>
                             <select class="agent-role-select" data-agent="kimi">
-                                <option value="developer">Developpeur</option>
-                                <option value="lead">Chef de projet</option>
-                                <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
-                                <option value="optimizer">Optimiseur</option>
-                                <option value="tester">Testeur</option>
+                                <option value="developer">Developpeur</option><option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option><option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option><option value="tester">Testeur</option>
                             </select>
                         </div>
                         <select class="agent-model-select" data-agent="kimi"></select>
@@ -604,7 +568,6 @@
                                 <div class="attach-menu" id="agents-attach-menu">
                                     <button type="button" data-attach="image"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg> <span data-i18n="attach-image">Image</span></button>
                                     <button type="button" data-attach="file"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg> <span data-i18n="attach-file">Fichier</span></button>
-                                    <button type="button" class="brain-attach-toggle" data-brain-toggle="agents" aria-pressed="false"><span class="brain-toggle-box" aria-hidden="true"></span>Utiliser Zaalis Brain</button>
                                 </div>
                             </div>
                             <!-- Mode Selector -->
@@ -616,23 +579,25 @@
                                 </button>
                                 <div class="mode-dropdown" id="agents-mode-menu">
                                     <button type="button" class="mode-item active" data-perm="supervised">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
-                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Commandes libres, écritures de fichiers validées</span>
+                                        <span class="mode-item-desc" data-i18n="perm-supervised-title">Chaque modification demande votre accord</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="semi">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M13 8.5 10 13h4l-3 4.5"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-semi">Semi-auto</span>
-                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Large autonomie, seul le sensible est validé</span>
+                                        <span class="mode-item-desc" data-i18n="perm-semi-title">Code auto, commandes validées</span>
                                     </button>
                                     <button type="button" class="mode-item" data-perm="auto">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-auto">Autonome</span>
                                         <span class="mode-item-desc" data-i18n="perm-auto-title">Contrôle total, aucune validation</span>
                                     </button>
-                                    <button type="button" class="mode-item mode-item-danger" data-perm="bypass">
-                                        <span class="mode-item-title" data-i18n="perm-bypass">Aucune restriction</span>
-                                        <span class="mode-item-desc" data-i18n="perm-bypass-title">Accès aux secrets (.env), zéro validation — danger</span>
-                                    </button>
                                 </div>
                             </div>
+                            <button class="attach-btn computer-control-btn" id="agents-computer-btn" type="button" aria-pressed="false" title="Activer le contrôle explicite du PC pour cette tâche">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/><circle cx="12" cy="10.5" r="2"/></svg>
+                            </button>
                         </div>
                         <div class="chat-input-bottom-right">
                             <button class="voice-btn" id="agents-voice-btn" title="Activer la dictée vocale">
@@ -645,8 +610,16 @@
                     </div>
                 </div>
 
-                <!-- Historique retire ici aussi : la liste des conversations
-                     Agents vit dans la barre laterale gauche. -->
+                <!-- Project agents history: shown only when a project is open -->
+                <div class="chat-history project-history">
+                    <div class="history-label">
+                        <span data-i18n="history-header">Historique</span>
+                        <button class="new-chat-btn" id="new-chat-btn-agents" title="Nouveau chat">+ <span data-i18n="new-chat-btn">Nouveau</span></button>
+                    </div>
+                    <div class="history-list project-history-list" id="history-list-agents">
+                        <div class="history-empty" data-i18n="history-empty">Aucune conversation</div>
+                    </div>
+                </div>
 
             </div>
 
@@ -679,8 +652,7 @@
                 <span data-i18n="settings-api-keys-title">Cles API</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="mcp">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg>
-                <span>MCP</span>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg><span>MCP</span>
             </button>
             <div class="settings-nav-label" data-i18n="settings-zside-category">ZS IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
@@ -690,10 +662,6 @@
             <button class="settings-nav-item" type="button" data-settings-section="models">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
                 <span data-i18n="settings-models-title">Modèles par défaut</span>
-            </button>
-            <button class="settings-nav-item" type="button" data-settings-section="instructions">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
-                <span data-i18n="settings-instructions-title">Instructions IA</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -734,6 +702,13 @@
                             <option value="fr">Francais</option>
                             <option value="en">English</option>
                         </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-terminal-profile">Terminal intégré</label>
+                            <p>Choisissez le terminal ouvert par l’icône Terminal. Les commandes IA ne sont pas concernées.</p>
+                        </div>
+                        <select id="settings-terminal-profile"></select>
                     </div>
                 </section>
 
@@ -776,22 +751,30 @@
                         <input type="password" id="key-mistral" placeholder="...">
                     </div>
                     <div class="form-group">
-                        <div class="key-label-row">
-                            <label for="key-moonshot">Moonshot AI (Kimi)</label>
-                            <span class="key-status" id="key-status-moonshot"></span>
-                        </div>
+                        <div class="key-label-row"><label for="key-moonshot">Moonshot AI (Kimi)</label><span class="key-status" id="key-status-moonshot"></span></div>
                         <input type="password" id="key-moonshot" placeholder="...">
                     </div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
                     <h3>MCP · Zaalis Brain</h3>
-                    <p class="form-hint">Connecte l’IDE et le CLI au Cerveau local. Copiez l’URL et le jeton affichés dans Zaalis Brain → IA → MCP local. Le jeton est chiffré localement et n’est jamais réaffiché.</p>
+                    <p class="form-hint">Connexion dédiée au Cerveau local. Le jeton est chiffré sur ce PC et ne sera jamais réaffiché.</p>
                     <div class="settings-status-row"><span>État</span><strong id="brain-mcp-status">Non configuré</strong></div>
-                    <div class="form-group settings-row-group"><div class="settings-row-copy"><label for="brain-mcp-enabled">Activer Zaalis Brain</label><p>Désactive immédiatement l’usage du Cerveau par les IA de l’IDE et du CLI.</p></div><label class="zs-switch"><input id="brain-mcp-enabled" type="checkbox"><span class="zs-slider"></span></label></div>
-                    <div class="form-group"><label for="brain-mcp-endpoint">Route MCP locale</label><input id="brain-mcp-endpoint" type="url" autocomplete="off" placeholder="http://127.0.0.1:39191/mcp/..." spellcheck="false"></div>
-                    <div class="form-group"><label for="brain-mcp-token">Jeton Bearer</label><input id="brain-mcp-token" type="password" autocomplete="new-password" placeholder="Coller le jeton à 64 caractères"></div>
-                    <div class="form-group"><label for="mcp-servers-json">Serveurs MCP supplémentaires</label><p class="form-hint">JSON : id, name, endpoint HTTPS (ou loopback HTTP), enabled, allow, deny et token. Les jetons sont chiffrés localement et ne sont jamais réaffichés.</p><textarea id="mcp-servers-json" rows="6" spellcheck="false" placeholder='[{"id":"github","name":"GitHub","endpoint":"https://…/mcp","enabled":true,"allow":[] ,"deny":[]}]'></textarea></div>
+                    <div class="form-group settings-row-group"><div class="settings-row-copy"><label for="brain-mcp-enabled">Activer Zaalis Brain</label><p>Utilise le Cerveau local dans l’IDE et le CLI.</p></div><label class="zs-switch"><input id="brain-mcp-enabled" type="checkbox"><span class="zs-slider"></span></label></div>
+                    <div class="form-group"><label for="brain-mcp-endpoint">Route MCP locale</label><input id="brain-mcp-endpoint" type="url" placeholder="http://127.0.0.1:39191/mcp/..." spellcheck="false"></div>
+                    <div class="form-group"><label for="brain-mcp-token">Jeton Bearer</label><input id="brain-mcp-token" type="password" placeholder="Coller le jeton à 64 caractères"></div>
+                    <hr class="settings-separator">
+                    <div class="mcp-personal-toolbar">
+                        <h3>MCP personnels</h3>
+                        <div class="mcp-personal-actions">
+                            <button class="btn btn-ghost mcp-action-btn" id="mcp-import-config" type="button">Importer une config</button>
+                            <button class="btn btn-ghost mcp-action-btn" id="mcp-add-blender" type="button">Blender MCP</button>
+                            <button class="btn btn-primary mcp-action-btn" id="mcp-add-personal" type="button">Ajouter</button>
+                        </div>
+                    </div>
+                    <p class="form-hint">Connectez des serveurs MCP Streamable HTTP comme dans Codex ou Claude. Le jeton est optionnel ; HTTPS est requis sauf pour un serveur local. Importez un fichier JSON compatible ou configurez directement l’URL.</p>
+                    <input id="mcp-config-file" type="file" accept="application/json,.json" hidden>
+                    <div id="mcp-personal-list" class="mcp-server-list" aria-live="polite"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="hardware">
@@ -808,11 +791,12 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="gguf-variant-select" data-i18n="settings-gguf-engine-label">Moteur GGUF</label>
-                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne Metal sur macOS, puis CPU si necessaire.</p>
+                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne CUDA, Vulkan ou CPU selon le poste.</p>
                         </div>
                         <select id="gguf-variant-select">
                             <option value="" data-i18n="settings-gguf-auto">Auto</option>
-                            <option value="metal">Metal</option>
+                            <option value="cuda">CUDA (NVIDIA)</option>
+                            <option value="vulkan">Vulkan (AMD / Intel)</option>
                             <option value="cpu">CPU</option>
                         </select>
                     </div>
@@ -938,16 +922,6 @@
                             <option value="1" data-i18n="settings-reasoning-med">Moyen</option>
                             <option value="2" data-i18n="settings-reasoning-max">Maximal</option>
                         </select>
-                    </div>
-                </section>
-
-                <section class="settings-card settings-pane" data-settings-pane="instructions">
-                    <h3 data-i18n="settings-instructions-title">Instructions IA</h3>
-                    <p class="form-hint" data-i18n="settings-instructions-hint">Ajoutez des préférences permanentes pour toutes les IA : ton, niveau de détail, langue ou méthode de travail.</p>
-                    <div class="form-group settings-instructions-group">
-                        <label for="settings-custom-system-instructions" data-i18n="settings-instructions-label">Instructions système personnelles</label>
-                        <textarea id="settings-custom-system-instructions" rows="11" maxlength="12000" spellcheck="true" placeholder="Ex. Réponds en français, avec un ton clair et direct. Explique brièvement les choix techniques."></textarea>
-                        <p class="form-hint" data-i18n="settings-instructions-safety">Ces préférences s’appliquent au chat, aux agents et aux modèles locaux. Elles ne peuvent pas désactiver les règles de sécurité, les permissions ou les garde-fous du fournisseur.</p>
                     </div>
                 </section>
 
@@ -1078,6 +1052,22 @@
         <div class="modal-footer">
             <button class="btn btn-ghost" id="cancel-project-btn" data-i18n="cancel-project-btn">Annuler</button>
             <button class="btn btn-primary" id="confirm-project-btn" data-i18n="confirm-project-btn">Ouvrir</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== PROJECT PATH MOVED MODAL ========== -->
+<div class="modal-overlay" id="project-path-moved-modal">
+    <div class="modal modal-sm" role="alertdialog" aria-modal="true" aria-labelledby="project-path-moved-title">
+        <div class="modal-header">
+            <h2 id="project-path-moved-title">Chemin du projet modifié</h2>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" id="project-path-moved-message"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-danger" id="delete-moved-project-btn" type="button">Supprimer le projet</button>
+            <button class="btn btn-primary" id="update-moved-project-btn" type="button">Mettre à jour le chemin</button>
         </div>
     </div>
 </div>
@@ -1214,7 +1204,7 @@
             <button class="modal-close" id="close-update-modal">&times;</button>
         </div>
         <div class="modal-body">
-            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.13</p>
+            <p class="form-hint" id="update-release-name">zaalis IDE V1.0.14</p>
             <div class="update-steps">
                 <div class="update-step active" id="update-step-download">
                     <div class="update-step-badge"><span class="step-number">1</span><span class="step-check">✓</span></div>
@@ -1227,7 +1217,7 @@
                     <div class="update-step-badge"><span class="step-number">2</span></div>
                     <div class="update-step-text">
                         <strong>Installation manuelle</strong>
-                        <span>Fermez votre IDE, puis ouvrez le fichier d'installation telecharge.</span>
+                        <span>Fermez votre IDE, puis double-cliquez sur zaalis-update.exe.</span>
                     </div>
                 </div>
             </div>
@@ -1286,14 +1276,13 @@
     </div>
 </div>
 
-<script src="catalog.js?v=1.0.18"></script>
-<script src="help.js?v=1.0.18"></script>
-<script src="script/state.js?v=1.0.18" defer></script>
-<script src="script/ui.js?v=1.0.18" defer></script>
-<script src="script/security-review.js?v=1.0.18" defer></script>
-<script src="script/commands.js?v=1.0.18" defer></script>
-<script src="script/ai.js?v=1.0.18" defer></script>
-<script src="script/remote.js?v=1.0.18" defer></script>
-<script src="script/main.js?v=1.0.18" defer></script>
+<script src="catalog.js?v=1.0.14"></script>
+<script src="help.js?v=1.0.14"></script>
+<script src="script/state.js?v=1.0.14" defer></script>
+<script src="script/ui.js?v=1.0.14" defer></script>
+<script src="script/commands.js?v=1.0.14" defer></script>
+<script src="script/ai.js?v=1.0.14" defer></script>
+<script src="script/remote.js?v=1.0.14" defer></script>
+<script src="script/main.js?v=1.0.14" defer></script>
 </body>
 </html>
