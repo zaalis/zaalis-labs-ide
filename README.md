@@ -1,8 +1,8 @@
-# zaalis labs IDE
+# zaalis labs IDE for Windows
 
-Local IDE by zaalis labs with a shared Rust agent core, a thin local Node.js HTTP adapter, and a native Windows application powered by WebView2.
+Local IDE by zaalis labs, built on a shared Rust agent core, a local Node.js HTTP adapter, and a native Windows application powered by WebView2.
 
-## Launch with the Windows installer
+## Install the Windows application
 
 Download and run:
 
@@ -10,11 +10,11 @@ Download and run:
 
 The installer adds the application to Windows and creates launch shortcuts.
 
-## Launch manually
+## Run the development server
 
-Prerequisites: Node.js and Rust 1.90 or newer.
+Prerequisites: Node.js and Rust 1.90 or later.
 
-```bash
+```powershell
 npm install
 cargo build --manifest-path rust/Cargo.toml -p zaalis-agentd
 npm start
@@ -26,34 +26,34 @@ Then open:
 http://localhost:3000
 ```
 
-## Command sandbox
+This mode opens the local web interface for development; it does not launch the native Windows desktop application.
 
-Commands always run with a minimal environment and process-tree cleanup. Set
-`ZAALIS_SANDBOX_MODE=strict` to require native filesystem and network isolation;
-startup fails closed when the platform backend is unavailable. A workspace
-release build places `zaalis-sandbox` beside the daemon on Linux/macOS. The
-strict Unix helper uses Landlock plus network seccomp on Linux and Seatbelt on
-macOS. Windows probes the available AppContainer/Windows Sandbox backend and
-otherwise keeps the default Job Object containment without claiming strict
-isolation.
+## Command isolation on Windows
+
+Commands run by agents use a reduced environment and process-tree cleanup. Set `ZAALIS_SANDBOX_MODE=strict` to require native filesystem and network isolation: startup fails when the required strict-isolation mechanism is unavailable.
+
+On Windows, the application attempts to use AppContainer or Windows Sandbox. When neither mechanism is available, it retains standard Job Object containment and does not claim strict isolation.
 
 ## Rebuild the Windows application
 
 Prerequisites:
 
 - Node.js
-- Rust 1.90 or newer
-- Visual Studio with the Desktop C++ workload
+- Rust 1.90 or later
+- Visual Studio with the **Desktop development with C++** workload
 - Inno Setup 6
 
-```bat
-native\build_server.bat
-native\build_cli.bat
-native\build_shell.bat
-native\build_installer.bat
+In PowerShell, run:
+
+```powershell
+npm run build:rust
+cmd /c native\build_server.bat
+cmd /c native\build_cli.bat
+cmd /c native\build_shell.bat
+cmd /c native\build_installer.bat
 ```
 
-The generated installer can be found here:
+The generated installer is located at:
 
 ```text
 native\installer\zaalis-setup.exe
@@ -63,6 +63,6 @@ native\installer\zaalis-setup.exe
 
 Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
 
-zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) file and the [NOTICE](NOTICE) file included in this repository.
+zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) and [NOTICE](NOTICE) files included in this repository.
 
-No ownership rights are transferred by accessing, cloning, using, modifying, or contributing to this repository.
+Accessing, cloning, using, modifying, or contributing to this repository does not transfer any ownership rights.
