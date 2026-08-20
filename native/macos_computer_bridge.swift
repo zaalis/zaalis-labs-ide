@@ -3,7 +3,6 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import ImageIO
-import ScreenCaptureKit
 import Carbon.HIToolbox
 
 // Privileged macOS side of the computer-control feature.  It deliberately
@@ -33,51 +32,28 @@ func screenPermission(prompt: Bool) -> Bool {
     return false
 }
 
-// The screenshot API is async while this command-line bridge deliberately
-// returns one synchronous JSON response. The lock also keeps Swift 6's strict
-// concurrency checker from seeing a mutable captured local across Task.
-final class ScreenshotResult: @unchecked Sendable {
-    private let lock = NSLock()
-    private var image: CGImage?
-    private var failure: String?
-
-    func succeed(_ value: CGImage) {
-        lock.lock(); image = value; lock.unlock()
-    }
-
-    func fail(_ error: Error) {
-        lock.lock(); failure = error.localizedDescription; lock.unlock()
-    }
-
-    func get() throws -> CGImage {
-        lock.lock(); defer { lock.unlock() }
-        if let image { return image }
-        throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: failure ?? "screen capture failed"])
-    }
-}
-
-@available(macOS 14.0, *)
+// SCScreenshotManager was introduced in the macOS 14 SDK.  Building the app
+// with the macOS 13 Command Line Tools then failed even though the bridge only
+// needs Screen Recording permission.  The CoreGraphics API has the same
+// permission model, is synchronous (ideal for this stdin/stdout helper), and
+// remains available on every macOS version supported by the app.
 func capturedImage() throws -> CGImage {
-    let semaphore = DispatchSemaphore(value: 0)
-    let result = ScreenshotResult()
-    Task {
-        do {
-            let content = try await SCShareableContent.current
-            guard let display = content.displays.first else { throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: "display unavailable"]) }
-            let filter = SCContentFilter(display: display, excludingWindows: [])
-            let config = SCStreamConfiguration()
-            config.width = display.width
-            config.height = display.height
-            result.succeed(try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config))
-        } catch { result.fail(error) }
-        semaphore.signal()
+    guard let image = CGWindowListCreateImage(
+        .infinite,
+        .optionOnScreenOnly,
+        kCGNullWindowID,
+        [.bestResolution]
+    ) else {
+        throw NSError(
+            domain: "zaalis",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "screen capture failed; grant Screen Recording permission to zaalis IDE"]
+        )
     }
-    semaphore.wait()
-    return try result.get()
+    return image
 }
 
 func pngBase64() throws -> String {
-    guard #available(macOS 14.0, *) else { throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: "macOS 14 required for screen capture"]) }
     let image = try capturedImage()
     let data = NSMutableData()
     guard let destination = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else {
