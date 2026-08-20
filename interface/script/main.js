@@ -1145,7 +1145,13 @@ async function checkForUpdates() {
                     if (releaseNameEl) releaseNameEl.textContent = data.name || data.tag_name;
                     if (progContainer) progContainer.classList.remove('hidden');
                     if (waiting) waiting.classList.add('hidden');
-                    if (statusText) statusText.textContent = "Pret a telecharger";
+                    // Deja installe ce tag et la version n'a pas bouge : le paquet
+                    // publie n'a pas ete compile a la version que le tag annonce.
+                    // Sans ce message, la mise a jour se represente sans fin et
+                    // semble echouer alors qu'elle a reussi.
+                    if (statusText) statusText.textContent = data.tagMismatch
+                        ? `Deja installe. Le paquet publie sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un zaalis-linux-x64.deb compile en ${String(data.tag_name || '').replace(/^v/i, '')}.`
+                        : "Pret a telecharger";
                     if (progressBar) progressBar.style.width = '0%';
                     if (stepDownload) {
                         stepDownload.classList.add('active');
@@ -1238,23 +1244,40 @@ if (confirmUpdateBtn) {
                         if (progContainer) progContainer.classList.remove('hidden');
                         if (waiting) waiting.classList.add('hidden');
                         progressBar.style.width = '100%';
-                        downloadedUpdatePath = pData.dest || data.dest || "C:\\Users\\boque\\Downloads\\zaalis-update.exe";
+                        // Sert de drapeau "deja telecharge" : le serveur retient
+                        // le vrai chemin, l'UI n'a pas a le connaitre.
+                        downloadedUpdatePath = pData.dest || data.dest || 'zaalis-update.deb';
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis lancez zaalis-update.exe depuis votre dossier Telechargements.";
-                        // Un seul bouton orange "Fermer l'IDE" qui ferme totalement l'app.
+                        statusText.textContent = "Telechargement termine. L'IDE va se fermer, s'installer et redemarrer tout seul.";
+                        // Un seul bouton orange : l'installation se fait sans assistant
+                        // (au plus une authentification systeme, le temps d'ecrire dans
+                        // /opt) puis l'IDE se relance sur la nouvelle version.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
                         confirmUpdateBtn.classList.remove('btn-primary');
                         confirmUpdateBtn.classList.add('btn-warning');
-                        confirmUpdateBtn.textContent = "Fermer l'IDE";
+                        confirmUpdateBtn.textContent = "Installer et redemarrer";
                         confirmUpdateBtn.onclick = async () => {
                             confirmUpdateBtn.disabled = true;
-                            confirmUpdateBtn.textContent = "Fermeture...";
-                            try { await fetch('/api/app/close', { method: 'POST' }); } catch {}
+                            confirmUpdateBtn.textContent = "Installation...";
+                            statusText.textContent = "Remplacement des fichiers en cours... votre mot de passe peut etre demande, puis l'IDE redemarre.";
+                            try {
+                                const iRes = await fetch('/api/update/install', { method: 'POST' });
+                                // Le serveur se coupe juste apres avoir repondu : une
+                                // reponse manquante n'est pas une erreur ici.
+                                if (iRes.ok) return;
+                                const iData = await iRes.json().catch(() => ({}));
+                                throw new Error(iData.error || 'HTTP ' + iRes.status);
+                            } catch (err) {
+                                if (err && err.name === 'TypeError') return; // serveur deja arrete
+                                statusText.textContent = "Erreur: " + err.message;
+                                confirmUpdateBtn.disabled = false;
+                                confirmUpdateBtn.textContent = "Installer et redemarrer";
+                            }
                         };
                     } else if (pData.progress < 0) {
                         clearInterval(interval);

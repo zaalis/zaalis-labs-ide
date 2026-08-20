@@ -2711,11 +2711,17 @@ app.get('/api/check-update', async (req, res) => {
     const assets = release.assets || [];
     const asset = assets.find((a) => /\.deb$/i.test(a.name)) || assets.find((a) => /\.AppImage$/i.test(a.name));
     const latestVersion = release.tag_name || null;
+    const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
+    // On a deja installe exactement ce tag et on annonce toujours une version
+    // plus ancienne : le paquet publie n'a pas ete compile a la version que le
+    // tag annonce. Sans le signaler, l'IDE repropose la meme mise a jour sans
+    // fin et elle a l'air d'echouer alors qu'elle a reussi.
     res.json({
       tag_name: latestVersion,
       name: release.name || latestVersion || null,
       currentVersion: APP_VERSION,
-      updateAvailable: latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false,
+      updateAvailable,
+      tagMismatch: updateAvailable && !!latestVersion && readLastUpdateTag() === latestVersion,
       downloadUrl: asset ? asset.browser_download_url : null
     });
   } catch (err) {
@@ -2724,6 +2730,19 @@ app.get('/api/check-update', async (req, res) => {
 });
 let downloadProgress = 0;
 let downloadedInstallerPath = null;
+let pendingUpdateTag = null;
+
+// On retient le tag de la derniere release installee : c'est ce qui permet a
+// /api/check-update de distinguer une vraie nouvelle version d'un tag dont le
+// paquet publie a ete compile a une autre version.
+const LAST_UPDATE_TAG_FILE = path.join(DATA_DIR, 'last-update-tag');
+function tagFromUpdateUrl(raw) {
+  const m = String(raw || '').match(/\/releases\/download\/([^/]+)\//);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function readLastUpdateTag() {
+  try { return fs.readFileSync(LAST_UPDATE_TAG_FILE, 'utf8').trim() || null; } catch { return null; }
+}
 
 // Only accept installer URLs from GitHub (where releases are published) so the
 // endpoint can't be used to download and launch an arbitrary binary.
@@ -2741,6 +2760,7 @@ app.post('/api/update/download', (req, res) => {
     const dlUrl = req.body.url;
     if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
     if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
+    pendingUpdateTag = tagFromUpdateUrl(dlUrl);
 
     // On garde l'extension publiee par la release (.deb ou .AppImage) : c'est
     // elle qui decide de l'outil d'installation cote /api/update/install.
@@ -2791,33 +2811,130 @@ app.get('/api/update/progress', (req, res) => {
   res.json({ progress: downloadProgress, dest: downloadedInstallerPath });
 });
 
+// Le binaire a relancer une fois la mise a jour posee. APPIMAGE designe le
+// fichier AppImage lui-meme (et non le point de montage temporaire), et une
+// installation par paquet pose le shell Electron dans /opt.
+function relaunchTarget() {
+  for (const candidate of [process.env.APPIMAGE, '/opt/zaalis-ide/zaalis-ide', '/usr/local/bin/zaalis-ide']) {
+    if (!candidate) continue;
+    try { if (fs.existsSync(candidate)) return candidate; } catch {}
+  }
+  return null;
+}
+
+// Citation pour /bin/sh : les chemins viennent de nous, mais un dossier
+// personnel contenant une apostrophe suffirait a casser le script.
+function shQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
+}
+
+// Mise a jour silencieuse : les fichiers installes sont remplaces et l'IDE
+// revient tout seul, sans un seul ecran d'assistant — ce qu'on attend d'une
+// application de bureau.
+//
+// Sur Linux, ecrire dans /opt demande les droits root, que ce serveur n'a pas
+// et ne doit pas avoir. pkexec est ce qui s'en approche le plus : une seule
+// fenetre d'authentification du bureau, puis plus aucune question. Un AppImage,
+// lui, appartient a l'utilisateur et se remplace sans aucune invite.
 app.post('/api/update/install', (req, res) => {
   try {
+    if (process.platform !== 'linux') {
+      return res.status(400).json({ error: 'Mise a jour automatique disponible sur Linux uniquement.' });
+    }
     const installerPath = downloadedInstallerPath;
     if (!installerPath || !fs.existsSync(installerPath)) {
       return res.status(409).json({ error: 'Installer not downloaded yet.' });
     }
 
-    // Un AppImage est autonome : on le rend executable et l'utilisateur le lance
-    // lui-meme. Un .deb demande les droits root, que ce serveur n'a pas et ne
-    // doit pas demander : on ouvre le paquet avec le gestionnaire graphique du
-    // bureau (GNOME Logiciels, Discover...), qui possede sa propre elevation.
-    if (/\.AppImage$/i.test(installerPath)) {
-      try { fs.chmodSync(installerPath, 0o755); } catch {}
-      return res.json({ success: true, installerPath, manual: true });
-    }
+    // La mise a jour ne peut pas etre pilotee d'ici : elle doit remplacer
+    // zaalis-server, c'est-a-dire *ce* processus. On confie donc le travail a un
+    // script detache qui nous survit.
+    const updateLog = path.join(os.tmpdir(), 'zaalis-update.log');
+    const scriptPath = path.join(os.tmpdir(), 'zaalis-update-runner.sh');
+    const isAppImage = /\.AppImage$/i.test(installerPath);
+    const appImagePath = isAppImage ? process.env.APPIMAGE : null;
+    const relaunch = relaunchTarget();
 
-    // xdg-open delegue au gestionnaire de paquets du bureau, qui detient le
-    // processus : il survit donc a la fermeture de l'IDE.
-    const child = spawn('xdg-open', [installerPath], {
+    const install = isAppImage
+      // Un AppImage est un simple fichier appartenant a l'utilisateur : on ecrit
+      // le nouveau par-dessus l'ancien, sans elevation ni invite. Sans savoir
+      // quel fichier remplacer (IDE lance autrement que par l'AppImage), il ne
+      // reste que le repli manuel.
+      ? (appImagePath
+          ? [`cp -f ${shQuote(installerPath)} ${shQuote(appImagePath)} && chmod +x ${shQuote(appImagePath)} || fallback`]
+          : [`chmod +x ${shQuote(installerPath)}`, 'fallback'])
+      // apt-get regle les dependances quand la nouvelle version en ajoute ; dpkg
+      // prend le relais sur une distribution sans apt. Les deux dans le meme
+      // pkexec : une seule authentification demandee a l'utilisateur.
+      : [`pkexec env DEBIAN_FRONTEND=noninteractive sh -c 'apt-get install -y --allow-downgrades "$1" || dpkg -i "$1"' sh ${shQuote(installerPath)} || fallback`];
+
+    const script = [
+      '#!/bin/sh',
+      '# Genere par zaalis IDE pour installer une mise a jour. Se supprime a la fin.',
+      // Rien ne lit ce journal au demarrage, mais c'est la seule trace qui reste
+      // si une mise a jour silencieuse echoue : l'interface a disparu depuis
+      // longtemps. C'est donc par la qu'on diagnostique.
+      `exec >>${shQuote(updateLog)} 2>&1`,
+      'echo "--- zaalis update $(date 2>/dev/null) ---"',
+      '',
+      '# Elevation refusee, polkit absent, paquet casse... : on retombe sur le',
+      '# gestionnaire de paquets graphique du bureau, qui a sa propre elevation.',
+      "# L'utilisateur n'est jamais laisse avec une application fermee ET non mise a jour.",
+      'fallback() {',
+      `  xdg-open ${shQuote(installerPath)} 2>/dev/null || true`,
+      `  rm -f ${shQuote(scriptPath)}`,
+      '  exit 0',
+      '}',
+      '',
+      "# Laisse la reponse HTTP atteindre l'interface avant que l'application ne tombe.",
+      'sleep 1',
+      "# On ferme nous-memes plutot que de compter sur l'installateur : le coeur",
+      '# Rust survit a son parent, et le shell Electron rouvrirait une interface',
+      "# servie par des fichiers en train d'etre remplaces.",
+      'pkill -x zaalis-agentd 2>/dev/null || true',
+      'pkill -x zaalis-server 2>/dev/null || true',
+      'pkill -x zaalis-ide 2>/dev/null || true',
+      '# Laisse le temps aux processus de rendre leurs fichiers.',
+      'sleep 2',
+      '',
+      ...install,
+      '',
+      relaunch ? `setsid ${shQuote(relaunch)} >/dev/null 2>&1 &` : '# aucun shell installe a relancer',
+      `rm -f ${shQuote(scriptPath)}`,
+      ''
+    ].join('\n');
+
+    fs.writeFileSync(scriptPath, script, { encoding: 'utf8', mode: 0o700 });
+
+    // On note le tag qu'on installe. Si la prochaine verification le repropose,
+    // c'est que le paquet publie ne correspond pas a son tag (voir
+    // /api/check-update).
+    try {
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+    } catch {}
+
+    // detached place le script dans sa propre session : il survit donc a notre
+    // arret, qui arrive une seconde plus tard. L'environnement complet est
+    // transmis a dessein — sans DISPLAY ni DBUS_SESSION_BUS_ADDRESS, pkexec n'a
+    // aucune fenetre ou demander le mot de passe.
+    const child = spawn('/bin/sh', [scriptPath], {
       detached: true,
       stdio: 'ignore',
+      cwd: os.tmpdir(),
       env: execEnv()
     });
     child.on('error', () => {});
     child.unref();
 
-    res.json({ success: true, installerPath });
+    res.json({ success: true, installerPath, silent: true, log: updateLog });
+
+    // On s'arrete proprement pour que le moteur GGUF tombe avec nous. Fermer la
+    // fenetre Electron est laisse au script : il tue zaalis-ide juste apres, et
+    // le faire ici aussi n'ajouterait qu'un doublon.
+    setTimeout(() => {
+      try { if (engineProc) engineProc.kill(); } catch {}
+      process.exit(0);
+    }, 600);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

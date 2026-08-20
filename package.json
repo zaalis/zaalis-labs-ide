@@ -1,6 +1,6 @@
 {
   "name": "connexion-ide",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Local Zaalis IDE with an Express server, CLI, and native Linux shell (Electron).",
   "main": "server.js",
   "bin": "server.js",
