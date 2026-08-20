@@ -1145,7 +1145,11 @@ async function checkForUpdates() {
                     if (releaseNameEl) releaseNameEl.textContent = data.name || data.tag_name;
                     if (progContainer) progContainer.classList.remove('hidden');
                     if (waiting) waiting.classList.add('hidden');
-                    if (statusText) statusText.textContent = "Pret a telecharger";
+                    // A tag which has already been applied but is still offered
+                    // means its published DMG was built with another version.
+                    if (statusText) statusText.textContent = data.tagMismatch
+                        ? `Deja installe. Le DMG publie sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un DMG compile en ${String(data.tag_name || '').replace(/^v/i, '')}.`
+                        : "Pret a telecharger";
                     if (progressBar) progressBar.style.width = '0%';
                     if (stepDownload) {
                         stepDownload.classList.add('active');
@@ -1238,23 +1242,36 @@ if (confirmUpdateBtn) {
                         if (progContainer) progContainer.classList.remove('hidden');
                         if (waiting) waiting.classList.add('hidden');
                         progressBar.style.width = '100%';
-                        downloadedUpdatePath = pData.dest || data.dest || "C:\\Users\\boque\\Downloads\\zaalis-update.exe";
+                        downloadedUpdatePath = pData.dest || data.dest || 'zaalis-update.dmg';
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. Cliquez sur Fermer l'IDE, puis lancez zaalis-update.exe depuis votre dossier Telechargements.";
-                        // Un seul bouton orange "Fermer l'IDE" qui ferme totalement l'app.
+                        statusText.textContent = "Telechargement termine. Ouvrez le DMG puis remplacez zaalis IDE dans Applications.";
+                        // macOS cannot replace a running, signed app bundle.
+                        // The Finder mounts the downloaded image and preserves
+                        // the standard signed-DMG installation flow.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
                         confirmUpdateBtn.classList.remove('btn-primary');
                         confirmUpdateBtn.classList.add('btn-warning');
-                        confirmUpdateBtn.textContent = "Fermer l'IDE";
+                        confirmUpdateBtn.textContent = "Ouvrir le DMG";
                         confirmUpdateBtn.onclick = async () => {
                             confirmUpdateBtn.disabled = true;
-                            confirmUpdateBtn.textContent = "Fermeture...";
-                            try { await fetch('/api/app/close', { method: 'POST' }); } catch {}
+                            confirmUpdateBtn.textContent = "Ouverture...";
+                            try {
+                                const iRes = await fetch('/api/update/install', { method: 'POST' });
+                                if (!iRes.ok) {
+                                    const iData = await iRes.json().catch(() => ({}));
+                                    throw new Error(iData.error || 'HTTP ' + iRes.status);
+                                }
+                                statusText.textContent = "Le DMG est ouvert. Glissez zaalis IDE dans Applications, puis relancez l'application.";
+                            } catch (err) {
+                                statusText.textContent = "Erreur: " + err.message;
+                                confirmUpdateBtn.disabled = false;
+                                confirmUpdateBtn.textContent = "Ouvrir le DMG";
+                            }
                         };
                     } else if (pData.progress < 0) {
                         clearInterval(interval);

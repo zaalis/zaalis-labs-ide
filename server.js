@@ -2689,11 +2689,16 @@ app.get('/api/check-update', async (req, res) => {
     const asset = assets.find((a) => /\.dmg$/i.test(a.name) && a.name.includes(wanted))
       || assets.find((a) => /\.dmg$/i.test(a.name));
     const latestVersion = release.tag_name || null;
+    const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
+    // If this tag was already installed but the executable still reports an
+    // older version, the release asset was built from the wrong source.
+    // Surface it instead of offering the same update forever.
     res.json({
       tag_name: latestVersion,
       name: release.name || latestVersion || null,
       currentVersion: APP_VERSION,
-      updateAvailable: latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false,
+      updateAvailable,
+      tagMismatch: updateAvailable && !!latestVersion && readLastUpdateTag() === latestVersion,
       downloadUrl: asset ? asset.browser_download_url : null
     });
   } catch (err) {
@@ -2702,6 +2707,18 @@ app.get('/api/check-update', async (req, res) => {
 });
 let downloadProgress = 0;
 let downloadedInstallerPath = null;
+let pendingUpdateTag = null;
+
+// Persist the tag whose DMG was opened. This makes a re-tagged or stale DMG
+// diagnosable after relaunch, rather than looking like an endless update loop.
+const LAST_UPDATE_TAG_FILE = path.join(DATA_DIR, 'last-update-tag');
+function tagFromUpdateUrl(raw) {
+  const m = String(raw || '').match(/\/releases\/download\/([^/]+)\//);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function readLastUpdateTag() {
+  try { return fs.readFileSync(LAST_UPDATE_TAG_FILE, 'utf8').trim() || null; } catch { return null; }
+}
 
 // Only accept installer URLs from GitHub (where releases are published) so the
 // endpoint can't be used to download and launch an arbitrary binary.
@@ -2719,6 +2736,7 @@ app.post('/api/update/download', (req, res) => {
     const dlUrl = req.body.url;
     if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
     if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
+    pendingUpdateTag = tagFromUpdateUrl(dlUrl);
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
     const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.dmg');
@@ -2784,6 +2802,10 @@ app.post('/api/update/install', (req, res) => {
     });
     child.on('error', () => {});
     child.unref();
+
+    try {
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+    } catch {}
 
     res.json({ success: true, installerPath, manual: true });
   } catch (err) {

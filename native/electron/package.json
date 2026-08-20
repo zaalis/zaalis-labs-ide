@@ -1,6 +1,6 @@
 {
   "name": "zaalis-ide-electron",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Electron shell for zaalis IDE",
   "main": "main.js",
   "private": true,

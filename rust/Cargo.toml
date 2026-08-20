@@ -20,7 +20,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "1.0.14"
+version = "1.0.15"
 license = "LicenseRef-zaalis"
 authors = ["zaalis Labs"]
 rust-version = "1.90"
