@@ -8,10 +8,11 @@ const { exec, execFile, spawn } = require('child_process');
 const brainMcp = require('./brain-mcp-client');
 const mcpRegistry = require('./mcp-registry');
 const { AutomationManager } = require('./automation-manager');
-const windowsComputer = require('./windows-computer');
-const { TerminalManager } = require('./terminal-manager');
+const { createWindowsComputerAction } = require('./windows-computer');
+const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
+const modelCatalog = require('./model-catalog');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -19,6 +20,12 @@ try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
+// Le pont de contrôle du bureau tourne dans ce processus (WPF + PowerShell).
+// L'overlay affiche un bouton « Arrêter le travail » qui rappelle le serveur sur
+// /api/automation/stop-bridge : il s'authentifie avec ce secret tiré au lancement,
+// jamais avec la session de l'utilisateur.
+const COMPUTER_STOP_SECRET = crypto.randomBytes(32).toString('hex');
+const windowsComputer = { call: createWindowsComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) };
 const automationManager = new AutomationManager({ actionHandler: windowsComputer.call });
 const computerRuns = new Map();
 const terminalManager = new TerminalManager();
@@ -247,6 +254,124 @@ function browserAllowed(p) {
   return p === '/chat' || p === '/ollama-models' || p === '/gguf-models' ||
          p === '/stt' || p === '/tts' || p === '/voice-status' || p === '/voice-options';
 }
+// ---------------------------------------------------------------------------
+// CODESTRALE BRIDGE — restricted access for the codestrale desktop app.
+// ---------------------------------------------------------------------------
+// codestrale is a separate Tauri app on the same machine: it syncs Git repos
+// between the user's devices and delegates every AI turn to this IDE, so the
+// account, the API keys and the Rust core all stay in one place.
+//
+// It cannot guess where we listen or how to authenticate, so on start-up we
+// publish a descriptor — `codestrale-bridge.json` { secret, port, version, pid,
+// updatedAt } — in the stable per-user folders codestrale looks into. It reads
+// the secret from disk and sends it in the x-zaalis-codestrale header.
+//
+// Same trust model as `browser-secret`: any local process of this user can
+// already read the vault, so this exposes nothing new. The reachable surface is
+// deliberately narrow — agent turns, their decisions, their cancellation, and
+// the two read-only descriptors. Never files, keys, exec or tunnel.
+const CODESTRALE_BRIDGE_FILE = 'codestrale-bridge.json';
+const CODESTRALE_HEADER = 'x-zaalis-codestrale';
+
+// The stable per-user `zaalis` root, independent of any ZAALIS_DATA_DIR
+// override: codestrale is a separate process and only ever looks here.
+function zaalisRootDir() {
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis');
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'zaalis');
+}
+
+// Every folder codestrale probes: the `zaalis` root, its `server-data`
+// subfolder, and DATA_DIR — which adds nothing on a packaged install but is
+// where an unpackaged run actually lives.
+//
+// ZAALIS_DATA_DIR means "this instance is self-contained" (resolveDataDir and
+// browserBridgeDir already read it that way), so an isolated run must not
+// overwrite the descriptor of the real install. codestrale probes that same
+// variable first, so an override still pairs correctly.
+function codestraleBridgeDirs() {
+  if (process.env.ZAALIS_DATA_DIR) return [DATA_DIR];
+  const root = zaalisRootDir();
+  const seen = new Set();
+  return [root, path.join(root, 'server-data'), DATA_DIR].filter((dir) => {
+    const key = path.resolve(dir);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+const CODESTRALE_SECRET_FILE = path.join(browserBridgeDir(), 'codestrale-secret');
+let CODESTRALE_SECRET;
+try {
+  CODESTRALE_SECRET = fs.readFileSync(CODESTRALE_SECRET_FILE, 'utf-8').trim();
+  if (!CODESTRALE_SECRET) throw new Error('empty');
+} catch {
+  CODESTRALE_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(CODESTRALE_SECRET_FILE, CODESTRALE_SECRET, { mode: 0o600 });
+  } catch {}
+}
+
+// Announce where we listen and how to talk to us. Called once the port is
+// actually bound, so the descriptor never advertises a port we failed to take.
+function publishCodestraleBridge(port) {
+  const payload = JSON.stringify({
+    secret: CODESTRALE_SECRET,
+    port,
+    version: APP_VERSION,
+    pid: process.pid,
+    updatedAt: new Date().toISOString(),
+  }, null, 2);
+  for (const dir of codestraleBridgeDirs()) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, CODESTRALE_BRIDGE_FILE), payload, { mode: 0o600 });
+    } catch {}
+  }
+}
+
+// Remove the descriptor on a clean exit so codestrale says "IDE fermé" instead
+// of trying a port nobody listens on. A crash leaves the file behind, which is
+// harmless: the connection simply fails and codestrale reports the same thing.
+function unpublishCodestraleBridge() {
+  for (const dir of codestraleBridgeDirs()) {
+    try { fs.unlinkSync(path.join(dir, CODESTRALE_BRIDGE_FILE)); } catch {}
+  }
+}
+
+// codestrale has no session of its own: like the browser bridge, it acts as the
+// account currently driving the IDE.
+function codestraleUser(req) {
+  const header = String(req.headers[CODESTRALE_HEADER] || '');
+  if (!header || !safeEqual(header, CODESTRALE_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  const active = users.find((u) => u.id === lastActiveUserId);
+  if (active) return active;
+  return users.slice().sort((a, b) => {
+    const ka = a.apiKeys && Object.keys(a.apiKeys).length ? 1 : 0;
+    const kb = b.apiKeys && Object.keys(b.apiKeys).length ? 1 : 0;
+    if (ka !== kb) return kb - ka;
+    return String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''));
+  })[0];
+}
+
+// An agent turn, the decisions it asks for, its cancellation, and the two
+// descriptors — nothing else. The Rust core's own status stays out: /ping
+// already reports it, so there is no reason to widen the surface.
+// `/agent-runs/<session>/cancel` is matched on shape, not on a fixed id.
+function codestraleAllowed(p) {
+  return p === '/codestrale/ping' || p === '/codestrale/models' ||
+         p === '/agent-chat' || p === '/rust-core/decision' ||
+         /^\/agent-runs\/[^/]+\/cancel$/.test(p);
+}
+
 function chatsFile(userId, kind) {
   // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
   const k = kind === 'agents' ? 'agents' : 'chat';
@@ -259,10 +384,17 @@ const SHARED_CONFIG_DEFAULTS = {
   ggufCtx: 8192,
   ggufVariant: '',
   ggufGpuLayers: '',
-  terminalProfile: 'cmd'
+  terminalProfile: DEFAULT_TERMINAL_PROFILE
 };
-const GGUF_VARIANTS = new Set(['', 'cuda', 'vulkan', 'cpu']);
-const TERMINAL_PROFILES = new Set(['cmd', 'powershell', 'pwsh', 'git-bash']);
+// Variantes du moteur GGUF acceptees par la configuration. Elles dependent de
+// ce que llama.cpp publie pour la plateforme : Metal sur macOS, ROCm/Vulkan sur
+// Linux (pas de binaire CUDA publie), CUDA/Vulkan sur Windows.
+const GGUF_VARIANTS = new Set(process.platform === 'darwin'
+  ? ['', 'metal', 'cpu']
+  : process.platform === 'linux'
+    ? ['', 'rocm', 'vulkan', 'cpu']
+    : ['', 'cuda', 'vulkan', 'cpu']);
+const TERMINAL_PROFILES = new Set(TERMINAL_PROFILE_IDS);
 
 function clampSharedGgufCtx(value) {
   const n = parseInt(value, 10);
@@ -449,6 +581,20 @@ app.post('/api/internal/rust-computer', async (req, res) => {
   }
 });
 
+// Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
+// est un processus séparé, sans cookie de session : il s'authentifie avec le
+// secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
+// La seule chose que ce jeton permet est d'arrêter la tâche en cours, donc
+// l'exposer avant le garde d'authentification n'élargit aucune surface.
+app.post('/api/automation/stop-bridge', async (req, res) => {
+  const header = String(req.headers['x-zaalis-computer'] || '');
+  if (!COMPUTER_STOP_SECRET || !header || !safeEqual(header, COMPUTER_STOP_SECRET)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try { return res.json(await automationManager.stop()); }
+  catch (error) { return res.status(500).json({ error: error.message || String(error) }); }
+});
+
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
@@ -471,6 +617,14 @@ app.use('/api', (req, res, next) => {
     if (!browserAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour le navigateur.' });
     req.user = bUser;
     req.isBrowser = true;
+    return next();
+  }
+  // codestrale bridge: shared local secret, agent endpoints only.
+  const cUser = codestraleUser(req);
+  if (cUser) {
+    if (!codestraleAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour codestrale.' });
+    req.user = cUser;
+    req.isCodestrale = true;
     return next();
   }
   return res.status(401).json({ error: 'Authentification requise.' });
@@ -2194,6 +2348,52 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 
 app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
 
+// ---------------------------------------------------------------------------
+// CODESTRALE BRIDGE — the two descriptors the companion app reads.
+// ---------------------------------------------------------------------------
+// Reaching either of these already proves the secret was valid and an account
+// exists (the auth guard answers 401 otherwise), which is exactly how
+// codestrale tells "IDE closed" from "IDE open, nobody logged in".
+
+// GET /api/codestrale/ping -> is the bridge alive, and can models actually answer
+app.get('/api/codestrale/ping', (req, res) => {
+  const core = rustAgentBridge.status();
+  res.json({
+    ok: true,
+    version: APP_VERSION,
+    account: req.user ? req.user.email : null,
+    // codestrale greys out the composer unless both are true: without the Rust
+    // core there is no agent runtime, so no model can answer.
+    rustCore: { available: !!core.available, enabled: !!core.enabled },
+  });
+});
+
+// GET /api/codestrale/models -> provider -> exact models, with readiness
+app.get('/api/codestrale/models', async (req, res) => {
+  const shared = sharedConfigForUser(req.user);
+  // Both local runtimes are optional: a missing Ollama or an empty models
+  // folder must leave the cloud providers perfectly usable, so each lookup
+  // degrades to an empty list instead of failing the whole catalogue.
+  let ollama = [];
+  try {
+    const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+    const answer = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2500) });
+    const data = await answer.json();
+    ollama = (data.models || []).map((m) => m.name).filter(Boolean);
+  } catch {}
+  let gguf = [];
+  try {
+    ensureDir(MODELS_DIR);
+    gguf = fs.readdirSync(MODELS_DIR).filter((f) => f.toLowerCase().endsWith('.gguf'));
+  } catch {}
+  res.json(modelCatalog.buildCatalog({
+    keys: userApiKeys(req.user),
+    ollama,
+    gguf,
+    ggufCtx: shared.ggufCtx,
+  }));
+});
+
 app.post('/api/rust-core/decision', async (req, res) => {
   try {
     const result = await rustAgentBridge.decide(req.user.id, req.body || {});
@@ -2243,6 +2443,16 @@ async function rustAgentHttp(req, res, next) {
       computerToken = crypto.randomBytes(32).toString('base64url');
       computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
     }
+    // A GGUF turn needs the local engine loaded with that exact file first —
+    // the single chat already did this, the agent path did not.
+    if (model === 'gguf') {
+      if (!body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+      const shared = sharedConfigForUser(req.user);
+      await ensureEngine(body.submodel, (body.config && body.config.ggufVariant) || shared.ggufVariant, {
+        ctx: (body.config && body.config.ggufCtx) || shared.ggufCtx,
+        gpuLayers: (body.config && body.config.ggufGpuLayers) !== undefined ? body.config.ggufGpuLayers : shared.ggufGpuLayers,
+      });
+    }
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -2250,6 +2460,7 @@ async function rustAgentHttp(req, res, next) {
       model,
       submodel: body.submodel,
       message,
+      systemPrompt: body.systemPrompt,
       permissionMode: body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -2437,11 +2648,17 @@ app.get('/api/check-update', async (req, res) => {
     const release = await ghRes.json();
     const asset = (release.assets || []).find(a => a.name === 'zaalis-setup.exe');
     const latestVersion = release.tag_name || null;
+    const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
+    // We already installed this exact tag, yet we still report an older version:
+    // the published zaalis-setup.exe was built from a different version than the
+    // tag claims. Without saying so, the app just re-offers the same update
+    // forever and the update looks broken when it actually succeeded.
     res.json({
       tag_name: latestVersion,
       name: release.name || latestVersion || null,
       currentVersion: APP_VERSION,
-      updateAvailable: latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false,
+      updateAvailable,
+      tagMismatch: updateAvailable && !!latestVersion && readLastUpdateTag() === latestVersion,
       downloadUrl: asset ? asset.browser_download_url : null
     });
   } catch (err) {
@@ -2450,6 +2667,18 @@ app.get('/api/check-update', async (req, res) => {
 });
 let downloadProgress = 0;
 let downloadedInstallerPath = null;
+let pendingUpdateTag = null;
+
+// Remember which release tag we last installed, so /api/check-update can tell a
+// genuine new version from a tag whose asset was built at another version.
+const LAST_UPDATE_TAG_FILE = path.join(DATA_DIR, 'last-update-tag');
+function tagFromUpdateUrl(raw) {
+  const m = String(raw || '').match(/\/releases\/download\/([^/]+)\//);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function readLastUpdateTag() {
+  try { return fs.readFileSync(LAST_UPDATE_TAG_FILE, 'utf8').trim() || null; } catch { return null; }
+}
 
 // Only accept installer URLs from GitHub (where releases are published) so the
 // endpoint can't be used to download and launch an arbitrary binary.
@@ -2467,6 +2696,7 @@ app.post('/api/update/download', (req, res) => {
     const dlUrl = req.body.url;
     if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
     if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
+    pendingUpdateTag = tagFromUpdateUrl(dlUrl);
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
     const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
@@ -2514,23 +2744,104 @@ app.get('/api/update/progress', (req, res) => {
   res.json({ progress: downloadProgress, dest: downloadedInstallerPath });
 });
 
+// Silent in-place update: replace every installed file and bring the IDE back
+// up, without a single wizard page — the way a desktop app is expected to
+// update itself. The installer already does the hard part (it reinstalls over
+// {app} with `ignoreversion`); we only drive it with /VERYSILENT.
 app.post('/api/update/install', (req, res) => {
   try {
+    if (process.platform !== 'win32') {
+      return res.status(400).json({ error: 'Mise a jour automatique disponible sur Windows uniquement.' });
+    }
     const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
     if (!fs.existsSync(installerPath)) {
       return res.status(409).json({ error: 'Installer not downloaded yet.' });
     }
 
-    // Ask Explorer to open the installer. Explorer owns the process, so it is
-    // independent from the IDE/server process tree if the app needs to close.
-    const child = spawn('explorer.exe', [installerPath], {
+    // The update can't be driven from here: the installer has to overwrite
+    // zaalis-server.exe, which is *this* process. So we hand the job to a
+    // detached script that outlives us.
+    //
+    // The script kills the zaalis processes itself instead of letting the
+    // installer do it: installer.iss runs `taskkill /F /T`, and /T walks the
+    // process tree — this script is spawned from zaalis-server.exe, so it
+    // would be killed along with its parent, mid-update.
+    const appExe = path.join(APP_DIR, 'zaalis.exe');
+    // Setup writes its own install log here. Nothing reads it at runtime, but
+    // it is the only trace left if a silent update goes wrong (the UI is gone
+    // by then), so it is what to look at when diagnosing a failed update.
+    const updateLog = path.join(os.tmpdir(), 'zaalis-update.log');
+    const scriptPath = path.join(os.tmpdir(), 'zaalis-update-runner.bat');
+    const vbsPath = path.join(os.tmpdir(), 'zaalis-update-runner.vbs');
+    const script = [
+      '@echo off',
+      'rem Generated by zaalis IDE to install an update. Deletes itself when done.',
+      // Let the HTTP response reach the UI before the app goes down.
+      'ping -n 2 127.0.0.1 >nul',
+      'taskkill /F /IM zaalis.exe >nul 2>nul',
+      'taskkill /F /IM zaalis-server.exe >nul 2>nul',
+      // zaalis-agentd.exe keeps a lock on its own file, and installer.iss does
+      // not close it — without this the silent install fails to overwrite it.
+      'taskkill /F /IM zaalis-agentd.exe >nul 2>nul',
+      // Give Windows time to release the file handles on the exes.
+      'ping -n 4 127.0.0.1 >nul',
+      // `start /wait` matters: Setup can hand control back before it is done
+      // copying (it re-launches a copy of itself). Without waiting we would
+      // relaunch the IDE mid-install, and Setup would kill it right after.
+      `start /wait "" "${installerPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="${updateLog}"`,
+      'if not "%ERRORLEVEL%"=="0" goto fallback',
+      fs.existsSync(appExe) ? `start "" "${appExe}"` : 'rem no GUI shell installed to relaunch',
+      'goto done',
+      ':fallback',
+      // Silent install refused (SmartScreen, antivirus, a leftover lock...).
+      // Open the normal wizard so the user is never stranded with a closed app
+      // that was never updated. Its own [Run] entry offers to relaunch.
+      `start "" "${installerPath}"`,
+      ':done',
+      `del "${vbsPath}"`,
+      'del "%~f0"',
+      ''
+    ].join('\r\n');
+
+    fs.writeFileSync(scriptPath, script, 'ascii');
+
+    // Record the tag we are installing. If the next check still offers it, the
+    // published asset does not match its tag (see /api/check-update).
+    try {
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+    } catch {}
+
+    // Launching that script needs two things at once, and cmd.exe cannot give
+    // both:
+    //   - it must outlive this server (it is about to kill us), which needs
+    //     `detached`;
+    //   - it must stay invisible — but Windows IGNORES CREATE_NO_WINDOW when
+    //     DETACHED_PROCESS is set, so cmd.exe would run with no console and
+    //     every console command inside (ping, taskkill) would allocate its own
+    //     VISIBLE window. That is what opened a burst of terminals.
+    //
+    // WScript.Shell.Run with window style 0 gives the script a real console
+    // that is merely hidden, which its children inherit. Detached wscript.exe
+    // then survives our death. Verified: silent AND surviving.
+    fs.writeFileSync(vbsPath,
+      `CreateObject("WScript.Shell").Run "cmd /c ""${scriptPath}""", 0, False\r\n`, 'ascii');
+
+    const child = spawn('wscript.exe', ['//B', '//Nologo', vbsPath], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true
     });
     child.unref();
 
-    res.json({ success: true, installerPath });
+    res.json({ success: true, installerPath, silent: true, log: updateLog });
+
+    // Shut ourselves down cleanly so the GGUF engine stops with us. Closing the
+    // GUI shell is left to the script: it kills zaalis.exe a moment later, and
+    // doing it here too would only add a second, redundant taskkill.
+    setTimeout(() => {
+      try { if (engineProc) engineProc.kill(); } catch {}
+      process.exit(0);
+    }, 600);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2773,7 +3084,22 @@ async function startOllamaIfNeeded() {
 // (IPv6 ::1) and http://127.0.0.1 (IPv4) work. Network exposure is still
 // blocked at the application layer: the loopback guard above returns 403 to
 // any request whose remote address is not a loopback address.
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT} (local access only)`);
+const server = app.listen(PORT, () => {
+  const address = server.address();
+  // The bound port, not the requested one, is what codestrale must dial.
+  const bound = (address && typeof address === 'object' && address.port) || PORT;
+  console.log(`Server running on http://localhost:${bound} (local access only)`);
+  publishCodestraleBridge(bound);
   startOllamaIfNeeded();
 });
+
+// Stop advertising a bridge that is going away. `exit` covers the normal path;
+// the signals cover the IDE shell closing the server — Node's default handler
+// is replaced once we listen, so each one has to terminate explicitly.
+process.on('exit', unpublishCodestraleBridge);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(signal, () => {
+    unpublishCodestraleBridge();
+    process.exit(0);
+  });
+}
