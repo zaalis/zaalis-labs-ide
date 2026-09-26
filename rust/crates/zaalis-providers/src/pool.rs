@@ -22,17 +22,27 @@ pub struct PoolConfig {
     pub max_backoff: Duration,
     pub circuit_failure_threshold: u32,
     pub circuit_cooldown: Duration,
+    pub kimi_interval: Duration,
+    pub mistral_interval: Duration,
 }
 
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             global_concurrency: 16,
-            max_retries: 3,
-            base_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(10),
+            // Agent turns may need several model calls in quick succession
+            // (plan, screen observation, then the next action). A 250 ms
+            // retry storm only worsens a provider-side 429, particularly on
+            // entry plans with very small RPM allowances. Start at one
+            // second and allow enough attempts for a short rolling window to
+            // clear before surfacing an error to the user.
+            max_retries: 5,
+            base_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(30),
             circuit_failure_threshold: 5,
             circuit_cooldown: Duration::from_secs(30),
+            kimi_interval: pacing_from_env("ZAALIS_PACING_MS_KIMI", Duration::from_secs(20)),
+            mistral_interval: pacing_from_env("ZAALIS_PACING_MS_MISTRAL", Duration::from_secs(2)),
         }
     }
 }
@@ -86,6 +96,7 @@ struct Entry {
     semaphore: Arc<Semaphore>,
     stats: Arc<AtomicStats>,
     circuit: Arc<Mutex<CircuitState>>,
+    next_start: Arc<Mutex<Instant>>,
 }
 
 impl Clone for Entry {
@@ -95,6 +106,7 @@ impl Clone for Entry {
             semaphore: Arc::clone(&self.semaphore),
             stats: Arc::clone(&self.stats),
             circuit: Arc::clone(&self.circuit),
+            next_start: Arc::clone(&self.next_start),
         }
     }
 }
@@ -131,6 +143,7 @@ impl ProviderPool {
                     semaphore: Arc::new(Semaphore::new(capacity)),
                     stats: Arc::new(AtomicStats::default()),
                     circuit: Arc::new(Mutex::new(CircuitState::default())),
+                    next_start: Arc::new(Mutex::new(Instant::now())),
                 },
             );
     }
@@ -189,6 +202,7 @@ impl ProviderPool {
 
         let mut attempt = 0_u8;
         let source = loop {
+            wait_for_provider_slot(&entry, &self.config, provider_id, &cancel).await?;
             match entry
                 .provider
                 .stream_turn(request.clone(), cancel.clone())
@@ -257,6 +271,69 @@ impl ProviderPool {
         if circuit.consecutive_failures >= self.config.circuit_failure_threshold.max(1) {
             circuit.open_until = Instant::now().checked_add(self.config.circuit_cooldown);
         }
+    }
+}
+
+// The provider pool is process-wide, so pacing here coordinates every agent
+// sharing the same API key. It avoids the familiar desktop sequence
+// observe → activate → inspect → type being emitted as a burst. Kimi's
+// entry-plan response explicitly advertises 3 RPM, hence a 20-second slot;
+// Mistral needs only a short anti-burst interval while token reduction in the
+// runner handles its tokens-per-minute quota.
+fn pacing_from_env(name: &str, default: Duration) -> Duration {
+    pacing_from_env_with(name, default, |key| std::env::var(key).ok())
+}
+
+fn pacing_from_env_with(
+    name: &str,
+    default: Duration,
+    read: impl FnOnce(&str) -> Option<String>,
+) -> Duration {
+    read(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+fn provider_interval(config: &PoolConfig, provider: ProviderId) -> Duration {
+    match provider {
+        ProviderId::Kimi => config.kimi_interval,
+        ProviderId::Mistral => config.mistral_interval,
+        _ => Duration::ZERO,
+    }
+}
+
+async fn wait_for_provider_slot(
+    entry: &Entry,
+    config: &PoolConfig,
+    provider: ProviderId,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let interval = provider_interval(config, provider);
+    if interval.is_zero() {
+        return Ok(());
+    }
+    let (previous, reserved, wait_until) = {
+        let mut next = entry.next_start.lock().expect("provider pacing poisoned");
+        let previous = *next;
+        let now = Instant::now();
+        let slot = (*next).max(now);
+        *next = slot.checked_add(interval).unwrap_or(slot);
+        (previous, *next, slot)
+    };
+    let delay = wait_until.saturating_duration_since(Instant::now());
+    if delay.is_zero() {
+        return Ok(());
+    }
+    tokio::select! {
+        _ = cancel.cancelled() => {
+            let mut next = entry.next_start.lock().expect("provider pacing poisoned");
+            if *next == reserved {
+                *next = previous;
+            }
+            Err(ProviderError::new(ProviderErrorKind::Cancelled, "requête annulée"))
+        },
+        _ = tokio::time::sleep(delay) => Ok(()),
     }
 }
 
@@ -379,6 +456,105 @@ mod tests {
 
     fn request(id: ProviderId) -> TurnRequest {
         TurnRequest::new(ModelBinding::new(id, None), "", vec![Message::user("go")])
+    }
+
+    #[test]
+    fn desktop_provider_pacing_matches_the_advertised_limits() {
+        let config = PoolConfig::default();
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", Duration::from_secs(20), |_| None),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_MISTRAL", Duration::from_secs(2), |_| None),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            provider_interval(&config, ProviderId::Kimi),
+            config.kimi_interval
+        );
+        assert_eq!(
+            provider_interval(&config, ProviderId::Mistral),
+            config.mistral_interval
+        );
+        assert_eq!(
+            provider_interval(&config, ProviderId::Local),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn provider_pacing_accepts_environment_overrides() {
+        let default = Duration::from_secs(20);
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |name| {
+                assert_eq!(name, "ZAALIS_PACING_MS_KIMI");
+                Some("125".into())
+            }),
+            Duration::from_millis(125)
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |_| Some("0".into())),
+            Duration::ZERO
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |_| Some("invalid".into())),
+            default
+        );
+        assert_eq!(
+            pacing_from_env_with(
+                "ZAALIS_PACING_MS_MISTRAL",
+                Duration::from_secs(2),
+                |_| Some("50".into())
+            ),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_request_releases_its_slot() {
+        let config = PoolConfig {
+            kimi_interval: Duration::from_secs(1),
+            ..PoolConfig::default()
+        };
+        let pool = ProviderPool::new(config);
+        pool.register(Arc::new(FakeProvider {
+            id: ProviderId::Kimi,
+            concurrency: 2,
+            failures_left: AtomicUsize::new(0),
+        }));
+        let entry = pool.providers.read().expect("registry")[&ProviderId::Kimi].clone();
+        wait_for_provider_slot(
+            &entry,
+            &pool.config,
+            ProviderId::Kimi,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("first slot");
+        let previous = *entry.next_start.lock().expect("pacing");
+        let cancel = CancellationToken::new();
+        let waiting_entry = entry.clone();
+        let waiting_config = pool.config.clone();
+        let waiting_cancel = cancel.clone();
+        let waiting = tokio::spawn(async move {
+            wait_for_provider_slot(
+                &waiting_entry,
+                &waiting_config,
+                ProviderId::Kimi,
+                &waiting_cancel,
+            )
+            .await
+        });
+        while *entry.next_start.lock().expect("pacing") == previous {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        assert_eq!(
+            waiting.await.expect("task").unwrap_err().kind,
+            ProviderErrorKind::Cancelled
+        );
+        assert_eq!(*entry.next_start.lock().expect("pacing"), previous);
     }
 
     #[tokio::test]

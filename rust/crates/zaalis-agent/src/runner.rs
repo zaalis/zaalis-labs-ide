@@ -17,6 +17,14 @@ use zaalis_providers::{
 use zaalis_tools::{ToolContext, ToolDispatch, ToolInvocation};
 
 const MAX_RUNTIME_ROUNDS: u32 = 128;
+const COMPUTER_CAPTURE_PROMPT: &str =
+    "[Capture actuelle du bureau — utilise cette image pour poursuivre le contrôle.]";
+
+#[derive(Debug)]
+struct ToolExecution {
+    outcome: ToolOutcome,
+    images: Vec<zaalis_providers::ImagePart>,
+}
 
 /// How a tool bears on the completion gate.
 enum ToolCategory {
@@ -119,22 +127,46 @@ pub(crate) async fn run_agent(
             ));
         }
 
+        let mut available_tools = session.tools.definitions();
+        let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
+        if desktop_control {
+            // A desktop-control turn does not need filesystem, Git, terminal,
+            // checkpoint or web schemas. Advertising the whole IDE catalogue
+            // costs thousands of input tokens on every observe/click/type
+            // round, which is enough to exhaust entry-plan provider limits
+            // before the task can finish. The computer tool remains fully
+            // typed; only irrelevant choices are removed.
+            available_tools.retain(|tool| tool.name == "computer");
+        }
+        let mut runtime_system =
+            system_prompt(&session, &node, planning, &files_changed, usage.tool_calls);
+        if desktop_control {
+            runtime_system.push_str(
+                "\n\nMODE CONTRÔLE DU BUREAU : seul l’outil computer est disponible. Regroupe les actions clavier sûres et déterministes lorsque l’état est déjà connu (par exemple ouvrir une nouvelle note puis saisir son texte), mais observe/inspecte après un changement d’écran important. Termine dès que le résultat demandé est confirmé afin d’économiser les appels au fournisseur."
+            );
+        }
+        let tools: Vec<ToolSpec> = available_tools.into_iter().map(|tool| ToolSpec {
+            name: tool.name, description: tool.description, schema: tool.input_schema,
+        }).collect();
+        let capabilities = session.providers.metadata(node.model.provider)
+            .map(|(_, caps)| caps.for_binding(&node.model)).unwrap_or_default();
+        let context = capabilities.max_context as usize;
+        let output_reserve = (context / 5).clamp(256, 8192);
+        let overhead = runtime_system.len().div_ceil(3)
+            + serde_json::to_string(&tools)?.len().div_ceil(3) + 256;
+        let input_budget = context.saturating_sub(output_reserve + overhead);
+        if input_budget < 256 {
+            return Err(ZaalisError::invalid("Le contexte du modèle est trop petit pour les instructions et outils actifs. Choisir un contexte plus grand ou réduire les outils."));
+        }
+        crate::context::compact(&mut history, input_budget)?;
+        session.checkpoint_history(&node.id, &history).await;
         let request = TurnRequest {
             binding: node.model.clone(),
-            system: system_prompt(&session, &node, planning, &files_changed, usage.tool_calls),
+            system: runtime_system,
             messages: history.clone(),
-            tools: session
-                .tools
-                .definitions()
-                .into_iter()
-                .map(|tool| ToolSpec {
-                    name: tool.name,
-                    description: tool.description,
-                    schema: tool.input_schema,
-                })
-                .collect(),
+            tools,
             reasoning: node.model.reasoning,
-            max_output_tokens: remaining_tokens(&node, &usage),
+            max_output_tokens: Some(remaining_tokens(&node, &usage).unwrap_or(output_reserve as u32).min(output_reserve as u32)),
             temperature: None,
         };
         usage.rounds = usage.rounds.saturating_add(1);
@@ -204,14 +236,17 @@ pub(crate) async fn run_agent(
             tool_calls: calls.clone(),
             provider_state: state,
         });
+        session.checkpoint_history(&node.id, &history).await;
 
         if !calls.is_empty() {
+            let mut latest_capture = Vec::new();
             for call in calls {
                 usage.tool_calls = usage.tool_calls.saturating_add(1);
                 tools_used.push(call.name.clone());
-                let outcome =
+                let execution =
                     execute_tool(&session, &node, &mut timeline, call.clone(), cancel.clone())
                         .await?;
+                let outcome = execution.outcome;
                 collect_changed_files(&outcome, &mut files_changed);
                 let is_error = !outcome.is_ok();
                 if !is_error {
@@ -230,7 +265,27 @@ pub(crate) async fn run_agent(
                     content: serde_json::to_string(&outcome)?,
                     is_error,
                 });
+                session.checkpoint_history(&node.id, &history).await;
+                if !execution.images.is_empty() {
+                    latest_capture = execution.images;
+                }
                 session.update_usage(&node.id, usage).await;
+            }
+            if !latest_capture.is_empty() {
+                // A screenshot is a vision attachment, never text in the
+                // tool result. It is appended only once every tool result of
+                // this round is in history: OpenAI-compatible and Anthropic
+                // APIs reject a user message between an assistant's tool
+                // calls and their results. Keeping only the latest capture
+                // bounds a long computer-control turn to one image per
+                // provider request instead of a full desktop history.
+                history.retain(|message| {
+                    !matches!(message, Message::User { text, images } if text == COMPUTER_CAPTURE_PROMPT && !images.is_empty())
+                });
+                history.push(Message::User {
+                    text: COMPUTER_CAPTURE_PROMPT.into(),
+                    images: latest_capture,
+                });
             }
             continue;
         }
@@ -320,7 +375,7 @@ async fn execute_tool(
     timeline: &mut Timeline,
     call: ProviderToolInvocation,
     cancel: CancellationToken,
-) -> Result<ToolOutcome> {
+) -> Result<ToolExecution> {
     execute_hooks(
         session,
         node,
@@ -336,7 +391,7 @@ async fn execute_tool(
         node,
         timeline,
         HookEvent::PostToolUse,
-        serde_json::json!({"tool":call.name,"input":call.arguments,"outcome":outcome.clone()}),
+        serde_json::json!({"tool":call.name,"input":call.arguments,"outcome":outcome.outcome.clone()}),
         cancel,
     )
     .await?;
@@ -349,7 +404,7 @@ async fn execute_tool_raw(
     timeline: &mut Timeline,
     call: ProviderToolInvocation,
     cancel: CancellationToken,
-) -> Result<ToolOutcome> {
+) -> Result<ToolExecution> {
     let call_id = ToolCallId::from_raw(call.id.clone());
     let mut segment = Segment::new(
         node.id.clone(),
@@ -410,7 +465,7 @@ async fn execute_tool_raw(
                 answer = receiver => answer.map_err(|_| ZaalisError::cancelled())?,
                 () = cancel.cancelled() => {
                     let dispatch = session.tools.cancel_pending(&prompt.request_id)?;
-                    return outcome_from_dispatch(dispatch);
+                    return Ok(ToolExecution { outcome: outcome_from_dispatch(dispatch)?, images: Vec::new() });
                 }
             };
             let allowed = matches!(answer, PermissionAnswer::Allow { .. });
@@ -428,7 +483,8 @@ async fn execute_tool_raw(
             session.tools.resolve(&prompt.request_id, answer).await?
         }
     };
-    let outcome = outcome_from_dispatch(dispatch)?;
+    let mut outcome = outcome_from_dispatch(dispatch)?;
+    let images = detach_computer_images(&mut outcome);
     session.events.emit(Event::ToolCompleted {
         call_id,
         outcome: outcome.clone(),
@@ -439,7 +495,43 @@ async fn execute_tool_raw(
         segment_id: segment.id,
         duration_ms,
     });
-    Ok(outcome)
+    Ok(ToolExecution { outcome, images })
+}
+
+fn detach_computer_images(outcome: &mut ToolOutcome) -> Vec<zaalis_providers::ImagePart> {
+    let ToolOutcome::Ok { result, .. } = outcome else {
+        return Vec::new();
+    };
+    let Some(object) = result.as_object_mut() else {
+        return Vec::new();
+    };
+    let Some(images) = object
+        .remove("images")
+        .and_then(|value| value.as_array().cloned())
+    else {
+        return Vec::new();
+    };
+    let detached = images
+        .into_iter()
+        .filter_map(|image| {
+            let mime = image.get("mime")?.as_str()?;
+            let data = image.get("data")?.as_str()?;
+            // A malformed or unexpectedly enormous bridge reply must never be
+            // replayed into a provider request.
+            if !mime.starts_with("image/") || data.is_empty() || data.len() > 12_000_000 {
+                return None;
+            }
+            Some(zaalis_providers::ImagePart {
+                mime: mime.into(),
+                data: data.into(),
+            })
+        })
+        .take(1)
+        .collect::<Vec<_>>();
+    if !detached.is_empty() {
+        object.insert("capture_attached".into(), serde_json::Value::Bool(true));
+    }
+    detached
 }
 
 async fn execute_hooks(
@@ -459,11 +551,15 @@ async fn execute_hooks(
             name: "run".into(),
             arguments: serde_json::json!({"command":hook.command,"timeout_ms":hook.timeout_ms}),
         };
-        let outcome = execute_tool_raw(session, node, timeline, call, cancel.clone()).await?;
-        if hook.blocking && !outcome.is_ok() {
+        let execution = execute_tool_raw(session, node, timeline, call, cancel.clone()).await?;
+        if hook.blocking && !execution.outcome.is_ok() {
             return Err(ZaalisError::new(
                 zaalis_core::ErrorCode::ToolFailure,
-                format!("Hook {:?} bloquant en échec : {}", event, outcome.summary()),
+                format!(
+                    "Hook {:?} bloquant en échec : {}",
+                    event,
+                    execution.outcome.summary()
+                ),
             ));
         }
     }
@@ -707,5 +803,40 @@ fn workspace_for_node(session: &SessionInner, node: &AgentNode) -> Result<zaalis
         None | Some(zaalis_core::Workspace::Direct) => Ok(session.config.workspace.clone()),
         Some(zaalis_core::Workspace::Worktree { path, .. })
         | Some(zaalis_core::Workspace::Snapshot { path }) => zaalis_fs::Workspace::open(path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn computer_capture_is_an_attachment_not_tool_result_text() {
+        let screenshot = "a".repeat(2_700_000);
+        let mut outcome = ToolOutcome::Ok {
+            summary: "computer observe".into(),
+            result: json!({
+                "name": "computer",
+                "text": "Capture d’écran actuelle fournie au modèle.",
+                "images": [{ "mime": "image/png", "data": screenshot }]
+            }),
+            duration_ms: 1,
+        };
+
+        let images = detach_computer_images(&mut outcome);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].data.len(), 2_700_000);
+        let encoded = serde_json::to_string(&outcome).expect("outcome serializes");
+        assert!(!encoded.contains("aaaa"));
+        assert_eq!(outcome_result(&outcome)["capture_attached"], true);
+    }
+
+    fn outcome_result(outcome: &ToolOutcome) -> &serde_json::Value {
+        match outcome {
+            ToolOutcome::Ok { result, .. } => result,
+            _ => panic!("expected successful tool outcome"),
+        }
     }
 }

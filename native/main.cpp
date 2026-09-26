@@ -5,6 +5,7 @@
 //  - Waits for the server to be ready, then shows the UI in a WebView2.
 // =====================================================================
 #define WIN32_LEAN_AND_MEAN   // prevent windows.h from pulling in winsock 1
+#define NOMINMAX
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
@@ -13,6 +14,7 @@
 #include <wrl.h>
 #include "WebView2.h"
 #include <string>
+#include "browser/BrowserHost.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -39,6 +41,15 @@ static const int      SERVER_PORT  = 3000;
 static ComPtr<ICoreWebView2Controller> g_controller;
 static ComPtr<ICoreWebView2>           g_webview;
 static HANDLE                          g_job = nullptr;
+
+static void ReportNativeCapabilities() {
+    if (g_webview) g_webview->PostWebMessageAsJson(
+        L"{\"type\":\"nativeCapabilities\",\"browser\":true,\"browserEngine\":\"zaalis-webview2\"}");
+}
+
+static bool IsAppSource(const std::wstring& source) {
+    return source == APP_URL || source.rfind(std::wstring(APP_URL) + L"/", 0) == 0;
+}
 
 // Folder containing this executable.
 static std::wstring ExeDir() {
@@ -140,9 +151,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
         SetWindowPos(hwnd, nullptr, prc->left, prc->top,
                      prc->right - prc->left, prc->bottom - prc->top,
                      SWP_NOZORDER | SWP_NOACTIVATE);
+        ZaalisBrowser::UpdateDpi();
         return 0;
     }
     case WM_DESTROY:
+        ZaalisBrowser::Shutdown();
+        if (g_controller) g_controller->Close();
+        g_webview.Reset();
+        g_controller.Reset();
         PostQuitMessage(0);
         return 0;
     }
@@ -205,6 +221,33 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                             g_controller->get_CoreWebView2(&g_webview);
                             RECT rc; GetClientRect(hwnd, &rc);
                             g_controller->put_Bounds(rc);
+                            ZaalisBrowser::Initialize(hwnd, [](const std::wstring& json) {
+                                if (g_webview) g_webview->PostWebMessageAsJson(json.c_str());
+                            });
+                            g_webview->AddScriptToExecuteOnDocumentCreated(
+                                L"window.zaalisNativeCapabilities = Object.freeze({browser:true,browserEngine:'zaalis-webview2'});", nullptr);
+                            EventRegistrationToken token;
+                            g_webview->add_WebMessageReceived(
+                                Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {
+                                        LPWSTR source = nullptr;
+                                        args->get_Source(&source);
+                                        bool trusted = source && IsAppSource(source);
+                                        CoTaskMemFree(source);
+                                        if (!trusted) return S_OK;
+                                        LPWSTR json = nullptr;
+                                        if (SUCCEEDED(args->get_WebMessageAsJson(&json)) && json) {
+                                            ZaalisBrowser::Dispatch(json);
+                                            CoTaskMemFree(json);
+                                        }
+                                        return S_OK;
+                                    }).Get(), &token);
+                            g_webview->add_NavigationCompleted(
+                                Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2NavigationCompletedEventArgs*) -> HRESULT {
+                                        ReportNativeCapabilities();
+                                        return S_OK;
+                                    }).Get(), &token);
                             g_webview->Navigate(APP_URL);
                             return S_OK;
                         }).Get());

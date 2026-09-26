@@ -4,6 +4,7 @@
 //! tool invocation, permission prompt and budget pause is emitted as a typed
 //! protocol event, and the same loop serves all eight providers.
 
+mod context;
 mod control;
 mod event_bus;
 mod interaction;
@@ -27,18 +28,20 @@ mod tests {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
     use zaalis_core::{
-        now_ms, AgentNode, Budget, ModelBinding, PermissionMode, PermissionSet, ProviderId,
-        RoleSpec, ToolCallId, Usage,
+        now_ms, AccessKind, AgentNode, Budget, ModelBinding, PermissionMode, PermissionSet,
+        ProviderId, RoleSpec, ToolCallId, Usage,
     };
     use zaalis_fs::Workspace;
+    use zaalis_guard::AccessRequest;
     use zaalis_guard::Guard;
     use zaalis_protocol::{Event, ToolOutcome};
     use zaalis_providers::{
-        Capabilities, ModelProvider, PoolConfig, ProviderError, ProviderPool, ProviderStream,
-        StopReason, ToolInvocation as ProviderToolCall, TurnEvent, TurnRequest,
+        Capabilities, Message, ModelProvider, PoolConfig, ProviderError, ProviderPool,
+        ProviderStream, StopReason, ToolInvocation as ProviderToolCall, TurnEvent, TurnRequest,
     };
     use zaalis_tools::{
-        register_filesystem_tools, ToolContext, ToolDispatch, ToolInvocation, ToolRuntime,
+        register_filesystem_tools, Tool, ToolContext, ToolDefinition, ToolDispatch, ToolInvocation,
+        ToolResult, ToolRuntime,
     };
 
     #[derive(Debug)]
@@ -55,6 +58,45 @@ mod tests {
                 turns: Mutex::new(turns.into()),
                 requests: Mutex::new(Vec::new()),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeComputerTool;
+
+    #[async_trait]
+    impl Tool for FakeComputerTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "computer".into(),
+                description: "Capture simulée".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn access(
+            &self,
+            _input: &serde_json::Value,
+            context: &ToolContext,
+        ) -> zaalis_core::Result<AccessRequest> {
+            Ok(AccessRequest::new(
+                context.agent_id.clone(),
+                "computer",
+                AccessKind::Computer,
+            ))
+        }
+
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _context: ToolContext,
+            _cancel: CancellationToken,
+        ) -> zaalis_core::Result<ToolResult> {
+            let image = input["image"].as_str().unwrap_or("capture");
+            Ok(ToolResult {
+                summary: "capture".into(),
+                value: serde_json::json!({"images":[{"mime":"image/png","data":image}]}),
+            })
         }
     }
 
@@ -195,6 +237,32 @@ mod tests {
         assert!(kinds.contains(&"text_delta"));
         assert!(kinds.contains(&"agent_completed"));
         assert_eq!(kinds.last(), Some(&"turn_completed"));
+    }
+
+    #[tokio::test]
+    async fn a_second_turn_reuses_the_agent_and_its_prior_answer() {
+        let answer = |text: &str| vec![
+            TurnEvent::TextDelta { text: text.into() },
+            TurnEvent::Completed { reason: StopReason::EndTurn },
+        ];
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![answer("première réponse"), answer("seconde réponse")],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        let agent = fixture.session.add_root(node(
+            &fixture.session, ProviderId::Mistral, PermissionMode::ReadOnly,
+        )).await.unwrap();
+        fixture.session.run_turn("Première demande").await.unwrap();
+        fixture.session.run_turn("Deuxième demande").await.unwrap();
+        let requests = provider.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            Message::Assistant { text, .. } if text == "première réponse")));
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            Message::User { text, .. } if text == "Deuxième demande")));
+        assert!(matches!(fixture.session.tree().await.get(&agent).unwrap().state,
+            zaalis_core::AgentState::Done));
     }
 
     #[tokio::test]
@@ -567,6 +635,88 @@ mod tests {
         let json = serde_json::to_string(history).unwrap();
         assert!(json.contains("\"is_error\":true"));
         assert!(json.contains("\"role\":\"tool\""));
+    }
+
+    #[tokio::test]
+    async fn computer_tool_results_precede_the_only_retained_capture() {
+        let call = |id: &str, image: &str| TurnEvent::ToolCallCompleted {
+            call: ProviderToolCall {
+                id: id.into(),
+                name: "computer".into(),
+                arguments: serde_json::json!({"image": image}),
+            },
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Local,
+            vec![
+                vec![
+                    call("A", "image-a"),
+                    call("B", "image-b"),
+                    TurnEvent::Completed {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                vec![
+                    call("C", "image-c"),
+                    TurnEvent::Completed {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                vec![
+                    TurnEvent::TextDelta {
+                        text: "Terminé".into(),
+                    },
+                    TurnEvent::Completed {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .inner
+            .tools
+            .register(FakeComputerTool)
+            .expect("computer");
+        fixture
+            .session
+            .add_root(node(
+                &fixture.session,
+                ProviderId::Local,
+                PermissionMode::Bypass,
+            ))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Observe le bureau").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3);
+        let messages = &requests[1].messages;
+        let tail = &messages[messages.len() - 4..];
+        assert!(
+            matches!(&tail[0], Message::Assistant { tool_calls, .. } if tool_calls.iter().map(|call| call.id.as_str()).collect::<Vec<_>>() == ["A", "B"])
+        );
+        assert!(matches!(&tail[1], Message::Tool { call_id, .. } if call_id == "A"));
+        assert!(matches!(&tail[2], Message::Tool { call_id, .. } if call_id == "B"));
+        assert!(
+            matches!(&tail[3], Message::User { text, images } if text.starts_with("[Capture actuelle du bureau") && images.len() == 1 && images[0].data == "image-b")
+        );
+        let captures = requests[2]
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { text, images }
+                    if text.starts_with("[Capture actuelle du bureau") =>
+                {
+                    Some(images)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].len(), 1);
+        assert_eq!(captures[0][0].data, "image-c");
     }
 
     #[tokio::test]

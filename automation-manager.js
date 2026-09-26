@@ -1,10 +1,20 @@
 'use strict';
 
 const crypto = require('crypto');
+const os = require('os');
 
 const STATES = new Set(['running', 'waiting_user', 'stopping', 'stopped', 'failed', 'completed']);
 const ACTIONS = new Set(['observe', 'inspect', 'menus', 'move', 'click', 'scroll', 'type', 'key', 'open_terminal', 'activate_app', 'ask']);
 const ALWAYS_CONFIRM = new Set(['open_terminal']);
+
+// Nom du bureau piloté, utilisé dans les messages rendus à l'utilisateur. Le
+// même module sert les trois éditions (Windows, Linux, macOS) : seule cette
+// étiquette et la validation de `activate_app` dépendent de la plateforme.
+function desktopLabel() {
+  if (process.platform === 'linux') return 'Linux';
+  if (process.platform === 'darwin') return 'macOS';
+  return 'Windows';
+}
 
 function text(v, cap = 8000) { return String(v == null ? '' : v).slice(0, cap); }
 function finite(v, min, max) { const n = Number(v); return Number.isFinite(n) && n >= min && n <= max ? n : null; }
@@ -50,9 +60,13 @@ function normalizeAction(input) {
   }
   if (action === 'activate_app') {
     out.path = text(input.path, 1024);
+    if (out.path.includes('..')) return null;
+    const linuxApplications = ['/usr/share/applications/', '/usr/local/share/applications/', `${os.homedir()}/.local/share/applications/`, '~/.local/share/applications/', '/var/lib/flatpak/exports/share/applications/'];
     const validPath = process.platform === 'win32'
       ? (/^(?:[A-Za-z]:\\|\\\\).+\.(?:exe|bat|cmd)$/i.test(out.path) || /^(?:notepad|calc|mspaint|chrome|edge|msedge|firefox|code|explorer|cmd|powershell)(?:\.exe)?$/i.test(out.path))
-      : /^\/.*\.app$/.test(out.path);
+      : process.platform === 'darwin'
+        ? (/^(?:\/Applications\/|\/System\/Applications\/|~\/Applications\/)[^\0\r\n]+\.app$/.test(out.path) || /^(?:Safari|Google Chrome|Firefox|TextEdit|Notes|Finder|Terminal|Visual Studio Code|Calculator)$/.test(out.path))
+        : ((linuxApplications.some((dir) => out.path.startsWith(dir)) && /^[^\0\r\n]+\.desktop$/.test(out.path)) || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path));
     if (!validPath) return null;
   }
   if (action === 'ask') {
@@ -100,15 +114,16 @@ class AutomationManager {
   async status() { return this.bridge({ action: 'status' }); }
 
   async start({ userId, permissionMode }) {
-    if (this.active && ['running', 'waiting_user', 'stopping'].includes(this.active.state)) throw new Error('Une tâche de contrôle Windows est déjà active.');
+    const platform = desktopLabel();
+    if (this.active && ['running', 'waiting_user', 'stopping'].includes(this.active.state)) throw new Error(`Une tâche de contrôle ${platform} est déjà active.`);
     const permissions = await this.status();
-    if (!permissions.ok) throw new Error(permissions.error || 'Pont Windows indisponible.');
+    if (!permissions.ok) throw new Error(permissions.error || `Pont ${platform} indisponible.`);
     const session = { id: crypto.randomUUID(), userId, permissionMode, state: 'running', events: [], lastAction: null, question: null, answer: null, answerResolve: null, lastPerception: null, pendingVerification: null, lastCapture: null };
     this.active = session;
     await this.bridge({ action: 'overlay_start' });
-    this.record(session, 'session_started', 'Contrôle Windows activé');
+    this.record(session, 'session_started', `Contrôle ${platform} activé`);
     if (!permissions.accessibility || !permissions.screenRecording) {
-      this.record(session, 'permission_status', 'Autorisations Windows non confirmées : le composant natif les vérifiera lors de chaque action.');
+      this.record(session, 'permission_status', `Autorisations ${platform} non confirmées : le composant natif les vérifiera lors de chaque action.`);
     }
     return session;
   }

@@ -61,19 +61,64 @@ function windowsTerminalProfiles() {
   ];
 }
 
+// Profils POSIX (Linux et macOS).  L'ordre porte le sens : le premier est le
+// shell par défaut de la plateforme, donc celui retenu quand la configuration
+// utilisateur ne désigne rien de disponible.  On résout chaque shell en chemin
+// absolu (chemin usuel puis PATH) pour ne jamais dépendre du PATH du service.
+function unixTerminalProfiles() {
+  const darwin = process.platform === 'darwin';
+  const candidates = [
+    { id: 'zsh', label: 'zsh', paths: ['/bin/zsh', '/usr/bin/zsh'], args: ['-il'] },
+    { id: 'bash', label: 'bash', paths: ['/bin/bash', '/usr/bin/bash', '/opt/homebrew/bin/bash'], args: ['-il'] },
+    { id: 'fish', label: 'fish', paths: ['/usr/bin/fish', '/usr/local/bin/fish', '/opt/homebrew/bin/fish'], args: ['-i'] },
+    { id: 'sh', label: 'sh', paths: ['/bin/sh', '/usr/bin/sh'], args: ['-i'] },
+  ];
+  // macOS livre zsh par défaut depuis Catalina, les distributions Linux bash.
+  const order = darwin ? ['zsh', 'bash', 'fish', 'sh'] : ['bash', 'zsh', 'fish', 'sh'];
+  const resolved = order.map((id) => {
+    const entry = candidates.find((candidate) => candidate.id === id);
+    const shell = entry.paths.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+      || executableOnPath(entry.id);
+    return { id: entry.id, label: entry.label, shell, args: entry.args, available: !!shell };
+  });
+  // « Shell de connexion » suit $SHELL : c'est ce que l'utilisateur a choisi
+  // pour sa session, et il peut pointer ailleurs que les quatre ci-dessus.
+  const login = String(process.env.SHELL || '');
+  const loginAvailable = !!login && (() => { try { return fs.existsSync(login); } catch { return false; } })();
+  resolved.push({
+    id: 'login-shell',
+    label: loginAvailable ? `Shell de connexion (${path.basename(login)})` : 'Shell de connexion',
+    shell: loginAvailable ? login : '',
+    args: ['-il'],
+    available: loginAvailable,
+  });
+  return resolved;
+}
+
+function platformTerminalProfiles() {
+  return process.platform === 'win32' ? windowsTerminalProfiles() : unixTerminalProfiles();
+}
+
+// Identifiants acceptés par l'API de configuration et profil retenu par défaut.
+// Exportés pour que server.js n'ait pas à redéclarer une liste par plateforme.
+const TERMINAL_PROFILE_IDS = platformTerminalProfiles().map((profile) => profile.id);
+const DEFAULT_TERMINAL_PROFILE = process.platform === 'win32'
+  ? 'cmd'
+  : (process.platform === 'darwin' ? 'zsh' : 'bash');
+
 class TerminalManager {
   constructor() { this.sessions = new Map(); }
 
   profiles() {
-    if (process.platform !== 'win32') return [{ id: 'system', label: 'Terminal système', available: true }];
-    return windowsTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
+    return platformTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
   }
 
   profile(profileId) {
-    if (process.platform !== 'win32') return { id: 'system', shell: '/bin/zsh', args: ['-il'] };
-    const profiles = windowsTerminalProfiles();
+    const profiles = platformTerminalProfiles();
     return profiles.find((profile) => profile.id === profileId && profile.available)
-      || profiles.find((profile) => profile.id === 'cmd');
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE && profile.available)
+      || profiles.find((profile) => profile.available)
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE);
   }
 
   create({ userId, cwd, profileId, origin = 'agent' }) {
@@ -108,7 +153,14 @@ class TerminalManager {
 
   write(session, data) { if (session.closed) throw new Error('Terminal fermé.'); session.proc.write(String(data || '')); }
   resize(session, cols, rows) { if (!session.closed) session.proc.resize(Math.max(20, Math.min(320, Number(cols) || 100)), Math.max(5, Math.min(120, Number(rows) || 26))); }
-  close(session) { if (!session || session.closed) return; session.closed = true; try { session.proc.kill(); } catch {} this.sessions.delete(session.id); }
+  close(session) {
+    if (!session) return;
+    session.closed = true;
+    this.sessions.delete(session.id);
+    // onExit marks a session closed before the PTY addon has necessarily
+    // disposed its pipes. Always release the native PTY handle as well.
+    try { session.proc.kill(); } catch {}
+  }
 
   async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
     const session = this.latest(userId, cwd);
@@ -132,4 +184,4 @@ class TerminalManager {
   }
 }
 
-module.exports = { TerminalManager };
+module.exports = { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE };

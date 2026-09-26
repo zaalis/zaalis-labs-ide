@@ -136,6 +136,28 @@ pub enum BindingOrigin {
     Fallback,
 }
 
+/// Model-specific facts discovered from the model server or explicit catalogue.
+/// Missing facts retain the adapter's defaults for backwards compatibility.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    None,
+    Native,
+    Effort,
+}
+
 /// Provider + model + reasoning, as bound to one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelBinding {
@@ -149,6 +171,8 @@ pub struct ModelBinding {
     pub reasoning: ReasoningLevel,
     #[serde(default = "default_origin")]
     pub origin: BindingOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
 }
 
 fn default_origin() -> BindingOrigin {
@@ -162,6 +186,7 @@ impl ModelBinding {
             model,
             reasoning: ReasoningLevel::OFF,
             origin: BindingOrigin::ExplicitUser,
+            capabilities: None,
         }
     }
 
@@ -182,6 +207,7 @@ impl ModelBinding {
             model: self.model.clone(),
             reasoning: self.reasoning,
             origin: BindingOrigin::InheritedFromParent,
+            capabilities: self.capabilities.clone(),
         }
     }
 

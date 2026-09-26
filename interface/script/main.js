@@ -57,6 +57,14 @@ const SETTINGS_SELECT_IDS = [
     'settings-default-reasoning-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
+let terminalProfiles = [];
+let defaultTerminalProfile = '';
+function terminalProfileDefault() {
+    return terminalProfiles.find(profile => profile.id === defaultTerminalProfile && profile.available)?.id
+        || terminalProfiles.find(profile => profile.available)?.id
+        || terminalProfiles[0]?.id
+        || 'cmd';
+}
 function initSettingsCustomSelects() {
     if (_settingsSelectsReady) return;
     if (typeof createCustomSelect !== 'function') return;
@@ -72,7 +80,7 @@ function sharedHardwareConfigPayload() {
         ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
         ggufVariant: c.ggufVariant || '',
         ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
-        terminalProfile: c.terminalProfile || 'cmd'
+        terminalProfile: c.terminalProfile || terminalProfileDefault()
     };
 }
 
@@ -81,6 +89,7 @@ function sharedHardwareConfigPayload() {
 function populateTerminalProfiles(profiles) {
     const select = $('#settings-terminal-profile');
     if (!select || !Array.isArray(profiles)) return;
+    terminalProfiles = profiles;
     select.replaceChildren(...profiles.map((profile) => {
         const option = document.createElement('option');
         option.value = profile.id;
@@ -88,8 +97,8 @@ function populateTerminalProfiles(profiles) {
         option.disabled = !profile.available;
         return option;
     }));
-    const saved = state.config.terminalProfile || 'cmd';
-    state.config.terminalProfile = select.querySelector(`option[value="${saved}"]:not(:disabled)`) ? saved : 'cmd';
+    const saved = state.config.terminalProfile;
+    state.config.terminalProfile = profiles.some(profile => profile.id === saved && profile.available) ? saved : terminalProfileDefault();
     select.value = state.config.terminalProfile;
 }
 
@@ -104,7 +113,7 @@ function applySharedHardwareConfig(config) {
         const raw = config.ggufGpuLayers;
         c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
     }
-    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || 'cmd');
+    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || terminalProfileDefault());
 }
 
 async function syncSharedHardwareConfig() {
@@ -122,7 +131,10 @@ async function loadSharedHardwareConfig() {
         const res = await fetch('/api/config');
         if (!res.ok) return;
         const data = await res.json();
-        if (data) populateTerminalProfiles(data.terminalProfiles);
+        if (data) {
+            defaultTerminalProfile = data.defaultTerminalProfile || '';
+            populateTerminalProfiles(data.terminalProfiles);
+        }
         if (data && data.configured && data.config) {
             applySharedHardwareConfig(data.config);
             populateTerminalProfiles(data.terminalProfiles);
@@ -373,7 +385,7 @@ $('#save-btn').addEventListener('click', async () => {
     const nglVal = getVal('gguf-ngl-select');
     c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
     // ----- Integrated terminal -----
-    const previousTerminalProfile = c.terminalProfile || 'cmd';
+    const previousTerminalProfile = c.terminalProfile || terminalProfileDefault();
     const terminalProfileSelect = $('#settings-terminal-profile');
     if (terminalProfileSelect && terminalProfileSelect.value) c.terminalProfile = terminalProfileSelect.value;
     if (c.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));

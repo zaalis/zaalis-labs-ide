@@ -235,6 +235,13 @@ impl Store {
         Ok(events)
     }
 
+    pub fn last_event_sequence(&self, session: &SessionId) -> Result<u64> {
+        self.connection.lock().expect("store lock poisoned")
+            .query_row("SELECT COALESCE(MAX(seq),0) FROM events WHERE session_id=?1", params![session.as_str()], |row| row.get::<_, i64>(0))
+            .map(|sequence| sequence.max(0) as u64)
+            .map_err(sql_error)
+    }
+
     pub fn set_credential_ref(
         &self,
         user_id: &str,
