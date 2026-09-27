@@ -91,9 +91,16 @@ impl Captured {
         self.truncated |= visible.len() < bytes.len();
     }
 
+    /// Hand the captured bytes out, with secrets masked.
+    ///
+    /// This is the single place every one-shot and background process output
+    /// leaves the crate, so masking here covers the model, the transcript and
+    /// the UI at once. Masking on the way *out* rather than on the way in keeps
+    /// the byte budget honest: a truncation decision stays about the real
+    /// output size, not the redacted one.
     fn drain(&mut self) -> (String, String, bool) {
-        let stdout = String::from_utf8_lossy(&self.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&self.stderr).into_owned();
+        let stdout = zaalis_secrets::sanitize(&String::from_utf8_lossy(&self.stdout)).into_owned();
+        let stderr = zaalis_secrets::sanitize(&String::from_utf8_lossy(&self.stderr)).into_owned();
         self.stdout.clear();
         self.stderr.clear();
         (stdout, stderr, self.truncated)
@@ -115,6 +122,73 @@ pub struct ExecRuntime {
     root: PathBuf,
     processes: Arc<RwLock<HashMap<String, Arc<ProcessSession>>>>,
     sandbox_policy: SandboxPolicy,
+    network: Arc<NetworkPolicy>,
+}
+
+/// The egress policy applied to commands, and the proxy that enforces it.
+///
+/// The proxy is started on first use rather than in `new`: binding a listener
+/// needs an async context, and a runtime created for a workspace nobody ends up
+/// running a command in should not have opened a socket.
+#[derive(Debug)]
+struct NetworkPolicy {
+    policy: Option<zaalis_netpolicy::DomainPolicy>,
+    proxy: tokio::sync::OnceCell<Option<Arc<zaalis_netpolicy::EgressProxy>>>,
+}
+
+impl NetworkPolicy {
+    /// Read the policy from the environment.
+    ///
+    /// Off by default. Turning it on has to be a decision, because a policy
+    /// that surprises a user mid-build teaches them to disable it.
+    fn from_environment() -> Self {
+        let mode = std::env::var("ZAALIS_NET_POLICY").unwrap_or_default();
+        let extra: Vec<String> = std::env::var("ZAALIS_NET_ALLOW")
+            .unwrap_or_default()
+            .split(',')
+            .map(|host| host.trim().to_owned())
+            .filter(|host| !host.is_empty())
+            .collect();
+        let policy = match mode.to_ascii_lowercase().as_str() {
+            // The registries a build actually needs, and nothing else.
+            "dev" | "on" | "1" => {
+                Some(zaalis_netpolicy::DomainPolicy::development_default().with_allow(extra))
+            }
+            // Nothing but what the user named.
+            "strict" => Some(zaalis_netpolicy::DomainPolicy::default().with_allow(extra)),
+            _ => None,
+        };
+        Self {
+            policy,
+            proxy: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn proxy(&self) -> Option<Arc<zaalis_netpolicy::EgressProxy>> {
+        self.proxy
+            .get_or_init(|| async {
+                let policy = self.policy.clone()?;
+                match zaalis_netpolicy::EgressProxy::start(policy).await {
+                    Ok(proxy) => Some(Arc::new(proxy)),
+                    // Fail closed on the *policy*, not on the command: if the
+                    // proxy cannot start, commands run without it, and the
+                    // capability report says so rather than pretending.
+                    Err(error) => {
+                        eprintln!("zaalis: proxy réseau indisponible — {}", error.message);
+                        None
+                    }
+                }
+            })
+            .await
+            .clone()
+    }
+
+    async fn environment(&self) -> Vec<(String, String)> {
+        match self.proxy().await {
+            Some(proxy) => proxy.environment(),
+            None => Vec::new(),
+        }
+    }
 }
 
 impl ExecRuntime {
@@ -138,6 +212,7 @@ impl ExecRuntime {
             root,
             processes: Arc::new(RwLock::new(HashMap::new())),
             sandbox_policy,
+            network: Arc::new(NetworkPolicy::from_environment()),
         })
     }
 
@@ -160,7 +235,7 @@ impl ExecRuntime {
             return run_strict(&self.root, command, timeout, cancel).await;
         }
         let started = Instant::now();
-        let mut child = spawn_shell(&self.root, command)?;
+        let mut child = spawn_shell(&self.root, command, &self.network.environment().await)?;
         let captured = Arc::new(Mutex::new(Captured::default()));
         let readers = take_readers(&mut child, Arc::clone(&captured))?;
         let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
@@ -200,7 +275,7 @@ impl ExecRuntime {
             ));
         }
         validate_command(command)?;
-        let mut child = spawn_shell(&self.root, command)?;
+        let mut child = spawn_shell(&self.root, command, &self.network.environment().await)?;
         let captured = Arc::new(Mutex::new(Captured::default()));
         let readers = take_readers(&mut child, Arc::clone(&captured))?;
         let process_id = format!("proc_{}", uuid::Uuid::now_v7().simple());
@@ -332,7 +407,11 @@ fn validate_command(command: &str) -> Result<()> {
     Ok(())
 }
 
-fn spawn_shell(root: &Path, command: &str) -> Result<Box<dyn ChildWrapper>> {
+fn spawn_shell(
+    root: &Path,
+    command: &str,
+    proxy_environment: &[(String, String)],
+) -> Result<Box<dyn ChildWrapper>> {
     let mut process = platform_shell(command);
     process
         .current_dir(root)
@@ -343,6 +422,11 @@ fn spawn_shell(root: &Path, command: &str) -> Result<Box<dyn ChildWrapper>> {
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     copy_minimal_environment(&mut process);
+    // After the minimal copy, so an inherited HTTP_PROXY can never override the
+    // one the policy is enforcing.
+    for (name, value) in proxy_environment {
+        process.env(name, value);
+    }
     let mut wrapped = CommandWrap::from(process);
     wrapped.wrap(KillOnDrop);
     #[cfg(windows)]
@@ -470,9 +554,17 @@ fn run_strict_blocking(
 
     let started = Instant::now();
     let timeout = timeout.unwrap_or(DEFAULT_TIMEOUT).min(MAX_TIMEOUT);
-    let sandbox = Sandbox::builder(root)
+    let mut builder = Sandbox::builder(root)
         .max_memory(2 * 1024 * 1024 * 1024)
-        .max_processes(64)
+        .max_processes(64);
+    // The workspace is read-write by construction; everything a build needs to
+    // *read* has to be granted explicitly. Without this the sandbox is airtight
+    // and useless: `cargo build` cannot reach its own toolchain, so strict mode
+    // would fail on its first command and be switched off.
+    for path in sandbox::read_only_roots() {
+        builder = builder.read_only(path);
+    }
+    let sandbox = builder
         .build()
         .map_err(|error| ZaalisError::denied(format!("sandbox strict : {error}")))?;
     let shell = std::env::var_os("ComSpec").unwrap_or_else(|| "cmd.exe".into());
@@ -703,6 +795,36 @@ mod tests {
             .await
             .expect("remove");
         assert!(runtime.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_command_inherits_the_egress_proxy_when_a_policy_is_active() {
+        // The variables are what a cooperating tool reads, so asserting on them
+        // is asserting on the mechanism: no proxy variables reach the child,
+        // no policy is being applied to it.
+        let network = NetworkPolicy {
+            policy: Some(zaalis_netpolicy::DomainPolicy::development_default()),
+            proxy: tokio::sync::OnceCell::new(),
+        };
+        let environment = network.environment().await;
+        assert!(
+            environment
+                .iter()
+                .any(|(name, value)| name == "HTTPS_PROXY" && value.starts_with("http://127.0.0.1:")),
+            "la commande doit être pointée vers le proxy local : {environment:?}"
+        );
+        assert!(environment.iter().any(|(name, _)| name == "NO_PROXY"));
+    }
+
+    #[tokio::test]
+    async fn no_policy_means_no_proxy_variables_at_all() {
+        // The default has to stay invisible: a user who never asked for egress
+        // control must not find their build talking to a proxy.
+        let network = NetworkPolicy {
+            policy: None,
+            proxy: tokio::sync::OnceCell::new(),
+        };
+        assert!(network.environment().await.is_empty());
     }
 
     #[tokio::test]

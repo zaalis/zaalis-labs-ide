@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
+const { sanitize } = require('./secrets-mask');
 
 // A native PTY addon must never prevent the IDE from starting.  In a packaged
 // build it is loaded only when the user opens the integrated terminal, so a
@@ -61,19 +62,64 @@ function windowsTerminalProfiles() {
   ];
 }
 
+// Profils POSIX (Linux et macOS).  L'ordre porte le sens : le premier est le
+// shell par défaut de la plateforme, donc celui retenu quand la configuration
+// utilisateur ne désigne rien de disponible.  On résout chaque shell en chemin
+// absolu (chemin usuel puis PATH) pour ne jamais dépendre du PATH du service.
+function unixTerminalProfiles() {
+  const darwin = process.platform === 'darwin';
+  const candidates = [
+    { id: 'zsh', label: 'zsh', paths: ['/bin/zsh', '/usr/bin/zsh'], args: ['-il'] },
+    { id: 'bash', label: 'bash', paths: ['/bin/bash', '/usr/bin/bash', '/opt/homebrew/bin/bash'], args: ['-il'] },
+    { id: 'fish', label: 'fish', paths: ['/usr/bin/fish', '/usr/local/bin/fish', '/opt/homebrew/bin/fish'], args: ['-i'] },
+    { id: 'sh', label: 'sh', paths: ['/bin/sh', '/usr/bin/sh'], args: ['-i'] },
+  ];
+  // macOS livre zsh par défaut depuis Catalina, les distributions Linux bash.
+  const order = darwin ? ['zsh', 'bash', 'fish', 'sh'] : ['bash', 'zsh', 'fish', 'sh'];
+  const resolved = order.map((id) => {
+    const entry = candidates.find((candidate) => candidate.id === id);
+    const shell = entry.paths.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+      || executableOnPath(entry.id);
+    return { id: entry.id, label: entry.label, shell, args: entry.args, available: !!shell };
+  });
+  // « Shell de connexion » suit $SHELL : c'est ce que l'utilisateur a choisi
+  // pour sa session, et il peut pointer ailleurs que les quatre ci-dessus.
+  const login = String(process.env.SHELL || '');
+  const loginAvailable = !!login && (() => { try { return fs.existsSync(login); } catch { return false; } })();
+  resolved.push({
+    id: 'login-shell',
+    label: loginAvailable ? `Shell de connexion (${path.basename(login)})` : 'Shell de connexion',
+    shell: loginAvailable ? login : '',
+    args: ['-il'],
+    available: loginAvailable,
+  });
+  return resolved;
+}
+
+function platformTerminalProfiles() {
+  return process.platform === 'win32' ? windowsTerminalProfiles() : unixTerminalProfiles();
+}
+
+// Identifiants acceptés par l'API de configuration et profil retenu par défaut.
+// Exportés pour que server.js n'ait pas à redéclarer une liste par plateforme.
+const TERMINAL_PROFILE_IDS = platformTerminalProfiles().map((profile) => profile.id);
+const DEFAULT_TERMINAL_PROFILE = process.platform === 'win32'
+  ? 'cmd'
+  : (process.platform === 'darwin' ? 'zsh' : 'bash');
+
 class TerminalManager {
   constructor() { this.sessions = new Map(); }
 
   profiles() {
-    if (process.platform !== 'win32') return [{ id: 'system', label: 'Terminal système', available: true }];
-    return windowsTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
+    return platformTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
   }
 
   profile(profileId) {
-    if (process.platform !== 'win32') return { id: 'system', shell: '/bin/zsh', args: ['-il'] };
-    const profiles = windowsTerminalProfiles();
+    const profiles = platformTerminalProfiles();
     return profiles.find((profile) => profile.id === profileId && profile.available)
-      || profiles.find((profile) => profile.id === 'cmd');
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE && profile.available)
+      || profiles.find((profile) => profile.available)
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE);
   }
 
   create({ userId, cwd, profileId, origin = 'agent' }) {
@@ -104,7 +150,11 @@ class TerminalManager {
     return this.create({ userId, cwd });
   }
 
-  snapshot(session) { return { id: session.id, cwd: session.cwd, closed: session.closed, output: session.buffer, profile: session.profile.id, origin: session.origin }; }
+  // Le masquage s'applique ici et dans `runCommand`, pas sur l'événement
+  // `data` : un chunk PTY coupe un jeton en plein milieu et découpe les
+  // séquences ANSI, donc masquer par chunk raterait la moitié des secrets tout
+  // en cassant le rendu.  Ces deux points-là voient toujours un texte complet.
+  snapshot(session) { return { id: session.id, cwd: session.cwd, closed: session.closed, output: sanitize(session.buffer), profile: session.profile.id, origin: session.origin }; }
 
   write(session, data) { if (session.closed) throw new Error('Terminal fermé.'); session.proc.write(String(data || '')); }
   resize(session, cols, rows) { if (!session.closed) session.proc.resize(Math.max(20, Math.min(320, Number(cols) || 100)), Math.max(5, Math.min(120, Number(rows) || 26))); }
@@ -128,8 +178,9 @@ class TerminalManager {
     });
     const raw = session.buffer.slice(before);
     const match = raw.match(new RegExp(`${marker}:(\\d+)`));
-    return { session, output: raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
+    const output = raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024);
+    return { session, output: sanitize(output), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
   }
 }
 
-module.exports = { TerminalManager };
+module.exports = { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE };

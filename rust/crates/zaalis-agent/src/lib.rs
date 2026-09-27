@@ -4,14 +4,18 @@
 //! tool invocation, permission prompt and budget pause is emitted as a typed
 //! protocol event, and the same loop serves all eight providers.
 
+mod context;
 mod control;
 mod event_bus;
+pub mod guardian;
 mod interaction;
+mod prompt;
 mod runner;
 mod session;
 mod spawn;
 
 pub use event_bus::EventBus;
+pub use guardian::ModelReviewer;
 pub use interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
 pub use session::{AgentSession, AgentSessionSnapshot, SessionConfig, SessionRunMode};
 

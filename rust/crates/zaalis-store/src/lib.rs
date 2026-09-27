@@ -256,6 +256,66 @@ impl Store {
         Ok(())
     }
 
+    /// Remember one rule the user approved permanently, scoped to a workspace.
+    ///
+    /// Scoping by workspace is the point: "always allow `npm run build *`" is a
+    /// statement about *this* project's tooling, and silently applying it to
+    /// every other project the user opens would grant more than they said.
+    pub fn save_permission_grant(&self, workspace: &str, kind: &str, pattern: &str) -> Result<()> {
+        if workspace.trim().is_empty() || pattern.trim().is_empty() {
+            return Err(ZaalisError::invalid("règle de permission incomplète"));
+        }
+        self.connection
+            .lock()
+            .expect("store lock poisoned")
+            .execute(
+                "INSERT INTO permission_grants(workspace,kind,pattern,created_at_ms)
+                 VALUES(?1,?2,?3,?4)
+                 ON CONFLICT(workspace,kind,pattern) DO NOTHING",
+                params![workspace, kind, pattern, now_ms() as i64],
+            )
+            .map_err(sql_error)?;
+        Ok(())
+    }
+
+    /// Every rule approved permanently for a workspace, oldest first.
+    pub fn permission_grants(&self, workspace: &str) -> Result<Vec<(String, String)>> {
+        let connection = self.connection.lock().expect("store lock poisoned");
+        let mut statement = connection
+            .prepare(
+                "SELECT kind,pattern FROM permission_grants WHERE workspace=?1
+                 ORDER BY created_at_ms,kind,pattern",
+            )
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([workspace], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(sql_error)?;
+        let mut grants = Vec::new();
+        for row in rows {
+            grants.push(row.map_err(sql_error)?);
+        }
+        Ok(grants)
+    }
+
+    /// Withdraw one rule. A permission the user cannot take back is a trap.
+    pub fn forget_permission_grant(
+        &self,
+        workspace: &str,
+        kind: &str,
+        pattern: &str,
+    ) -> Result<bool> {
+        let removed = self
+            .connection
+            .lock()
+            .expect("store lock poisoned")
+            .execute(
+                "DELETE FROM permission_grants WHERE workspace=?1 AND kind=?2 AND pattern=?3",
+                params![workspace, kind, pattern],
+            )
+            .map_err(sql_error)?;
+        Ok(removed > 0)
+    }
+
     pub(crate) fn file_imported(&self, path: &str, sha256: &str) -> Result<bool> {
         let found: Option<i64> = self
             .connection
@@ -400,6 +460,38 @@ mod tests {
         let conversations = store.conversations("u1", "chat").unwrap();
         assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0]["title"], "new");
+    }
+
+    #[test]
+    fn permission_grants_survive_a_restart_and_stay_scoped_to_their_workspace() {
+        let dir = TempDir::new().expect("tempdir");
+        let path = dir.path().join("db.sqlite");
+        let store = Store::open(&path).expect("store");
+        store
+            .save_permission_grant("C:/projets/a", "Exec", "npm run build *")
+            .unwrap();
+        // Repeating an approval must not pile up duplicate rows.
+        store
+            .save_permission_grant("C:/projets/a", "Exec", "npm run build *")
+            .unwrap();
+        store
+            .save_permission_grant("C:/projets/b", "Exec", "cargo test *")
+            .unwrap();
+        drop(store);
+
+        let store = Store::open(&path).expect("reopen");
+        assert_eq!(
+            store.permission_grants("C:/projets/a").unwrap(),
+            vec![("Exec".to_owned(), "npm run build *".to_owned())]
+        );
+        // The other project's approval stays over there.
+        assert_eq!(store.permission_grants("C:/projets/b").unwrap().len(), 1);
+        assert!(store.permission_grants("C:/projets/c").unwrap().is_empty());
+
+        assert!(store
+            .forget_permission_grant("C:/projets/a", "Exec", "npm run build *")
+            .unwrap());
+        assert!(store.permission_grants("C:/projets/a").unwrap().is_empty());
     }
 
     #[test]

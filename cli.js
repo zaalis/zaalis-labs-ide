@@ -598,6 +598,84 @@ function restoreConversation() {
   } catch { return null; }
 }
 
+// Toutes les sessions enregistrees, la plus recente d'abord.
+//
+// `/resume` ne voyait que le dossier courant : une session ouverte hier dans un
+// autre projet etait sur le disque mais introuvable.  La lister, c'est la
+// difference entre une fonctionnalite qui existe et une fonctionnalite qu'on
+// utilise.
+function listConversations() {
+  let files = [];
+  try { files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json')); }
+  catch { return []; }
+  const sessions = [];
+  for (const file of files) {
+    try {
+      const full = path.join(SESSIONS_DIR, file);
+      const d = JSON.parse(fs.readFileSync(full, 'utf-8'));
+      if (!Array.isArray(d.history) || !d.history.length) continue;
+      const lastUser = [...d.history].reverse().find((h) => h && h.role === 'user');
+      sessions.push({
+        file: full,
+        cwd: String(d.cwd || ''),
+        savedAt: Number(d.savedAt || 0),
+        model: d.model || null,
+        submodel: d.submodel || null,
+        history: d.history,
+        exchanges: Math.ceil(d.history.length / 2),
+        preview: String((lastUser && lastUser.content) || '').replace(/\s+/g, ' ').trim().slice(0, 90),
+      });
+    } catch {}
+  }
+  return sessions.sort((a, b) => b.savedAt - a.savedAt);
+}
+
+// Filtre sur le chemin du projet et sur le contenu echange : on cherche
+// « la session ou je parlais du proxy », pas un identifiant.
+function searchConversations(sessions, query) {
+  const needle = String(query || '').toLowerCase().trim();
+  if (!needle) return sessions;
+  return sessions.filter((s) => {
+    if (s.cwd.toLowerCase().includes(needle)) return true;
+    if (s.preview.toLowerCase().includes(needle)) return true;
+    return s.history.some((h) => String((h && h.content) || '').toLowerCase().includes(needle));
+  });
+}
+
+function relativeTime(ms) {
+  const delta = Date.now() - ms;
+  if (!ms || delta < 0) return 'date inconnue';
+  const minutes = Math.round(delta / 60000);
+  if (minutes < 1) return "a l'instant";
+  if (minutes < 60) return `il y a ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `il y a ${hours} h`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'hier' : `il y a ${days} jours`;
+}
+
+function printConversationList(sessions) {
+  sessions.forEach((s, index) => {
+    const here = s.cwd.toLowerCase() === projectRoot().toLowerCase();
+    const where = here ? 'ce dossier' : (s.cwd || 'dossier inconnu');
+    console.log(`${brand(String(index + 1).padStart(2))}  ${relativeTime(s.savedAt)} · ${s.exchanges} echange(s) · ${dim(where)}`);
+    if (s.preview) console.log(`    ${dim(s.preview)}`);
+  });
+}
+
+function applyConversation(chosen) {
+  history.length = 0;
+  history.push(...chosen.history);
+  if (chosen.model) { session.model = chosen.model; session.submodel = chosen.submodel; saveSession(session); }
+  const when = relativeTime(chosen.savedAt);
+  console.log(green('✓ ') + `Session restauree : ${chosen.exchanges} echange(s) (${when}). Modele : ${currentModelLabel()}`);
+  if (chosen.cwd && chosen.cwd.toLowerCase() !== projectRoot().toLowerCase()) {
+    // Le contexte repris parle d'un autre projet que celui ou l'on se trouve :
+    // le dire evite des reponses qui semblent hors sujet sans raison visible.
+    console.log(dim(`    Cette session vient de ${chosen.cwd} — le dossier courant est different.`));
+  }
+}
+
 function isLocalModel(model) {
   return model === 'local' || model === 'gguf';
 }
@@ -1285,7 +1363,7 @@ const SLASH = [
   { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
   { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
   { name: 'remember', category: 'project', desc: 'ajouter une note a ZAALIS.md', usage: '<note>', args: true },
-  { name: 'resume', category: 'project', desc: 'reprendre la derniere session de ce dossier' },
+  { name: 'resume', category: 'project', desc: 'lister/rechercher les sessions et en reprendre une' },
   { name: 'export', category: 'project', desc: 'exporter la session' },
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
@@ -1670,11 +1748,22 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'resume') {
-    const d = restoreConversation();
-    if (!d) { console.log(dim('Aucune session sauvegardee pour ce dossier.')); return; }
-    const when = new Date(d.savedAt || Date.now()).toLocaleString();
-    if (d.model) { session.model = d.model; session.submodel = d.submodel; saveSession(session); }
-    console.log(green('✓ ') + `Session restauree : ${Math.ceil(history.length / 2)} echange(s) (${when}). Modele : ${currentModelLabel()}`);
+    const all = listConversations();
+    if (!all.length) { console.log(dim('Aucune session enregistree.')); return; }
+
+    const query = String(arg || '').trim();
+    // Un numero reprend directement ; un mot filtre ; rien du tout liste.
+    const byNumber = /^\d+$/.test(query) ? all[Number(query) - 1] : null;
+    if (byNumber) { applyConversation(byNumber); return; }
+    if (/^\d+$/.test(query)) { console.log(brand('✗ ') + `Aucune session numero ${query}.`); return; }
+
+    const matches = searchConversations(all, query);
+    if (!matches.length) { console.log(dim(`Aucune session ne correspond a « ${query} ».`)); return; }
+    if (query && matches.length === 1) { applyConversation(matches[0]); return; }
+
+    console.log(query ? `${matches.length} session(s) pour « ${query} » :` : 'Sessions enregistrees :');
+    printConversationList(matches.slice(0, 20));
+    console.log(dim('  /resume <numero> pour reprendre, /resume <mot> pour filtrer.'));
     return;
   }
   if (name === 'export') {

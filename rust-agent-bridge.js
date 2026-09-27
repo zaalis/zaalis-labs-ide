@@ -7,6 +7,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+// Noms de méthodes et étiquettes d'événements générés depuis
+// rust/crates/zaalis-protocol.  Les retaper ici serait le bug silencieux
+// classique : le cœur émet un événement que personne ne rend, sans erreur.
+const { METHODS, EVENTS } = require('./interface/script/protocol.generated');
+
+const SESSION_EVENT = 'session.event';
 
 function findAgentd(baseDir) {
   const exe = process.platform === 'win32' ? 'zaalis-agentd.exe' : 'zaalis-agentd';
@@ -73,7 +79,7 @@ class AgentdClient {
             : message.error.code === -32601 ? 404 : 500;
           pending.reject(error);
         } else pending.resolve(message.result);
-      } else if (message.method === 'session.event' && message.params && message.params.session_id) {
+      } else if (message.method === SESSION_EVENT && message.params && message.params.session_id) {
         const listeners = this.listeners.get(String(message.params.session_id));
         if (listeners) for (const listener of [...listeners]) listener(message.params);
       }
@@ -168,7 +174,7 @@ class RustAgentBridge {
     };
     if (options.team) create.agents = options.team;
     else create.model = { provider: options.model, model: options.submodel || undefined, reasoning: options.reasoningLevel || 0 };
-    const made = await client.request('session.create', create);
+    const made = await client.request(METHODS.SESSION_CREATE, create);
     const sessionId = made.session_id;
     onEvent({ type: 'run_started', runId: sessionId, sessionId });
     const lead = options.team
@@ -185,42 +191,58 @@ class RustAgentBridge {
     const completed = new Promise((resolve) => { finish = resolve; });
     const off = client.onSession(sessionId, (frame) => {
       const agent = String(frame.agent_id || 'session');
-      if (frame.type === 'text_delta') text.set(agent, (text.get(agent) || '') + String(frame.text || ''));
-      if (frame.type === 'reasoning_delta') reasoning.set(agent, (reasoning.get(agent) || '') + String(frame.text || ''));
-      if (frame.type === 'tool_started') {
+      if (frame.type === EVENTS.TEXT_DELTA) text.set(agent, (text.get(agent) || '') + String(frame.text || ''));
+      if (frame.type === EVENTS.REASONING_DELTA) reasoning.set(agent, (reasoning.get(agent) || '') + String(frame.text || ''));
+      if (frame.type === EVENTS.TOOL_STARTED) {
         startedTools.set(String(frame.call_id), { tool: frame.tool, input: frame.input || {} });
         onEvent({ type: 'tool_started', id: frame.call_id, tool: frame.tool, input: frame.input || {}, summary: frame.title });
       }
-      if (frame.type === 'tool_completed') {
+      if (frame.type === EVENTS.TOOL_COMPLETED) {
         const original = startedTools.get(String(frame.call_id)) || {};
         const outcome = frame.outcome || {};
         const result = { tool: original.tool || 'outil', input: original.input || {}, summary: outcome.summary || outcome.status || 'termine', text: outcome.result ? JSON.stringify(outcome.result) : (outcome.message || ''), error: outcome.status === 'error', blocked: outcome.status === 'denied' };
         toolResults.push(result);
         onEvent({ type: 'tool_done', id: frame.call_id, ...result });
       }
-      if (frame.type === 'permission_requested') onEvent({ type: 'permission_required', sessionId, requestId: frame.request_id, summary: frame.summary, target: frame.target, risks: frame.risks || [] });
-      if (frame.type === 'plan_ready') onEvent({ type: 'plan_required', sessionId, requestId: frame.request_id, content: frame.content });
-      if (frame.type === 'budget_exhausted') onEvent({ type: 'budget_required', sessionId, requestId: frame.request_id, limit: frame.limit, usage: frame.usage });
-      if (frame.type === 'agent_state_changed') onEvent({ type: 'agent_state', agentId: frame.agent_id, state: frame.state });
-      if (frame.type === 'provider_error' || frame.type === 'agent_failed') failure = frame.message || frame.error || 'Erreur agent.';
-      if (frame.type === 'turn_completed') { usage = frame.usage || usage; finish(); }
+      if (frame.type === EVENTS.PERMISSION_REQUESTED) onEvent({ type: 'permission_required', sessionId, requestId: frame.request_id, summary: frame.summary, target: frame.target, risks: frame.risks || [] });
+      if (frame.type === EVENTS.PLAN_READY) onEvent({ type: 'plan_required', sessionId, requestId: frame.request_id, content: frame.content });
+      if (frame.type === EVENTS.BUDGET_EXHAUSTED) onEvent({ type: 'budget_required', sessionId, requestId: frame.request_id, limit: frame.limit, usage: frame.usage });
+      if (frame.type === EVENTS.AGENT_STATE_CHANGED) onEvent({ type: 'agent_state', agentId: frame.agent_id, state: frame.state });
+      if (frame.type === EVENTS.PROVIDER_ERROR || frame.type === EVENTS.AGENT_FAILED) failure = frame.message || frame.error || 'Erreur agent.';
+      if (frame.type === EVENTS.TURN_COMPLETED) { usage = frame.usage || usage; finish(); }
       onEvent({ type: 'rust_event', event: frame });
     });
     let abortHandler = null;
     if (options.signal) {
-      abortHandler = () => { client.request('session.cancel', { session_id: sessionId }).catch(() => {}); };
+      abortHandler = () => { client.request(METHODS.SESSION_CANCEL, { session_id: sessionId }).catch(() => {}); };
       if (options.signal.aborted) abortHandler(); else options.signal.addEventListener('abort', abortHandler, { once: true });
     }
     try {
-      await client.request('session.prompt', { session_id: sessionId, text: options.message, images: options.images || [] });
+      await client.request(METHODS.SESSION_PROMPT, { session_id: sessionId, text: options.message, images: options.images || [] });
       await completed;
       const leadId = String(lead.id);
-      return { response: text.get(leadId) || '', thinking: reasoning.get(leadId) || '', usage: usage ? { input: usage.input_tokens, output: usage.output_tokens } : null, toolResults, sessionId, ...(failure && !text.get(leadId) ? { error: failure } : {}) };
+      return {
+        response: text.get(leadId) || '',
+        thinking: reasoning.get(leadId) || '',
+        usage: usage ? {
+          input: usage.input_tokens,
+          output: usage.output_tokens,
+          toolCalls: usage.tool_calls || 0,
+          rounds: usage.rounds || 0,
+          webQueries: usage.web_queries || 0,
+          webResults: usage.web_results || 0,
+          webPagesRead: usage.web_pages_read || 0,
+          contextCompactions: usage.context_compactions || 0,
+        } : null,
+        toolResults,
+        sessionId,
+        ...(failure && !text.get(leadId) ? { error: failure } : {})
+      };
     } finally {
       if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
       off();
       this.sessions.delete(sessionId);
-      client.request('session.close', { session_id: sessionId }).catch(() => {});
+      client.request(METHODS.SESSION_CLOSE, { session_id: sessionId }).catch(() => {});
     }
   }
 
@@ -228,16 +250,16 @@ class RustAgentBridge {
     const session = this.sessions.get(String(body.sessionId || ''));
     if (!session || session.userId !== userId) throw Object.assign(new Error('Session interactive introuvable.'), { status: 404 });
     const base = { session_id: body.sessionId, request_id: body.requestId };
-    if (body.kind === 'permission') return session.client.request('permission.decide', { ...base, answer: body.allow ? { allow: { scope: body.scope || 'once' } } : 'deny' });
-    if (body.kind === 'plan') return session.client.request(body.allow ? 'plan.approve' : 'plan.reject', { ...base, feedback: body.feedback || undefined });
-    if (body.kind === 'budget') return session.client.request('budget.extend', { ...base, additional_tokens: body.additionalTokens, stop: !!body.stop });
+    if (body.kind === 'permission') return session.client.request(METHODS.PERMISSION_DECIDE, { ...base, answer: body.allow ? { allow: { scope: body.scope || 'once' } } : 'deny' });
+    if (body.kind === 'plan') return session.client.request(body.allow ? METHODS.PLAN_APPROVE : METHODS.PLAN_REJECT, { ...base, feedback: body.feedback || undefined });
+    if (body.kind === 'budget') return session.client.request(METHODS.BUDGET_EXTEND, { ...base, additional_tokens: body.additionalTokens, stop: !!body.stop });
     throw Object.assign(new Error('Decision interactive invalide.'), { status: 400 });
   }
 
   async cancel(userId, sessionId) {
     const session = this.sessions.get(String(sessionId || ''));
     if (!session || session.userId !== userId) throw Object.assign(new Error('Tache introuvable.'), { status: 404 });
-    await session.client.request('session.cancel', { session_id: String(sessionId) });
+    await session.client.request(METHODS.SESSION_CANCEL, { session_id: String(sessionId) });
     return { cancelled: true };
   }
 

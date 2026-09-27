@@ -12,10 +12,16 @@ const { execFile, spawn } = require('child_process');
 
 let overlayProcess = null;
 
-// Same palette, proportions and breathing cadence as macOS's Electron overlay.
-// It is a separate click-through WPF process, so visual feedback never changes
-// the real Windows input path used by the computer-control bridge.
-function startOverlay() {
+// Overlay d'activité du contrôle de bureau.  Palette, proportions, cadence de
+// respiration, dérive de la brume et barre de contrôle sont identiques aux
+// éditions macOS (Electron) et Linux (GTK/cairo) : seul le moteur de rendu
+// change.  C'est un processus WPF séparé et traversant (WS_EX_TRANSPARENT), donc
+// il ne modifie jamais le chemin d'entrée réel utilisé par le pont de contrôle.
+//
+// La barre du bas porte le bouton « Arrêter le travail » : elle est, elle,
+// cliquable, et appelle /api/automation/stop-bridge avec le secret tiré au
+// lancement du serveur — jamais avec la session de l'utilisateur.
+function startOverlay({ port, secret }) {
   if (overlayProcess && overlayProcess.exitCode == null) return { ok: true, pid: overlayProcess.pid };
   const script = String.raw`
 Add-Type -AssemblyName PresentationFramework,PresentationCore,WindowsBase,System.Windows.Forms
@@ -24,40 +30,218 @@ using System; using System.Runtime.InteropServices;
 public static class ZaalisOverlayNative {
   [DllImport("user32.dll", SetLastError=true)] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
   [DllImport("user32.dll", SetLastError=true)] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int cx, int cy, uint flags);
+  [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int value);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 }
 '@
-[xml]$xaml = @'
+# Un powershell.exe lance depuis un service est DPI-unaware : sur un ecran 4K a
+# 150%, la fenetre ne couvrirait qu'une partie du bureau. On declare donc la
+# conscience par moniteur AVANT de creer la moindre fenetre, puis on positionne
+# chaque fenetre en pixels physiques via SetWindowPos (WPF, lui, raisonne en
+# unites logiques : les 28 px de bordure restent l'equivalent exact des 28 px
+# CSS de macOS).
+try { [void][ZaalisOverlayNative]::SetProcessDpiAwareness(2) } catch { try { [void][ZaalisOverlayNative]::SetProcessDPIAware() } catch {} }
+
+$app = New-Object Windows.Application
+$app.ShutdownMode = [Windows.ShutdownMode]::OnExplicitShutdown
+
+# Une fenetre de bordure PAR ECRAN, comme l'overlay macOS : sur un poste
+# multi-ecrans, chaque bureau recoit son propre cadre, au lieu d'un seul cadre
+# autour du rectangle englobant qui laisserait les bords interieurs nus.
+$overlays = @()
+foreach ($display in [Windows.Forms.Screen]::AllScreens) {
+$bounds = $display.Bounds
+$w = [double]$bounds.Width
+$h = [double]$bounds.Height
+
+# Geometrie de la brume, transposee de la feuille de style macOS :
+#   .mist { inset:-25% }  -> la couche mesure 150% du bureau, decalee de -25%
+#   radial-gradient(ellipse at 15% 20%, rgba(157,89,255,.28), transparent 32%)
+#   radial-gradient(ellipse at 80% 84%, rgba(102,45,210,.28), transparent 38%)
+# Un degrade radial CSS sans taille explicite s'etend jusqu'au coin le plus
+# eloigne : ramenes en coordonnees du bureau, les deux halos se logent donc dans
+# les coins haut-gauche et bas-droit, et non au milieu de l'ecran. Ici l'ellipse
+# WPF EST la zone coloree (opaque au centre, transparente au bord), ce qui
+# reproduit exactement l'arret « transparent 32% / 38% ».
+$e2w = 0.912 * $w; $e2h = 0.958 * $h; $e2x = 0.494 * $w; $e2y = 0.531 * $h
+$driftX = 0.03 * $w; $driftY = -0.02 * $h
+# Bord interieur du cadre en plumes : chaque bande fait 80 px (le double des
+# 40 px du navigateur). $wm/$hm placent les bandes droite et basse.
+$wm = $w - 80; $hm = $h - 80
+
+# Bordure d'activite = portage WPF du halo « setAiControlBorder » du navigateur
+# zaalis, en violet et deux fois plus epais :
+#  - un rectangle plein rempli d'un degrade horizontal qui DEFILE (SpreadMethod
+#    Repeat + TranslateTransform anime), exactement le background-position 0->200%
+#    du navigateur ;
+#  - un OpacityMask en « cadre plume » : 4 bandes (haut/bas/gauche/droite), chacune
+#    transparente au ras du bord, opaque a 20 px, re-transparente a 80 px. C'est la
+#    transposition du -webkit-mask du navigateur (transparent, #000 10px, transparent
+#    40px) porte au double. Les geometries sont en px ecran ; DrawingBrush Stretch=Fill
+#    les remet a l'echelle 1:1 quel que soit le DPI.
+#  - un BlurEffect qui diffuse le tout (equivalent du filter:blur), pose sur le
+#    conteneur pour que le flou s'applique APRES le masque, comme en CSS.
+[xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" Topmost="True" ShowActivated="False" ResizeMode="NoResize" IsHitTestVisible="False">
   <Grid IsHitTestVisible="False" ClipToBounds="True">
-    <Canvas Opacity="0.9">
-      <Ellipse Width="1500" Height="1000" Canvas.Left="-260" Canvas.Top="-210" Opacity="0.28">
-        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#479D59FF" Offset="0"/><GradientStop Color="#009D59FF" Offset="0.32"/><GradientStop Color="#00000000" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
-      </Ellipse>
-      <Ellipse Width="1700" Height="1150" Canvas.Right="-360" Canvas.Bottom="-260" Opacity="0.28">
-        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#47662DD2" Offset="0"/><GradientStop Color="#00662DD2" Offset="0.38"/><GradientStop Color="#00000000" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
+    <Canvas x:Name="Mist" RenderTransformOrigin="0.5,0.5">
+      <Canvas.RenderTransform><TransformGroup><ScaleTransform x:Name="MistScale" ScaleX="1" ScaleY="1"/><TranslateTransform x:Name="MistShift" X="0" Y="0"/></TransformGroup></Canvas.RenderTransform>
+      <Canvas.Effect><BlurEffect Radius="20"/></Canvas.Effect>
+      <Ellipse Width="$e2w" Height="$e2h" Canvas.Left="$e2x" Canvas.Top="$e2y" Opacity="0.28">
+        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#FF662DD2" Offset="0"/><GradientStop Color="#00662DD2" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
       </Ellipse>
     </Canvas>
-    <Border BorderThickness="28" Opacity="0.9">
-      <Border.BorderBrush><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#94783EDE" Offset="0"/><GradientStop Color="#29AD57FF" Offset="0.5"/><GradientStop Color="#8A5B22AF" Offset="1"/></LinearGradientBrush></Border.BorderBrush>
-      <Border.Effect><BlurEffect Radius="2"/></Border.Effect>
-      <Border.Style><Style TargetType="Border"><Style.Triggers><EventTrigger RoutedEvent="Loaded"><BeginStoryboard><Storyboard AutoReverse="True" RepeatBehavior="Forever"><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.55" Duration="0:0:5.5"/><DoubleAnimation Storyboard.TargetProperty="Effect.Radius" To="5" Duration="0:0:5.5"/></Storyboard></BeginStoryboard></EventTrigger></Style.Triggers></Style></Border.Style>
-    </Border>
+    <Grid Opacity="0.8">
+      <Grid.Effect><BlurEffect Radius="28"/></Grid.Effect>
+      <Rectangle x:Name="Glow">
+        <Rectangle.Fill>
+          <LinearGradientBrush StartPoint="0,0.5" EndPoint="0.5,0.5" SpreadMethod="Repeat">
+            <LinearGradientBrush.RelativeTransform><TranslateTransform x:Name="FlowShift" X="0" Y="0"/></LinearGradientBrush.RelativeTransform>
+            <GradientStop Color="#D95B22AF" Offset="0"/>
+            <GradientStop Color="#D99D59FF" Offset="0.25"/>
+            <GradientStop Color="#D9C78CFF" Offset="0.5"/>
+            <GradientStop Color="#D99D59FF" Offset="0.75"/>
+            <GradientStop Color="#D95B22AF" Offset="1"/>
+          </LinearGradientBrush>
+        </Rectangle.Fill>
+        <Rectangle.OpacityMask>
+          <DrawingBrush Stretch="Fill">
+            <DrawingBrush.Drawing>
+              <DrawingGroup>
+                <GeometryDrawing>
+                  <GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,$w,80"/></GeometryDrawing.Geometry>
+                  <GeometryDrawing.Brush><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00FFFFFF" Offset="0"/><GradientStop Color="#FFFFFFFF" Offset="0.25"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></GeometryDrawing.Brush>
+                </GeometryDrawing>
+                <GeometryDrawing>
+                  <GeometryDrawing.Geometry><RectangleGeometry Rect="0,$hm,$w,80"/></GeometryDrawing.Geometry>
+                  <GeometryDrawing.Brush><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#00FFFFFF" Offset="0"/><GradientStop Color="#FFFFFFFF" Offset="0.75"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></GeometryDrawing.Brush>
+                </GeometryDrawing>
+                <GeometryDrawing>
+                  <GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,80,$h"/></GeometryDrawing.Geometry>
+                  <GeometryDrawing.Brush><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#00FFFFFF" Offset="0"/><GradientStop Color="#FFFFFFFF" Offset="0.25"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></GeometryDrawing.Brush>
+                </GeometryDrawing>
+                <GeometryDrawing>
+                  <GeometryDrawing.Geometry><RectangleGeometry Rect="$wm,0,80,$h"/></GeometryDrawing.Geometry>
+                  <GeometryDrawing.Brush><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#00FFFFFF" Offset="0"/><GradientStop Color="#FFFFFFFF" Offset="0.75"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush></GeometryDrawing.Brush>
+                </GeometryDrawing>
+              </DrawingGroup>
+            </DrawingBrush.Drawing>
+          </DrawingBrush>
+        </Rectangle.OpacityMask>
+      </Rectangle>
+    </Grid>
   </Grid>
 </Window>
-'@
-$reader = New-Object Xml.XmlNodeReader $xaml
-$window = [Windows.Markup.XamlReader]::Load($reader)
-$screen = [Windows.Forms.SystemInformation]::VirtualScreen
-$window.Left = $screen.Left; $window.Top = $screen.Top; $window.Width = $screen.Width; $window.Height = $screen.Height
+"@
+$window = [Windows.Markup.XamlReader]::Load((New-Object Xml.XmlNodeReader $xaml))
+
+# Derive de la brume : 12 s aller-retour, translation de 3% / -2% et zoom 1.06,
+# exactement l'animation « drift » de la feuille de style macOS.
+$mistScale = $window.FindName('MistScale')
+$mistShift = $window.FindName('MistShift')
+$drift = New-Object Windows.Media.Animation.Storyboard
+$driftDuration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(12))
+foreach ($item in @(
+  @{ Target = $mistScale; Property = 'ScaleX'; To = 1.06 },
+  @{ Target = $mistScale; Property = 'ScaleY'; To = 1.06 },
+  @{ Target = $mistShift; Property = 'X'; To = $driftX },
+  @{ Target = $mistShift; Property = 'Y'; To = $driftY }
+)) {
+  $animation = New-Object Windows.Media.Animation.DoubleAnimation
+  $animation.To = $item.To
+  $animation.Duration = $driftDuration
+  $animation.AutoReverse = $true
+  $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+  [Windows.Media.Animation.Storyboard]::SetTarget($animation, $item.Target)
+  [Windows.Media.Animation.Storyboard]::SetTargetProperty($animation, (New-Object Windows.PropertyPath $item.Property))
+  $drift.Children.Add($animation)
+}
+
+# Defilement du degrade de la bordure : le brush est repete deux fois sur la
+# largeur (EndPoint 0.5), donc translater de 0.5 fait glisser d'une tuile
+# complete et boucle sans couture. 7 s lineaire, comme le navigateur.
+$flow = $window.FindName('FlowShift')
+$flowAnim = New-Object Windows.Media.Animation.DoubleAnimation
+$flowAnim.From = 0.0
+$flowAnim.To = 0.5
+$flowAnim.Duration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(7))
+$flowAnim.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
+
+# GetNewClosure fige $bounds et $drift pour CETTE iteration : sans cela, les
+# gestionnaires liraient la derniere valeur de la boucle et tous les cadres se
+# poseraient sur le meme ecran.
 $window.add_SourceInitialized({
-  $source = [Windows.PresentationSource]::FromVisual($window)
+  $source = [Windows.PresentationSource]::FromVisual($this)
+  # WS_EX_TRANSPARENT (0x20) + WS_EX_TOOLWINDOW (0x80000) : la fenetre laisse
+  # passer clics et survol, et n'apparait ni dans la barre des taches ni en Alt+Tab.
   $extended = [ZaalisOverlayNative]::GetWindowLong($source.Handle, -20)
   [void][ZaalisOverlayNative]::SetWindowLong($source.Handle, -20, ($extended -bor 0x20 -bor 0x80000))
+  # SWP_NOZORDER (0x4) + SWP_NOACTIVATE (0x10) : on ne fixe que la geometrie.
+  [void][ZaalisOverlayNative]::SetWindowPos($source.Handle, [IntPtr]::Zero, $bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height, 0x14)
+}.GetNewClosure())
+$window.add_ContentRendered({
+  $drift.Begin()
+  $flow.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $flowAnim)
+}.GetNewClosure())
+$overlays += $window
+}
+
+# Barre de controle : meme geometrie que le dock macOS (320 x 58, centree en bas
+# de la zone de travail de l'ecran principal, 34 px de marge).
+[xml]$dockXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" Topmost="True" ShowActivated="False" ResizeMode="NoResize" Width="320" Height="58">
+  <Border CornerRadius="18" Background="#E1180E2A" BorderBrush="#5CD6BBFF" BorderThickness="1" Margin="0,2,0,2">
+    <Grid Margin="13,0,13,0">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <Ellipse Grid.Column="0" Width="9" Height="9" Fill="#B36CFF" VerticalAlignment="Center">
+        <Ellipse.Style><Style TargetType="Ellipse"><Style.Triggers><EventTrigger RoutedEvent="Loaded"><BeginStoryboard><Storyboard AutoReverse="True" RepeatBehavior="Forever"><DoubleAnimation Storyboard.TargetProperty="Opacity" To="0.45" Duration="0:0:0.8"/></Storyboard></BeginStoryboard></EventTrigger></Style.Triggers></Style></Ellipse.Style>
+      </Ellipse>
+      <TextBlock Grid.Column="1" Margin="12,0,12,0" VerticalAlignment="Center" Foreground="#F4ECFF" FontSize="12" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Text="L'IA travaille sur ce PC"/>
+      <Button x:Name="Stop" Grid.Column="2" VerticalAlignment="Center" Foreground="White" FontSize="12" FontWeight="Bold" BorderThickness="0" Padding="12,8,12,8" Cursor="Hand" Content="Arr&#234;ter le travail">
+        <Button.Template>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Chip" CornerRadius="11" Background="#DB3D56"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/></Border>
+            <ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Chip" Property="Background" Value="#F05068"/></Trigger></ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Button.Template>
+      </Button>
+    </Grid>
+  </Border>
+</Window>
+"@
+$dock = [Windows.Markup.XamlReader]::Load((New-Object Xml.XmlNodeReader $dockXaml))
+$dock.add_SourceInitialized({
+  $source = [Windows.PresentationSource]::FromVisual($dock)
+  $extended = [ZaalisOverlayNative]::GetWindowLong($source.Handle, -20)
+  # WS_EX_NOACTIVATE seulement : la barre doit rester cliquable.
+  [void][ZaalisOverlayNative]::SetWindowLong($source.Handle, -20, ($extended -bor 0x8000000))
+  # Sonde M11 : facteur d'echelle reel de CE moniteur, pour convertir les 320x58
+  # unites logiques en pixels physiques attendus par SetWindowPos.
+  $scale = $source.CompositionTarget.TransformToDevice.M11
+  if (-not $scale -or $scale -le 0) { $scale = 1 }
+  $dockW = [int](320 * $scale)
+  $dockH = [int](58 * $scale)
+  $work = [Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+  $dockX = [int]($work.Left + ($work.Width - $dockW) / 2)
+  $dockY = [int]($work.Bottom - $dockH - (34 * $scale))
+  [void][ZaalisOverlayNative]::SetWindowPos($source.Handle, [IntPtr]::Zero, $dockX, $dockY, $dockW, $dockH, 0x14)
 })
-$window.ShowDialog() | Out-Null
+$dock.FindName('Stop').add_Click({
+  try {
+    $uri = "http://127.0.0.1:$($env:ZAALIS_OVERLAY_PORT)/api/automation/stop-bridge"
+    Invoke-RestMethod -Method Post -Uri $uri -Headers @{ 'x-zaalis-computer' = $env:ZAALIS_OVERLAY_SECRET } -TimeoutSec 5 | Out-Null
+  } catch {}
+  $app.Shutdown()
+})
+
+foreach ($overlay in $overlays) { $overlay.Show() }
+$dock.Show()
+$app.Run() | Out-Null
 `;
   overlayProcess = spawn('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-Command', script], {
     stdio: 'ignore', windowsHide: true,
+    env: { ...process.env, ZAALIS_OVERLAY_PORT: String(port), ZAALIS_OVERLAY_SECRET: String(secret) },
   });
   overlayProcess.once('exit', () => { overlayProcess = null; });
   overlayProcess.once('error', () => { overlayProcess = null; });
@@ -71,9 +255,9 @@ function stopOverlay() {
   overlayProcess = null;
 }
 
-function call(action) {
+function call(action, overlayConfig) {
   if (process.platform !== 'win32') return Promise.resolve({ ok: false, error: 'unsupported-platform' });
-  if (action && action.action === 'overlay_start') return Promise.resolve(startOverlay());
+  if (action && action.action === 'overlay_start') return Promise.resolve(startOverlay(overlayConfig || {}));
   if (action && action.action === 'overlay_stop') { stopOverlay(); return Promise.resolve({ ok: true }); }
   const payload = Buffer.from(JSON.stringify(action || {}), 'utf8').toString('base64');
   const script = String.raw`
@@ -251,4 +435,11 @@ Result @{ok=$false;error='unsupported-action'}
   });
 }
 
-module.exports = { call };
+// Même forme que `createLinuxComputerAction` : le serveur fournit son port et le
+// secret d'arrêt une seule fois, et obtient un gestionnaire d'action utilisable
+// tel quel par AutomationManager.
+function createWindowsComputerAction({ port, secret }) {
+  return function windowsComputerAction(action) { return call(action, { port, secret }); };
+}
+
+module.exports = { call, createWindowsComputerAction };

@@ -204,6 +204,18 @@ pub struct Usage {
     #[serde(default)]
     pub reasoning_tokens: u64,
     pub tool_calls: u32,
+    /// Number of outbound search operations actually executed by this agent.
+    #[serde(default)]
+    pub web_queries: u32,
+    /// Search or image results returned to the agent, before it chooses sources.
+    #[serde(default)]
+    pub web_results: u32,
+    /// Public pages or assets actually read/verified by this agent.
+    #[serde(default)]
+    pub web_pages_read: u32,
+    /// Number of times the runtime compacted older history before a model call.
+    #[serde(default)]
+    pub context_compactions: u32,
     pub rounds: u32,
     pub wall_time_ms: u64,
 }
@@ -219,6 +231,10 @@ impl Usage {
         self.cached_tokens += other.cached_tokens;
         self.reasoning_tokens += other.reasoning_tokens;
         self.tool_calls += other.tool_calls;
+        self.web_queries += other.web_queries;
+        self.web_results += other.web_results;
+        self.web_pages_read += other.web_pages_read;
+        self.context_compactions += other.context_compactions;
         self.rounds += other.rounds;
         self.wall_time_ms = self.wall_time_ms.max(other.wall_time_ms);
     }
@@ -679,6 +695,10 @@ impl AgentTree {
             total.cached_tokens += node.usage.cached_tokens;
             total.reasoning_tokens += node.usage.reasoning_tokens;
             total.tool_calls += node.usage.tool_calls;
+            total.web_queries += node.usage.web_queries;
+            total.web_results += node.usage.web_results;
+            total.web_pages_read += node.usage.web_pages_read;
+            total.context_compactions += node.usage.context_compactions;
             total.rounds += node.usage.rounds;
             total.wall_time_ms = total.wall_time_ms.max(node.usage.wall_time_ms);
         }

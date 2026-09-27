@@ -28,9 +28,15 @@ impl Default for PoolConfig {
     fn default() -> Self {
         Self {
             global_concurrency: 16,
-            max_retries: 3,
-            base_backoff: Duration::from_millis(250),
-            max_backoff: Duration::from_secs(10),
+            // Agent turns may need several model calls in quick succession
+            // (plan, screen observation, then the next action). A 250 ms
+            // retry storm only worsens a provider-side 429, particularly on
+            // entry plans with very small RPM allowances. Start at one
+            // second and allow enough attempts for a short rolling window to
+            // clear before surfacing an error to the user.
+            max_retries: 5,
+            base_backoff: Duration::from_secs(1),
+            max_backoff: Duration::from_secs(30),
             circuit_failure_threshold: 5,
             circuit_cooldown: Duration::from_secs(30),
         }
@@ -86,6 +92,7 @@ struct Entry {
     semaphore: Arc<Semaphore>,
     stats: Arc<AtomicStats>,
     circuit: Arc<Mutex<CircuitState>>,
+    next_start: Arc<Mutex<Instant>>,
 }
 
 impl Clone for Entry {
@@ -95,6 +102,7 @@ impl Clone for Entry {
             semaphore: Arc::clone(&self.semaphore),
             stats: Arc::clone(&self.stats),
             circuit: Arc::clone(&self.circuit),
+            next_start: Arc::clone(&self.next_start),
         }
     }
 }
@@ -131,6 +139,7 @@ impl ProviderPool {
                     semaphore: Arc::new(Semaphore::new(capacity)),
                     stats: Arc::new(AtomicStats::default()),
                     circuit: Arc::new(Mutex::new(CircuitState::default())),
+                    next_start: Arc::new(Mutex::new(Instant::now())),
                 },
             );
     }
@@ -189,6 +198,7 @@ impl ProviderPool {
 
         let mut attempt = 0_u8;
         let source = loop {
+            wait_for_provider_slot(&entry, provider_id, &cancel).await?;
             match entry
                 .provider
                 .stream_turn(request.clone(), cancel.clone())
@@ -257,6 +267,46 @@ impl ProviderPool {
         if circuit.consecutive_failures >= self.config.circuit_failure_threshold.max(1) {
             circuit.open_until = Instant::now().checked_add(self.config.circuit_cooldown);
         }
+    }
+}
+
+// The provider pool is process-wide, so pacing here coordinates every agent
+// sharing the same API key. It avoids the familiar desktop sequence
+// observe → activate → inspect → type being emitted as a burst. Kimi's
+// entry-plan response explicitly advertises 3 RPM, hence a 20-second slot;
+// Mistral needs only a short anti-burst interval while token reduction in the
+// runner handles its tokens-per-minute quota.
+fn provider_interval(provider: ProviderId) -> Duration {
+    match provider {
+        ProviderId::Kimi => Duration::from_secs(20),
+        ProviderId::Mistral => Duration::from_secs(2),
+        _ => Duration::ZERO,
+    }
+}
+
+async fn wait_for_provider_slot(
+    entry: &Entry,
+    provider: ProviderId,
+    cancel: &CancellationToken,
+) -> Result<(), ProviderError> {
+    let interval = provider_interval(provider);
+    if interval.is_zero() {
+        return Ok(());
+    }
+    let wait_until = {
+        let mut next = entry.next_start.lock().expect("provider pacing poisoned");
+        let now = Instant::now();
+        let slot = (*next).max(now);
+        *next = slot.checked_add(interval).unwrap_or(slot);
+        slot
+    };
+    let delay = wait_until.saturating_duration_since(Instant::now());
+    if delay.is_zero() {
+        return Ok(());
+    }
+    tokio::select! {
+        _ = cancel.cancelled() => Err(ProviderError::new(ProviderErrorKind::Cancelled, "requête annulée")),
+        _ = tokio::time::sleep(delay) => Ok(()),
     }
 }
 
@@ -379,6 +429,16 @@ mod tests {
 
     fn request(id: ProviderId) -> TurnRequest {
         TurnRequest::new(ModelBinding::new(id, None), "", vec![Message::user("go")])
+    }
+
+    #[test]
+    fn desktop_provider_pacing_matches_the_advertised_limits() {
+        assert_eq!(provider_interval(ProviderId::Kimi), Duration::from_secs(20));
+        assert_eq!(
+            provider_interval(ProviderId::Mistral),
+            Duration::from_secs(2)
+        );
+        assert_eq!(provider_interval(ProviderId::Local), Duration::ZERO);
     }
 
     #[tokio::test]

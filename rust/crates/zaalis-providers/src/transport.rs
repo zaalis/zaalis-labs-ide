@@ -93,13 +93,18 @@ fn classify_transport(error: reqwest::Error, local: bool) -> ProviderError {
 
 async fn classify_response(response: reqwest::Response) -> ProviderError {
     let status = response.status();
-    let retry_after_ms = response
+    let retry_after_header_ms = response
         .headers()
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .map(|seconds| seconds.saturating_mul(1_000));
     let body = response.text().await.unwrap_or_default();
+    // Some OpenAI-compatible APIs (including hosted Kimi deployments) put
+    // their cooldown only in the JSON message, e.g. "try again after 1
+    // seconds", and omit Retry-After. Preserve that signal so the shared
+    // provider pool waits instead of retrying in a tight burst.
+    let retry_after_ms = retry_after_header_ms.or_else(|| retry_after_from_body(&body));
     let parsed = serde_json::from_str::<Value>(&body).ok();
     let message = parsed
         .as_ref()
@@ -119,5 +124,40 @@ async fn classify_response(response: reqwest::Response) -> ProviderError {
         429 => ProviderError::rate_limited(message, retry_after_ms),
         500..=599 => ProviderError::transient(message),
         _ => ProviderError::invalid(message),
+    }
+}
+
+fn retry_after_from_body(body: &str) -> Option<u64> {
+    let lower = body.to_ascii_lowercase();
+    for marker in ["try again after", "retry after", "after"] {
+        let Some(offset) = lower.find(marker) else {
+            continue;
+        };
+        let tail = &lower[offset + marker.len()..];
+        let digits: String = tail
+            .chars()
+            .skip_while(|character| !character.is_ascii_digit())
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        if let Ok(seconds) = digits.parse::<u64>() {
+            return Some(seconds.saturating_mul(1_000));
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after_from_body;
+
+    #[test]
+    fn reads_provider_cooldown_from_a_rate_limit_message() {
+        assert_eq!(
+            retry_after_from_body(
+                "request reached organization max RPM: 3, please try again after 1 seconds"
+            ),
+            Some(1_000)
+        );
+        assert_eq!(retry_after_from_body("rate limit exceeded"), None);
     }
 }

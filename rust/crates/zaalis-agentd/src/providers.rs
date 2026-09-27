@@ -27,6 +27,11 @@ impl ProviderSecrets {
     pub fn insert(&mut self, provider: ProviderId, value: impl Into<String>) {
         let value = value.into();
         if !value.trim().is_empty() {
+            // Every key the daemon holds is also registered for output masking.
+            // Doing it here rather than at each call site means a provider
+            // added later cannot forget to do it: holding the key and masking
+            // it become the same step.
+            zaalis_secrets::register_secret(format!("clé {provider}"), value.clone());
             self.values.insert(provider, value);
         }
     }

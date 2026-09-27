@@ -12,6 +12,7 @@ const { createWindowsComputerAction } = require('./windows-computer');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
+const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
@@ -119,7 +120,10 @@ function userApiKeys(user) {
   const out = {};
   for (const p of KEY_PROVIDERS) {
     const enc = user && user.apiKeys && user.apiKeys[p];
-    if (enc) { const v = decryptSecret(enc); if (v) out[p] = v; }
+    // Toute clé déchiffrée est aussi enregistrée pour le masquage de sortie :
+    // détenir la clé et savoir la masquer deviennent le même geste, donc un
+    // fournisseur ajouté plus tard ne peut pas oublier la seconde moitié.
+    if (enc) { const v = decryptSecret(enc); if (v) { registerSecret(`clé ${p}`, v); out[p] = v; } }
   }
   return out;
 }

@@ -1311,6 +1311,16 @@ function createLiveAgentActivity(container) {
                 : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
             const html = agentToolResultsHTML(results);
             toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            const usage = data && data.usage;
+            const webQueries = Number(usage && usage.webQueries || 0);
+            const webResults = Number(usage && usage.webResults || 0);
+            const webPagesRead = Number(usage && usage.webPagesRead || 0);
+            if (webQueries || webResults || webPagesRead) {
+                const researchLabel = lang === 'en'
+                    ? `Web evidence: ${webQueries} ${webQueries === 1 ? 'query' : 'queries'}, ${webResults} ${webResults === 1 ? 'result' : 'results'}, ${webPagesRead} ${webPagesRead === 1 ? 'page read' : 'pages read'}.`
+                    : `Recherche web : ${webQueries} ${pluralFr(webQueries, 'requête', 'requêtes')}, ${webResults} ${pluralFr(webResults, 'résultat', 'résultats')}, ${webPagesRead} ${pluralFr(webPagesRead, 'page lue', 'pages lues')}.`;
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(researchLabel)}</div>`);
+            }
             if (details) details.removeAttribute('open');
             body.classList.remove('live-agent-active');
             followScroll(container);

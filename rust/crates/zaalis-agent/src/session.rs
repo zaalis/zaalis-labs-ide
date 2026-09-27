@@ -1,6 +1,7 @@
 use crate::control::NativePlanTool;
 use crate::event_bus::EventBus;
 use crate::interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
+use crate::prompt::discover_project_guidance;
 use crate::runner::{run_agent, run_lifecycle_hook, AgentRun};
 use crate::spawn::{NativeMergeTool, NativeSpawnTool};
 use serde::{Deserialize, Serialize};
@@ -47,12 +48,16 @@ pub struct SessionConfig {
     pub workspace: Workspace,
     pub mode: SessionRunMode,
     pub system_prompt: String,
+    /// Bounded conventions from AGENTS.md and ZAALIS.md at the workspace root.
+    /// They are rendered as lower-priority project guidance by the prompt composer.
+    pub project_guidance: String,
     pub max_concurrency: usize,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
 
 impl SessionConfig {
     pub fn new(workspace: Workspace, mode: SessionRunMode) -> Self {
+        let project_guidance = discover_project_guidance(workspace.root());
         Self {
             session_id: SessionId::new(),
             workspace,
@@ -60,6 +65,7 @@ impl SessionConfig {
             system_prompt:
                 "Tu es un agent Zaalis. Utilise les outils typés, vérifie ton travail, et rapporte au passé ce que tu as réellement fait."
                     .into(),
+            project_guidance,
             max_concurrency: 8,
             extensions: None,
         }
