@@ -7,7 +7,7 @@
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
     <link rel="stylesheet" href="base.css?v=1.0.15">
     <link rel="stylesheet" href="app.css?v=1.0.15">
-    <link rel="stylesheet" href="workspace.css?v=1.1.0">
+    <link rel="stylesheet" href="workspace.css?v=1.1.1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -323,6 +323,7 @@
                     <select id="ai-submodel">
                         <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                     </select>
+                    <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
                 </div>
 
                 <!-- Token / context meter -->
@@ -883,6 +884,17 @@
                     <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
+                            <label for="settings-default-permission-select" data-i18n="settings-default-permission-label">Mode de travail par défaut</label>
+                            <p data-i18n="settings-default-permission-hint">Le dernier mode choisi est repris au prochain démarrage et après reconnexion.</p>
+                        </div>
+                        <select id="settings-default-permission-select">
+                            <option value="supervised" data-i18n="perm-supervised">Supervisé</option>
+                            <option value="semi" data-i18n="perm-semi">Semi-auto</option>
+                            <option value="auto" data-i18n="perm-auto">Autonome</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
                             <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">Modèle chat par défaut</label>
                             <p data-i18n="settings-default-chat-hint">Modèle sélectionné par défaut dans le chat.</p>
                         </div>
@@ -1282,9 +1294,9 @@
 <script src="script/state.js?v=1.0.15" defer></script>
 <script src="script/ui.js?v=1.0.15" defer></script>
 <script src="script/commands.js?v=1.0.15" defer></script>
-<script src="script/ai.js?v=1.0.15" defer></script>
+<script src="script/ai.js?v=1.0.16" defer></script>
 <script src="script/remote.js?v=1.0.15" defer></script>
 <script src="script/main.js?v=1.0.15" defer></script>
-<script src="script/workspace.js?v=1.1.0" defer></script>
+<script src="script/workspace.js?v=1.1.1" defer></script>
 </body>
 </html>

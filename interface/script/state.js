@@ -25,6 +25,7 @@ const state = {
         // ----- Default models -----
         defaultAgentModel: 'codex',     // agents lead model preselected
         defaultReasoning: 0,            // 0 = MIN, 1 = MED, 2 = MAX
+        defaultPermissionMode: 'supervised', // last chosen permission mode
         // ----- Project -----
         defaultProjectFolder: '',       // starting folder for the picker
         reopenLastProject: false,       // reopen last project automatically on launch
@@ -356,6 +357,8 @@ const TRANSLATIONS = {
         'settings-default-agent-hint': 'Modèle chef de projet présélectionné en mode Agents.',
         'settings-default-reasoning-label': 'Effort de raisonnement par défaut',
         'settings-default-reasoning-hint': 'Niveau de réflexion appliqué au démarrage (modèles compatibles).',
+        'settings-default-permission-label': 'Mode de travail par défaut',
+        'settings-default-permission-hint': 'Le dernier mode choisi est repris au prochain démarrage et après reconnexion.',
         'settings-reasoning-min': 'Minimal',
         'settings-reasoning-med': 'Moyen',
         'settings-reasoning-max': 'Maximal',
@@ -566,6 +569,8 @@ const TRANSLATIONS = {
         'settings-default-agent-hint': 'Lead model preselected in Agents mode.',
         'settings-default-reasoning-label': 'Default reasoning effort',
         'settings-default-reasoning-hint': 'Thinking level applied at startup (compatible models).',
+        'settings-default-permission-label': 'Default working mode',
+        'settings-default-permission-hint': 'The last selected mode is restored at startup and after signing in.',
         'settings-reasoning-min': 'Minimal',
         'settings-reasoning-med': 'Medium',
         'settings-reasoning-max': 'Maximal',
@@ -1294,6 +1299,9 @@ function loadState() {
                 }
                 const { keys, ...safeConfig } = s.config;
                 Object.assign(state.config, safeConfig);
+                if (['supervised', 'semi', 'auto'].includes(state.config.defaultPermissionMode)) {
+                    state.permissionMode = state.config.defaultPermissionMode;
+                }
             }
             if (s.profile) Object.assign(state.profile, s.profile);
             state.config.ggufCtx = clampGgufCtx(state.config.ggufCtx);

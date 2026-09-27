@@ -635,6 +635,23 @@ app.use('/api', (req, res, next) => {
   return res.status(401).json({ error: 'Authentification requise.' });
 });
 
+// Per-account preference survives logout and application reinstalls because
+// users.json lives in the stable user data directory.
+const UI_PERMISSION_MODES = new Set(['supervised', 'semi', 'auto']);
+app.get('/api/preferences', (req, res) => {
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
+});
+app.put('/api/preferences', (req, res) => {
+  const permissionMode = String(req.body?.permissionMode || '');
+  if (!UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === req.user.id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+  user.permissionMode = permissionMode;
+  saveUsers(users);
+  res.json({ permissionMode });
+});
+
 // Update profile
 app.post('/api/profile', (req, res) => {
   const { pseudo, photo } = req.body || {};

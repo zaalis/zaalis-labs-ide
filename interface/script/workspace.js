@@ -42,6 +42,12 @@
     let mode = saved.mode === 'chat' ? 'chat' : 'editor';
     let panel = ['files', 'browser', 'terminal', 'artifacts', 'agents', 'chat'].includes(saved.panel) ? saved.panel : null;
     let width = Math.max(300, Math.min(760, Number(saved.width) || 420));
+    // The left sidebar shows either the project files or the conversations.
+    // Each layout keeps its own choice: files for the editor, chats for Chat IDE.
+    const sidebarViews = { editor: 'files', chat: 'chats' };
+    for (const key of Object.keys(sidebarViews)) {
+        if (['files', 'chats'].includes(saved.sidebarView?.[key])) sidebarViews[key] = saved.sidebarView[key];
+    }
     const workspace = byId('workspace');
     if (!workspace) return;
     const editor = byId('editor-panel');
@@ -52,10 +58,19 @@
     terminal.before(terminalAnchor);
     const aiPanel = byId('ai-panel');
     const panes = {};
+    let filesPaneRoot = null;
     const railButtons = {};
     const navigation = el('nav', 'workspace-navigation');
     navigation.setAttribute('aria-label', text('Projets et conversations', 'Projects and conversations'));
     byId('sidebar-stack').before(navigation);
+    const chatsTitle = el('span', 'ws-sidebar-title', text('Conversations', 'Conversations'));
+    byId('project-btn').after(chatsTitle);
+    const filesEmpty = el('div', 'ws-files-empty');
+    byId('sidebar-stack').after(filesEmpty);
+    const viewSwitch = el('button', 'ws-view-switch');
+    viewSwitch.type = 'button';
+    viewSwitch.addEventListener('click', () => setSidebarView(sidebarViews[mode] === 'files' ? 'chats' : 'files'));
+    byId('sidebar-profile').before(viewSwitch);
     const modeControl = el('div', 'workspace-modes');
     modeControl.setAttribute('role', 'group');
     modeControl.setAttribute('aria-label', text('Disposition', 'Workspace layout'));
@@ -104,7 +119,36 @@
     splitter.setAttribute('aria-valuemax', '760');
     workspace.append(splitter, dock, rail);
     function saveLayout() {
-        try { localStorage.setItem('zaalis-workspace', JSON.stringify({ mode, panel, width })); } catch {}
+        try { localStorage.setItem('zaalis-workspace', JSON.stringify({ mode, panel, width, sidebarView: sidebarViews })); } catch {}
+    }
+    function setSidebarView(view) {
+        sidebarViews[mode] = view === 'chats' ? 'chats' : 'files';
+        applySidebarView();
+        saveLayout();
+    }
+    function applySidebarView() {
+        const view = sidebarViews[mode];
+        document.body.dataset.sidebarView = view;
+        const next = view === 'files'
+            ? { label: text('Afficher les chats', 'Show chats'), icon: 'chat' }
+            : { label: text('Afficher les fichiers', 'Show files'), icon: 'files' };
+        viewSwitch.replaceChildren(icon(next.icon), el('span', '', next.label));
+        viewSwitch.title = next.label;
+        viewSwitch.setAttribute('aria-label', next.label);
+        if (view === 'chats') renderNavigation();
+        else renderFilesEmpty();
+    }
+    function renderFilesEmpty() {
+        filesEmpty.replaceChildren(el('p', 'ws-files-empty-title', text('Aucun projet ouvert', 'No project open')));
+        filesEmpty.append(button(text('Ouvrir un dossier', 'Open a folder'), 'files', () => byId('open-project-btn').click()));
+        const recent = getRecentProjects().slice(0, 6);
+        if (!recent.length) return;
+        filesEmpty.append(el('p', 'ws-files-empty-label', text('Projets récents', 'Recent projects')));
+        for (const path of recent) {
+            const row = button(path.replace(/[\\/]+$/, '').split(/[\\/]/).pop(), 'files', () => safelyNavigate(() => openProject(path, false)), 'ws-conversation');
+            row.title = path;
+            filesEmpty.append(row);
+        }
     }
     function applyWidth() {
         dock.style.width = `${width}px`;
@@ -132,23 +176,21 @@
         document.body.dataset.workspaceMode = mode;
         editorButton.setAttribute('aria-pressed', String(mode === 'editor'));
         chatButton.setAttribute('aria-pressed', String(mode === 'chat'));
-        if (mode === 'chat') panes.files.append(editor);
-        else editorAnchor.after(editor);
+        if (mode === 'chat') { panes.files.replaceChildren(editor); filesPaneRoot = null; }
+        else { editorAnchor.after(editor); renderEditorFilesPane(); }
+        placeComposerControls();
+        applySidebarView();
         saveLayout();
         renderNavigation();
         updatePanels();
         window.dispatchEvent(new Event('resize'));
     }
     function setPanel(value) {
-        if (value === 'files' && mode === 'editor') {
-            byId('sidebar-files-section').scrollIntoView({ block: 'nearest' });
-            byId('code-editor')?.focus();
-            return;
-        }
         panel = value;
         document.body.classList.remove('ws-mobile-navigation');
         mobileMenu.setAttribute('aria-expanded', 'false');
         updatePanels(); saveLayout();
+        if (panel === 'files' && mode === 'editor') renderEditorFilesPane();
         if (panel === 'terminal') {
             if (terminalSessionId) attachIntegratedTerminal(terminalSessionId).catch(showError);
             else openIntegratedTerminal().catch(showError);
@@ -158,7 +200,7 @@
         if (panel === 'chat') renderOtherChat();
     }
     function updatePanels() {
-        const visiblePanel = panel === 'files' && mode === 'editor' ? null : panel;
+        const visiblePanel = panel;
         dock.hidden = !visiblePanel;
         splitter.hidden = !visiblePanel;
         dockTitle.textContent = panelLabels[visiblePanel] || '';
@@ -167,6 +209,27 @@
         else if (terminal.parentElement === panes.terminal) { terminalAnchor.after(terminal); terminal.classList.add('hidden'); }
         applyWidth();
         syncBrowser();
+    }
+    async function renderEditorFilesPane(force = false) {
+        if (mode !== 'editor' || (filesPaneRoot === state.projectRoot && panes.files.childElementCount && !force)) return;
+        const root = state.projectRoot;
+        filesPaneRoot = root;
+        const pane = panes.files;
+        pane.replaceChildren();
+        if (!root) {
+            const empty = el('div', 'ws-empty-state');
+            empty.append(el('h3', '', text('Aucun projet ouvert', 'No project open')),
+                button(text('Ouvrir un dossier', 'Open a folder'), 'files', () => byId('open-project-btn').click()));
+            pane.append(empty);
+            return;
+        }
+        pane.append(el('p', 'ws-files-heading', root));
+        const tree = el('div', 'ws-dock-file-tree');
+        pane.append(tree);
+        const files = await fetchFiles('');
+        if (mode !== 'editor' || state.projectRoot !== root) return;
+        if (!files.length) tree.append(el('p', 'ws-empty-project', text('Ce dossier ne contient aucun fichier visible.', 'No visible files in this folder.')));
+        else renderTree(files, tree, 0);
     }
     function showError(error) { if (typeof showToast === 'function') showToast(text('Action impossible', 'Action unavailable'), error.message || String(error), { icon: '!' }); }
     function isBusy() { return !!chatAbort || !!document.querySelector('.agent-card.working'); }
@@ -332,7 +395,6 @@
                 if (item.path) {
                     if (normalizeProjectPath(item.project) !== normalizeProjectPath(state.projectRoot)) { showError(new Error(text('Ouvrez la conversation du projet associé à ce fichier.', 'Open the conversation for this file’s project.'))); return; }
                     await openFile(item.path, item.title);
-                    if (mode === 'chat') setPanel('files');
                 } else if (item.url) {
                     if (/^https?:/i.test(item.url)) {
                         if (nativeAvailable) { setPanel('browser'); nativePost({ type: 'browser', action: 'navigate', url: item.url }); }
@@ -386,6 +448,7 @@
             if (Array.isArray(event.artifacts)) registerArtifacts(event.artifacts, kind);
             const path = event.input?.path || event.input?.file_path || event.input?.filePath;
             if (path && /write|edit|patch|create_file/i.test(event.tool || '')) registerArtifacts([{ type: 'file', path, provenance: { tool: event.tool, callId: event.id, sessionId: activeRun } }], kind);
+            if (path && panel === 'files' && mode === 'editor') renderEditorFilesPane(true);
         }
         if (event.type === 'artifact_created') registerArtifacts([event.artifact || event], kind);
         if (!['text_delta', 'reasoning_delta'].includes(frame.type) || panel === 'agents') scheduleRefresh();
@@ -443,54 +506,102 @@
     // Model capabilities are authoritative server data. Keep the selector
     // disabled until the selected model's response arrives (including races).
     const capabilityCache = new Map();
-    const modelControls = el('div', 'ws-model-controls');
-    const reasonLabel = el('label', '', text('Raisonnement', 'Reasoning'));
-    const reasonSelect = el('select', 'ws-select'); reasonSelect.id = 'ws-reasoning'; reasonLabel.htmlFor = reasonSelect.id;
-    const capabilitiesLabel = el('span', 'ws-model-capabilities'); capabilitiesLabel.setAttribute('role', 'status');
-    modelControls.append(reasonLabel, reasonSelect, capabilitiesLabel);
-    document.querySelector('.ai-panel-header').after(modelControls);
+    // Editor: the vertical slider beside the AI panel. Chat IDE: model,
+    // reasoning and context sit in the composer's bottom row instead.
+    const reasonSelect = el('select', 'ws-reasoning-select'); reasonSelect.id = 'ws-reasoning';
+    reasonSelect.setAttribute('aria-label', text('Niveau de raisonnement', 'Reasoning level'));
+    const reasonWrap = el('div', 'ws-reasoning');
+    reasonWrap.append(el('span', 'ws-reasoning-label', text('Raisonnement', 'Reasoning')), reasonSelect);
+    const composerMeta = el('div', 'ws-composer-meta');
+    const modelBar = document.querySelector('#view-chat .model-selector-bar');
+    const modelBarAnchor = document.createComment('model bar home');
+    modelBar.before(modelBarAnchor);
+    const tokenMeter = byId('token-meter');
+    const tokenMeterAnchor = document.createComment('token meter home');
+    tokenMeter.before(tokenMeterAnchor);
+    function composerRight(kind) { return byId(kind === 'agents' ? 'view-agents' : 'view-chat').querySelector('.chat-input-bottom-right'); }
+    function placeComposerControls() {
+        if (mode === 'chat') {
+            composerMeta.append(tokenMeter, modelBar);
+            composerRight('chat').prepend(composerMeta);
+        } else {
+            tokenMeterAnchor.after(tokenMeter);
+            modelBarAnchor.after(modelBar);
+            composerMeta.remove();
+        }
+        const right = composerRight(activeKind());
+        if (mode === 'chat' && right === composerMeta.parentElement) right.insertBefore(reasonWrap, right.querySelector('.voice-btn'));
+        else right.prepend(reasonWrap);
+    }
     const capabilityKey = (provider, model) => `${provider}:${model}`;
     let capabilityRequest = 0;
     function getCapabilities(provider, model) { return capabilityCache.get(capabilityKey(provider, model)); }
-    async function refreshCapabilities() {
+    async function refreshCapabilities(force = false) {
         const current = reasoningContext();
         const key = capabilityKey(current.model, current.submodel);
         const request = ++capabilityRequest;
         reasonSelect.disabled = true;
+        if (current.model === 'gguf' && !current.submodel) {
+            reasonSelect.replaceChildren(el('option', '', text('Installer un modèle GGUF', 'Install a GGUF model')));
+            tokenMeter.dataset.capabilities = text('Aucun modèle GGUF installé', 'No GGUF model installed');
+            renderReasoningSlider(null);
+            updateTokenMeter();
+            return;
+        }
         try {
-            let caps = capabilityCache.get(key);
+            let caps = force ? null : capabilityCache.get(key);
             if (!caps) {
                 const response = await fetch(`/api/model-capabilities?provider=${encodeURIComponent(current.model)}&model=${encodeURIComponent(current.submodel)}`);
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 caps = await response.json(); capabilityCache.set(key, caps);
             }
             if (request !== capabilityRequest) return;
-            const levels = Array.isArray(caps.reasoning?.levels) ? caps.reasoning.levels : [];
+            const supported = !!caps.reasoning?.supported;
+            const levels = supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
             reasonSelect.replaceChildren();
             for (const level of levels) { const option = el('option', '', level.label || level.id); option.value = String(level.value); reasonSelect.append(option); }
-            if (!levels.length) { const option = el('option', '', text('Natif / non réglable', 'Native / fixed')); option.value = '0'; reasonSelect.append(option); }
+            if (!levels.length) {
+                const option = el('option', '', caps.reasoning?.mode === 'native' ? text('Raisonnement natif', 'Native reasoning') : text('Sans raisonnement', 'No reasoning'));
+                option.value = '0'; reasonSelect.append(option);
+            }
             const validLevel = levels.some(level => Number(level.value) === Number(state.reasoningLevel));
             if (!validLevel) state.reasoningLevel = Number(levels[0]?.value || 0);
             reasonSelect.value = String(state.reasoningLevel);
-            reasonSelect.disabled = !caps.reasoning?.supported || levels.length < 2;
-            const details = [caps.contextWindow ? `${fmtTokens(caps.contextWindow)} ${text('contexte', 'context')}` : null, caps.tools ? text('Outils', 'Tools') : null, caps.vision ? 'Vision' : null, caps.ready === false ? text('À configurer', 'Setup needed') : null].filter(Boolean);
-            capabilitiesLabel.textContent = details.join(' · ');
-            capabilitiesLabel.title = details.join(' · ');
+            reasonSelect.disabled = levels.length < 2;
+            renderReasoningSlider(caps);
+            const details = [caps.contextWindow ? `${fmtTokens(caps.contextWindow)} ${text('de contexte', 'context')}` : null, caps.tools ? text('Outils', 'Tools') : null, caps.vision ? 'Vision' : null, caps.ready === false ? text('À configurer', 'Setup needed') : null].filter(Boolean);
+            tokenMeter.dataset.capabilities = details.join(' · ');
             updateTokenMeter();
         } catch {
             if (request !== capabilityRequest) return;
-            reasonSelect.replaceChildren(el('option', '', text('Indisponible', 'Unavailable')));
-            capabilitiesLabel.textContent = text('Capacités du modèle indisponibles', 'Model capabilities unavailable');
+            reasonSelect.replaceChildren(el('option', '', text('Capacités indisponibles', 'Capabilities unavailable')));
+            renderReasoningSlider(null);
+            tokenMeter.dataset.capabilities = text('Capacités du modèle indisponibles', 'Model capabilities unavailable');
         }
     }
+    function syncReasoning() { if ([...reasonSelect.options].some(option => option.value === String(state.reasoningLevel))) reasonSelect.value = String(state.reasoningLevel); }
     reasonSelect.addEventListener('change', () => { state.reasoningLevel = Number(reasonSelect.value); updateSliderVisuals(); });
-    document.addEventListener('change', event => { if (event.target.matches('#model-select, #submodel-select, .agent-model-select, .agent-role-select, .agent-check')) refreshCapabilities(); });
-    document.querySelectorAll('.ai-tab').forEach(tab => tab.addEventListener('click', () => { refresh(); refreshCapabilities(); }));
+    // The context meter's tooltip also carries what the model supports.
+    tokenMeter.addEventListener('mouseenter', () => {
+        const usage = byId('token-text')?.textContent || '';
+        tokenMeter.title = [text('Contexte utilisé', 'Context used') + ` : ${usage}`, tokenMeter.dataset.capabilities].filter(Boolean).join('\n');
+    });
+    document.addEventListener('change', event => { if (event.target.matches('#ai-model, #ai-submodel, .agent-model-select, .agent-role-select, .agent-check')) refreshCapabilities(); });
+    document.querySelectorAll('.ai-tab').forEach(tab => tab.addEventListener('click', () => { placeComposerControls(); refresh(); refreshCapabilities(); }));
+    // In Chat IDE the editor lives in the Files dock: reveal it when a file opens.
+    const openFileInEditor = window.openFile;
+    window.openFile = async (...args) => {
+        const result = await openFileInEditor(...args);
+        if (mode === 'chat' && panel !== 'files') setPanel('files');
+        return result;
+    };
     function refresh() {
         renderNavigation();
+        if (sidebarViews[mode] === 'files') renderFilesEmpty();
         if (panel === 'artifacts') renderArtifacts();
         if (panel === 'agents') renderAgents();
         if (panel === 'chat') renderOtherChat();
+        if (panel === 'files' && mode === 'editor') renderEditorFilesPane();
     }
     // Capture runs before the legacy terminal button so it can reuse the same
     // session instead of creating a second terminal while opening the dock.
@@ -500,7 +611,7 @@
         if (event.ctrlKey && event.shiftKey && event.code === 'KeyE') { event.preventDefault(); setMode(mode === 'chat' ? 'editor' : 'chat'); }
         if (event.key === 'Escape' && !document.querySelector('.modal-overlay.active')) { document.body.classList.remove('ws-mobile-navigation'); syncBrowser(); }
     });
-    window.ZaalisWorkspace = { setMode, setPanel, refresh, renderNavigation, registerArtifacts, onAgentEvent, flushConversation, getCapabilities, refreshCapabilities, safelyNavigate, get mode() { return mode; } };
+    window.ZaalisWorkspace = { setMode, setPanel, setSidebarView, refresh, renderNavigation, registerArtifacts, onAgentEvent, flushConversation, getCapabilities, refreshCapabilities, syncReasoning, safelyNavigate, get mode() { return mode; } };
     setMode(mode);
-    refreshCapabilities();
+    // The authenticated startup path refreshes this after model restoration.
 })();

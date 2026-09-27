@@ -85,6 +85,31 @@ Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; \
   ValueData: "{olddata};{app}\bin"; Flags: preservestringtype; Check: NeedsAddPath(ExpandConstant('{app}\bin'))
 
 [Code]
+function SetFileAttributes(lpFileName: String; dwFileAttributes: Cardinal): Boolean;
+  external 'SetFileAttributesW@kernel32.dll stdcall';
+
+// A shortcut left read-only (e.g. a Desktop with the attribute applied
+// recursively) makes IPersistFile::Save fail with 0x80070005 when Setup
+// rewrites it. Clear the attribute and remove the old link first.
+procedure ReleaseShortcut(const Path: String);
+begin
+  if FileExists(Path) then
+  begin
+    SetFileAttributes(Path, FILE_ATTRIBUTE_NORMAL);
+    DeleteFile(Path);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssInstall then
+  begin
+    ReleaseShortcut(ExpandConstant('{userdesktop}\zaalis IDE.lnk'));
+    ReleaseShortcut(ExpandConstant('{group}\zaalis IDE.lnk'));
+    ReleaseShortcut(ExpandConstant('{group}\Desinstaller zaalis IDE.lnk'));
+  end;
+end;
+
 function NeedsAddPath(Param: string): Boolean;
 var
   OrigPath: string;

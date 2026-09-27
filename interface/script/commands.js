@@ -248,8 +248,8 @@ function updatePermissionBadge() {
 
 // Apply a permission mode from a slash command and refresh all UI.
 function _applyPermissionMode(mode, out, lang) {
-    state.permissionMode = mode;
-    if (typeof syncModeSelectorUI === 'function') syncModeSelectorUI();
+    if (typeof setPermissionMode === 'function' && ['supervised', 'semi', 'auto'].includes(mode)) setPermissionMode(mode);
+    else { state.permissionMode = mode; if (typeof syncModeSelectorUI === 'function') syncModeSelectorUI(); }
     updatePermissionBadge();
     if (mode === 'bypass') {
         _sysMsg(out, lang === 'en'

@@ -41,6 +41,7 @@ function submodelLabelFor(model, s) {
 function updateSubmodelDropdown() {
     const model = modelSelect.value;
     const subs = submodelsFor(model);
+    const previous = submodelSelect.value || state.config.aiSubmodel;
     submodelSelect.innerHTML = '';
     subs.forEach(s => {
         const opt = document.createElement('option');
@@ -49,7 +50,17 @@ function updateSubmodelDropdown() {
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
+    if (subs.includes(previous)) submodelSelect.value = previous;
+    if (model === 'gguf' && !subs.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = state.language === 'en' ? 'No GGUF model installed' : 'Aucun modèle GGUF installé';
+        submodelSelect.appendChild(option);
+    }
+    const install = $('#gguf-install-shortcut');
+    if (install) install.hidden = model !== 'gguf' || subs.length > 0;
 }
+$('#gguf-install-shortcut')?.addEventListener('click', () => $('#catalog-btn')?.click());
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
 function showToast(title, msg, opts = {}) {
@@ -105,9 +116,10 @@ function maybeWarnSmallLocalModel() {
     const lang = state.language || 'fr';
     const pretty = (typeof prettyModelLabel === 'function' && /^hf\.co\//i.test(sub)) ? prettyModelLabel(sub) : sub;
     const title = TRANSLATIONS[lang]['ollama-small-title'] || 'Modèle local léger';
+    const accurateTitle = modelSelect.value === 'gguf' ? (lang === 'en' ? 'Small GGUF model' : 'Petit modèle GGUF') : title;
     const tmpl = TRANSLATIONS[lang]['ollama-small-msg'] ||
         'Le modèle « {model} » est petit. Il peut halluciner, ignorer des consignes (lecture/écriture de fichiers) ou bugger. Pour des résultats fiables, préférez un modèle ≥ 14B.';
-    showToast(title, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
+    showToast(accurateTitle, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
 }
 
 modelSelect.addEventListener('change', () => {
@@ -1353,6 +1365,8 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Connexion impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
             await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
@@ -1382,6 +1396,8 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Création de compte impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
             await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
@@ -1405,6 +1421,8 @@ async function checkAuthAndInit() {
         if (data && data.authenticated) {
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);

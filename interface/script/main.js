@@ -54,7 +54,7 @@ const SETTINGS_SELECT_IDS = [
     'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
-    'settings-default-reasoning-select', 'settings-channel-select'
+    'settings-default-reasoning-select', 'settings-default-permission-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
 let terminalProfiles = [];
@@ -165,6 +165,7 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
+    setVal('settings-default-permission-select', ['supervised', 'semi', 'auto'].includes(state.permissionMode) ? state.permissionMode : c.defaultPermissionMode);
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -380,6 +381,8 @@ $('#save-btn').addEventListener('click', async () => {
     if (defChat) c.aiModel = defChat;
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
+    const selectedPermission = getVal('settings-default-permission-select');
+    if (selectedPermission && typeof setPermissionMode === 'function') setPermissionMode(selectedPermission);
     // ----- Hardware advanced -----
     c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
@@ -895,6 +898,7 @@ async function loadGgufModels() {
         if (modelSelect.value === 'gguf') {
             updateSubmodelDropdown();
             if (typeof createCustomSelect === 'function') createCustomSelect('ai-submodel');
+            window.ZaalisWorkspace?.refreshCapabilities(true);
         }
         // Keep the topbar model loader in sync with installed models + engine state.
         if (typeof syncModelLoader === 'function') syncModelLoader(data);
@@ -1697,6 +1701,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Maintenant que le modele est restaure : evaluer la compatibilite de
     // l'effort de reflexion et la disponibilite des pieces jointes.
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
+    window.ZaalisWorkspace?.refreshCapabilities(true);
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');
