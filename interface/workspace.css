@@ -98,10 +98,17 @@ body[data-sidebar-view="files"]:not(.project-open) .ws-files-empty{display:flex}
 #sidebar.collapsed .ws-view-switch,#app.sidebar-collapsed .ws-view-switch{justify-content:center;margin:6px 4px;padding:6px 0;border-color:transparent}
 #sidebar.collapsed .ws-view-switch>span:not(.ws-icon),#app.sidebar-collapsed .ws-view-switch>span:not(.ws-icon){display:none}
 
-/* Reasoning: vertical slider beside the AI panel in the editor, composer control in Chat IDE. */
+/* Reasoning: one vertical control beside the AI panel or chat composer. */
 #ai-panel{margin-left:0!important}
-#reasoning-slider-bar{display:none!important}
-.ws-composer-meta,.ws-reasoning{display:flex;align-items:center;gap:2px;min-width:0}
+#reasoning-slider-bar{display:flex;width:46px;height:184px;padding:12px 4px;border-color:var(--border-subtle);border-radius:13px;background:var(--bg-1);box-shadow:0 8px 24px rgba(0,0,0,.2)}
+#reasoning-slider-bar:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
+#reasoning-slider-bar .slider-track{top:28px;bottom:28px}
+#reasoning-slider-bar .slider-notch{font-size:9px;letter-spacing:.015em}
+#reasoning-slider-bar .slider-handle{width:13px;height:13px}
+#reasoning-slider-bar .reasoning-tooltip{right:52px;background:var(--bg-2);border:1px solid var(--border);color:var(--text-1);box-shadow:0 8px 20px rgba(0,0,0,.25)}
+#reasoning-slider-bar .reasoning-tooltip::after{border-color:transparent transparent transparent var(--bg-2)}
+body[data-workspace-mode="chat"] #reasoning-slider-bar{left:auto;right:-56px;bottom:0}
+.ws-composer-meta{display:flex;align-items:center;gap:2px;min-width:0}
 .ws-composer-meta{flex:0 1 auto}
 .ws-composer-meta .token-meter{padding:0 6px 0 2px;gap:6px;cursor:default}
 .ws-composer-meta .token-bar{flex:none;width:36px}
@@ -113,14 +120,6 @@ body[data-sidebar-view="files"]:not(.project-open) .ws-files-empty{display:flex}
 .gguf-install-shortcut{font:inherit;font-size:11px;color:var(--accent-hover);background:transparent;border:0;padding:4px 7px;border-radius:6px;white-space:nowrap;cursor:pointer}
 .gguf-install-shortcut:hover{background:var(--bg-hover)}
 .gguf-install-shortcut:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
-.ws-reasoning{position:relative;gap:6px;padding-left:8px;border-left:1px solid var(--border-subtle)}
-.ws-reasoning-label{font-size:11px;color:var(--text-3);white-space:nowrap}
-.ws-reasoning::after{content:"";position:absolute;right:9px;top:50%;width:5px;height:5px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;color:var(--text-3);transform:translateY(-75%) rotate(45deg);pointer-events:none}
-.ws-reasoning-select{appearance:none;-webkit-appearance:none;height:26px;max-width:150px;padding:3px 22px 3px 8px;border:0;border-radius:7px;background:transparent;color:var(--text-2);font:inherit;font-size:12px;cursor:pointer}
-.ws-reasoning-select:hover:not(:disabled){background:var(--bg-hover);color:var(--text-0)}
-.ws-reasoning-select:disabled{cursor:default;opacity:.6}
-.ws-reasoning-select:focus-visible{outline:2px solid var(--ws-ring);outline-offset:1px}
-.ws-reasoning-select option{background:var(--bg-2);color:var(--text-0)}
 
 /* Chat IDE: one centred column shared by every message and the composer. */
 body[data-workspace-mode="chat"]{--ws-column:780px;--ws-user-bubble:color-mix(in srgb,var(--accent) 28%,var(--bg-2))}
@@ -140,19 +139,21 @@ body[data-workspace-mode="chat"] .msg-ai details.reasoning{margin-bottom:14px;pa
 body[data-workspace-mode="chat"] .msg-ai details.reasoning>summary{font-size:13px;color:var(--ws-muted)}
 body[data-workspace-mode="chat"] .msg-ai details.reasoning .reasoning-chevron{transform:rotate(-90deg)}
 body[data-workspace-mode="chat"] .msg-ai details.reasoning[open] .reasoning-chevron{transform:rotate(0)}
-body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 48px);max-width:var(--ws-column);margin:0 auto 18px;padding:10px 12px 8px;border-radius:16px;background:var(--bg-2);container-type:inline-size}
+body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px);max-width:var(--ws-column);margin:0 auto 18px;padding:10px 12px 8px;border-radius:16px;background:var(--bg-2);container-type:inline-size}
 body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area textarea{min-height:44px;font-size:14px}
 body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 48px);max-width:var(--ws-column);margin-left:auto;margin-right:auto}
 body[data-workspace-mode="chat"] .chat-input-bottom-right{min-width:0}
 @container (max-width:620px){.ws-composer-meta .token-text{display:none}.ws-composer-meta .custom-select-trigger{max-width:120px}}
 @container (max-width:480px){.ws-composer-meta .token-meter,.ws-composer-meta .custom-select-container:first-child{display:none}}
 @media(max-width:1200px){.workspace-dock:not([hidden]){position:absolute;right:48px;top:0;bottom:0;width:min(420px,calc(100% - 48px))!important;max-width:none;z-index:20;box-shadow:-12px 0 32px rgba(0,0,0,.3)}.ws-dock-splitter{display:none!important}}
-@media(max-width:1100px){body[data-workspace-mode="chat"] .chat-input-bottom-right{flex-wrap:wrap;row-gap:6px}body[data-workspace-mode="chat"] .ws-composer-meta{flex:1 1 100%}body[data-workspace-mode="chat"] .ws-reasoning{margin-right:auto}}
+@media(max-width:1100px){body[data-workspace-mode="chat"] .chat-input-bottom-right{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}body[data-workspace-mode="chat"] .ws-composer-meta{flex:1 1 100%}}
 body[data-workspace-mode="editor"] .chat-input-area{container-type:inline-size}
-@container (max-width:400px){.chat-input-bottom{flex-wrap:wrap;gap:6px}.chat-input-bottom-right{flex:1 1 100%;justify-content:flex-end}.ws-reasoning{margin-right:auto}.ws-reasoning-label{display:none}}
+@container (max-width:400px){.chat-input-bottom{flex-wrap:wrap;gap:6px}.chat-input-bottom-right{flex:1 1 100%;justify-content:flex-end}}
 body[data-workspace-mode="chat"] .chat-history,body[data-workspace-mode="editor"] .chat-history{display:none!important}
 .ws-mobile-menu{display:none}
 @media(max-width:1200px){.workspace-dock{max-width:45vw;min-width:280px}#sidebar{width:215px;min-width:180px}.topbar-label-btn span{display:none}body[data-workspace-mode="editor"] #ai-panel{width:340px;min-width:280px}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 32px)}body[data-workspace-mode="chat"] .chat-messages{padding-left:max(16px,calc((100% - var(--ws-column))/2));padding-right:max(16px,calc((100% - var(--ws-column))/2))}}
 @media(max-width:900px){#workspace{display:flex!important;position:relative}#sidebar{position:absolute;left:0;top:0;bottom:0;width:270px!important;z-index:25;box-shadow:10px 0 35px rgba(0,0,0,.25);display:none!important}body.ws-mobile-navigation #sidebar{display:flex!important}#resizer-left,#resizer-right{display:none!important}.ws-mobile-menu{display:inline-flex}.ws-mobile-menu>span:not(.ws-icon){display:none}.topbar-left{gap:6px}.logo>span{display:none}#topbar{padding:0 8px;height:46px}.topbar-center{display:none}.topbar-right{gap:4px}.workspace-dock{position:absolute;right:48px;top:0;bottom:0;width:min(500px,calc(100% - 48px))!important;max-width:none;min-width:0;z-index:20;box-shadow:-10px 0 35px rgba(0,0,0,.25)}.ws-dock-splitter{display:none}.workspace-rail{margin-left:auto}body[data-workspace-mode="chat"] #ai-panel{min-width:0;flex:1;width:0!important;max-height:none;height:auto}body[data-workspace-mode="editor"] #editor-panel{min-width:0;flex:1}body[data-workspace-mode="editor"] #ai-panel{width:42%;min-width:240px;max-height:none;height:auto}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{margin-bottom:12px}.workspace-modes .ws-button{font-size:11px;padding:4px 7px}}
 @media(max-width:580px){body[data-workspace-mode="editor"] #workspace{flex-wrap:wrap!important}body[data-workspace-mode="editor"] #editor-panel{height:42%;flex:1 1 calc(100% - 48px)}body[data-workspace-mode="editor"] #ai-panel{height:58%;width:calc(100% - 48px);flex:1 1 calc(100% - 48px);min-width:0}body[data-workspace-mode="editor"] .workspace-rail{position:absolute;right:0;top:0;bottom:0}body[data-workspace-mode="editor"] .workspace-dock #editor-panel{height:100%}.workspace-modes .ws-icon{display:none}#catalog-btn,#help-btn,#lang-select{display:none}body[data-workspace-mode="chat"] .chat-messages{padding:16px 12px}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 20px)}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{padding:8px}body[data-workspace-mode="chat"] #chat-input{font-size:16px}.workspace-dock .ws-dock-head{min-height:44px}.ws-conversation,.ws-project-toggle,.ws-rail-button{min-height:44px}}
 @media(prefers-reduced-motion:reduce){.workspace-modes *, .workspace-navigation *, .workspace-dock *, .workspace-rail *{transition:none!important;animation:none!important}}
+/* Keep space for the separate reasoning rail at every viewport width. */
+body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px)}

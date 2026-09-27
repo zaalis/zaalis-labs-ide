@@ -2837,6 +2837,13 @@ function updateSliderVisuals() {
     sliderBar.querySelectorAll('.slider-notch, .slider-dot').forEach(node => {
         node.classList.toggle('active', levels.length > 1 && Number(node.dataset.index) === index);
     });
+    if (levels.length) {
+        sliderBar.setAttribute('aria-valuenow', String(levels[index].value));
+        sliderBar.setAttribute('aria-valuetext', levels[index].label || levels[index].id);
+    } else {
+        sliderBar.removeAttribute('aria-valuenow');
+        sliderBar.removeAttribute('aria-valuetext');
+    }
 }
 
 // Rebuilds the notches for the selected model; called whenever its
@@ -2861,7 +2868,7 @@ function renderReasoningSlider(caps) {
         notch.dataset.index = index;
         notch.textContent = REASONING_SHORT_LABELS[level.id] || String(level.label || level.id).toUpperCase();
         notch.title = level.label || level.id;
-        notch.style.top = `calc(28px + ${fromTop * 124}px)`;
+        notch.style.top = `calc(28px + ${fromTop * 128}px)`;
         sliderBar.insertBefore(notch, track);
 
         const dot = document.createElement('div');
@@ -2872,6 +2879,14 @@ function renderReasoningSlider(caps) {
     });
 
     sliderBar.classList.toggle('locked', levels.length < 2);
+    sliderBar.setAttribute('aria-disabled', String(levels.length < 2));
+    if (levels.length > 1) {
+        sliderBar.setAttribute('aria-valuemin', String(levels[0].value));
+        sliderBar.setAttribute('aria-valuemax', String(levels[levels.length - 1].value));
+    } else {
+        sliderBar.removeAttribute('aria-valuemin');
+        sliderBar.removeAttribute('aria-valuemax');
+    }
     if (tooltip) {
         tooltip.textContent = caps?.reasoning?.mode === 'native'
             ? (lang === 'en' ? 'Native reasoning, not adjustable' : 'Raisonnement natif, non réglable')
@@ -2889,6 +2904,9 @@ function initReasoningSlider() {
     if (!sliderBar) return;
     const handle = sliderBar.querySelector('.slider-handle');
     const track = sliderBar.querySelector('.slider-track');
+    sliderBar.setAttribute('role', 'slider');
+    sliderBar.setAttribute('aria-label', state.language === 'en' ? 'Reasoning level' : 'Niveau de raisonnement');
+    sliderBar.tabIndex = 0;
 
     let tooltipTimeout = null;
     function showIncompatibleTooltip() {
@@ -2913,7 +2931,27 @@ function initReasoningSlider() {
         state.reasoningLevel = Number(levels[index].value);
         updateSliderVisuals();
         window.ZaalisWorkspace?.syncReasoning();
+        saveState();
     }
+
+    sliderBar.addEventListener('keydown', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        const current = reasoningLevelIndex(levels);
+        const target = ({ ArrowUp: current + 1, ArrowRight: current + 1,
+            ArrowDown: current - 1, ArrowLeft: current - 1,
+            Home: 0, End: levels.length - 1 })[e.key];
+        if (target === undefined) return;
+        e.preventDefault();
+        commit(levels, Math.max(0, Math.min(levels.length - 1, target)));
+    });
+    sliderBar.addEventListener('wheel', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        e.preventDefault();
+        const current = reasoningLevelIndex(levels);
+        commit(levels, Math.max(0, Math.min(levels.length - 1, current + (e.deltaY < 0 ? 1 : -1))));
+    }, { passive: false });
 
     let dragging = false;
     sliderBar.addEventListener('mousedown', e => {

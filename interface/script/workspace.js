@@ -506,12 +506,9 @@
     // Model capabilities are authoritative server data. Keep the selector
     // disabled until the selected model's response arrives (including races).
     const capabilityCache = new Map();
-    // Editor: the vertical slider beside the AI panel. Chat IDE: model,
-    // reasoning and context sit in the composer's bottom row instead.
-    const reasonSelect = el('select', 'ws-reasoning-select'); reasonSelect.id = 'ws-reasoning';
-    reasonSelect.setAttribute('aria-label', text('Niveau de raisonnement', 'Reasoning level'));
-    const reasonWrap = el('div', 'ws-reasoning');
-    reasonWrap.append(el('span', 'ws-reasoning-label', text('Raisonnement', 'Reasoning')), reasonSelect);
+    // Keep the same vertical control in both layouts. In Chat IDE it sits
+    // beside the composer; in Editor it sits beside the AI panel.
+    const reasoningBar = byId('reasoning-slider-bar');
     const composerMeta = el('div', 'ws-composer-meta');
     const modelBar = document.querySelector('#view-chat .model-selector-bar');
     const modelBarAnchor = document.createComment('model bar home');
@@ -524,14 +521,13 @@
         if (mode === 'chat') {
             composerMeta.append(tokenMeter, modelBar);
             composerRight('chat').prepend(composerMeta);
+            byId('view-' + activeKind()).querySelector('.chat-input-area').append(reasoningBar);
         } else {
             tokenMeterAnchor.after(tokenMeter);
             modelBarAnchor.after(modelBar);
             composerMeta.remove();
+            aiPanel.prepend(reasoningBar);
         }
-        const right = composerRight(activeKind());
-        if (mode === 'chat' && right === composerMeta.parentElement) right.insertBefore(reasonWrap, right.querySelector('.voice-btn'));
-        else right.prepend(reasonWrap);
     }
     const capabilityKey = (provider, model) => `${provider}:${model}`;
     let capabilityRequest = 0;
@@ -540,9 +536,7 @@
         const current = reasoningContext();
         const key = capabilityKey(current.model, current.submodel);
         const request = ++capabilityRequest;
-        reasonSelect.disabled = true;
         if (current.model === 'gguf' && !current.submodel) {
-            reasonSelect.replaceChildren(el('option', '', text('Installer un modèle GGUF', 'Install a GGUF model')));
             tokenMeter.dataset.capabilities = text('Aucun modèle GGUF installé', 'No GGUF model installed');
             renderReasoningSlider(null);
             updateTokenMeter();
@@ -558,29 +552,19 @@
             if (request !== capabilityRequest) return;
             const supported = !!caps.reasoning?.supported;
             const levels = supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
-            reasonSelect.replaceChildren();
-            for (const level of levels) { const option = el('option', '', level.label || level.id); option.value = String(level.value); reasonSelect.append(option); }
-            if (!levels.length) {
-                const option = el('option', '', caps.reasoning?.mode === 'native' ? text('Raisonnement natif', 'Native reasoning') : text('Sans raisonnement', 'No reasoning'));
-                option.value = '0'; reasonSelect.append(option);
-            }
             const validLevel = levels.some(level => Number(level.value) === Number(state.reasoningLevel));
             if (!validLevel) state.reasoningLevel = Number(levels[0]?.value || 0);
-            reasonSelect.value = String(state.reasoningLevel);
-            reasonSelect.disabled = levels.length < 2;
             renderReasoningSlider(caps);
             const details = [caps.contextWindow ? `${fmtTokens(caps.contextWindow)} ${text('de contexte', 'context')}` : null, caps.tools ? text('Outils', 'Tools') : null, caps.vision ? 'Vision' : null, caps.ready === false ? text('À configurer', 'Setup needed') : null].filter(Boolean);
             tokenMeter.dataset.capabilities = details.join(' · ');
             updateTokenMeter();
         } catch {
             if (request !== capabilityRequest) return;
-            reasonSelect.replaceChildren(el('option', '', text('Capacités indisponibles', 'Capabilities unavailable')));
             renderReasoningSlider(null);
             tokenMeter.dataset.capabilities = text('Capacités du modèle indisponibles', 'Model capabilities unavailable');
         }
     }
-    function syncReasoning() { if ([...reasonSelect.options].some(option => option.value === String(state.reasoningLevel))) reasonSelect.value = String(state.reasoningLevel); }
-    reasonSelect.addEventListener('change', () => { state.reasoningLevel = Number(reasonSelect.value); updateSliderVisuals(); });
+    function syncReasoning() { updateSliderVisuals(); }
     // The context meter's tooltip also carries what the model supports.
     tokenMeter.addEventListener('mouseenter', () => {
         const usage = byId('token-text')?.textContent || '';
