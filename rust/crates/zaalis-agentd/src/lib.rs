@@ -435,6 +435,7 @@ impl Daemon {
             Some(snapshot.system_prompt.clone()),
         )?;
         runtime.restore(snapshot).await.map_err(RpcError::from)?;
+        runtime.resume_event_sequence(self.store.last_event_sequence(id).map_err(RpcError::from)?);
         let managed = Arc::new(ManagedSession {
             runtime,
             checkpoints,
@@ -465,7 +466,7 @@ impl Daemon {
         &self,
         input: SessionResumeParams,
     ) -> std::result::Result<(Value, Vec<RpcMessage>), RpcError> {
-        self.managed_or_restore(&input.session_id).await?;
+        let managed = self.managed_or_restore(&input.session_id).await?;
         let replay = self
             .store
             .events_after(&input.session_id, input.from_seq)
@@ -473,7 +474,10 @@ impl Daemon {
             .into_iter()
             .map(|frame| RpcMessage::Notification(event_notification(frame)))
             .collect();
-        Ok((json!({"resumed":true}), replay))
+        let tree = managed.runtime.tree().await;
+        let agents: Vec<_> = tree.iter().cloned().collect();
+        Ok((json!({"resumed":true,"session_id":input.session_id,"agents":agents,
+            "seq":self.store.last_event_sequence(&input.session_id).map_err(RpcError::from)?}), replay))
     }
 
     async fn prompt(
@@ -497,12 +501,24 @@ impl Daemon {
             .collect();
         let store = Arc::clone(&self.store);
         tokio::spawn(async move {
-            let result = runtime
-                .run_turn_with(input.text, images, input.agent_id)
-                .await;
+            let run = runtime.run_turn_with(input.text, images, input.agent_id);
+            tokio::pin!(run);
+            let mut checkpoint = tokio::time::interval(std::time::Duration::from_millis(500));
+            checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    _ = checkpoint.tick() => {
+                        if let Ok(value) = serde_json::to_value(runtime.snapshot().await) {
+                            let _ = store.save_session(runtime.id(), &value, "running");
+                        }
+                    }
+                }
+            };
             let snapshot = runtime.snapshot().await;
             let status = if result.is_ok() { "idle" } else { "failed" };
             if let Ok(value) = serde_json::to_value(snapshot) {
+                if store.session(runtime.id()).ok().flatten().is_some_and(|saved| saved.status == "closed") { return; }
                 let _ = store.save_session(runtime.id(), &value, status);
             }
         });

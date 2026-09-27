@@ -1,6 +1,7 @@
 'use strict';
 
 const crypto = require('crypto');
+const os = require('os');
 
 const STATES = new Set(['running', 'waiting_user', 'stopping', 'stopped', 'failed', 'completed']);
 const ACTIONS = new Set(['observe', 'inspect', 'menus', 'move', 'click', 'scroll', 'type', 'key', 'open_terminal', 'activate_app', 'ask']);
@@ -59,11 +60,16 @@ function normalizeAction(input) {
   }
   if (action === 'activate_app') {
     out.path = text(input.path, 1024);
+    if (out.path.includes('..')) return null;
+    const linuxApplications = ['/usr/share/applications/', '/usr/local/share/applications/', `${os.homedir()}/.local/share/applications/`, '~/.local/share/applications/', '/var/lib/flatpak/exports/share/applications/'];
     const validPath = process.platform === 'win32'
       ? (/^(?:[A-Za-z]:\\|\\\\).+\.(?:exe|bat|cmd)$/i.test(out.path) || /^(?:notepad|calc|mspaint|chrome|edge|msedge|firefox|code|explorer|cmd|powershell)(?:\.exe)?$/i.test(out.path))
       : process.platform === 'darwin'
-        ? (/^\/.*\.app$/.test(out.path) || /^[A-Za-z0-9._ -]{1,120}$/.test(out.path))
-        : (/^\/(?:[^\0\r\n]+)$/.test(out.path) || /^(?:notepad|chrome|chromium|edge|msedge|firefox|code|explorer|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path));
+        ? (/^\/.*\.app$/.test(out.path) || /^[A-Za-z0-9._ -]{1,120}$/.test(out.path)
+          || /^(?:\/Applications\/|\/System\/Applications\/|~\/Applications\/)[^\0\r\n]+\.app$/.test(out.path)
+          || /^(?:Safari|Google Chrome|Firefox|TextEdit|Notes|Finder|Terminal|Visual Studio Code|Calculator)$/.test(out.path))
+        : (/^\/(?:[^\0\r\n]+)$/.test(out.path) || /^(?:notepad|chrome|chromium|edge|msedge|firefox|code|explorer|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path)
+          || (linuxApplications.some((dir) => out.path.startsWith(dir)) && /^[^\0\r\n]+\.desktop$/.test(out.path)));
     if (!validPath) return null;
   }
   if (action === 'ask') {

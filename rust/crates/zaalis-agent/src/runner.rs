@@ -1,4 +1,3 @@
-use crate::context::compact_history;
 use crate::interaction::PlanAnswer;
 use crate::prompt::system_prompt;
 use crate::session::{SessionInner, SessionRunMode};
@@ -129,17 +128,6 @@ pub(crate) async fn run_agent(
             ));
         }
 
-        let context_window = session
-            .providers
-            .metadata(node.model.provider)
-            .map(|(_, capabilities)| capabilities.max_context)
-            .unwrap_or(128_000)
-            .max(16_000);
-        if compact_history(&mut history, context_window).is_some() {
-            usage.context_compactions = usage.context_compactions.saturating_add(1);
-            session.update_usage(&node.id, usage).await;
-        }
-
         let mut available_tools = session.tools.definitions();
         let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
         if desktop_control {
@@ -158,20 +146,31 @@ pub(crate) async fn run_agent(
                 "\n\nMODE CONTRÔLE DU BUREAU : seul l’outil computer est disponible. Regroupe les actions clavier sûres et déterministes lorsque l’état est déjà connu (par exemple ouvrir une nouvelle note puis saisir son texte), mais observe/inspecte après un changement d’écran important. Termine dès que le résultat demandé est confirmé afin d’économiser les appels au fournisseur."
             );
         }
+        let tools: Vec<ToolSpec> = available_tools.into_iter().map(|tool| ToolSpec {
+            name: tool.name, description: tool.description, schema: tool.input_schema,
+        }).collect();
+        let capabilities = session.providers.metadata(node.model.provider)
+            .map(|(_, caps)| caps.for_binding(&node.model)).unwrap_or_default();
+        let context = capabilities.max_context as usize;
+        let output_reserve = (context / 5).clamp(256, 8192);
+        let overhead = runtime_system.len().div_ceil(3)
+            + serde_json::to_string(&tools)?.len().div_ceil(3) + 256;
+        let input_budget = context.saturating_sub(output_reserve + overhead);
+        if input_budget < 256 {
+            return Err(ZaalisError::invalid("Le contexte du modèle est trop petit pour les instructions et outils actifs. Choisir un contexte plus grand ou réduire les outils."));
+        }
+        if crate::context::compact(&mut history, input_budget)? {
+            usage.context_compactions = usage.context_compactions.saturating_add(1);
+            session.update_usage(&node.id, usage).await;
+        }
+        session.checkpoint_history(&node.id, &history).await;
         let request = TurnRequest {
             binding: node.model.clone(),
             system: runtime_system,
             messages: history.clone(),
-            tools: available_tools
-                .into_iter()
-                .map(|tool| ToolSpec {
-                    name: tool.name,
-                    description: tool.description,
-                    schema: tool.input_schema,
-                })
-                .collect(),
+            tools,
             reasoning: node.model.reasoning,
-            max_output_tokens: remaining_tokens(&node, &usage),
+            max_output_tokens: Some(remaining_tokens(&node, &usage).unwrap_or(output_reserve as u32).min(output_reserve as u32)),
             temperature: None,
         };
         usage.rounds = usage.rounds.saturating_add(1);
@@ -241,8 +240,10 @@ pub(crate) async fn run_agent(
             tool_calls: calls.clone(),
             provider_state: state,
         });
+        session.checkpoint_history(&node.id, &history).await;
 
         if !calls.is_empty() {
+            let mut latest_capture = Vec::new();
             for call in calls {
                 usage.tool_calls = usage.tool_calls.saturating_add(1);
                 tools_used.push(call.name.clone());
@@ -269,20 +270,27 @@ pub(crate) async fn run_agent(
                     content: serde_json::to_string(&outcome)?,
                     is_error,
                 });
+                session.checkpoint_history(&node.id, &history).await;
                 if !execution.images.is_empty() {
-                    // A screenshot is a vision attachment, never text in the
-                    // tool result. Keeping only the latest capture bounds a
-                    // long computer-control turn to one image per provider
-                    // request instead of accumulating a full desktop history.
-                    history.retain(|message| {
-                        !matches!(message, Message::User { text, images } if text == COMPUTER_CAPTURE_PROMPT && !images.is_empty())
-                    });
-                    history.push(Message::User {
-                        text: COMPUTER_CAPTURE_PROMPT.into(),
-                        images: execution.images,
-                    });
+                    latest_capture = execution.images;
                 }
                 session.update_usage(&node.id, usage).await;
+            }
+            if !latest_capture.is_empty() {
+                // A screenshot is a vision attachment, never text in the
+                // tool result. It is appended only once every tool result of
+                // this round is in history: OpenAI-compatible and Anthropic
+                // APIs reject a user message between an assistant's tool
+                // calls and their results. Keeping only the latest capture
+                // bounds a long computer-control turn to one image per
+                // provider request instead of a full desktop history.
+                history.retain(|message| {
+                    !matches!(message, Message::User { text, images } if text == COMPUTER_CAPTURE_PROMPT && !images.is_empty())
+                });
+                history.push(Message::User {
+                    text: COMPUTER_CAPTURE_PROMPT.into(),
+                    images: latest_capture,
+                });
             }
             continue;
         }

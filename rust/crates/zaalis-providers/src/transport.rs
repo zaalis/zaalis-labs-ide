@@ -129,19 +129,29 @@ async fn classify_response(response: reqwest::Response) -> ProviderError {
 
 fn retry_after_from_body(body: &str) -> Option<u64> {
     let lower = body.to_ascii_lowercase();
-    for marker in ["try again after", "retry after", "after"] {
+    // Only explicit cooldown phrases count, and the number must follow them
+    // directly: a bare "after" would pick up any unrelated figure further in
+    // the body (an error code, a token count) as a delay.
+    for marker in ["try again after", "retry after", "try again in", "retry in"] {
         let Some(offset) = lower.find(marker) else {
             continue;
         };
-        let tail = &lower[offset + marker.len()..];
-        let digits: String = tail
-            .chars()
-            .skip_while(|character| !character.is_ascii_digit())
-            .take_while(|character| character.is_ascii_digit())
-            .collect();
-        if let Ok(seconds) = digits.parse::<u64>() {
-            return Some(seconds.saturating_mul(1_000));
-        }
+        let tail = lower[offset + marker.len()..].trim_start();
+        let number_len = tail
+            .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+            .unwrap_or(tail.len());
+        let Ok(value) = tail[..number_len].parse::<f64>() else {
+            continue;
+        };
+        let unit = tail[number_len..].trim_start();
+        let factor = if unit.starts_with("ms") || unit.starts_with("millisecond") {
+            1.0
+        } else if unit.starts_with("min") || unit.starts_with("m ") || unit == "m" {
+            60_000.0
+        } else {
+            1_000.0
+        };
+        return Some((value * factor).ceil().min(u64::MAX as f64) as u64);
     }
     None
 }
@@ -159,5 +169,16 @@ mod tests {
             Some(1_000)
         );
         assert_eq!(retry_after_from_body("rate limit exceeded"), None);
+        assert_eq!(
+            retry_after_from_body("Please try again in 1.5s."),
+            Some(1_500)
+        );
+        assert_eq!(retry_after_from_body("retry after 200ms"), Some(200));
+        assert_eq!(retry_after_from_body("try again after 2 minutes"), Some(120_000));
+        // An unrelated number later in the body is not a cooldown.
+        assert_eq!(
+            retry_after_from_body(r#"{"error":{"message":"quota resets after midnight","code":429}}"#),
+            None
+        );
     }
 }

@@ -173,13 +173,36 @@ class RustAgentBridge {
       ...(options.systemPrompt ? { system_prompt: String(options.systemPrompt).slice(0, 200000) } : {}),
     };
     if (options.team) create.agents = options.team;
-    else create.model = { provider: options.model, model: options.submodel || undefined, reasoning: options.reasoningLevel || 0 };
-    const made = await client.request(METHODS.SESSION_CREATE, create);
+    else create.model = { provider: options.model, model: options.submodel || undefined,
+      reasoning: options.reasoningLevel || 0, ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}) };
+    let made;
+    if (options.sessionId) {
+      try {
+        // No historical events need to be replayed into the new HTTP response:
+        // the conversation already owns them. The daemon still restores its
+        // durable agent tree and model history from the same session id.
+        made = await client.request('session.resume', { session_id: String(options.sessionId), from_seq: Number.MAX_SAFE_INTEGER });
+      } catch (error) {
+        if (!/introuvable|not found|fermée|closed/i.test(String(error.message || ''))) throw error;
+      }
+    }
+    if (!made) made = await client.request('session.create', create);
     const sessionId = made.session_id;
-    onEvent({ type: 'run_started', runId: sessionId, sessionId });
+    onEvent({ type: 'run_started', runId: sessionId, sessionId, conversationId: options.conversationId || null, resumed: !!made.resumed });
+    for (const agent of made.agents || []) {
+      onEvent({ type: 'rust_event', event: { type: 'agent_spawned', agent } });
+    }
     const lead = options.team
       ? made.agents.find((agent) => agent.role && agent.role.name === 'lead') || made.agents[made.agents.length - 1]
       : made.agents[0];
+    if (!lead) throw new Error('Session restaurée sans agent principal.');
+    if (made.resumed && !options.team) {
+      const wanted = create.model;
+      if (lead.model && (lead.model.provider !== wanted.provider || lead.model.model !== wanted.model ||
+          lead.model.reasoning !== wanted.reasoning || JSON.stringify(lead.model.capabilities || null) !== JSON.stringify(wanted.capabilities || null))) {
+        await client.request('agent.update', { session_id: sessionId, agent_id: lead.id, model: wanted });
+      }
+    }
     const text = new Map();
     const reasoning = new Map();
     const startedTools = new Map();
@@ -242,7 +265,6 @@ class RustAgentBridge {
       if (options.signal && abortHandler) options.signal.removeEventListener('abort', abortHandler);
       off();
       this.sessions.delete(sessionId);
-      client.request(METHODS.SESSION_CLOSE, { session_id: sessionId }).catch(() => {});
     }
   }
 
@@ -256,10 +278,11 @@ class RustAgentBridge {
     throw Object.assign(new Error('Decision interactive invalide.'), { status: 400 });
   }
 
-  async cancel(userId, sessionId) {
+  async cancel(userId, sessionId, agentId) {
     const session = this.sessions.get(String(sessionId || ''));
     if (!session || session.userId !== userId) throw Object.assign(new Error('Tache introuvable.'), { status: 404 });
-    await session.client.request(METHODS.SESSION_CANCEL, { session_id: String(sessionId) });
+    await session.client.request('session.cancel', { session_id: String(sessionId),
+      ...(agentId ? { agent_id: String(agentId) } : {}) });
     return { cancelled: true };
   }
 

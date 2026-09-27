@@ -22,6 +22,8 @@ pub struct PoolConfig {
     pub max_backoff: Duration,
     pub circuit_failure_threshold: u32,
     pub circuit_cooldown: Duration,
+    pub kimi_interval: Duration,
+    pub mistral_interval: Duration,
 }
 
 impl Default for PoolConfig {
@@ -39,6 +41,8 @@ impl Default for PoolConfig {
             max_backoff: Duration::from_secs(30),
             circuit_failure_threshold: 5,
             circuit_cooldown: Duration::from_secs(30),
+            kimi_interval: pacing_from_env("ZAALIS_PACING_MS_KIMI", Duration::from_secs(20)),
+            mistral_interval: pacing_from_env("ZAALIS_PACING_MS_MISTRAL", Duration::from_secs(2)),
         }
     }
 }
@@ -198,7 +202,7 @@ impl ProviderPool {
 
         let mut attempt = 0_u8;
         let source = loop {
-            wait_for_provider_slot(&entry, provider_id, &cancel).await?;
+            wait_for_provider_slot(&entry, &self.config, provider_id, &cancel).await?;
             match entry
                 .provider
                 .stream_turn(request.clone(), cancel.clone())
@@ -276,36 +280,59 @@ impl ProviderPool {
 // entry-plan response explicitly advertises 3 RPM, hence a 20-second slot;
 // Mistral needs only a short anti-burst interval while token reduction in the
 // runner handles its tokens-per-minute quota.
-fn provider_interval(provider: ProviderId) -> Duration {
+fn pacing_from_env(name: &str, default: Duration) -> Duration {
+    pacing_from_env_with(name, default, |key| std::env::var(key).ok())
+}
+
+fn pacing_from_env_with(
+    name: &str,
+    default: Duration,
+    read: impl FnOnce(&str) -> Option<String>,
+) -> Duration {
+    read(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(default)
+}
+
+fn provider_interval(config: &PoolConfig, provider: ProviderId) -> Duration {
     match provider {
-        ProviderId::Kimi => Duration::from_secs(20),
-        ProviderId::Mistral => Duration::from_secs(2),
+        ProviderId::Kimi => config.kimi_interval,
+        ProviderId::Mistral => config.mistral_interval,
         _ => Duration::ZERO,
     }
 }
 
 async fn wait_for_provider_slot(
     entry: &Entry,
+    config: &PoolConfig,
     provider: ProviderId,
     cancel: &CancellationToken,
 ) -> Result<(), ProviderError> {
-    let interval = provider_interval(provider);
+    let interval = provider_interval(config, provider);
     if interval.is_zero() {
         return Ok(());
     }
-    let wait_until = {
+    let (previous, reserved, wait_until) = {
         let mut next = entry.next_start.lock().expect("provider pacing poisoned");
+        let previous = *next;
         let now = Instant::now();
         let slot = (*next).max(now);
         *next = slot.checked_add(interval).unwrap_or(slot);
-        slot
+        (previous, *next, slot)
     };
     let delay = wait_until.saturating_duration_since(Instant::now());
     if delay.is_zero() {
         return Ok(());
     }
     tokio::select! {
-        _ = cancel.cancelled() => Err(ProviderError::new(ProviderErrorKind::Cancelled, "requête annulée")),
+        _ = cancel.cancelled() => {
+            let mut next = entry.next_start.lock().expect("provider pacing poisoned");
+            if *next == reserved {
+                *next = previous;
+            }
+            Err(ProviderError::new(ProviderErrorKind::Cancelled, "requête annulée"))
+        },
         _ = tokio::time::sleep(delay) => Ok(()),
     }
 }
@@ -433,12 +460,101 @@ mod tests {
 
     #[test]
     fn desktop_provider_pacing_matches_the_advertised_limits() {
-        assert_eq!(provider_interval(ProviderId::Kimi), Duration::from_secs(20));
+        let config = PoolConfig::default();
         assert_eq!(
-            provider_interval(ProviderId::Mistral),
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", Duration::from_secs(20), |_| None),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_MISTRAL", Duration::from_secs(2), |_| None),
             Duration::from_secs(2)
         );
-        assert_eq!(provider_interval(ProviderId::Local), Duration::ZERO);
+        assert_eq!(
+            provider_interval(&config, ProviderId::Kimi),
+            config.kimi_interval
+        );
+        assert_eq!(
+            provider_interval(&config, ProviderId::Mistral),
+            config.mistral_interval
+        );
+        assert_eq!(
+            provider_interval(&config, ProviderId::Local),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn provider_pacing_accepts_environment_overrides() {
+        let default = Duration::from_secs(20);
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |name| {
+                assert_eq!(name, "ZAALIS_PACING_MS_KIMI");
+                Some("125".into())
+            }),
+            Duration::from_millis(125)
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |_| Some("0".into())),
+            Duration::ZERO
+        );
+        assert_eq!(
+            pacing_from_env_with("ZAALIS_PACING_MS_KIMI", default, |_| Some("invalid".into())),
+            default
+        );
+        assert_eq!(
+            pacing_from_env_with(
+                "ZAALIS_PACING_MS_MISTRAL",
+                Duration::from_secs(2),
+                |_| Some("50".into())
+            ),
+            Duration::from_millis(50)
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_waiting_request_releases_its_slot() {
+        let config = PoolConfig {
+            kimi_interval: Duration::from_secs(1),
+            ..PoolConfig::default()
+        };
+        let pool = ProviderPool::new(config);
+        pool.register(Arc::new(FakeProvider {
+            id: ProviderId::Kimi,
+            concurrency: 2,
+            failures_left: AtomicUsize::new(0),
+        }));
+        let entry = pool.providers.read().expect("registry")[&ProviderId::Kimi].clone();
+        wait_for_provider_slot(
+            &entry,
+            &pool.config,
+            ProviderId::Kimi,
+            &CancellationToken::new(),
+        )
+        .await
+        .expect("first slot");
+        let previous = *entry.next_start.lock().expect("pacing");
+        let cancel = CancellationToken::new();
+        let waiting_entry = entry.clone();
+        let waiting_config = pool.config.clone();
+        let waiting_cancel = cancel.clone();
+        let waiting = tokio::spawn(async move {
+            wait_for_provider_slot(
+                &waiting_entry,
+                &waiting_config,
+                ProviderId::Kimi,
+                &waiting_cancel,
+            )
+            .await
+        });
+        while *entry.next_start.lock().expect("pacing") == previous {
+            tokio::task::yield_now().await;
+        }
+        cancel.cancel();
+        assert_eq!(
+            waiting.await.expect("task").unwrap_err().kind,
+            ProviderErrorKind::Cancelled
+        );
+        assert_eq!(*entry.next_start.lock().expect("pacing"), previous);
     }
 
     #[tokio::test]

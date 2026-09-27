@@ -1353,6 +1353,7 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Connexion impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1381,6 +1382,7 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Création de compte impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);

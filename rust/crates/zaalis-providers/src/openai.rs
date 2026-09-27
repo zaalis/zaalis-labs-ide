@@ -247,38 +247,45 @@ impl ModelProvider for OpenAiProvider {
         Ok(transport::stream_response(
             response,
             cancel,
-            StreamParser::for_provider(self.config.provider),
+            StreamParser::for_provider(self.config.provider).with_fallback_tools(
+                !self.config.capabilities.for_binding(&request.binding).native_tools
+                    && !request.tools.is_empty(),
+            ),
         ))
     }
 }
 
 /// Build the request body.
 pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool) -> Value {
+    let capabilities = config.capabilities.for_binding(&request.binding);
     let model = request
         .binding
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.clone());
 
-    let mut messages = Vec::new();
-    if !request.system.trim().is_empty() {
-        messages.push(json!({ "role": "system", "content": request.system }));
-    }
+    let mut system = request.system.trim().to_owned();
     // A provider without native tool calling (GGUF/llama.cpp) is given the tools
     // as a strict JSON protocol instead. The instructions and the parser in
     // `finish` are two halves of the same contract.
-    let fallback_tools = !request.tools.is_empty() && !config.capabilities.native_tools;
+    let fallback_tools = !request.tools.is_empty() && !capabilities.native_tools;
     if fallback_tools {
-        messages.push(json!({
-            "role": "system",
-            "content": fallback_tool_instructions(&request.tools),
-        }));
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&fallback_tool_instructions(&request.tools));
+    }
+
+    let mut messages = Vec::new();
+    if !system.is_empty() {
+        messages.push(json!({ "role": "system", "content": system }));
     }
     for message in &request.messages {
         messages.push(encode_message(
             message,
             config.provider,
-            config.capabilities.vision,
+            capabilities.vision,
+            capabilities.native_tools,
         ));
     }
 
@@ -288,7 +295,7 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
         "stream": stream,
     });
 
-    if !request.tools.is_empty() && config.capabilities.native_tools {
+    if !request.tools.is_empty() && capabilities.native_tools {
         body["tools"] = Value::Array(
             request
                 .tools
@@ -304,7 +311,12 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
     }
-    if config.reasoning == ReasoningStyle::Effort {
+    let reasoning_style = request.binding.capabilities.as_ref().and_then(|facts| facts.reasoning)
+        .map(|mode| match mode {
+            zaalis_core::ReasoningMode::Effort => ReasoningStyle::Effort,
+            _ => ReasoningStyle::None,
+        }).unwrap_or(config.reasoning);
+    if reasoning_style == ReasoningStyle::Effort {
         if let Some(effort) = effort_label(request.reasoning) {
             body["reasoning_effort"] = json!(effort);
         }
@@ -490,7 +502,7 @@ fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
     })
 }
 
-fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Value {
+fn encode_message(message: &Message, provider: ProviderId, vision: bool, native_tools: bool) -> Value {
     match message {
         Message::User { text, images } if images.is_empty() || !vision => {
             json!({ "role": "user", "content": text })
@@ -503,7 +515,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
         Message::Assistant {
             provider_state: Some(state),
             ..
-        } if state.provider == provider => state.value.clone(),
+        } if state.provider == provider && native_tools => state.value.clone(),
         Message::Assistant {
             text, tool_calls, ..
         } => {
@@ -511,7 +523,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             // Native `tool_calls` are only understood where native tools are on.
             // Under the GGUF fallback the call already lives in `text` as the
             // JSON envelope, so no native array is attached.
-            if !tool_calls.is_empty() && provider != ProviderId::Gguf {
+            if !tool_calls.is_empty() && native_tools {
                 value["tool_calls"] = Value::Array(
                     tool_calls
                         .iter()
@@ -538,7 +550,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             content,
             ..
         } => {
-            if provider == ProviderId::Gguf {
+            if !native_tools {
                 json!({
                     "role": "user",
                     "content": format!("[Résultat de l'outil {name}]\n{content}"),
@@ -575,6 +587,7 @@ pub struct StreamParser {
     text: String,
     reasoning: String,
     content_parts: Vec<Value>,
+    fallback_tools: bool,
 }
 
 impl StreamParser {
@@ -585,8 +598,14 @@ impl StreamParser {
     pub fn for_provider(provider: ProviderId) -> Self {
         Self {
             provider: Some(provider),
+            fallback_tools: provider == ProviderId::Gguf,
             ..Self::default()
         }
+    }
+
+    fn with_fallback_tools(mut self, enabled: bool) -> Self {
+        self.fallback_tools = enabled;
+        self
     }
 
     /// Feed raw bytes, returning the events they produced.
@@ -717,7 +736,7 @@ impl StreamParser {
         // GGUF fallback: no native tool call arrived, so try to read a strict
         // JSON envelope out of the text. Anything that is not exactly the
         // envelope is left as a normal answer — fail-closed, nothing runs.
-        if calls.is_empty() && self.provider == Some(ProviderId::Gguf) {
+        if calls.is_empty() && self.fallback_tools {
             if let Some(call) = parse_fallback_tool_call(&self.text) {
                 calls.push(call);
             }
@@ -741,7 +760,7 @@ impl StreamParser {
             }
             // The GGUF fallback state carries the call in its `content` text, so
             // no native `tool_calls` array is replayed to it.
-            if !calls.is_empty() && provider != ProviderId::Gguf {
+            if !calls.is_empty() && !self.fallback_tools {
                 state["tool_calls"] = Value::Array(
                     calls
                         .iter()
@@ -1234,10 +1253,35 @@ mod tests {
     }
 
     #[test]
+    fn gguf_merges_tool_instructions_into_the_initial_system_message() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let request = TurnRequest::new(
+            ModelBinding::new(ProviderId::Gguf, Some("local".into())),
+            "tu es un agent",
+            vec![Message::user("lis a.js")],
+        )
+        .with_tools(vec![ToolSpec {
+            name: "read".into(),
+            description: "Lire un fichier".into(),
+            schema: json!({"type":"object"}),
+        }]);
+
+        let body = build_request(&config, &request, true);
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"].as_str().unwrap_or("").contains("tool_call"));
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
     fn a_gguf_tool_result_is_replayed_as_user_text() {
         let value = encode_message(
             &Message::tool_result("c1", "read", "contenu"),
             ProviderId::Gguf,
+            false,
             false,
         );
         assert_eq!(value["role"], "user");

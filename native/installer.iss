@@ -15,6 +15,7 @@ DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
 DisableProgramGroupPage=yes
 DisableDirPage=yes
+DisableWelcomePage=no
 PrivilegesRequired=lowest
 OutputDir=installer
 OutputBaseFilename=zaalis-setup
@@ -22,9 +23,14 @@ SetupIconFile=app.ico
 UninstallDisplayIcon={app}\zaalis.exe
 Compression=lzma2
 SolidCompression=yes
-WizardStyle=modern
-WizardImageFile=wizard-image.bmp
-WizardSmallImageFile=wizard-small.bmp
+WizardStyle=modern dark hidebevels includetitlebar
+WizardSizePercent=130,130
+WizardBackColor=#09090b
+WizardBackImageFile=wizard-background.png
+WizardImageFile=wizard-image.png
+WizardImageBackColor=#09090b
+WizardSmallImageFile=wizard-small.png
+WizardSmallImageBackColor=#09090b
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Le CLI ajoute {app}\bin au PATH utilisateur : prevenir les processus en cours.
@@ -32,6 +38,19 @@ ChangesEnvironment=yes
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+
+[Messages]
+WelcomeLabel1=Bienvenue dans zaalis IDE
+WelcomeLabel2=Votre espace de création, de code et d'agents IA est prêt à prendre place sur ce PC.%n%nContinuez pour installer l'application et ses composants dans votre dossier utilisateur.
+ClickNext=Cliquez sur Continuer pour poursuivre ou sur Annuler pour quitter l'installation.
+WizardReady=Votre espace est prêt
+ReadyLabel1=zaalis IDE peut maintenant être installé.
+ReadyLabel2b=Les raccourcis seront créés sur le Bureau et dans le menu Démarrer. Cliquez sur Installer pour continuer.
+WizardInstalling=Installation de zaalis IDE
+InstallingLabel=Nous mettons en place votre espace de travail. Cela peut prendre quelques instants.
+FinishedHeadingLabel=zaalis IDE est prêt
+FinishedLabel=Installation terminée. Lancez zaalis IDE depuis le Bureau ou le menu Démarrer pour commencer.
+ButtonNext=&Continuer >
 
 [Files]
 Source: "dist\zaalis.exe";        DestDir: "{app}"; Flags: ignoreversion

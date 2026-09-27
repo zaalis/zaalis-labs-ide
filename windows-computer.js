@@ -64,6 +64,7 @@ $h = [double]$bounds.Height
 # les coins haut-gauche et bas-droit, et non au milieu de l'ecran. Ici l'ellipse
 # WPF EST la zone coloree (opaque au centre, transparente au bord), ce qui
 # reproduit exactement l'arret « transparent 32% / 38% ».
+$e1w = 0.820 * $w; $e1h = 0.768 * $h; $e1x = -0.435 * $w; $e1y = -0.334 * $h
 $e2w = 0.912 * $w; $e2h = 0.958 * $h; $e2x = 0.494 * $w; $e2y = 0.531 * $h
 $driftX = 0.03 * $w; $driftY = -0.02 * $h
 # Bord interieur du cadre en plumes : chaque bande fait 80 px (le double des
@@ -88,6 +89,9 @@ $wm = $w - 80; $hm = $h - 80
     <Canvas x:Name="Mist" RenderTransformOrigin="0.5,0.5">
       <Canvas.RenderTransform><TransformGroup><ScaleTransform x:Name="MistScale" ScaleX="1" ScaleY="1"/><TranslateTransform x:Name="MistShift" X="0" Y="0"/></TransformGroup></Canvas.RenderTransform>
       <Canvas.Effect><BlurEffect Radius="20"/></Canvas.Effect>
+      <Ellipse Width="$e1w" Height="$e1h" Canvas.Left="$e1x" Canvas.Top="$e1y" Opacity="0.28">
+        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#FF9D59FF" Offset="0"/><GradientStop Color="#009D59FF" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
+      </Ellipse>
       <Ellipse Width="$e2w" Height="$e2h" Canvas.Left="$e2x" Canvas.Top="$e2y" Opacity="0.28">
         <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#FF662DD2" Offset="0"/><GradientStop Color="#00662DD2" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
       </Ellipse>

@@ -10,7 +10,7 @@ set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" goto :novs
 
 set "VSPATH="
-for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -property installationPath`) do set "VSPATH=%%i"
+for /f "usebackq delims=" %%i in (`"%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSPATH=%%i"
 if not defined VSPATH goto :novs
 echo Visual Studio: %VSPATH%
 
@@ -25,7 +25,7 @@ rc /nologo /fo dist\app.res app.rc
 if errorlevel 1 goto :failed
 
 echo Compiling main.cpp ...
-cl /nologo /std:c++17 /EHsc /O2 /DUNICODE /D_UNICODE main.cpp /I "packages\webview2\build\native\include" /Fe:dist\zaalis.exe /Fo:dist\obj.obj /link /SUBSYSTEM:WINDOWS dist\app.res "packages\webview2\build\native\x64\WebView2LoaderStatic.lib" ws2_32.lib ole32.lib oleaut32.lib version.lib advapi32.lib shell32.lib shlwapi.lib user32.lib gdi32.lib dwmapi.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /O2 /DUNICODE /D_UNICODE main.cpp browser\BrowserHost.cpp /I "packages\webview2\build\native\include" /Fe:dist\zaalis.exe /Fo:dist\ /link /SUBSYSTEM:WINDOWS dist\app.res "packages\webview2\build\native\x64\WebView2LoaderStatic.lib" ws2_32.lib ole32.lib oleaut32.lib version.lib advapi32.lib shell32.lib shlwapi.lib user32.lib gdi32.lib dwmapi.lib windowsapp.lib
 if errorlevel 1 goto :failed
 
 echo Compiling pickfolder.cpp ...

@@ -522,9 +522,8 @@ async function readAgentEventStream(res, onEvent) {
             result = event.result || {};
         } else if (event.type === 'error') {
             streamError = event.error || 'Erreur agent.';
-        } else if (typeof onEvent === 'function') {
-            onEvent(event);
         }
+        if (typeof onEvent === 'function') onEvent(event);
     };
     while (true) {
         const { done, value } = await reader.read();
@@ -565,6 +564,8 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             reasoningLevel: state.reasoningLevel,
             images,
             history,
+            conversationId: options.conversationId,
+            sessionId: options.sessionId,
             computerControl: options.computerControl === undefined ? !!state.computerControl : !!options.computerControl,
             stream: wantsStream
         }),
@@ -873,6 +874,8 @@ async function sendChat(input) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
+    saveConversation('chat');
+    const activeConversation = state.conversations.find(conv => conv.id === state.currentConvId);
     const liveActivity = createLiveAgentActivity($('#chat-messages'));
     let liveActivityFinished = false;
     const body = addTypingMsg($('#chat-messages'), modelLabel);
@@ -909,7 +912,12 @@ async function sendChat(input) {
     setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            conversationId: activeConversation?.id,
+            sessionId: activeConversation?.sessionId,
+            onEvent: (event) => {
+                if (liveActivity) liveActivity.onEvent(event);
+                window.ZaalisWorkspace?.onAgentEvent(event);
+            }
         });
         stopThinking(body);
         if (data.error) {
@@ -1846,24 +1854,29 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
         }
     ];
     const { aiText = '', names = [], images = [] } = taskDraft;
+    if (!state.currentAgentConvId) state.currentAgentConvId = crypto.randomUUID();
     const response = await fetch('/api/rust-agent-team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
         body: JSON.stringify({
             team, message: task + aiText, root: state.projectRoot,
             permissionMode: state.permissionMode, language: lang,
-            reasoningLevel: state.reasoningLevel, images, stream: true
+            reasoningLevel: state.reasoningLevel, images, stream: true,
+            conversationId: state.currentAgentConvId,
+            sessionId: state.agentConversations.find(conv => conv.id === state.currentAgentConvId)?.sessionId
         })
     });
     if (response.status === 404 || response.status === 503) return false;
 
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', task + (names.length ? `\n📎 ${names.join(', ')}` : ''));
+    saveConversation('agents');
     const body = addTypingMsg($('#agents-log'), labels[lead.agent] || lead.agent);
     const activity = createLiveAgentActivity($('#agents-log'));
     const byId = new Map();
     const data = await readAgentEventStream(response, (event) => {
         handleRustInteractiveEvent(event).catch(() => {});
         if (activity) activity.onEvent(event);
+        window.ZaalisWorkspace?.onAgentEvent(event);
         if (event.type === 'rust_event' && event.event) {
             const frame = event.event;
             if (frame.type === 'agent_spawned' && frame.agent) {
@@ -2239,6 +2252,7 @@ function saveConversation(kind = 'chat') {
         else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     }
 
+    window.ZaalisWorkspace?.flushConversation(kind);
     persistChats(kind);
     renderHistory();
 }
@@ -2356,7 +2370,7 @@ function loadConversation(kind, id) {
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
-        state.chatHistory = (conv.messages || [])
+        state.chatHistory = Array.isArray(conv.apiHistory) ? conv.apiHistory.map(item => ({ ...item })) : (conv.messages || [])
             .filter(m => m.type === 'user' || m.type === 'ai')
             .map(m => ({
                 role: m.type === 'user' ? 'user' : 'assistant',
@@ -2847,6 +2861,10 @@ function updateSliderVisuals() {
 }
 
 function checkReasoningCompatibility() {
+    if (window.ZaalisWorkspace) {
+        window.ZaalisWorkspace.refreshCapabilities();
+        return;
+    }
     const { model, submodel } = reasoningContext();
     const sliderBar = $('#reasoning-slider-bar');
     if (!sliderBar) return;

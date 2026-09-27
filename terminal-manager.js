@@ -158,7 +158,14 @@ class TerminalManager {
 
   write(session, data) { if (session.closed) throw new Error('Terminal fermé.'); session.proc.write(String(data || '')); }
   resize(session, cols, rows) { if (!session.closed) session.proc.resize(Math.max(20, Math.min(320, Number(cols) || 100)), Math.max(5, Math.min(120, Number(rows) || 26))); }
-  close(session) { if (!session || session.closed) return; session.closed = true; try { session.proc.kill(); } catch {} this.sessions.delete(session.id); }
+  close(session) {
+    if (!session) return;
+    session.closed = true;
+    this.sessions.delete(session.id);
+    // onExit marks a session closed before the PTY addon has necessarily
+    // disposed its pipes. Always release the native PTY handle as well.
+    try { session.proc.kill(); } catch {}
+  }
 
   async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
     const session = this.latest(userId, cwd);

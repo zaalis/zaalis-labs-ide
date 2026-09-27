@@ -14,6 +14,7 @@ const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
 const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
+const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -656,7 +657,8 @@ app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
     config: sharedConfigForUser(req.user),
-    terminalProfiles: terminalManager.profiles()
+    terminalProfiles: terminalManager.profiles(),
+    defaultTerminalProfile: DEFAULT_TERMINAL_PROFILE
   });
 });
 
@@ -2352,6 +2354,55 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 
 app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
 
+async function capabilitiesForUser(user, provider, model) {
+  const id = String(provider || '').trim().toLowerCase();
+  if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
+    throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+  }
+  const name = String(model || modelCatalog.SUBMODELS[id]?.[0] || '').trim();
+  if (!name) throw Object.assign(new Error('Modèle requis.'), { status: 400 });
+  const shared = sharedConfigForUser(user);
+  const info = { ready: true };
+  if (id === 'local') {
+    info.ready = false;
+    try {
+      const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const answer = await fetch(`${url}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }), signal: AbortSignal.timeout(2500),
+      });
+      if (answer.ok) {
+        const show = await answer.json();
+        info.ready = true;
+        info.localCapabilities = show.capabilities || [];
+        const contextEntry = Object.entries(show.model_info || {}).find(([key, value]) =>
+          key.endsWith('.context_length') && Number.isFinite(Number(value)) && Number(value) >= 512);
+        if (contextEntry) info.contextWindow = Number(contextEntry[1]);
+      }
+    } catch {}
+  } else if (id === 'gguf') {
+    info.ready = fs.existsSync(path.join(MODELS_DIR, path.basename(name))) && path.basename(name) === name;
+    info.contextWindow = shared.ggufCtx;
+  } else {
+    const providerInfo = modelCatalog.PROVIDERS.find((entry) => entry.id === id);
+    info.ready = !!userApiKeys(user)[providerInfo.keyName];
+  }
+  return modelCapabilities(id, name, info);
+}
+
+app.get('/api/model-capabilities', async (req, res) => {
+  try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
+app.post('/api/rust-core/cancel', async (req, res) => {
+  try {
+    const sessionId = String(req.body && req.body.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: 'sessionId requis.' });
+    res.json(await rustAgentBridge.cancel(req.user.id, sessionId, req.body && req.body.agentId));
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
 // ---------------------------------------------------------------------------
 // CODESTRALE BRIDGE — the two descriptors the companion app reads.
 // ---------------------------------------------------------------------------
@@ -2447,22 +2498,34 @@ async function rustAgentHttp(req, res, next) {
       computerToken = crypto.randomBytes(32).toString('base64url');
       computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
     }
-    // A GGUF turn needs the local engine loaded with that exact file first —
-    // the single chat already did this, the agent path did not.
-    if (model === 'gguf') {
-      if (!body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    const selectedTeam = Array.isArray(body.team) ? body.team : null;
+    const ggufNames = selectedTeam
+      ? [...new Set(selectedTeam.filter((agent) => agent.model?.provider === 'gguf').map((agent) => agent.model.model).filter(Boolean))]
+      : model === 'gguf' ? [body.submodel] : [];
+    if (ggufNames.length > 1) throw Object.assign(new Error('Une équipe ne peut charger qu’un modèle GGUF à la fois.'), { status: 400 });
+    if (model === 'gguf' && !body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    if (ggufNames.length) {
       const shared = sharedConfigForUser(req.user);
-      await ensureEngine(body.submodel, (body.config && body.config.ggufVariant) || shared.ggufVariant, {
+      await ensureEngine(ggufNames[0], (body.config && body.config.ggufVariant) || shared.ggufVariant, {
         ctx: (body.config && body.config.ggufCtx) || shared.ggufCtx,
         gpuLayers: (body.config && body.config.ggufGpuLayers) !== undefined ? body.config.ggufGpuLayers : shared.ggufGpuLayers,
       });
     }
+    const modelFacts = selectedTeam ? null : await capabilitiesForUser(req.user, model, body.submodel);
+    const team = selectedTeam ? await Promise.all(selectedTeam.map(async (agent) => ({
+      ...agent,
+      model: {
+        ...agent.model,
+        capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
+      },
+    }))) : null;
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root || body.projectRoot),
       model,
       submodel: body.submodel,
+      modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
       systemPrompt: body.systemPrompt,
       permissionMode: body.permissionMode || 'supervised',
@@ -2470,12 +2533,18 @@ async function rustAgentHttp(req, res, next) {
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
       history: Array.isArray(body.history) ? body.history : [],
-      team: Array.isArray(body.team) ? body.team : null,
+      team,
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
       mcpServers: rustMcpServersFor(req.user),
-      runtimeConfig: computerToken ? {
+      runtimeConfig: {
+        ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
-      } : undefined,
+        } : {}),
+      },
       signal: controller.signal,
     }, emit);
     if (wantsStream) {
@@ -2518,12 +2587,16 @@ async function rustChatHttp(req, res, next) {
       if (!body.submodel) return res.status(400).json({ error: 'Aucun modèle GGUF sélectionné.' });
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
+    const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root),
       model: String(body.model),
       submodel: body.submodel,
+      modelCapabilities: bindingCapabilities(modelFacts),
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
       message: String(body.message),
       systemPrompt: body.systemPrompt,
       permissionMode: 'read-only',
