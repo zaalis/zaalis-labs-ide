@@ -51,11 +51,23 @@ function modelCapabilities(provider, model, options = {}) {
     // llama.cpp's OpenAI-compatible endpoint is used with the text tool
     // fallback. A GGUF filename alone cannot prove vision or thinking support.
     result.tools = false;
+    result.reasoning.mode = 'effort';
+    result.reasoning.supported = true;
+    result.reasoning.levels = [
+      { id: 'none', label: 'Désactivé', value: 0 },
+      { id: 'minimal', label: 'Minimal', value: 1 },
+      { id: 'low', label: 'Faible', value: 2 },
+      { id: 'medium', label: 'Moyen', value: 3 },
+      { id: 'high', label: 'Élevé', value: 4 },
+      { id: 'xhigh', label: 'Très élevé', value: 5 },
+      { id: 'max', label: 'Maximum', value: 6 },
+      { id: 'ultra', label: 'Ultra', value: 7 },
+    ];
   }
 
   if (result.reasoning.mode === 'effort') {
     result.reasoning.supported = true;
-    result.reasoning.levels = REASONING_LEVELS;
+    if (!result.reasoning.levels.length) result.reasoning.levels = REASONING_LEVELS;
   }
   return result;
 }

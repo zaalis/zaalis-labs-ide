@@ -317,9 +317,15 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
             _ => ReasoningStyle::None,
         }).unwrap_or(config.reasoning);
     if reasoning_style == ReasoningStyle::Effort {
-        if let Some(effort) = effort_label(request.reasoning) {
+        let effort = if config.provider == ProviderId::Gguf {
+            gguf_effort_label(request.reasoning)
+        } else { effort_label(request.reasoning) };
+        if let Some(effort) = effort {
             body["reasoning_effort"] = json!(effort);
         }
+    }
+    if config.provider == ProviderId::Gguf {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": request.reasoning.0 > 0 });
     }
     // Ask for usage on the final streamed chunk; providers that ignore the
     // option simply omit it, which the parser already tolerates.
@@ -335,6 +341,20 @@ fn effort_label(level: ReasoningLevel) -> Option<&'static str> {
         1 => Some("low"),
         2 => Some("medium"),
         _ => Some("high"),
+    }
+}
+
+fn gguf_effort_label(level: ReasoningLevel) -> Option<&'static str> {
+    match level.0 {
+        0 => None,
+        1 => Some("minimal"),
+        2 => Some("low"),
+        3 => Some("medium"),
+        4 => Some("high"),
+        5 => Some("xhigh"),
+        // llama.cpp/OpenAI-compatible transports do not define a distinct
+        // ultra wire value; match Hermes by clamping it to max.
+        _ => Some("max"),
     }
 }
 
@@ -1012,6 +1032,23 @@ mod tests {
         let openai = OpenAiConfig::for_provider(ProviderId::Codex, None).expect("config");
         let body = build_request(&openai, &request(), true);
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gguf_thinking_toggle_and_ultra_are_sent_to_llama_cpp() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let off = build_request(&config, &request(), false);
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(off.get("reasoning_effort").is_none());
+        let mut active = request();
+        active.reasoning = ReasoningLevel(7);
+        active.binding.capabilities = Some(zaalis_core::ModelCapabilities {
+            reasoning: Some(zaalis_core::ReasoningMode::Effort),
+            ..Default::default()
+        });
+        let on = build_request(&config, &active, false);
+        assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(on["reasoning_effort"], "max");
     }
 
     #[test]

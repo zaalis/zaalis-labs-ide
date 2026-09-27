@@ -29,6 +29,11 @@ function prettyModelLabel(full) {
 }
 // Submodel list per provider. Ollama + GGUF use the user's installed models.
 function submodelsFor(model) {
+    if (model.startsWith('hermes:')) {
+        const known = window.hermesProviders?.find(p => `hermes:${p.id}` === model)?.models || [];
+        const custom = state.config.hermesModelId;
+        return custom && !known.includes(custom) ? [...known, custom] : known;
+    }
     if (model === 'local') return (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
     if (model === 'gguf') return state.config.ggufModels || [];
     return SUBMODELS[model] || [];
@@ -57,9 +62,38 @@ function updateSubmodelDropdown() {
         option.textContent = state.language === 'en' ? 'No GGUF model installed' : 'Aucun modèle GGUF installé';
         submodelSelect.appendChild(option);
     }
+    const hermes = model.startsWith('hermes:');
+    const customInput = $('#hermes-model-input');
+    const thinkingLabel = $('#hermes-thinking-label');
+    if (customInput) {
+        customInput.hidden = !hermes;
+        customInput.value = hermes ? (state.config.hermesModelId || '') : '';
+        customInput.placeholder = subs.length ? 'ID personnalisé (facultatif)' : 'ID du modèle requis';
+    }
+    if (thinkingLabel) {
+        thinkingLabel.hidden = !hermes && model !== 'gguf';
+        $('#hermes-thinking-toggle').checked = state.config.hermesThinking !== false;
+    }
     const install = $('#gguf-install-shortcut');
     if (install) install.hidden = model !== 'gguf' || subs.length > 0;
 }
+$('#hermes-model-input')?.addEventListener('change', event => {
+    state.config.hermesModelId = event.target.value.trim();
+    if (state.config.hermesModelId) {
+        const option = document.createElement('option');
+        option.value = state.config.hermesModelId;
+        option.textContent = state.config.hermesModelId;
+        submodelSelect.appendChild(option);
+        submodelSelect.value = option.value;
+        state.config.aiSubmodel = option.value;
+    }
+    saveState();
+    checkReasoningCompatibility();
+});
+$('#hermes-thinking-toggle')?.addEventListener('change', event => {
+    state.config.hermesThinking = event.target.checked;
+    saveState();
+});
 $('#gguf-install-shortcut')?.addEventListener('click', () => $('#catalog-btn')?.click());
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
@@ -1711,6 +1745,9 @@ function createCustomSelect(selectId, opts) {
 
     const trigger = document.createElement('div');
     trigger.className = 'custom-select-trigger';
+    trigger.setAttribute('role', 'button');
+    trigger.tabIndex = 0;
+    trigger.setAttribute('aria-haspopup', 'listbox');
     
     const triggerText = document.createElement('span');
     triggerText.className = 'custom-select-trigger-text';
@@ -1734,6 +1771,7 @@ function createCustomSelect(selectId, opts) {
         
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
+        trigger.setAttribute('aria-label', `${selectId === 'ai-model' ? 'Fournisseur' : 'Modèle'} : ${triggerText.textContent}`);
 
         // Update color for model select trigger
         if (selectId === 'ai-model') {
@@ -1750,6 +1788,8 @@ function createCustomSelect(selectId, opts) {
             }
             div.textContent = opt.textContent;
             div.dataset.value = opt.value;
+            div.setAttribute('role', 'option');
+            div.tabIndex = 0;
             div.title = opt.title || opt.textContent;
 
             if (selectId === 'ai-model') {
@@ -1764,6 +1804,9 @@ function createCustomSelect(selectId, opts) {
                 select.dispatchEvent(new Event('change'));
                 closeAllCustomSelects();
             });
+            div.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); }
+            });
 
             optionsContainer.appendChild(div);
         });
@@ -1776,6 +1819,11 @@ function createCustomSelect(selectId, opts) {
         if (!isOpen) {
             wrapper.classList.add('open');
         }
+        trigger.setAttribute('aria-expanded', String(!isOpen));
+    });
+    trigger.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); trigger.click(); }
+        if (e.key === 'Escape') { wrapper.classList.remove('open'); trigger.setAttribute('aria-expanded', 'false'); }
     });
 
     const observer = new MutationObserver(() => {
@@ -1793,6 +1841,7 @@ function createCustomSelect(selectId, opts) {
 function closeAllCustomSelects() {
     document.querySelectorAll('.custom-select-container').forEach(c => {
         c.classList.remove('open');
+        c.querySelector('.custom-select-trigger')?.setAttribute('aria-expanded', 'false');
     });
 }
 

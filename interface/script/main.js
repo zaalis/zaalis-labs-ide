@@ -174,6 +174,7 @@ function populateSettingsControls() {
 
 $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
+    loadHermesCatalog();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -189,6 +190,55 @@ $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
 const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
+window.hermesProviders = [];
+async function loadHermesCatalog() {
+    try {
+        const response = await fetch('/api/hermes/catalog');
+        if (!response.ok) return;
+        const data = await response.json();
+        window.hermesProviders = data.providers || [];
+        const select = $('#ai-model');
+        select.querySelectorAll('option[value^="hermes:"]').forEach(option => option.remove());
+        window.hermesProviders.forEach(provider => {
+            const option = document.createElement('option');
+            option.value = `hermes:${provider.id}`;
+            option.textContent = `${provider.label} · Hermes`;
+            select.appendChild(option);
+        });
+        if (state.config.aiModel?.startsWith('hermes:')) {
+            select.value = state.config.aiModel;
+            updateSubmodelDropdown();
+            $('#ai-submodel').value = state.config.aiSubmodel || $('#ai-submodel').value;
+            window.ZaalisWorkspace?.refreshCapabilities(true);
+        }
+        const local = data.local || {};
+        $('#hermes-install-status').textContent = local.installed ? 'Installé' : 'Absent';
+        $('#hermes-runtime-status').textContent = (local.runtimes || []).join(', ') || 'Absent';
+        $('#hermes-local-models').textContent = String((local.models || []).length);
+        renderHermesKeyFields();
+    } catch {}
+}
+async function renderHermesKeyFields() {
+    const target = $('#hermes-key-fields');
+    if (!target) return;
+    let status = {};
+    try { const response = await fetch('/api/hermes/keys'); status = (await response.json()).keys || {}; } catch {}
+    target.replaceChildren();
+    window.hermesProviders.filter(provider => provider.keyEnv).forEach(provider => {
+        const row = document.createElement('div');
+        row.className = 'form-group';
+        const label = document.createElement('label');
+        label.textContent = `${provider.label} (${provider.keyEnv})`;
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.dataset.hermesKey = provider.id;
+        input.autocomplete = 'new-password';
+        input.placeholder = status[provider.id]?.set ? `Enregistrée ····${status[provider.id].last4}` : 'Clé API';
+        row.append(label, input);
+        target.appendChild(row);
+    });
+}
+loadHermesCatalog();
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -418,6 +468,18 @@ $('#save-btn').addEventListener('click', async () => {
             if (!res.ok) throw new Error('keys');
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
+        }
+        const hermesKeys = {};
+        $$('#hermes-key-fields input[data-hermes-key]').forEach(input => {
+            if (input.value.trim()) hermesKeys[input.dataset.hermesKey] = input.value.trim();
+        });
+        if (Object.keys(hermesKeys).length) {
+            const hermesResponse = await fetch('/api/hermes/keys', {
+                method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keys: hermesKeys })
+            });
+            if (!hermesResponse.ok) throw new Error('Hermes keys');
+            await renderHermesKeyFields();
         }
         btn.textContent = 'OK';
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
@@ -734,6 +796,13 @@ function setCardActions(card, name) {
     const ggufFile = card.dataset.ggufFile || '';
     const installed = target === 'gguf' ? (ggufFile && isGgufInstalled(ggufFile)) : isInstalled(name);
     actions.innerHTML = '';
+    if (ggufFile.startsWith('hermes:')) {
+        const badge = document.createElement('span');
+        badge.className = 'cat-tag local';
+        badge.textContent = 'Hermes · lecture seule';
+        actions.appendChild(badge);
+        return;
+    }
     if (installed) {
         const un = document.createElement('button');
         un.className = 'cat-uninstall'; un.type = 'button';
@@ -859,7 +928,7 @@ function renderGgufModels() {
         const chip = document.createElement('div');
         chip.className = 'ollama-chip';
         const span = document.createElement('span');
-        span.textContent = name.replace(/\.gguf$/i, '');
+        span.textContent = name.replace(/^hermes:/, 'Hermes · ').replace(/\.gguf$/i, '');
         span.title = name;
         const rm = document.createElement('button');
         rm.type = 'button';
@@ -867,7 +936,7 @@ function renderGgufModels() {
         rm.title = state.language === 'en' ? 'Delete' : 'Supprimer';
         rm.addEventListener('click', () => deleteGguf(name));
         chip.appendChild(span);
-        chip.appendChild(rm);
+        if (!name.startsWith('hermes:')) chip.appendChild(rm);
         box.appendChild(chip);
     });
 }
@@ -1662,6 +1731,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    await loadHermesCatalog();
     await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
@@ -1679,12 +1749,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Restore Ollama URL in settings modal
     const _set = (sel, val) => { const el = $(sel); if (el) el.value = val; };
     if (modelSelect) {
+        const savedSubmodel = state.config.aiSubmodel;
         modelSelect.value = state.config.aiModel || 'codex';
         if (!modelSelect.value) modelSelect.value = 'codex';
         modelSelect.dispatchEvent(new Event('change'));
         
-        if (state.config.aiSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === state.config.aiSubmodel)) {
-            submodelSelect.value = state.config.aiSubmodel;
+        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
+            submodelSelect.value = savedSubmodel;
         } else {
             // Default to newest submodel (first in the list) if saved one not found
             const subs = SUBMODELS[modelSelect.value] || [];

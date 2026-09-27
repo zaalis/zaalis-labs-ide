@@ -515,7 +515,7 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
             root: state.projectRoot,
             config: safeConfig,
             language: state.language || 'fr',
-            reasoningLevel: state.reasoningLevel,
+            reasoningLevel: (model.startsWith('hermes:') || model === 'gguf') && state.config.hermesThinking === false ? 0 : state.reasoningLevel,
             images, history
         }),
         signal
@@ -591,7 +591,7 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             rolePrompt: options.rolePrompt || undefined,
             language: state.language || 'fr',
             config: safeConfig,
-            reasoningLevel: state.reasoningLevel,
+            reasoningLevel: (model.startsWith('hermes:') || model === 'gguf') && state.config.hermesThinking === false ? 0 : state.reasoningLevel,
             images,
             history,
             conversationId: options.conversationId,
@@ -2783,7 +2783,7 @@ function updateAttachAvailability() {
     }
 }
 
-const REASONING_SHORT_LABELS = { off: 'OFF', low: 'LOW', medium: 'MED', high: 'HIGH', max: 'MAX' };
+const REASONING_SHORT_LABELS = { off: 'OFF', none: 'OFF', minimal: 'MIN', low: 'LOW', medium: 'MED', high: 'HIGH', xhigh: 'XHIGH', max: 'MAX', ultra: 'ULTRA' };
 
 // Levels come from /api/model-capabilities (cached by workspace.js) on the
 // runtime's 0..4 scale. An empty list means the model reasons natively or not
@@ -2879,6 +2879,9 @@ function renderReasoningSlider(caps) {
     });
 
     sliderBar.classList.toggle('locked', levels.length < 2);
+    sliderBar.title = caps?.provider === 'gguf' || String(caps?.provider || '').startsWith('hermes:')
+        ? 'Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.'
+        : '';
     sliderBar.setAttribute('aria-disabled', String(levels.length < 2));
     if (levels.length > 1) {
         sliderBar.setAttribute('aria-valuemin', String(levels[0].value));

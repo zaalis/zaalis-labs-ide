@@ -92,8 +92,8 @@ impl fmt::Display for ProviderId {
     }
 }
 
-/// How much reasoning to ask for, on the 0..=4 scale the interface slider
-/// already uses. Each provider adapter maps it onto its own vocabulary
+/// How much reasoning to ask for, on the 0..=7 scale used by local models.
+/// Existing cloud providers expose their own shorter lists. Each adapter maps it onto its own vocabulary
 /// (`reasoning_effort`, `thinking.budget_tokens`, `thinkingConfig`…), because no
 /// two providers agree on units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,7 +104,7 @@ impl ReasoningLevel {
     pub const OFF: ReasoningLevel = ReasoningLevel(0);
 
     pub fn clamped(value: u8) -> Self {
-        ReasoningLevel(value.min(4))
+        ReasoningLevel(value.min(7))
     }
 
     pub fn is_off(self) -> bool {
@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn reasoning_level_is_clamped_to_the_slider_range() {
-        assert_eq!(ReasoningLevel::clamped(9), ReasoningLevel(4));
+        assert_eq!(ReasoningLevel::clamped(9), ReasoningLevel(7));
         assert!(ReasoningLevel::default().is_off());
     }
 }

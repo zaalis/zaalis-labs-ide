@@ -26,9 +26,10 @@ test('local capabilities come from runtime metadata, not a model filename', () =
   assert.equal(bindingCapabilities(confirmed).max_context, 8192);
 });
 
-test('a GGUF file stays on the text fallback unless the runtime proves more', () => {
+test('GGUF keeps text tools and exposes the llama.cpp effort request', () => {
   const caps = modelCapabilities('gguf', 'SmolLM2-135M-Instruct-Q4_K_M.gguf', { ready: true, contextWindow: 4096 });
   assert.equal(caps.tools, false);
   assert.equal(caps.vision, false);
-  assert.equal(caps.reasoning.supported, false);
+  assert.equal(caps.reasoning.supported, true);
+  assert.equal(caps.reasoning.levels.length, 8);
 });

@@ -12,8 +12,9 @@ const { createWindowsComputerAction } = require('./windows-computer');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
-const { registerSecret } = require('./secrets-mask');
+const { registerSecret, sanitize } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
+const hermesBridge = require('./hermes-bridge');
 const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
@@ -779,6 +780,32 @@ app.put('/api/keys', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+app.get('/api/hermes/catalog', (req, res) => res.json({ providers: hermesBridge.CATALOG, local: hermesBridge.localStatus() }));
+app.get('/api/hermes/keys', (req, res) => {
+  const keys = {};
+  for (const provider of hermesBridge.CATALOG.filter(p => p.keyEnv)) {
+    const value = decryptSecret(req.user.apiKeys?.[`hermes:${provider.id}`] || '');
+    keys[provider.id] = { set: !!value, last4: value ? value.slice(-4) : '' };
+  }
+  res.json({ keys });
+});
+app.put('/api/hermes/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Modification des clés réservée au desktop.' });
+  const incoming = req.body?.keys || {};
+  const users = loadUsers();
+  const user = users.find(u => u.id === req.user.id);
+  if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+  user.apiKeys ||= {};
+  for (const provider of hermesBridge.CATALOG.filter(p => p.keyEnv)) {
+    if (!(provider.id in incoming)) continue;
+    const value = incoming[provider.id];
+    if (value === null) delete user.apiKeys[`hermes:${provider.id}`];
+    else if (typeof value === 'string' && value.trim()) user.apiKeys[`hermes:${provider.id}`] = encryptSecret(value.trim());
+  }
+  saveUsers(users);
+  res.json({ success: true });
 });
 
 
@@ -1953,6 +1980,16 @@ const MODELS_DIR = path.join(DATA_DIR, 'models');   // installed *.gguf files
 const ENGINE_DIR = path.join(DATA_DIR, 'engine');   // extracted llama.cpp builds
 const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
 const ENGINE_PORT = 8091;
+function ggufModelPath(name) {
+  const value = String(name || '');
+  if (value.startsWith('hermes:')) {
+    const basename = value.slice(7);
+    if (!basename || path.basename(basename) !== basename || !basename.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF Hermes invalide.');
+    return path.join(hermesBridge.hermesHome(), 'models', basename);
+  }
+  if (!value || path.basename(value) !== value || !value.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF invalide.');
+  return path.join(MODELS_DIR, value);
+}
 
 function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
 ensureDir(MODELS_DIR);
@@ -2002,6 +2039,17 @@ function findExeRecursive(dir, name) {
   };
   walk(dir);
   return found;
+}
+
+function hermesLlamaExe(variant) {
+  const root = path.join(hermesBridge.hermesHome(), 'runtimes', 'llamacpp');
+  let versions = [];
+  try { versions = fs.readdirSync(root).filter(name => /^b\d+$/.test(name)).sort((a, b) => Number(b.slice(1)) - Number(a.slice(1))); } catch {}
+  for (const version of versions) {
+    const exe = path.join(root, version, variant, 'llama-server.exe');
+    if (fs.existsSync(exe)) return exe;
+  }
+  return null;
 }
 
 function terminalGgufPullStatus(status) {
@@ -2206,7 +2254,7 @@ let engineOpts = '';
 // `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
 async function ensureEngine(modelFile, preferredVariant, opts) {
   opts = opts || {};
-  const modelPath = path.join(MODELS_DIR, modelFile);
+  const modelPath = ggufModelPath(modelFile);
   if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
   // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
   let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
@@ -2221,7 +2269,10 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
     await stopEngine();
     let variant = desiredVariant;
     let exe;
-    try { exe = await ensureEngineBinary(variant); }
+    try {
+      const hermesRuntime = modelFile.startsWith('hermes:') ? hermesLlamaExe(variant) : null;
+      exe = hermesRuntime || await ensureEngineBinary(variant);
+    }
     catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
     const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
     // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
@@ -2245,6 +2296,10 @@ app.get('/api/gguf-models', (req, res) => {
       let size = 0; try { size = fs.statSync(path.join(MODELS_DIR, f)).size; } catch {}
       return { name: f, size };
     });
+    for (const file of hermesBridge.localStatus().models) {
+      let size = 0; try { size = fs.statSync(ggufModelPath(`hermes:${file}`)).size; } catch {}
+      models.push({ name: `hermes:${file}`, size, source: 'Hermes', removable: false });
+    }
     res.json({ models, variant: detectEngineVariant(), running: !!engineProc, current: engineModelFile });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2263,9 +2318,9 @@ app.get('/api/gguf-engine', (req, res) => {
 // model into memory (LM Studio style). Streams NDJSON: loading -> ready/error.
 app.post('/api/gguf-load', async (req, res) => {
   const b = req.body || {};
-  const name = path.basename(String(b.name || ''));
+  const name = String(b.name || '');
   res.setHeader('Content-Type', 'application/x-ndjson');
-  if (!name.toLowerCase().endsWith('.gguf')) {
+  try { ggufModelPath(name); } catch {
     try { res.write(JSON.stringify({ status: 'error', error: 'Nom de modèle invalide.' }) + '\n'); } catch {}
     return res.end();
   }
@@ -2293,10 +2348,12 @@ app.post('/api/gguf-unload', async (req, res) => {
 // POST /api/gguf-delete { name }
 app.post('/api/gguf-delete', async (req, res) => {
   try {
-    const name = path.basename(String((req.body && req.body.name) || ''));
-    if (!name.toLowerCase().endsWith('.gguf')) return res.status(400).json({ error: 'Nom invalide.' });
+    const name = String((req.body && req.body.name) || '');
+    if (name.startsWith('hermes:')) return res.status(403).json({ error: 'Modèle Hermes externe en lecture seule.' });
+    let target;
+    try { target = ggufModelPath(name); } catch { return res.status(400).json({ error: 'Nom invalide.' }); }
     if (engineModelFile === name) await stopEngine();
-    fs.unlinkSync(path.join(MODELS_DIR, name));
+    fs.unlinkSync(target);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2373,6 +2430,15 @@ app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()
 
 async function capabilitiesForUser(user, provider, model) {
   const id = String(provider || '').trim().toLowerCase();
+  if (id.startsWith('hermes:')) {
+    const source = hermesBridge.selectedProvider(id);
+    return {
+      provider: id, model: String(model || ''), ready: hermesBridge.localStatus().installed,
+      tools: true, vision: false, contextWindow: 0,
+      reasoning: { mode: 'effort', supported: true, levels: hermesBridge.LEVELS.map((name, value) => ({ id: name, label: name === 'none' ? 'Désactivé' : name, value })) },
+      authType: source.authType,
+    };
+  }
   if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
     throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
   }
@@ -2398,7 +2464,7 @@ async function capabilitiesForUser(user, provider, model) {
       }
     } catch {}
   } else if (id === 'gguf') {
-    info.ready = fs.existsSync(path.join(MODELS_DIR, path.basename(name))) && path.basename(name) === name;
+    try { info.ready = fs.existsSync(ggufModelPath(name)); } catch { info.ready = false; }
     info.contextWindow = shared.ggufCtx;
   } else {
     const providerInfo = modelCatalog.PROVIDERS.find((entry) => entry.id === id);
@@ -2411,6 +2477,44 @@ app.get('/api/model-capabilities', async (req, res) => {
   try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
   catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
 });
+
+async function hermesChatHttp(req, res, next) {
+  const body = req.body || {};
+  if (!String(body.model || '').startsWith('hermes:')) return next();
+  const streaming = body.stream === true || /application\/x-ndjson/i.test(String(req.headers.accept || ''));
+  const controller = new AbortController();
+  req.once('aborted', () => controller.abort());
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  const emit = event => {
+    if (!streaming) return;
+    if (!res.headersSent) res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.write(sanitize(JSON.stringify(event)) + '\n');
+  };
+  try {
+    const provider = hermesBridge.selectedProvider(body.model);
+    const encrypted = req.user.apiKeys?.[`hermes:${provider.id}`];
+    const key = encrypted ? decryptSecret(encrypted) : '';
+    if (key) registerSecret(`clé Hermes ${provider.id}`, key);
+    const history = Array.isArray(body.history) ? body.history.slice(-20).map(turn => {
+      const role = turn?.role === 'assistant' ? 'Assistant' : 'Utilisateur';
+      return `${role}: ${String(turn?.content || '').slice(0, 8000)}`;
+    }).join('\n\n') : '';
+    const prompt = [body.systemPrompt ? `Instructions: ${String(body.systemPrompt).slice(0, 12000)}` : '',
+      history ? `Historique de la conversation:\n${history}` : '',
+      `Demande actuelle:\n${String(body.message || '')}`].filter(Boolean).join('\n\n');
+    const result = await hermesBridge.runChat({
+      providerId: provider.id, model: body.submodel, message: prompt,
+      root: resolveBase(body.root || body.projectRoot), key,
+      reasoningLevel: body.reasoningLevel, permissionMode: body.permissionMode || 'read-only',
+      signal: controller.signal, onEvent: emit,
+    });
+    if (streaming) { emit({ type: 'done', result }); return res.end(); }
+    return res.type('json').send(sanitize(JSON.stringify(result)));
+  } catch (error) {
+    if (streaming) { emit({ type: 'error', error: sanitize(error.message) }); return res.end(); }
+    return res.status(error.status || 500).json({ error: sanitize(error.message) });
+  }
+}
 
 app.post('/api/rust-core/cancel', async (req, res) => {
   try {
@@ -2584,7 +2688,7 @@ async function rustAgentHttp(req, res, next) {
   }
 }
 
-app.post('/api/agent-chat', rustAgentHttp);
+app.post('/api/agent-chat', hermesChatHttp, rustAgentHttp);
 app.post('/api/rust-agent-team', rustAgentHttp);
 
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
@@ -2645,7 +2749,7 @@ async function rustChatHttp(req, res, next) {
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   }
 }
-app.post('/api/chat', rustChatHttp);
+app.post('/api/chat', hermesChatHttp, rustChatHttp);
 
 // Image generation is intentionally separate from the conversational core:
 // xAI's image endpoint has no agent/tool loop to migrate.

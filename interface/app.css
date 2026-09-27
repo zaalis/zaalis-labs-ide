@@ -897,6 +897,13 @@ body.theme-light .diff-line.del{color:#b91c1c;}
 
 /* Custom select that opens DOWNWARD (settings live near the top) */
 .custom-select-container.drop-down .custom-select-options{top:34px;bottom:auto;}
+.model-selector-bar{flex-wrap:wrap;align-items:center;}
+.model-selector-bar .custom-select-container{flex:1 1 calc(50% - 6px);min-width:112px;max-width:100%;}
+.model-selector-bar #hermes-model-input{width:160px;min-width:110px;max-width:28vw;height:30px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);color:var(--text-0);padding:0 9px;font-size:11px;}
+.model-selector-bar #hermes-model-input[hidden],.model-selector-bar .hermes-thinking-control[hidden]{display:none;}
+.hermes-thinking-control{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;color:var(--text-1);font-size:11px;}
+.hermes-thinking-control input{accent-color:#7773ff;}
+.hermes-key-fields{max-height:340px;overflow-y:auto;padding-right:5px;}
 .settings-card .custom-select-container{flex:none;width:auto;min-width:180px;}
 .settings-card .custom-select-trigger{height:34px;border-radius:10px;font-size:13px;background:var(--bg-hover);}
 

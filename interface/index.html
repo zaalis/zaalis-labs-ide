@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.15">
-    <link rel="stylesheet" href="app.css?v=1.0.15">
+    <link rel="stylesheet" href="base.css?v=1.0.16">
+    <link rel="stylesheet" href="app.css?v=1.0.16">
     <link rel="stylesheet" href="workspace.css?v=1.1.1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
@@ -324,6 +324,8 @@
                         <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                     </select>
                     <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
+                    <input id="hermes-model-input" type="text" placeholder="ID du modèle Hermes" aria-label="ID du modèle Hermes" hidden>
+                    <label id="hermes-thinking-label" class="hermes-thinking-control" hidden><input id="hermes-thinking-toggle" type="checkbox" checked> Thinking</label>
                 </div>
 
                 <!-- Token / context meter -->
@@ -756,6 +758,10 @@
                         <div class="key-label-row"><label for="key-moonshot">Moonshot AI (Kimi)</label><span class="key-status" id="key-status-moonshot"></span></div>
                         <input type="password" id="key-moonshot" placeholder="...">
                     </div>
+                    <hr class="settings-separator">
+                    <h3>Fournisseurs Hermes Agent</h3>
+                    <p class="form-hint">Clés chiffrées dans l’IDE. Les fournisseurs avec connexion de compte utilisent la session Hermes installée.</p>
+                    <div id="hermes-key-fields" class="hermes-key-fields"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -781,6 +787,9 @@
 
                 <section class="settings-card settings-pane" data-settings-pane="hardware">
                     <h3 data-i18n="settings-hardware-title">Hardware</h3>
+                    <div class="settings-status-row"><span>Hermes Agent</span><strong id="hermes-install-status">Vérification…</strong></div>
+                    <div class="settings-status-row"><span>Runtime llama.cpp Hermes</span><strong id="hermes-runtime-status">—</strong></div>
+                    <div class="settings-status-row"><span>Modèles locaux Hermes</span><strong id="hermes-local-models">—</strong></div>
                     <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option detectee sur cette machine.</p>
                     <div class="settings-status-row">
                         <span data-i18n="settings-detected-label">Detecte</span>
@@ -1292,11 +1301,11 @@
 <script src="catalog.js?v=1.0.15"></script>
 <script src="help.js?v=1.0.15"></script>
 <script src="script/state.js?v=1.0.15" defer></script>
-<script src="script/ui.js?v=1.0.15" defer></script>
+<script src="script/ui.js?v=1.0.16" defer></script>
 <script src="script/commands.js?v=1.0.15" defer></script>
 <script src="script/ai.js?v=1.0.16" defer></script>
 <script src="script/remote.js?v=1.0.15" defer></script>
-<script src="script/main.js?v=1.0.15" defer></script>
+<script src="script/main.js?v=1.0.16" defer></script>
 <script src="script/workspace.js?v=1.1.1" defer></script>
 </body>
 </html>
