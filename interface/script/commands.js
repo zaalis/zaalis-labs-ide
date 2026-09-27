@@ -17,8 +17,8 @@ const SLASH_COMMANDS = [
 
     // tools
     { name: 'grep',     category: 'tools', fr: 'Recherche un motif dans le projet', en: 'Search a pattern across the project', usage: '<motif> [chemin]', args: true },
-    { name: 'search',   category: 'tools', fr: 'Ouvre une recherche dans zaalis browser', en: 'Open a search in zaalis browser', usage: '<requete>', args: true },
-    { name: 'deep-search', category: 'tools', fr: 'Recherche web approfondie avec sources', en: 'Deep web search with sources', usage: '<requete>', args: true },
+    { name: 'search',   category: 'tools', fr: 'Recherche dans le navigateur intégré (--externe : navigateur du PC)', en: 'Search in the integrated browser (--external: PC browser)', usage: '[--externe] <requete>', args: true },
+    { name: 'deep-search', category: 'tools', fr: 'Recherche web approfondie, visible dans le navigateur intégré', en: 'Deep web search, shown in the integrated browser', usage: '<requete>', args: true },
     { name: 'glob',     category: 'tools', fr: 'Trouve des fichiers par motif',     en: 'Find files by glob pattern',        usage: '<**/*.js>', args: true },
     { name: 'diff',     category: 'tools', fr: 'Affiche le diff Git (status + diff)', en: 'Show the Git diff (status + diff)',  usage: '[staged|unstaged]' },
     { name: 'run',      category: 'tools', fr: 'Exécute une commande (selon permissions)', en: 'Run a command (respects permissions)', usage: '<commande>', args: true },
@@ -269,7 +269,7 @@ async function _aiReadOnly(systemPrompt, userPrompt, label) {
     const lang = _lang();
     const model = modelSelect.value, submodel = submodelSelect.value;
     const out = $('#chat-messages');
-    const lbl = label || (modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0]);
+    const lbl = label || providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     const body = addTypingMsg(out, lbl);
     const controller = new AbortController();
     chatAbort = controller;
@@ -392,27 +392,23 @@ SLASH_HANDLERS.grep = async (arg, out, lang) => {
 };
 
 SLASH_HANDLERS.search = async (arg, out, lang) => {
-    const query = (arg || '').trim();
-    if (!query) { _sysMsg(out, lang === 'en' ? 'Usage: /search <query>' : 'Usage : /search <requete>'); return; }
-    // zaalis browser est lance automatiquement cote serveur s'il n'est pas deja
-    // ouvert. En cas de mode local securise ou d'echec de lancement, le
-    // serveur renvoie un code distinct (offline_mode / browser_unavailable)
-    // qu'on affiche tel quel plutot qu'une erreur generique.
-    const r = await fetch(`/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab`);
+    // Par défaut la recherche s'affiche dans le navigateur intégré (panneau
+    // globe). Le navigateur du PC n'est utilisé que sur demande explicite.
+    let query = (arg || '').trim();
+    const external = /^(--externe|--external|--ext)(\s|$)/i.test(query);
+    if (external) query = query.replace(/^(--externe|--external|--ext)(\s|$)/i, '').trim();
+    if (!query) { _sysMsg(out, lang === 'en' ? 'Usage: /search [--external] <query>' : 'Usage : /search [--externe] <requete>'); return; }
+    if (!external) window.ZaalisWorkspace?.setPanel?.('browser');
+    const r = await fetch(`/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab${external ? '&external=1' : ''}`);
     const data = await r.json().catch(() => ({}));
-    if (data.error === 'offline_mode') {
-        _sysMsg(out, data.message || (lang === 'en' ? 'Secure local mode is on: search is unavailable.' : 'Mode local securise actif : recherche impossible.'));
-        return;
-    }
     if (data.error === 'browser_unavailable') {
-        _sysMsg(out, lang === 'en' ? 'zaalis browser could not be found or started.' : 'zaalis browser est introuvable ou n a pas pu demarrer.');
+        _sysMsg(out, data.message || (lang === 'en' ? 'The integrated browser is only available in the zaalis IDE app.' : 'Le navigateur intégré est disponible dans l’application zaalis IDE.'));
         return;
     }
     if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
     const rows = _kvRows([
         [lang === 'en' ? 'Query' : 'Recherche', query],
-        [lang === 'en' ? 'Target' : 'Cible', 'zaalis browser'],
-        [lang === 'en' ? 'Mode' : 'Mode', data.background ? 'arriere-plan' : 'vue normale']
+        [lang === 'en' ? 'Target' : 'Cible', external ? (lang === 'en' ? 'PC browser' : 'navigateur du PC') : (lang === 'en' ? 'integrated browser' : 'navigateur intégré')],
     ]);
     _sysHTML(out, _toolCard(lang === 'en' ? 'Search opened' : 'Recherche ouverte', 'browser', rows));
 };
@@ -446,7 +442,7 @@ SLASH_HANDLERS['deep-search'] = async (arg, out, lang) => {
             return;
         }
         if (data.error === 'browser_unavailable') {
-            status.textContent = lang === 'en' ? 'zaalis browser could not be found or started.' : 'zaalis browser est introuvable ou n a pas pu demarrer.';
+            status.textContent = data.message || (lang === 'en' ? 'The integrated browser is only available in the zaalis IDE app.' : 'Le navigateur intégré est disponible dans l’application zaalis IDE.');
             return;
         }
         if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));

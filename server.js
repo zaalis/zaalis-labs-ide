@@ -12,9 +12,10 @@ const { createWindowsComputerAction } = require('./windows-computer');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
-const { registerSecret, sanitize } = require('./secrets-mask');
+const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
-const hermesBridge = require('./hermes-bridge');
+const compatProviders = require('./compat-providers');
+const { BrowserHost } = require('./zaalis-browser/host');
 const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
@@ -587,6 +588,28 @@ app.post('/api/internal/rust-computer', async (req, res) => {
   }
 });
 
+// Private loopback bridge used only by the Rust `browser` tool: the agent's
+// web actions happen in the integrated browser, visible to the user.
+app.post('/api/internal/rust-browser', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BROWSER_TOOL_TOKEN)) return res.status(401).json({ error: 'Jeton browser invalide.' });
+  const body = req.body || {};
+  const action = String(body.action || '');
+  try {
+    if (action === 'open_external') {
+      const ok = openInExternalBrowser(body.url);
+      return res.json({ summary: ok ? 'Ouvert dans le navigateur externe' : 'URL refusée', result: ok ? `Ouvert dans le navigateur par défaut : ${body.url}` : 'Seules les URL http(s) sont acceptées.' });
+    }
+    if (!browserHost.available()) return res.status(503).json({ error: 'Navigateur intégré indisponible (application zaalis IDE requise).' });
+    const args = { ...body };
+    delete args.action;
+    const result = await browserHost.agentTool(action, args);
+    return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 // Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
 // est un processus séparé, sans cookie de session : il s'authentifie avec le
 // secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
@@ -782,30 +805,103 @@ app.put('/api/keys', (req, res) => {
   }
 });
 
-app.get('/api/hermes/catalog', (req, res) => res.json({ providers: hermesBridge.CATALOG, local: hermesBridge.localStatus() }));
-app.get('/api/hermes/keys', (req, res) => {
-  const keys = {};
-  for (const provider of hermesBridge.CATALOG.filter(p => p.keyEnv)) {
-    const value = decryptSecret(req.user.apiKeys?.[`hermes:${provider.id}`] || '');
-    keys[provider.id] = { set: !!value, last4: value ? value.slice(-4) : '' };
-  }
-  res.json({ keys });
-});
-app.put('/api/hermes/keys', (req, res) => {
+// OpenAI-compatible providers: keys live in the same encrypted vault as the
+// built-in ones (`compat:<id>`), URLs of self-hosted entries in compatUrls.
+function compatBaseUrl(user, provider) {
+  const saved = user && user.compatUrls && user.compatUrls[provider.id];
+  return provider.editableUrl && saved ? saved : provider.baseUrl;
+}
+function compatKey(user, provider) {
+  const enc = user && user.apiKeys && user.apiKeys[compatProviders.vaultName(provider.id)];
+  const value = enc ? decryptSecret(enc) : '';
+  if (value) registerSecret(`clé ${provider.id}`, value);
+  return value;
+}
+function compatReady(user, provider) {
+  if (!compatBaseUrl(user, provider)) return false;
+  return provider.keyless ? true : !!compatKey(user, provider);
+}
+function compatStatus(user) {
+  return compatProviders.PROVIDERS.map((provider) => {
+    const key = compatKey(user, provider);
+    return {
+      id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
+      defaultUrl: provider.baseUrl, models: provider.models,
+      keyless: !!provider.keyless, editableUrl: !!provider.editableUrl, local: !!provider.local,
+      key: { set: !!key, last4: key ? key.slice(-4) : '' },
+      // Keyless local servers only count once the user saved them explicitly.
+      configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
+    };
+  });
+}
+// Every configured endpoint goes to the daemon at once, so switching provider
+// does not restart it. The keys travel as separate environment variables.
+function compatEndpointsFor(user) {
+  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => ({
+    id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '',
+  }));
+}
+
+app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
+
+// PUT /api/compat/keys { keys: { deepseek: 'sk-…' | null }, baseUrls: { lmstudio: 'http://…' | null } }
+app.put('/api/compat/keys', (req, res) => {
   if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Modification des clés réservée au desktop.' });
-  const incoming = req.body?.keys || {};
-  const users = loadUsers();
-  const user = users.find(u => u.id === req.user.id);
-  if (!user) return res.status(401).json({ error: 'Authentification requise.' });
-  user.apiKeys ||= {};
-  for (const provider of hermesBridge.CATALOG.filter(p => p.keyEnv)) {
-    if (!(provider.id in incoming)) continue;
-    const value = incoming[provider.id];
-    if (value === null) delete user.apiKeys[`hermes:${provider.id}`];
-    else if (typeof value === 'string' && value.trim()) user.apiKeys[`hermes:${provider.id}`] = encryptSecret(value.trim());
+  try {
+    const keys = (req.body && req.body.keys) || {};
+    const urls = (req.body && req.body.baseUrls) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    user.compatUrls = user.compatUrls || {};
+    for (const provider of compatProviders.PROVIDERS) {
+      if (provider.id in keys) {
+        const value = keys[provider.id];
+        if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
+        else if (typeof value === 'string' && value.trim()) user.apiKeys[compatProviders.vaultName(provider.id)] = encryptSecret(value.trim());
+      }
+      if (provider.editableUrl && provider.id in urls) {
+        if (urls[provider.id] === null || urls[provider.id] === '') { delete user.compatUrls[provider.id]; continue; }
+        const url = compatProviders.normalizeBaseUrl(urls[provider.id]);
+        if (!url) return res.status(400).json({ error: `URL invalide pour ${provider.label}.` });
+        user.compatUrls[provider.id] = url;
+      }
+    }
+    saveUsers(users);
+    res.json({ providers: compatStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  saveUsers(users);
-  res.json({ success: true });
+});
+
+// GET /api/compat/models?provider=deepseek -> live /models of that provider,
+// fetched from this PC with the user's own key.
+const compatModelCache = new Map();
+app.get('/api/compat/models', async (req, res) => {
+  const provider = compatProviders.get(req.query.provider);
+  if (!provider) return res.status(404).json({ error: 'Fournisseur inconnu.' });
+  const baseUrl = compatBaseUrl(req.user, provider);
+  const key = compatKey(req.user, provider);
+  const cacheKey = crypto.createHash('sha256').update(`${req.user.id}|${provider.id}|${baseUrl}|${key}`).digest('hex');
+  const cached = compatModelCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  if (!baseUrl || (!provider.keyless && !key)) return res.json({ models: provider.models, live: false });
+  try {
+    const answer = await fetch(`${baseUrl}/models`, {
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!answer.ok) return res.json({ models: provider.models, live: false, error: `HTTP ${answer.status}` });
+    const data = await answer.json();
+    const list = Array.isArray(data && data.data) ? data.data : Array.isArray(data && data.models) ? data.models : [];
+    const live = [...new Set(list.map((item) => (typeof item === 'string' ? item : item && (item.id || item.name))).filter(Boolean).map(String))];
+    const models = [...provider.models.filter((id) => live.includes(id)), ...live.filter((id) => !provider.models.includes(id)).sort()];
+    compatModelCache.set(cacheKey, { at: Date.now(), models });
+    res.json({ models: models.length ? models : provider.models, live: models.length > 0 });
+  } catch (error) {
+    res.json({ models: provider.models, live: false, error: error.name === 'TimeoutError' ? 'délai dépassé' : 'injoignable' });
+  }
 });
 
 
@@ -1112,63 +1208,60 @@ app.post('/api/exec', (req, res) => {
 // These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
 // are strictly read-only, bounded in output, and path-guarded to the project.
 
-// zaalis browser est un projet frere (meme auteur), installe par son propre
-// installateur Inno Setup a un chemin fixe et non configurable (DisableDirPage
-// dans installer.iss) : on peut donc le retrouver sans dependre d'un
-// raccourci que l'utilisateur pourrait deplacer ou renommer.
-const ZAALIS_BROWSER_EXE = process.env.LOCALAPPDATA
-  ? path.join(process.env.LOCALAPPDATA, 'Programs', 'zaalis browser', 'zaalis-browser.exe')
-  : null;
-const ZAALIS_BROWSER_PING = 'http://127.0.0.1:8715/zaalis/ping';
+// Navigateur intégré : zaalis Browser (vendu dans zaalis-browser/) s'exécute
+// dans ce serveur et affiche ses vues WebView2 dans la fenêtre native de
+// l'IDE (bouton globe). Aucune installation séparée n'est nécessaire. Un
+// navigateur externe (celui par défaut du PC) n'est utilisé que sur demande
+// explicite (?external=1, /search --externe, outil browser open_external).
 const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+const browserHost = new BrowserHost({
+  dataDir: process.env.ZAALIS_BROWSER_DATA_DIR ||
+    path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'zaalis', 'Browser'),
+  secretFile: BROWSER_SECRET_FILE,
+  idePort: PORT,
+  log: (line) => console.error(line),
+});
+browserHost.connect();
+// Jeton stable du processus pour l'outil Rust `browser` : il ne change pas
+// entre deux tours, donc le démon n'est pas relancé à chaque requête.
+const BROWSER_TOOL_TOKEN = crypto.randomBytes(32).toString('base64url');
 
-async function pingZaalisBrowser(timeoutMs) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+function integratedBrowserUnavailable() {
+  return {
+    ok: false, status: 503,
+    body: {
+      error: 'browser_unavailable',
+      message: 'Le navigateur intégré est disponible dans l\'application zaalis IDE (fenêtre native).',
+    },
+  };
+}
+
+function browserOffline() {
+  const core = browserHost.core;
+  return !!(core && core.settings && core.settings.offline);
+}
+
+async function openInIntegratedBrowser(targetUrl, { background = false } = {}) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
+  if (!browserHost.available()) return integratedBrowserUnavailable();
   try {
-    const r = await fetch(ZAALIS_BROWSER_PING, { signal: ctrl.signal });
-    return r.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.open(url, { background });
+    return { ok: true, status: 200, body: { ok: true, target: 'integrated', ...opened } };
+  } catch (error) {
+    return { ok: false, status: 502, body: { error: error.message || 'navigateur intégré indisponible' } };
   }
 }
 
-// S'assure que zaalis browser tourne, en le lancant si besoin (chemin fixe
-// ci-dessus). L'API locale du navigateur demarre des l'ouverture du process,
-// avant meme que la fenetre/WebView2 soit prete : on patiente donc un peu
-// apres le premier ping reussi pour laisser le premier onglet s'initialiser
-// (sinon une recherche envoyee trop tot est silencieusement ignoree).
-let launchingBrowser = null;
-async function ensureZaalisBrowserRunning() {
-  if (await pingZaalisBrowser(800)) return true;
-  if (launchingBrowser) return launchingBrowser;
-
-  launchingBrowser = (async () => {
-    if (!ZAALIS_BROWSER_EXE || !fs.existsSync(ZAALIS_BROWSER_EXE)) return false;
-    try {
-      const child = spawn(ZAALIS_BROWSER_EXE, [], { detached: true, stdio: 'ignore' });
-      child.unref();
-    } catch {
-      return false;
-    }
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      if (await pingZaalisBrowser(800)) {
-        await new Promise((r) => setTimeout(r, 700)); // laisse le premier onglet s'initialiser
-        return true;
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    return false;
-  })();
-
+// Navigateur externe = celui par défaut de Windows, seulement sur demande.
+function openInExternalBrowser(targetUrl) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return false;
   try {
-    return await launchingBrowser;
-  } finally {
-    launchingBrowser = null;
-  }
+    const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return true;
+  } catch { return false; }
 }
 
 function decodeHtmlEntities(value) {
@@ -1363,52 +1456,6 @@ async function fetchPageExcerpt(url) {
   }
 }
 
-async function openInZaalisBrowser(targetUrl, { background = false, timeoutMs = 4000 } = {}) {
-  const url = safeHttpUrl(targetUrl);
-  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return {
-      ok: false,
-      status: 503,
-      body: {
-        error: 'browser_unavailable',
-        message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-      },
-    };
-  }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const bg = background ? '&background=1' : '';
-    const r = await fetch(`http://127.0.0.1:8715/zaalis/newtab?url=${encodeURIComponent(url)}${bg}`, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          error: 'offline_mode',
-          message: body.message || 'Mode local securise actif : recherche impossible.',
-        },
-      };
-    }
-    if (!r.ok || body.error) return { ok: false, status: r.status || 502, body: { error: body.error || `browser HTTP ${r.status}` } };
-    return { ok: true, status: 200, body };
-  } catch (e) {
-    return {
-      ok: false,
-      status: 502,
-      body: {
-        error: e && e.name === 'AbortError' ? 'zaalis browser ne repond pas' : 'zaalis browser est indisponible',
-        detail: e && e.message,
-      },
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function deepSearchQueries(query) {
   const base = String(query || '').replace(/\s+/g, ' ').trim();
   const out = [base, `${base} official source`, `${base} documentation`, `${base} analysis`];
@@ -1436,53 +1483,39 @@ app.get('/api/favicon', async (req, res) => {
 app.get('/api/browser-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   const mode = String(req.query.mode || 'newtab').toLowerCase();
-  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const visibleParam = background ? '&background=1' : '';
-  const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
-  const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
-
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return res.status(503).json({
-      error: 'browser_unavailable',
-      message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-    });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, query: q, target: 'external', url });
   }
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4000);
+  if (!browserHost.available()) {
+    const unavailable = integratedBrowserUnavailable();
+    return res.status(unavailable.status).json(unavailable.body);
+  }
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return res.status(409).json({
-        error: 'offline_mode',
-        message: body.message || 'Mode local securise actif : recherche impossible.',
-      });
-    }
-    if (!r.ok || body.error) {
-      return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
-    }
-    res.json({ ok: true, query: q, mode, background, browser: body });
-  } catch (e) {
-    const msg = e && e.name === 'AbortError'
-      ? 'zaalis browser ne repond pas'
-      : 'zaalis browser est indisponible';
-    res.status(502).json({ error: msg, detail: e && e.message });
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.search(q, { newTab: mode !== 'active' });
+    res.json({ ok: true, query: q, mode, target: 'integrated', url: opened.url });
+  } catch (error) {
+    res.status(502).json({ error: error.message || 'navigateur intégré indisponible' });
   }
 });
 
 app.get('/api/browser-open', async (req, res) => {
   const url = safeHttpUrl(req.query.url);
   if (!url) return res.status(400).json({ error: 'url is required' });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, url, target: 'external' });
+  }
   const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const r = await openInZaalisBrowser(url, { background });
+  const r = await openInIntegratedBrowser(url, { background });
   if (!r.ok) return res.status(r.status).json(r.body);
-  res.json({ ok: true, url, browser: r.body });
+  res.json({ ok: true, url, target: 'integrated', browser: r.body });
+});
+
+app.get('/api/browser/status', (req, res) => {
+  res.json({ available: browserHost.available(), started: !!browserHost.core, tabs: browserHost.tabs() });
 });
 
 app.post('/api/deep-search', async (req, res) => {
@@ -1493,10 +1526,15 @@ app.post('/api/deep-search', async (req, res) => {
   const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
   const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
 
-  // First open the search page in zaalis browser. If secure local mode blocks it,
-  // do not perform server-side web requests behind the user's back.
-  const firstOpen = await openInZaalisBrowser(searchPageUrl(query), { background: false, timeoutMs: 5000 });
-  if (!firstOpen.ok) return res.status(firstOpen.status).json(firstOpen.body);
+  // The search opens first in the integrated browser, so the user sees it
+  // happen. If its secure local mode is on, no web request is made at all.
+  if (browserOffline()) {
+    return res.status(409).json({ error: 'offline_mode', message: 'Mode local sécurisé actif : recherche impossible.' });
+  }
+  let searchTab = null;
+  if (browserHost.available()) {
+    try { searchTab = await browserHost.search(query, { newTab: true }); } catch {}
+  }
 
   const searchedQueries = deepSearchQueries(query);
   const all = [];
@@ -1523,10 +1561,12 @@ app.post('/api/deep-search', async (req, res) => {
     result.quote = usefulQuote(result.excerpt || result.description || result.snippet);
   }
 
-  const opened = [{ url: searchPageUrl(query), kind: 'search', foreground: true }];
-  for (const result of all.slice(0, openTabs)) {
-    const openedTab = await openInZaalisBrowser(result.url, { background: true, timeoutMs: 4000 });
-    if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false });
+  const opened = searchTab ? [{ url: searchTab.url, kind: 'search', foreground: true, target: 'integrated' }] : [];
+  if (searchTab) {
+    for (const result of all.slice(0, openTabs)) {
+      const openedTab = await openInIntegratedBrowser(result.url, { background: true });
+      if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false, target: 'integrated' });
+    }
   }
 
   res.json({ ok: true, query, searchedQueries, results: all, opened });
@@ -1982,11 +2022,6 @@ const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
 const ENGINE_PORT = 8091;
 function ggufModelPath(name) {
   const value = String(name || '');
-  if (value.startsWith('hermes:')) {
-    const basename = value.slice(7);
-    if (!basename || path.basename(basename) !== basename || !basename.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF Hermes invalide.');
-    return path.join(hermesBridge.hermesHome(), 'models', basename);
-  }
   if (!value || path.basename(value) !== value || !value.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF invalide.');
   return path.join(MODELS_DIR, value);
 }
@@ -2039,17 +2074,6 @@ function findExeRecursive(dir, name) {
   };
   walk(dir);
   return found;
-}
-
-function hermesLlamaExe(variant) {
-  const root = path.join(hermesBridge.hermesHome(), 'runtimes', 'llamacpp');
-  let versions = [];
-  try { versions = fs.readdirSync(root).filter(name => /^b\d+$/.test(name)).sort((a, b) => Number(b.slice(1)) - Number(a.slice(1))); } catch {}
-  for (const version of versions) {
-    const exe = path.join(root, version, variant, 'llama-server.exe');
-    if (fs.existsSync(exe)) return exe;
-  }
-  return null;
 }
 
 function terminalGgufPullStatus(status) {
@@ -2269,10 +2293,7 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
     await stopEngine();
     let variant = desiredVariant;
     let exe;
-    try {
-      const hermesRuntime = modelFile.startsWith('hermes:') ? hermesLlamaExe(variant) : null;
-      exe = hermesRuntime || await ensureEngineBinary(variant);
-    }
+    try { exe = await ensureEngineBinary(variant); }
     catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
     const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
     // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
@@ -2296,10 +2317,6 @@ app.get('/api/gguf-models', (req, res) => {
       let size = 0; try { size = fs.statSync(path.join(MODELS_DIR, f)).size; } catch {}
       return { name: f, size };
     });
-    for (const file of hermesBridge.localStatus().models) {
-      let size = 0; try { size = fs.statSync(ggufModelPath(`hermes:${file}`)).size; } catch {}
-      models.push({ name: `hermes:${file}`, size, source: 'Hermes', removable: false });
-    }
     res.json({ models, variant: detectEngineVariant(), running: !!engineProc, current: engineModelFile });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2349,7 +2366,6 @@ app.post('/api/gguf-unload', async (req, res) => {
 app.post('/api/gguf-delete', async (req, res) => {
   try {
     const name = String((req.body && req.body.name) || '');
-    if (name.startsWith('hermes:')) return res.status(403).json({ error: 'Modèle Hermes externe en lecture seule.' });
     let target;
     try { target = ggufModelPath(name); } catch { return res.status(400).json({ error: 'Nom invalide.' }); }
     if (engineModelFile === name) await stopEngine();
@@ -2430,14 +2446,10 @@ app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()
 
 async function capabilitiesForUser(user, provider, model) {
   const id = String(provider || '').trim().toLowerCase();
-  if (id.startsWith('hermes:')) {
-    const source = hermesBridge.selectedProvider(id);
-    return {
-      provider: id, model: String(model || ''), ready: hermesBridge.localStatus().installed,
-      tools: true, vision: false, contextWindow: 0,
-      reasoning: { mode: 'effort', supported: true, levels: hermesBridge.LEVELS.map((name, value) => ({ id: name, label: name === 'none' ? 'Désactivé' : name, value })) },
-      authType: source.authType,
-    };
+  if (compatProviders.isCompat(id)) {
+    const provider = compatProviders.get(id);
+    if (!provider) throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+    return compatProviders.capabilities(id, model, compatReady(user, provider));
   }
   if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
     throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
@@ -2477,44 +2489,6 @@ app.get('/api/model-capabilities', async (req, res) => {
   try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
   catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
 });
-
-async function hermesChatHttp(req, res, next) {
-  const body = req.body || {};
-  if (!String(body.model || '').startsWith('hermes:')) return next();
-  const streaming = body.stream === true || /application\/x-ndjson/i.test(String(req.headers.accept || ''));
-  const controller = new AbortController();
-  req.once('aborted', () => controller.abort());
-  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
-  const emit = event => {
-    if (!streaming) return;
-    if (!res.headersSent) res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-    res.write(sanitize(JSON.stringify(event)) + '\n');
-  };
-  try {
-    const provider = hermesBridge.selectedProvider(body.model);
-    const encrypted = req.user.apiKeys?.[`hermes:${provider.id}`];
-    const key = encrypted ? decryptSecret(encrypted) : '';
-    if (key) registerSecret(`clé Hermes ${provider.id}`, key);
-    const history = Array.isArray(body.history) ? body.history.slice(-20).map(turn => {
-      const role = turn?.role === 'assistant' ? 'Assistant' : 'Utilisateur';
-      return `${role}: ${String(turn?.content || '').slice(0, 8000)}`;
-    }).join('\n\n') : '';
-    const prompt = [body.systemPrompt ? `Instructions: ${String(body.systemPrompt).slice(0, 12000)}` : '',
-      history ? `Historique de la conversation:\n${history}` : '',
-      `Demande actuelle:\n${String(body.message || '')}`].filter(Boolean).join('\n\n');
-    const result = await hermesBridge.runChat({
-      providerId: provider.id, model: body.submodel, message: prompt,
-      root: resolveBase(body.root || body.projectRoot), key,
-      reasoningLevel: body.reasoningLevel, permissionMode: body.permissionMode || 'read-only',
-      signal: controller.signal, onEvent: emit,
-    });
-    if (streaming) { emit({ type: 'done', result }); return res.end(); }
-    return res.type('json').send(sanitize(JSON.stringify(result)));
-  } catch (error) {
-    if (streaming) { emit({ type: 'error', error: sanitize(error.message) }); return res.end(); }
-    return res.status(error.status || 500).json({ error: sanitize(error.message) });
-  }
-}
 
 app.post('/api/rust-core/cancel', async (req, res) => {
   try {
@@ -2579,6 +2553,34 @@ app.post('/api/rust-core/decision', async (req, res) => {
   }
 });
 
+// The agent's browser tool exists only where the integrated browser does: in
+// the desktop app, never for the phone remote.
+function browserToolConfig(req) {
+  if (req.isMobile || req.isTunnel || !browserHost.available()) return {};
+  return { browserEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-browser`, browserToken: BROWSER_TOOL_TOKEN };
+}
+
+// Web searches made by the agent's server-side tools are replayed in the
+// integrated browser so the user sees them happen (desktop only).
+function mirrorWebTools(req, emit) {
+  if (req.isMobile || req.isTunnel) return emit;
+  let opened = 0;
+  return (event) => {
+    try {
+      if (event && event.type === 'tool_started' && browserHost.available()) {
+        const input = event.input || {};
+        if ((event.tool === 'web_search' || event.tool === 'deep_search') && input.query) {
+          browserHost.search(String(input.query), { newTab: true }).catch(() => {});
+        } else if (event.tool === 'web_fetch' && input.url && opened < 6) {
+          opened++;
+          openInIntegratedBrowser(String(input.url), { background: true }).catch(() => {});
+        }
+      }
+    } catch {}
+    return emit(event);
+  };
+}
+
 async function rustAgentHttp(req, res, next) {
   const status = rustAgentBridge.status();
   if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
@@ -2637,15 +2639,17 @@ async function rustAgentHttp(req, res, next) {
       ...agent,
       model: {
         ...agent.model,
+        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
         capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
       },
     }))) : null;
+    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root || body.projectRoot),
-      model,
-      submodel: body.submodel,
+      model: lead.provider,
+      submodel: lead.model,
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
       systemPrompt: body.systemPrompt,
@@ -2661,13 +2665,15 @@ async function rustAgentHttp(req, res, next) {
       runtimeConfig: {
         ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
         ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
         } : {}),
       },
       signal: controller.signal,
-    }, emit);
+    }, mirrorWebTools(req, emit));
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();
@@ -2688,7 +2694,7 @@ async function rustAgentHttp(req, res, next) {
   }
 }
 
-app.post('/api/agent-chat', hermesChatHttp, rustAgentHttp);
+app.post('/api/agent-chat', rustAgentHttp);
 app.post('/api/rust-agent-team', rustAgentHttp);
 
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
@@ -2709,12 +2715,13 @@ async function rustChatHttp(req, res, next) {
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
     const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
+    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root),
-      model: String(body.model),
-      submodel: body.submodel,
+      model: target.provider,
+      submodel: target.model,
       modelCapabilities: bindingCapabilities(modelFacts),
       sessionId: body.sessionId,
       conversationId: body.conversationId,
@@ -2731,6 +2738,8 @@ async function rustChatHttp(req, res, next) {
           ? sharedConfigForUser(req.user).ollamaUrl
           : body.config && body.config.ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
       },
       signal: (() => {
         const controller = new AbortController();
@@ -2738,7 +2747,7 @@ async function rustChatHttp(req, res, next) {
         res.once('close', () => { if (!res.writableEnded) controller.abort(); });
         return controller.signal;
       })(),
-    }, () => {});
+    }, mirrorWebTools(req, () => {}));
     return res.json({
       response: result.response || '',
       thinking: result.thinking || undefined,
@@ -2749,7 +2758,7 @@ async function rustChatHttp(req, res, next) {
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   }
 }
-app.post('/api/chat', hermesChatHttp, rustChatHttp);
+app.post('/api/chat', rustChatHttp);
 
 // Image generation is intentionally separate from the conversational core:
 // xAI's image endpoint has no agent/tool loop to migrate.

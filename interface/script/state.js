@@ -91,6 +91,14 @@ const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google',
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
 function modelIdentity(model, submodel, lang) {
+    if (String(model || '').startsWith('compat:')) {
+        // Gateways (OpenRouter, NIM…) host models from many makers: name the
+        // model and the provider it goes through, nothing more.
+        const via = (window.compatProviders || []).find(p => `compat:${p.id}` === model)?.label || model.slice(7);
+        return lang === 'en'
+            ? `\n\n[IDENTITY] You are the model "${submodel}", reached through ${via} inside zaalis IDE. If the user asks which model you are, answer honestly: "${submodel}". Never claim to be a different model.`
+            : `\n\n[IDENTITÉ] Tu es le modèle « ${submodel} », utilisé via ${via} dans l'IDE zaalis. Si l'utilisateur demande quel modèle tu es, réponds honnêtement : « ${submodel} ». Ne prétends jamais être un autre modèle.`;
+    }
     const isLocal = model === 'local' || model === 'gguf';
     const label = isLocal
         ? (typeof prettyModelLabel === 'function' ? prettyModelLabel(submodel) : submodel) || submodel

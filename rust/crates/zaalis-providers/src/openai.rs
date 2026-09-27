@@ -133,8 +133,9 @@ impl OpenAiConfig {
                     ..Capabilities::default()
                 },
             ),
-            // These two have their own dialects.
-            ProviderId::Claude | ProviderId::Gemini => return None,
+            // These two have their own dialects, and a compatible endpoint has
+            // no fixed URL: see [`OpenAiConfig::compat`].
+            ProviderId::Claude | ProviderId::Gemini | ProviderId::Compat => return None,
         };
 
         Some(Self {
@@ -148,6 +149,28 @@ impl OpenAiConfig {
         })
     }
 
+    /// A user-configured OpenAI-compatible endpoint. The key is optional because
+    /// a self-hosted server (LM Studio, vLLM…) often runs without one.
+    pub fn compat(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self {
+            provider: ProviderId::Compat,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            api_key: api_key.filter(|key| !key.trim().is_empty()),
+            auth: AuthScheme::Bearer,
+            default_model: String::new(),
+            // The per-model facts sent by the server decide; nothing is sent
+            // by default because unknown fields make some gateways fail.
+            reasoning: ReasoningStyle::None,
+            capabilities: Capabilities {
+                reasoning: true,
+                streamed_reasoning: true,
+                max_context: 128_000,
+                max_concurrency: 4,
+                ..Capabilities::default()
+            },
+        }
+    }
+
     /// Point at a different endpoint (self-hosted gateway, proxy, custom port).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
@@ -158,9 +181,10 @@ impl OpenAiConfig {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// Whether a local engine needs no key at all.
+    /// Whether a local engine needs no key at all. A compatible endpoint is
+    /// registered with its key when it needs one, so the server decides.
     pub fn needs_key(&self) -> bool {
-        !self.provider.is_local()
+        !self.provider.is_local() && self.provider != ProviderId::Compat
     }
 }
 
@@ -353,7 +377,7 @@ fn gguf_effort_label(level: ReasoningLevel) -> Option<&'static str> {
         4 => Some("high"),
         5 => Some("xhigh"),
         // llama.cpp/OpenAI-compatible transports do not define a distinct
-        // ultra wire value; match Hermes by clamping it to max.
+        // ultra wire value, so it is clamped to max.
         _ => Some("max"),
     }
 }

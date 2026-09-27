@@ -418,8 +418,9 @@ document.addEventListener('click', e => {
     const img = e.target.closest && e.target.closest('.generated-image');
     if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
 });
-// Web links inside AI/system answers open in zaalis browser, so source links
-// from /deep-search stay in the same browsing workspace.
+// Web links inside AI/system answers open in the integrated browser (globe
+// panel), so /deep-search sources stay in the same browsing workspace. Outside
+// the native app there is no integrated browser: the link opens normally.
 document.addEventListener('click', async e => {
     const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
     if (!a || !a.closest('#chat-messages, #agents-log')) return;
@@ -515,7 +516,7 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
             root: state.projectRoot,
             config: safeConfig,
             language: state.language || 'fr',
-            reasoningLevel: (model.startsWith('hermes:') || model === 'gguf') && state.config.hermesThinking === false ? 0 : state.reasoningLevel,
+            reasoningLevel: state.reasoningLevel,
             images, history
         }),
         signal
@@ -591,7 +592,7 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             rolePrompt: options.rolePrompt || undefined,
             language: state.language || 'fr',
             config: safeConfig,
-            reasoningLevel: (model.startsWith('hermes:') || model === 'gguf') && state.config.hermesThinking === false ? 0 : state.reasoningLevel,
+            reasoningLevel: state.reasoningLevel,
             images,
             history,
             conversationId: options.conversationId,
@@ -883,7 +884,7 @@ async function sendChat(input) {
     const { aiText = '', names = [], images = [] } = draft;
 
     const isLocal = model === 'local' || model === 'gguf';
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     let completed = false;
     let aborted = false;
 
@@ -1618,7 +1619,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
     if (!state.projectRoot) return;
     const out = $(opts.container || '#chat-messages');
     const retryHistory = Array.isArray(opts.history) ? opts.history : state.chatHistory.slice();
-    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex]?.text || model).split(' ')[0];
+    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex] ? providerShortLabel(modelSelect.options[modelSelect.selectedIndex]) : model);
     const persistToChat = opts.persistToChat !== false;
 
     // Re-send the files involved so the model can copy the exact text.
@@ -1704,7 +1705,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         ? 'Here is the content you requested. Analyze it and answer the user now (do not request these same files again).\n\n'
         : 'Voici le contenu que tu as demandé. Analyse-le et réponds maintenant à l\'utilisateur (ne redemande pas ces mêmes fichiers).\n\n') + ctx;
 
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     const body = addTypingMsg(out, modelLabel);
     const controller = new AbortController();
     chatAbort = controller;
@@ -2742,7 +2743,10 @@ function isVisionCompatible(model, submodel) {
         case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
-        default: return false;
+        default:
+            // OpenAI-compatible gateways: same rule as compat-providers.js.
+            return String(model || '').startsWith('compat:')
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }
 }
 function chatImagesAllowed() {
@@ -2879,7 +2883,7 @@ function renderReasoningSlider(caps) {
     });
 
     sliderBar.classList.toggle('locked', levels.length < 2);
-    sliderBar.title = caps?.provider === 'gguf' || String(caps?.provider || '').startsWith('hermes:')
+    sliderBar.title = caps?.provider === 'gguf'
         ? 'Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.'
         : '';
     sliderBar.setAttribute('aria-disabled', String(levels.length < 2));

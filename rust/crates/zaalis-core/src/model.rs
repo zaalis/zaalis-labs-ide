@@ -31,10 +31,15 @@ pub enum ProviderId {
     Local,
     /// llama.cpp server, on the local machine.
     Gguf,
+    /// Any OpenAI-compatible endpoint the user configured in zaalis itself
+    /// (OpenRouter, DeepSeek, Fireworks, a self-hosted gateway…). The model
+    /// string is `<endpoint>::<model>`; the endpoint's URL and key are held by
+    /// the daemon and never travel in the binding.
+    Compat,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 8] = [
+    pub const ALL: [ProviderId; 9] = [
         ProviderId::Codex,
         ProviderId::Claude,
         ProviderId::Gemini,
@@ -43,6 +48,7 @@ impl ProviderId {
         ProviderId::Kimi,
         ProviderId::Local,
         ProviderId::Gguf,
+        ProviderId::Compat,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -55,6 +61,7 @@ impl ProviderId {
             ProviderId::Kimi => "kimi",
             ProviderId::Local => "local",
             ProviderId::Gguf => "gguf",
+            ProviderId::Compat => "compat",
         }
     }
 
@@ -69,6 +76,7 @@ impl ProviderId {
             ProviderId::Kimi => "Moonshot AI",
             ProviderId::Local => "Ollama",
             ProviderId::Gguf => "llama.cpp",
+            ProviderId::Compat => "Compatible OpenAI",
         }
     }
 
@@ -259,6 +267,7 @@ mod tests {
         assert_eq!(ProviderId::Kimi.as_str(), "kimi");
         assert_eq!(ProviderId::Local.as_str(), "local");
         assert_eq!(ProviderId::Gguf.as_str(), "gguf");
+        assert_eq!(ProviderId::Compat.as_str(), "compat");
     }
 
     #[test]

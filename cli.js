@@ -1338,7 +1338,7 @@ const SLASH = [
   { name: 'compact', category: 'general', desc: 'compacter le contexte' },
   { name: 'reset', category: 'general', desc: 'reinitialisation locale' },
   { name: 'grep', category: 'tools', desc: 'chercher un motif', usage: '<motif> [chemin]', args: true },
-  { name: 'search', category: 'tools', desc: 'ouvrir une recherche dans zaalis browser', usage: '<requete>', args: true },
+  { name: 'search', category: 'tools', desc: 'recherche dans le navigateur intégré de zaalis IDE (--externe : navigateur du PC)', usage: '[--externe] <requete>', args: true },
   { name: 'deep-search', category: 'tools', desc: 'recherche web approfondie avec sources', usage: '<requete>', args: true },
   { name: 'glob', category: 'tools', desc: 'trouver des fichiers', usage: '<**/*.js>', args: true },
   { name: 'diff', category: 'tools', desc: 'afficher le diff Git', usage: '[staged|unstaged]' },
@@ -1535,7 +1535,7 @@ async function runDeepSearchCli(query) {
     if (r.status < 200 || r.status >= 300 || payload.error) {
       stop();
       if (payload.error === 'offline_mode') console.log(brand('! ') + (payload.message || 'Mode local securise actif : recherche approfondie impossible.'));
-      else if (payload.error === 'browser_unavailable') console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+      else if (payload.error === 'browser_unavailable') console.log(brand('✗ ') + 'Navigateur integre indisponible : ouvrez l application zaalis IDE.');
       else console.log(brand('Erreur ') + (payload.message || payload.error || `HTTP ${r.status}`));
       return;
     }
@@ -1664,18 +1664,20 @@ async function runSlashCommand(ev, me) {
   }
   if (name === 'deep-search') { await runDeepSearchCli(arg); return; }
   if (name === 'search') {
-    if (!arg) { console.log(dim('Usage: /search <requete>')); return; }
+    const external = /^(--externe|--external|--ext)(\s|$)/i.test(arg || '');
+    const query = String(arg || '').replace(/^(--externe|--external|--ext)(\s|$)/i, '').trim();
+    if (!query) { console.log(dim('Usage: /search [--externe] <requete>')); return; }
     try {
-      // zaalis browser est lance automatiquement cote serveur s'il n'est pas
-      // deja ouvert (chemin d'installation fixe, independant d'un raccourci).
-      const r = await authed('GET', `/api/browser-search?q=${encodeURIComponent(arg)}&mode=newtab`);
+      // Par defaut : navigateur integre de l'application zaalis IDE ouverte.
+      // --externe : navigateur par defaut du PC, sur demande explicite.
+      const r = await authed('GET', `/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab${external ? '&external=1' : ''}`);
       const body = r.json || {};
       if (r.status >= 200 && r.status < 300 && !body.error) {
-        console.log(green('OK ') + 'Recherche ouverte dans un nouvel onglet de zaalis browser : ' + arg);
+        console.log(green('OK ') + (external ? 'Recherche ouverte dans le navigateur du PC : ' : 'Recherche ouverte dans le navigateur integre de zaalis IDE : ') + query);
       } else if (body.error === 'offline_mode') {
         console.log(brand('! ') + (body.message || 'Mode local securise actif : recherche impossible.'));
       } else if (body.error === 'browser_unavailable') {
-        console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+        console.log(brand('✗ ') + 'Navigateur integre indisponible : ouvrez l application zaalis IDE, ou utilisez /search --externe.');
       } else {
         console.log(brand('Erreur ') + (body.error || `HTTP ${r.status}`));
       }

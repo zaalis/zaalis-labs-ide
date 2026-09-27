@@ -174,7 +174,7 @@ function populateSettingsControls() {
 
 $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
-    loadHermesCatalog();
+    loadCompatProviders();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -190,55 +190,173 @@ $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
 const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
-window.hermesProviders = [];
-async function loadHermesCatalog() {
+// ----- OpenAI-compatible providers (DeepSeek, OpenRouter, LM Studio…) -----
+// Served by zaalis itself: the server keeps the keys encrypted and the Rust
+// core calls each provider directly from this PC.
+window.compatProviders = [];
+async function loadCompatProviders() {
     try {
-        const response = await fetch('/api/hermes/catalog');
+        const response = await fetch('/api/compat/providers');
         if (!response.ok) return;
-        const data = await response.json();
-        window.hermesProviders = data.providers || [];
-        const select = $('#ai-model');
-        select.querySelectorAll('option[value^="hermes:"]').forEach(option => option.remove());
-        window.hermesProviders.forEach(provider => {
-            const option = document.createElement('option');
-            option.value = `hermes:${provider.id}`;
-            option.textContent = `${provider.label} · Hermes`;
-            select.appendChild(option);
-        });
-        if (state.config.aiModel?.startsWith('hermes:')) {
-            select.value = state.config.aiModel;
-            updateSubmodelDropdown();
-            $('#ai-submodel').value = state.config.aiSubmodel || $('#ai-submodel').value;
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-        }
-        const local = data.local || {};
-        $('#hermes-install-status').textContent = local.installed ? 'Installé' : 'Absent';
-        $('#hermes-runtime-status').textContent = (local.runtimes || []).join(', ') || 'Absent';
-        $('#hermes-local-models').textContent = String((local.models || []).length);
-        renderHermesKeyFields();
-    } catch {}
+        window.compatProviders = (await response.json()).providers || [];
+    } catch { return; }
+    renderCompatModelOptions();
+    renderCompatKeyFields();
 }
-async function renderHermesKeyFields() {
-    const target = $('#hermes-key-fields');
+// Only configured providers appear in the model list; the others stay one
+// click away in Settings, so the list remains short and readable.
+function renderCompatModelOptions() {
+    const group = $('#compat-model-group');
+    if (!group) return;
+    const select = $('#ai-model');
+    const wanted = state.config.aiModel;
+    const add = group.querySelector('option[data-action="add"]');
+    group.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
+    window.compatProviders.filter(provider => provider.configured).forEach(provider => {
+        const option = document.createElement('option');
+        option.value = `compat:${provider.id}`;
+        option.textContent = provider.label;
+        option.title = `${provider.label} — ${provider.baseUrl}`;
+        group.insertBefore(option, add);
+    });
+    if (String(wanted || '').startsWith('compat:') && select.value !== wanted
+        && Array.from(select.options).some(option => option.value === wanted)) {
+        const submodel = state.config.aiSubmodel;
+        select.value = wanted;
+        updateSubmodelDropdown();
+        if (submodel && Array.from(submodelSelect.options).some(option => option.value === submodel)) submodelSelect.value = submodel;
+        window.ZaalisWorkspace?.refreshCapabilities(true);
+    }
+}
+function compatHost(url) {
+    try { return new URL(url).host; } catch { return ''; }
+}
+function renderCompatKeyFields() {
+    const target = $('#compat-key-fields');
     if (!target) return;
-    let status = {};
-    try { const response = await fetch('/api/hermes/keys'); status = (await response.json()).keys || {}; } catch {}
+    const en = state.language === 'en';
     target.replaceChildren();
-    window.hermesProviders.filter(provider => provider.keyEnv).forEach(provider => {
+    window.compatProviders.forEach(provider => {
         const row = document.createElement('div');
         row.className = 'form-group';
+        row.dataset.compatProvider = provider.id;
+        row.dataset.search = `${provider.label} ${provider.id} ${provider.baseUrl}`.toLowerCase();
+        const head = document.createElement('div');
+        head.className = 'key-label-row';
         const label = document.createElement('label');
-        label.textContent = `${provider.label} (${provider.keyEnv})`;
+        label.htmlFor = `compat-key-${provider.id}`;
+        label.textContent = provider.label;
+        const host = document.createElement('span');
+        host.className = 'compat-host';
+        host.textContent = compatHost(provider.baseUrl);
+        label.appendChild(host);
+        const status = document.createElement('span');
+        status.className = 'key-status';
+        if (provider.key.set || provider.configured) {
+            status.classList.add('set');
+            status.textContent = provider.key.set ? (en ? 'Saved' : 'Enregistrée') : (en ? 'Active' : 'Activé');
+            if (provider.key.last4) {
+                const last4 = document.createElement('span');
+                last4.className = 'key-last4';
+                last4.textContent = ` ····${provider.key.last4}`;
+                status.appendChild(last4);
+            }
+            const clear = document.createElement('button');
+            clear.type = 'button';
+            clear.className = 'compat-clear';
+            clear.textContent = en ? 'Remove' : 'Retirer';
+            clear.addEventListener('click', () => removeCompatProvider(provider));
+            status.appendChild(clear);
+        }
+        head.append(label, status);
         const input = document.createElement('input');
         input.type = 'password';
-        input.dataset.hermesKey = provider.id;
+        input.id = `compat-key-${provider.id}`;
+        input.dataset.compatKey = provider.id;
         input.autocomplete = 'new-password';
-        input.placeholder = status[provider.id]?.set ? `Enregistrée ····${status[provider.id].last4}` : 'Clé API';
-        row.append(label, input);
+        input.spellcheck = false;
+        input.placeholder = provider.key.set ? '••••••••••••'
+            : provider.keyless ? (en ? 'API key (optional)' : 'Clé API (facultative)') : (en ? 'API key' : 'Clé API');
+        row.append(head, input);
+        if (provider.editableUrl) {
+            const url = document.createElement('input');
+            url.type = 'url';
+            url.className = 'compat-url';
+            url.dataset.compatUrl = provider.id;
+            url.spellcheck = false;
+            url.value = provider.configured || provider.baseUrl !== provider.defaultUrl ? provider.baseUrl : '';
+            url.placeholder = provider.defaultUrl || 'https://exemple.com/v1';
+            url.setAttribute('aria-label', `${provider.label} — URL`);
+            row.appendChild(url);
+        }
         target.appendChild(row);
     });
+    filterCompatKeyFields();
 }
-loadHermesCatalog();
+function filterCompatKeyFields() {
+    const query = ($('#compat-filter')?.value || '').trim().toLowerCase();
+    let visible = 0;
+    $$('#compat-key-fields [data-compat-provider]').forEach(row => {
+        const show = !query || row.dataset.search.includes(query);
+        row.hidden = !show;
+        if (show) visible++;
+    });
+    let empty = $('#compat-key-fields .compat-empty');
+    if (!visible && !empty) {
+        empty = document.createElement('div');
+        empty.className = 'compat-empty';
+        empty.textContent = state.language === 'en' ? 'No provider matches.' : 'Aucun fournisseur ne correspond.';
+        $('#compat-key-fields')?.appendChild(empty);
+    } else if (visible && empty) empty.remove();
+}
+$('#compat-filter')?.addEventListener('input', filterCompatKeyFields);
+async function removeCompatProvider(provider) {
+    try {
+        const response = await fetch('/api/compat/keys', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: { [provider.id]: null }, baseUrls: provider.editableUrl ? { [provider.id]: null } : {} })
+        });
+        if (!response.ok) return;
+        window.compatProviders = (await response.json()).providers || [];
+        renderCompatModelOptions();
+        renderCompatKeyFields();
+    } catch {}
+}
+async function saveCompatSettings() {
+    const keys = {};
+    const baseUrls = {};
+    $$('#compat-key-fields input[data-compat-key]').forEach(input => {
+        if (input.value.trim()) keys[input.dataset.compatKey] = input.value.trim();
+    });
+    $$('#compat-key-fields input[data-compat-url]').forEach(input => {
+        const provider = window.compatProviders.find(p => p.id === input.dataset.compatUrl);
+        const value = input.value.trim();
+        const current = provider && (provider.configured || provider.baseUrl !== provider.defaultUrl) ? provider.baseUrl : '';
+        // A keyless local server (LM Studio) is enabled by saving its URL.
+        if (value !== current || (value && provider && !provider.configured)) baseUrls[input.dataset.compatUrl] = value || null;
+    });
+    if (!Object.keys(keys).length && !Object.keys(baseUrls).length) return;
+    const response = await fetch('/api/compat/keys', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys, baseUrls })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'compat');
+    window.compatProviders = data.providers || [];
+    renderCompatModelOptions();
+    renderCompatKeyFields();
+}
+function openCompatSettings() {
+    $('#settings-btn')?.click();
+    setSettingsSection('api');
+    requestAnimationFrame(() => {
+        $('#compat-settings-title')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        $('#compat-filter')?.focus({ preventScroll: true });
+    });
+}
+$('#ai-model')?.addEventListener('custom-select-action', event => {
+    if (event.detail === 'add') openCompatSettings();
+});
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -469,18 +587,7 @@ $('#save-btn').addEventListener('click', async () => {
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
         }
-        const hermesKeys = {};
-        $$('#hermes-key-fields input[data-hermes-key]').forEach(input => {
-            if (input.value.trim()) hermesKeys[input.dataset.hermesKey] = input.value.trim();
-        });
-        if (Object.keys(hermesKeys).length) {
-            const hermesResponse = await fetch('/api/hermes/keys', {
-                method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keys: hermesKeys })
-            });
-            if (!hermesResponse.ok) throw new Error('Hermes keys');
-            await renderHermesKeyFields();
-        }
+        await saveCompatSettings();
         btn.textContent = 'OK';
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
     } catch {
@@ -796,13 +903,6 @@ function setCardActions(card, name) {
     const ggufFile = card.dataset.ggufFile || '';
     const installed = target === 'gguf' ? (ggufFile && isGgufInstalled(ggufFile)) : isInstalled(name);
     actions.innerHTML = '';
-    if (ggufFile.startsWith('hermes:')) {
-        const badge = document.createElement('span');
-        badge.className = 'cat-tag local';
-        badge.textContent = 'Hermes · lecture seule';
-        actions.appendChild(badge);
-        return;
-    }
     if (installed) {
         const un = document.createElement('button');
         un.className = 'cat-uninstall'; un.type = 'button';
@@ -928,7 +1028,7 @@ function renderGgufModels() {
         const chip = document.createElement('div');
         chip.className = 'ollama-chip';
         const span = document.createElement('span');
-        span.textContent = name.replace(/^hermes:/, 'Hermes · ').replace(/\.gguf$/i, '');
+        span.textContent = name.replace(/\.gguf$/i, '');
         span.title = name;
         const rm = document.createElement('button');
         rm.type = 'button';
@@ -936,7 +1036,7 @@ function renderGgufModels() {
         rm.title = state.language === 'en' ? 'Delete' : 'Supprimer';
         rm.addEventListener('click', () => deleteGguf(name));
         chip.appendChild(span);
-        if (!name.startsWith('hermes:')) chip.appendChild(rm);
+        chip.appendChild(rm);
         box.appendChild(chip);
     });
 }
@@ -1709,6 +1809,19 @@ if (catalogSearch) catalogSearch.addEventListener('keydown', e => {
 // ==========================================================
 //  INIT
 // ==========================================================
+function migrateRetiredModelState() {
+    const c = state.config;
+    let changed = false;
+    if (String(c.aiModel || '').startsWith('hermes:')) {
+        const id = c.aiModel.slice(7).replace(/^nebius-token-factory$/, 'nebius');
+        c.aiModel = window.compatProviders.some(p => p.id === id) ?`compat:${id}` : 'codex';
+        changed = true;
+    }
+    if (String(c.aiSubmodel || '').startsWith('hermes:')) { c.aiSubmodel = c.aiSubmodel.slice(7); changed = true; }
+    for (const key of ['hermesModelId', 'hermesThinking']) if (key in c) { delete c[key]; changed = true; }
+    if (changed) saveState();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     loadState();
 
@@ -1731,7 +1844,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
-    await loadHermesCatalog();
+    await loadCompatProviders();
+    migrateRetiredModelState();
     await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization

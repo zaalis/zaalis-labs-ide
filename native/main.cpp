@@ -33,10 +33,12 @@
 
 using namespace Microsoft::WRL;
 
-static const wchar_t* APP_URL      = L"http://localhost:3000";
+// Port of the bundled server. ZAALIS_PORT (also read by the server) lets a
+// development build run beside the installed app.
+static int          SERVER_PORT  = 3000;
+static std::wstring APP_URL      = L"http://localhost:3000";
 static const wchar_t* WINDOW_TITLE = L"zaalis IDE";
 static const wchar_t* SERVER_EXE   = L"zaalis-server.exe";
-static const int      SERVER_PORT  = 3000;
 
 static ComPtr<ICoreWebView2Controller> g_controller;
 static ComPtr<ICoreWebView2>           g_webview;
@@ -48,7 +50,7 @@ static void ReportNativeCapabilities() {
 }
 
 static bool IsAppSource(const std::wstring& source) {
-    return source == APP_URL || source.rfind(std::wstring(APP_URL) + L"/", 0) == 0;
+    return source == APP_URL || source.rfind(APP_URL + L"/", 0) == 0;
 }
 
 // Folder containing this executable.
@@ -66,7 +68,10 @@ static std::wstring ExeDir() {
 static std::wstring WebViewDataDir() {
     std::wstring dir;
     PWSTR localAppData = nullptr;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
+    wchar_t root[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"ZAALIS_WEBVIEW_DATA_ROOT", root, MAX_PATH)) {
+        dir = root;
+    } else if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &localAppData))) {
         dir = localAppData;
         CoTaskMemFree(localAppData);
     } else {
@@ -168,8 +173,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM w, LPARAM l) {
 int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
     // 0) Crisp rendering on high-DPI / 4K screens (must be set before any window).
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    wchar_t port[16] = {};
+    if (GetEnvironmentVariableW(L"ZAALIS_PORT", port, 16)) {
+        const int value = _wtoi(port);
+        if (value > 0 && value < 65536) { SERVER_PORT = value; APP_URL = L"http://localhost:" + std::to_wstring(value); }
+    }
 
-    // 1) Start the bundled server and wait until it answers.
+    // 1) Start the bundled server and wait until it answers. The integrated
+    //    browser's private channel must exist first: the server inherits its
+    //    name and one-time token through the environment.
+    ZaalisBrowser::PrepareChannel();
     LaunchServer();
     if (!WaitForServer(20000)) {
         MessageBoxW(nullptr,
@@ -248,7 +261,7 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                                         ReportNativeCapabilities();
                                         return S_OK;
                                     }).Get(), &token);
-                            g_webview->Navigate(APP_URL);
+                            g_webview->Navigate(APP_URL.c_str());
                             return S_OK;
                         }).Get());
                 return S_OK;

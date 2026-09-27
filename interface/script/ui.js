@@ -3,10 +3,18 @@
 const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
-// Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', kimi: '#38bdf8', local: '#fafafa', gguf: '#34d399' };
+// Provider names are plain text in the theme colour: per-vendor colours made
+// the list hard to read.
 function applyModelColor() {
-    modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
+    modelSelect.style.color = '';
+}
+
+// Short provider name for message labels: "Codex (OpenAI)" -> "Codex",
+// "Qwen Cloud (Alibaba)" -> "Qwen Cloud".
+function providerShortLabel(option) {
+    const text = option ? String(option.textContent || '') : '';
+    if (option && String(option.value || '').startsWith('compat:')) return text.replace(/\s*\(.*\)\s*$/, '') || text;
+    return text.split(' ')[0];
 }
 
 // Pretty short name for the dropdown (full tag stays in the option's value).
@@ -28,12 +36,44 @@ function prettyModelLabel(full) {
     return quant ? `${s} (${quant})` : s;
 }
 // Submodel list per provider. Ollama + GGUF use the user's installed models.
+// OpenAI-compatible providers: the provider's live /models list once fetched
+// (with the user's own key, from this PC), otherwise the starter list, plus
+// any model ID the user typed in the dropdown search.
+const compatLiveModels = new Map();
+const compatModelFetches = new Map();
+function compatModelsFor(id) {
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const base = compatLiveModels.get(id) || provider?.models || [];
+    const custom = (state.config.compatCustomModels || {})[id] || [];
+    return [...new Set([...base, ...custom])];
+}
+function fetchCompatModels(id) {
+    if (compatLiveModels.has(id) || compatModelFetches.has(id)) return;
+    const request = fetch(`/api/compat/models?provider=${encodeURIComponent(id)}`)
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+            if (!data || !Array.isArray(data.models)) return;
+            compatLiveModels.set(id, data.models);
+            // Rebuild only if the provider is still selected; the current
+            // choice is kept when it still exists.
+            if (modelSelect.value === `compat:${id}`) updateSubmodelDropdown();
+        })
+        .catch(() => {})
+        .finally(() => compatModelFetches.delete(id));
+    compatModelFetches.set(id, request);
+}
+function rememberCompatModel(model, submodel) {
+    if (!model.startsWith('compat:') || !submodel) return;
+    const id = model.slice(7);
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const known = compatLiveModels.get(id) || provider?.models || [];
+    if (known.includes(submodel)) return;
+    state.config.compatCustomModels = state.config.compatCustomModels || {};
+    const list = state.config.compatCustomModels[id] || [];
+    if (!list.includes(submodel)) state.config.compatCustomModels[id] = [...list, submodel].slice(-20);
+}
 function submodelsFor(model) {
-    if (model.startsWith('hermes:')) {
-        const known = window.hermesProviders?.find(p => `hermes:${p.id}` === model)?.models || [];
-        const custom = state.config.hermesModelId;
-        return custom && !known.includes(custom) ? [...known, custom] : known;
-    }
+    if (model.startsWith('compat:')) return compatModelsFor(model.slice(7));
     if (model === 'local') return (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
     if (model === 'gguf') return state.config.ggufModels || [];
     return SUBMODELS[model] || [];
@@ -62,38 +102,21 @@ function updateSubmodelDropdown() {
         option.textContent = state.language === 'en' ? 'No GGUF model installed' : 'Aucun modèle GGUF installé';
         submodelSelect.appendChild(option);
     }
-    const hermes = model.startsWith('hermes:');
-    const customInput = $('#hermes-model-input');
-    const thinkingLabel = $('#hermes-thinking-label');
-    if (customInput) {
-        customInput.hidden = !hermes;
-        customInput.value = hermes ? (state.config.hermesModelId || '') : '';
-        customInput.placeholder = subs.length ? 'ID personnalisé (facultatif)' : 'ID du modèle requis';
-    }
-    if (thinkingLabel) {
-        thinkingLabel.hidden = !hermes && model !== 'gguf';
-        $('#hermes-thinking-toggle').checked = state.config.hermesThinking !== false;
+    const compat = model.startsWith('compat:');
+    // Any model ID can be typed in the dropdown search for these providers.
+    submodelSelect.dataset.allowCustom = compat ? '1' : '';
+    if (compat) {
+        if (!subs.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = state.language === 'en' ? 'Type a model ID…' : 'Saisir un ID de modèle…';
+            submodelSelect.appendChild(option);
+        }
+        fetchCompatModels(model.slice(7));
     }
     const install = $('#gguf-install-shortcut');
     if (install) install.hidden = model !== 'gguf' || subs.length > 0;
 }
-$('#hermes-model-input')?.addEventListener('change', event => {
-    state.config.hermesModelId = event.target.value.trim();
-    if (state.config.hermesModelId) {
-        const option = document.createElement('option');
-        option.value = state.config.hermesModelId;
-        option.textContent = state.config.hermesModelId;
-        submodelSelect.appendChild(option);
-        submodelSelect.value = option.value;
-        state.config.aiSubmodel = option.value;
-    }
-    saveState();
-    checkReasoningCompatibility();
-});
-$('#hermes-thinking-toggle')?.addEventListener('change', event => {
-    state.config.hermesThinking = event.target.checked;
-    saveState();
-});
 $('#gguf-install-shortcut')?.addEventListener('click', () => $('#catalog-btn')?.click());
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
@@ -180,6 +203,7 @@ modelSelect.addEventListener('change', () => {
 });
 submodelSelect.addEventListener('change', () => {
     state.config.aiSubmodel = submodelSelect.value;
+    rememberCompatModel(modelSelect.value, submodelSelect.value);
     saveState();
 
     checkReasoningCompatibility();
@@ -1762,54 +1786,144 @@ function createCustomSelect(selectId, opts) {
 
     const optionsContainer = document.createElement('div');
     optionsContainer.className = 'custom-select-options';
+    optionsContainer.addEventListener('click', e => e.stopPropagation());
     wrapper.appendChild(optionsContainer);
+
+    // Long lists (live /models of a gateway can hold hundreds of entries) get a
+    // search field. It lives outside the rebuilt list so a refresh never steals
+    // the focus while the user is typing. Where the select allows it, the typed
+    // text can be used as a model ID directly.
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'custom-select-search';
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    optionsContainer.appendChild(search);
+    const list = document.createElement('div');
+    list.className = 'custom-select-list';
+    list.setAttribute('role', 'listbox');
+    optionsContainer.appendChild(list);
 
     select.parentNode.insertBefore(wrapper, select.nextSibling);
 
+    const allowsCustom = () => select.dataset.allowCustom === '1';
+    const searchable = () => allowsCustom() || select.options.length > 10;
+
+    function choose(value) {
+        if (select.value !== value) {
+            select.value = value;
+            select.dispatchEvent(new Event('change'));
+        }
+        closeAllCustomSelects();
+    }
+
+    function optionRow(opt) {
+        const div = document.createElement('div');
+        div.className = 'custom-select-option';
+        if (opt.dataset.action) div.classList.add('action');
+        else if (opt.value === select.value) div.classList.add('selected');
+        div.textContent = opt.textContent;
+        div.dataset.value = opt.value;
+        div.setAttribute('role', 'option');
+        div.setAttribute('aria-selected', String(opt.value === select.value));
+        div.tabIndex = 0;
+        div.title = opt.title || opt.textContent;
+        div.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (opt.dataset.action) {
+                closeAllCustomSelects();
+                select.dispatchEvent(new CustomEvent('custom-select-action', { detail: opt.dataset.action }));
+                return;
+            }
+            if (opt.value === '' && allowsCustom()) { search.focus(); return; }
+            choose(opt.value);
+        });
+        div.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); }
+        });
+        return div;
+    }
+
+    function renderList() {
+        list.innerHTML = '';
+        const query = search.value.trim().toLowerCase();
+        const matches = (opt) => !query || opt.textContent.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query);
+        // Group headers come from <optgroup>; groups left empty by the filter
+        // are skipped entirely.
+        for (const child of Array.from(select.children)) {
+            if (child.tagName === 'OPTGROUP') {
+                const rows = Array.from(child.children).filter(opt => opt.tagName === 'OPTION' && (!query || !opt.dataset.action) && matches(opt));
+                if (!rows.length) continue;
+                const header = document.createElement('div');
+                header.className = 'custom-select-group';
+                header.textContent = child.label;
+                list.appendChild(header);
+                rows.forEach(opt => list.appendChild(optionRow(opt)));
+            } else if (child.tagName === 'OPTION' && matches(child) && !(query && child.value === '')) {
+                list.appendChild(optionRow(child));
+            }
+        }
+        const typed = search.value.trim();
+        if (allowsCustom() && typed && !Array.from(select.options).some(opt => opt.value === typed)) {
+            const custom = document.createElement('div');
+            custom.className = 'custom-select-option action';
+            custom.tabIndex = 0;
+            custom.setAttribute('role', 'option');
+            custom.textContent = (state.language === 'en' ? 'Use model “{id}”' : 'Utiliser le modèle « {id} »').replace('{id}', typed);
+            custom.addEventListener('click', e => {
+                e.stopPropagation();
+                const option = document.createElement('option');
+                option.value = typed;
+                option.textContent = typed;
+                option.title = typed;
+                select.appendChild(option);
+                choose(typed);
+            });
+            list.appendChild(custom);
+        }
+        if (!list.children.length) {
+            const empty = document.createElement('div');
+            empty.className = 'custom-select-empty';
+            empty.textContent = state.language === 'en' ? 'No match' : 'Aucun résultat';
+            list.appendChild(empty);
+        }
+    }
+
     function updateOptions() {
-        optionsContainer.innerHTML = '';
-        
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
         trigger.setAttribute('aria-label', `${selectId === 'ai-model' ? 'Fournisseur' : 'Modèle'} : ${triggerText.textContent}`);
-
-        // Update color for model select trigger
-        if (selectId === 'ai-model') {
-            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-            triggerText.style.color = colors[select.value] || 'var(--text-0)';
-        }
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
+        search.hidden = !searchable();
+        search.placeholder = allowsCustom()
+            ? (state.language === 'en' ? 'Search or type a model ID…' : 'Rechercher ou saisir un ID…')
+            : (state.language === 'en' ? 'Search…' : 'Rechercher…');
+        renderList();
+    }
 
-        Array.from(select.options).forEach(opt => {
-            const div = document.createElement('div');
-            div.className = 'custom-select-option';
-            if (opt.value === select.value) {
-                div.classList.add('selected');
-            }
-            div.textContent = opt.textContent;
-            div.dataset.value = opt.value;
-            div.setAttribute('role', 'option');
-            div.tabIndex = 0;
-            div.title = opt.title || opt.textContent;
+    search.addEventListener('input', renderList);
+    search.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { closeAllCustomSelects(); trigger.focus(); return; }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            list.querySelector('.custom-select-option')?.click();
+        }
+        if (e.key === 'ArrowDown') { e.preventDefault(); list.querySelector('.custom-select-option')?.focus(); }
+    });
 
-            if (selectId === 'ai-model') {
-                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-                div.style.color = colors[opt.value] || 'inherit';
-                div.style.fontWeight = '600';
-            }
-
-            div.addEventListener('click', (e) => {
-                e.stopPropagation();
-                select.value = opt.value;
-                select.dispatchEvent(new Event('change'));
-                closeAllCustomSelects();
-            });
-            div.addEventListener('keydown', e => {
-                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); }
-            });
-
-            optionsContainer.appendChild(div);
-        });
+    // Keep the open list inside the panel that holds it: those panels clip
+    // their overflow, and a list sticking out made the whole chat view scroll
+    // sideways. Right-anchor when the right edge would overflow, then narrow.
+    function fitDropdown() {
+        const style = optionsContainer.style;
+        style.left = ''; style.right = ''; style.maxWidth = '';
+        const holder = wrapper.closest('.ai-view, .settings-pane, .modal-content') || document.documentElement;
+        const bounds = holder.getBoundingClientRect();
+        const right = Math.min(bounds.right, window.innerWidth) - 6;
+        const left = Math.max(bounds.left, 0) + 6;
+        let rect = optionsContainer.getBoundingClientRect();
+        if (rect.right > right) { style.left = 'auto'; style.right = '0'; rect = optionsContainer.getBoundingClientRect(); }
+        if (rect.left < left) style.maxWidth = `${Math.max(160, Math.floor(rect.right - left))}px`;
     }
 
     trigger.addEventListener('click', (e) => {
@@ -1818,6 +1932,13 @@ function createCustomSelect(selectId, opts) {
         closeAllCustomSelects();
         if (!isOpen) {
             wrapper.classList.add('open');
+            if (search.value) { search.value = ''; renderList(); }
+            fitDropdown();
+            if (!search.hidden) search.focus({ preventScroll: true });
+            // Scroll the list only: scrollIntoView would also scroll the
+            // clipped ancestors.
+            const selected = list.querySelector('.selected');
+            if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.clientHeight / 2 + selected.offsetHeight / 2);
         }
         trigger.setAttribute('aria-expanded', String(!isOpen));
     });
@@ -1826,14 +1947,18 @@ function createCustomSelect(selectId, opts) {
         if (e.key === 'Escape') { wrapper.classList.remove('open'); trigger.setAttribute('aria-expanded', 'false'); }
     });
 
+    // Re-creating the dropdown for the same <select> must not stack observers
+    // and listeners from the previous instance.
+    if (typeof select._customSelectCleanup === 'function') select._customSelectCleanup();
     const observer = new MutationObserver(() => {
         updateOptions();
     });
     observer.observe(select, { childList: true, characterData: true, subtree: true });
-
-    select.addEventListener('change', () => {
-        updateOptions();
-    });
+    select.addEventListener('change', updateOptions);
+    select._customSelectCleanup = () => {
+        observer.disconnect();
+        select.removeEventListener('change', updateOptions);
+    };
 
     updateOptions();
 }

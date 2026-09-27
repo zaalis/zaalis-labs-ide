@@ -36,6 +36,9 @@ class AgentdClient {
     if (runtimeConfig && runtimeConfig.ggufUrl) env.ZAALIS_GGUF_URL = String(runtimeConfig.ggufUrl);
     if (runtimeConfig && runtimeConfig.computerEndpoint) env.ZAALIS_COMPUTER_ENDPOINT = String(runtimeConfig.computerEndpoint);
     if (runtimeConfig && runtimeConfig.computerToken) env.ZAALIS_COMPUTER_TOKEN = String(runtimeConfig.computerToken);
+    // Integrated browser (desktop only): endpoint of the Rust `browser` tool.
+    if (runtimeConfig && runtimeConfig.browserEndpoint) env.ZAALIS_BROWSER_ENDPOINT = String(runtimeConfig.browserEndpoint);
+    if (runtimeConfig && runtimeConfig.browserToken) env.ZAALIS_BROWSER_TOOL_TOKEN = String(runtimeConfig.browserToken);
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -43,6 +46,19 @@ class AgentdClient {
     for (const [name, variable] of Object.entries(names)) {
       if (keys && keys[name]) env[variable] = String(keys[name]);
     }
+    // OpenAI-compatible endpoints configured in zaalis: the list names each
+    // key's variable, the keys themselves travel one per variable.
+    const compat = [];
+    for (const [index, endpoint] of ((runtimeConfig && runtimeConfig.compatEndpoints) || []).entries()) {
+      if (!endpoint || !endpoint.id || !endpoint.base_url) continue;
+      const entry = { id: String(endpoint.id), base_url: String(endpoint.base_url) };
+      if (endpoint.key) {
+        entry.key_env = `ZAALIS_COMPAT_KEY_${index}`;
+        env[entry.key_env] = String(endpoint.key);
+      }
+      compat.push(entry);
+    }
+    if (compat.length) env.ZAALIS_COMPAT_ENDPOINTS = JSON.stringify(compat);
     this.child = spawn(executable, ['--stdio'], { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env });
     this.nextId = 1;
     this.pending = new Map();

@@ -308,7 +308,9 @@
     const browserAddress = el('input');
     browserAddress.type = 'url'; browserAddress.placeholder = 'https://'; browserAddress.required = true;
     browserAddress.setAttribute('aria-label', text('Adresse du site', 'Website address'));
-    const externalOpen = button(text('Ouvrir dans zaalis browser', 'Open in zaalis browser'));
+    // Outside the native app there is no integrated browser: this form opens
+    // the address in the PC's default browser, and says so.
+    const externalOpen = button(text('Ouvrir dans le navigateur du PC', 'Open in the PC browser'));
     externalOpen.type = 'submit';
     browserForm.append(browserAddress, externalOpen);
     browserFallback.append(browserForm);
@@ -335,7 +337,7 @@
         try {
             const url = new URL(browserAddress.value);
             if (!['http:', 'https:'].includes(url.protocol)) throw new Error(text('Utilisez une adresse HTTP ou HTTPS.', 'Use an HTTP or HTTPS address.'));
-            const response = await fetch(`/api/browser-open?url=${encodeURIComponent(url.href)}`);
+            const response = await fetch(`/api/browser-open?url=${encodeURIComponent(url.href)}${nativeAvailable ? '' : '&external=1'}`);
             const data = await response.json();
             if (!response.ok || data.error) throw new Error(data.error || 'Navigateur indisponible');
         } catch (error) { showError(error); }
@@ -344,6 +346,13 @@
         window.chrome.webview.addEventListener('message', event => {
             let data = event.data;
             if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return; } }
+            // The integrated browser asks to be shown (search, AI browsing...):
+            // same effect as clicking the globe.
+            if (data?.type === 'browserReveal') {
+                if (panel !== 'browser') setPanel('browser');
+                else syncBrowser();
+                return;
+            }
             if (data?.type === 'nativeCapabilities' || data?.type === 'browserState') {
                 nativeAvailable = data.browser === true || data.available === true;
                 browserFallback.hidden = nativeAvailable && !data.error;

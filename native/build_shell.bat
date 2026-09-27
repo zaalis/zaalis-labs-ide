@@ -25,7 +25,7 @@ rc /nologo /fo dist\app.res app.rc
 if errorlevel 1 goto :failed
 
 echo Compiling main.cpp ...
-cl /nologo /std:c++17 /utf-8 /EHsc /O2 /DUNICODE /D_UNICODE main.cpp browser\BrowserHost.cpp /I "packages\webview2\build\native\include" /Fe:dist\zaalis.exe /Fo:dist\ /link /SUBSYSTEM:WINDOWS dist\app.res "packages\webview2\build\native\x64\WebView2LoaderStatic.lib" ws2_32.lib ole32.lib oleaut32.lib version.lib advapi32.lib shell32.lib shlwapi.lib user32.lib gdi32.lib dwmapi.lib windowsapp.lib
+cl /nologo /std:c++17 /utf-8 /EHsc /O2 /DUNICODE /D_UNICODE main.cpp browser\BrowserHost.cpp /I "packages\webview2\build\native\include" /Fe:dist\zaalis.exe /Fo:dist\ /link /SUBSYSTEM:WINDOWS dist\app.res "packages\webview2\build\native\x64\WebView2LoaderStatic.lib" ws2_32.lib ole32.lib oleaut32.lib version.lib advapi32.lib shell32.lib shlwapi.lib user32.lib gdi32.lib dwmapi.lib windowsapp.lib comctl32.lib crypt32.lib windowscodecs.lib bcrypt.lib uuid.lib /MANIFEST:EMBED
 if errorlevel 1 goto :failed
 
 echo Compiling pickfolder.cpp ...
