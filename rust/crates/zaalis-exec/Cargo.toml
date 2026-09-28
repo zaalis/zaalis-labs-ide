@@ -9,6 +9,8 @@ rust-version.workspace = true
 
 [dependencies]
 zaalis-core = { workspace = true }
+zaalis-secrets = { workspace = true }
+zaalis-netpolicy = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "process", "rt", "sync", "time"] }
 tokio-util = { workspace = true }

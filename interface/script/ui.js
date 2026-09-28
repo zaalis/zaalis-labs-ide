@@ -3,10 +3,18 @@
 const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
-// Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', kimi: '#38bdf8', local: '#fafafa', gguf: '#34d399' };
+// Provider names are plain text in the theme colour: per-vendor colours made
+// the list hard to read.
 function applyModelColor() {
-    modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
+    modelSelect.style.color = '';
+}
+
+// Short provider name for message labels: "Codex (OpenAI)" -> "Codex",
+// "Qwen Cloud (Alibaba)" -> "Qwen Cloud".
+function providerShortLabel(option) {
+    const text = option ? String(option.textContent || '') : '';
+    if (option && String(option.value || '').startsWith('compat:')) return text.replace(/\s*\(.*\)\s*$/, '') || text;
+    return text.split(' ')[0];
 }
 
 // Pretty short name for the dropdown (full tag stays in the option's value).
@@ -28,7 +36,44 @@ function prettyModelLabel(full) {
     return quant ? `${s} (${quant})` : s;
 }
 // Submodel list per provider. Ollama + GGUF use the user's installed models.
+// OpenAI-compatible providers: the provider's live /models list once fetched
+// (with the user's own key, from this PC), otherwise the starter list, plus
+// any model ID the user typed in the dropdown search.
+const compatLiveModels = new Map();
+const compatModelFetches = new Map();
+function compatModelsFor(id) {
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const base = compatLiveModels.get(id) || provider?.models || [];
+    const custom = (state.config.compatCustomModels || {})[id] || [];
+    return [...new Set([...base, ...custom])];
+}
+function fetchCompatModels(id) {
+    if (compatLiveModels.has(id) || compatModelFetches.has(id)) return;
+    const request = fetch(`/api/compat/models?provider=${encodeURIComponent(id)}`)
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+            if (!data || !Array.isArray(data.models)) return;
+            compatLiveModels.set(id, data.models);
+            // Rebuild only if the provider is still selected; the current
+            // choice is kept when it still exists.
+            if (modelSelect.value === `compat:${id}`) updateSubmodelDropdown();
+        })
+        .catch(() => {})
+        .finally(() => compatModelFetches.delete(id));
+    compatModelFetches.set(id, request);
+}
+function rememberCompatModel(model, submodel) {
+    if (!model.startsWith('compat:') || !submodel) return;
+    const id = model.slice(7);
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const known = compatLiveModels.get(id) || provider?.models || [];
+    if (known.includes(submodel)) return;
+    state.config.compatCustomModels = state.config.compatCustomModels || {};
+    const list = state.config.compatCustomModels[id] || [];
+    if (!list.includes(submodel)) state.config.compatCustomModels[id] = [...list, submodel].slice(-20);
+}
 function submodelsFor(model) {
+    if (model.startsWith('compat:')) return compatModelsFor(model.slice(7));
     if (model === 'local') return (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
     if (model === 'gguf') return state.config.ggufModels || [];
     return SUBMODELS[model] || [];
@@ -41,6 +86,7 @@ function submodelLabelFor(model, s) {
 function updateSubmodelDropdown() {
     const model = modelSelect.value;
     const subs = submodelsFor(model);
+    const previous = submodelSelect.value || state.config.aiSubmodel;
     submodelSelect.innerHTML = '';
     subs.forEach(s => {
         const opt = document.createElement('option');
@@ -49,7 +95,29 @@ function updateSubmodelDropdown() {
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
+    if (subs.includes(previous)) submodelSelect.value = previous;
+    if (model === 'gguf' && !subs.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = state.language === 'en' ? 'No GGUF model installed' : 'Aucun modèle GGUF installé';
+        submodelSelect.appendChild(option);
+    }
+    const compat = model.startsWith('compat:');
+    // Any model ID can be typed in the dropdown search for these providers.
+    submodelSelect.dataset.allowCustom = compat ? '1' : '';
+    if (compat) {
+        if (!subs.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = state.language === 'en' ? 'Type a model ID…' : 'Saisir un ID de modèle…';
+            submodelSelect.appendChild(option);
+        }
+        fetchCompatModels(model.slice(7));
+    }
+    const install = $('#gguf-install-shortcut');
+    if (install) install.hidden = model !== 'gguf' || subs.length > 0;
 }
+$('#gguf-install-shortcut')?.addEventListener('click', () => $('#catalog-btn')?.click());
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
 function showToast(title, msg, opts = {}) {
@@ -105,27 +173,28 @@ function maybeWarnSmallLocalModel() {
     const lang = state.language || 'fr';
     const pretty = (typeof prettyModelLabel === 'function' && /^hf\.co\//i.test(sub)) ? prettyModelLabel(sub) : sub;
     const title = TRANSLATIONS[lang]['ollama-small-title'] || 'Modèle local léger';
+    const accurateTitle = modelSelect.value === 'gguf' ? (lang === 'en' ? 'Small GGUF model' : 'Petit modèle GGUF') : title;
     const tmpl = TRANSLATIONS[lang]['ollama-small-msg'] ||
         'Le modèle « {model} » est petit. Il peut halluciner, ignorer des consignes (lecture/écriture de fichiers) ou bugger. Pour des résultats fiables, préférez un modèle ≥ 14B.';
-    showToast(title, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
+    showToast(accurateTitle, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
 }
 
 modelSelect.addEventListener('change', () => {
     state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
-    
+
     // Auto-select the newest submodel for the newly chosen provider
     const model = modelSelect.value;
     const subs = submodelsFor(model);
     if (subs.length) {
         submodelSelect.value = subs[0]; // Newest model is first in the list
     }
-    
+
     state.config.aiSubmodel = submodelSelect.value;
     saveState();
-    
+
     createCustomSelect('ai-submodel');
-    
+
     checkReasoningCompatibility();
     updateAttachAvailability();
     applyModelColor();
@@ -134,6 +203,7 @@ modelSelect.addEventListener('change', () => {
 });
 submodelSelect.addEventListener('change', () => {
     state.config.aiSubmodel = submodelSelect.value;
+    rememberCompatModel(modelSelect.value, submodelSelect.value);
     saveState();
 
     checkReasoningCompatibility();
@@ -323,19 +393,19 @@ function initRecentProjects() {
     container.innerHTML = '';
     recent.forEach(p => {
         const folderName = p.split(/[\\/]/).pop();
-        
+
         // Row container
         const projectRow = document.createElement('div');
         projectRow.className = 'project-dropdown-row';
         projectRow.title = p;
         if (state.projectRoot === p) projectRow.classList.add('active');
-        
+
         // Chevron button
         const chev = document.createElement('button');
         chev.className = 'proj-dropdown-chev-btn';
         chev.type = 'button';
         chev.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="proj-dropdown-chev"><polyline points="9 18 15 12 9 6"/></svg>`;
-        
+
         // Project name button (opens project)
         const nameBtn = document.createElement('button');
         nameBtn.className = 'proj-dropdown-name-btn';
@@ -392,10 +462,10 @@ function initRecentProjects() {
         // Nested chats list container
         const chatsContainer = document.createElement('div');
         chatsContainer.className = 'project-dropdown-chats';
-        
+
         chatsContainer.style.display = 'block';
         chev.querySelector('.proj-dropdown-chev').classList.toggle('expanded', true);
-        
+
         // Toggle chats list expand
         chev.addEventListener('click', e => {
             e.stopPropagation();
@@ -623,7 +693,7 @@ function renderNoProjectConversations(container) {
     const storeKey = kind === 'agents' ? 'agentConversations' : 'conversations';
     const curIdKey = kind === 'agents' ? 'currentAgentConvId' : 'currentConvId';
     const curId = state[curIdKey];
-    
+
     const convs = (state[storeKey] || [])
         .filter(c => !c.project)
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
@@ -657,7 +727,7 @@ function renderNoProjectConversations(container) {
         const row = document.createElement('div');
         row.className = 'convo-item' + (conv.id === curId ? ' active' : '');
         row.title = conv.date || '';
-        
+
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
@@ -666,7 +736,7 @@ function renderNoProjectConversations(container) {
                 loadConversation(kind, conv.id);
             }
         });
-        
+
         const delBtn = document.createElement('button');
         delBtn.className = 'convo-del';
         delBtn.type = 'button';
@@ -680,7 +750,7 @@ function renderNoProjectConversations(container) {
                 deleteConversation(kind, conv.id);
             }
         });
-        
+
         row.appendChild(titleEl);
         row.appendChild(delBtn);
         container.appendChild(row);
@@ -953,7 +1023,7 @@ function renderTabs() {
 function switchToFile(filePath) {
     if (!state.openFiles[filePath]) return;
     state.activeFile = filePath;
-    
+
     const fileData = state.openFiles[filePath];
     if (textarea.value !== fileData.content) {
         textarea.value = fileData.content;
@@ -965,7 +1035,7 @@ function switchToFile(filePath) {
 
 function closeFile(filePath) {
     if (!state.openFiles[filePath]) return;
-    
+
     if (state.openFiles[filePath].unsaved) {
         const lang = state.language || 'fr';
         const msgConfirm = lang === 'en'
@@ -1070,15 +1140,15 @@ async function saveCurrentFile() {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-        
+
         const lang = state.language || 'fr';
         fileData.unsaved = false;
         $('#status-saved').textContent = TRANSLATIONS[lang]['saved-indicator'] || 'Enregistre';
         $('#status-saved').style.color = 'var(--green)';
         renderTabs();
-        setTimeout(() => { 
+        setTimeout(() => {
             if (state.activeFile === filePath && !fileData.unsaved) {
-                $('#status-saved').textContent = ''; 
+                $('#status-saved').textContent = '';
             }
         }, 2000);
     } catch (err) {
@@ -1353,6 +1423,9 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Connexion impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1381,6 +1454,9 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Création de compte impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1403,6 +1479,8 @@ async function checkAuthAndInit() {
         if (data && data.authenticated) {
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1691,7 +1769,10 @@ function createCustomSelect(selectId, opts) {
 
     const trigger = document.createElement('div');
     trigger.className = 'custom-select-trigger';
-    
+    trigger.setAttribute('role', 'button');
+    trigger.tabIndex = 0;
+    trigger.setAttribute('aria-haspopup', 'listbox');
+
     const triggerText = document.createElement('span');
     triggerText.className = 'custom-select-trigger-text';
     trigger.appendChild(triggerText);
@@ -1705,48 +1786,144 @@ function createCustomSelect(selectId, opts) {
 
     const optionsContainer = document.createElement('div');
     optionsContainer.className = 'custom-select-options';
+    optionsContainer.addEventListener('click', e => e.stopPropagation());
     wrapper.appendChild(optionsContainer);
+
+    // Long lists (live /models of a gateway can hold hundreds of entries) get a
+    // search field. It lives outside the rebuilt list so a refresh never steals
+    // the focus while the user is typing. Where the select allows it, the typed
+    // text can be used as a model ID directly.
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'custom-select-search';
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    optionsContainer.appendChild(search);
+    const list = document.createElement('div');
+    list.className = 'custom-select-list';
+    list.setAttribute('role', 'listbox');
+    optionsContainer.appendChild(list);
 
     select.parentNode.insertBefore(wrapper, select.nextSibling);
 
+    const allowsCustom = () => select.dataset.allowCustom === '1';
+    const searchable = () => allowsCustom() || select.options.length > 10;
+
+    function choose(value) {
+        if (select.value !== value) {
+            select.value = value;
+            select.dispatchEvent(new Event('change'));
+        }
+        closeAllCustomSelects();
+    }
+
+    function optionRow(opt) {
+        const div = document.createElement('div');
+        div.className = 'custom-select-option';
+        if (opt.dataset.action) div.classList.add('action');
+        else if (opt.value === select.value) div.classList.add('selected');
+        div.textContent = opt.textContent;
+        div.dataset.value = opt.value;
+        div.setAttribute('role', 'option');
+        div.setAttribute('aria-selected', String(opt.value === select.value));
+        div.tabIndex = 0;
+        div.title = opt.title || opt.textContent;
+        div.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (opt.dataset.action) {
+                closeAllCustomSelects();
+                select.dispatchEvent(new CustomEvent('custom-select-action', { detail: opt.dataset.action }));
+                return;
+            }
+            if (opt.value === '' && allowsCustom()) { search.focus(); return; }
+            choose(opt.value);
+        });
+        div.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); }
+        });
+        return div;
+    }
+
+    function renderList() {
+        list.innerHTML = '';
+        const query = search.value.trim().toLowerCase();
+        const matches = (opt) => !query || opt.textContent.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query);
+        // Group headers come from <optgroup>; groups left empty by the filter
+        // are skipped entirely.
+        for (const child of Array.from(select.children)) {
+            if (child.tagName === 'OPTGROUP') {
+                const rows = Array.from(child.children).filter(opt => opt.tagName === 'OPTION' && (!query || !opt.dataset.action) && matches(opt));
+                if (!rows.length) continue;
+                const header = document.createElement('div');
+                header.className = 'custom-select-group';
+                header.textContent = child.label;
+                list.appendChild(header);
+                rows.forEach(opt => list.appendChild(optionRow(opt)));
+            } else if (child.tagName === 'OPTION' && matches(child) && !(query && child.value === '')) {
+                list.appendChild(optionRow(child));
+            }
+        }
+        const typed = search.value.trim();
+        if (allowsCustom() && typed && !Array.from(select.options).some(opt => opt.value === typed)) {
+            const custom = document.createElement('div');
+            custom.className = 'custom-select-option action';
+            custom.tabIndex = 0;
+            custom.setAttribute('role', 'option');
+            custom.textContent = (state.language === 'en' ? 'Use model “{id}”' : 'Utiliser le modèle « {id} »').replace('{id}', typed);
+            custom.addEventListener('click', e => {
+                e.stopPropagation();
+                const option = document.createElement('option');
+                option.value = typed;
+                option.textContent = typed;
+                option.title = typed;
+                select.appendChild(option);
+                choose(typed);
+            });
+            list.appendChild(custom);
+        }
+        if (!list.children.length) {
+            const empty = document.createElement('div');
+            empty.className = 'custom-select-empty';
+            empty.textContent = state.language === 'en' ? 'No match' : 'Aucun résultat';
+            list.appendChild(empty);
+        }
+    }
+
     function updateOptions() {
-        optionsContainer.innerHTML = '';
-        
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
-
-        // Update color for model select trigger
-        if (selectId === 'ai-model') {
-            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-            triggerText.style.color = colors[select.value] || 'var(--text-0)';
-        }
+        trigger.setAttribute('aria-label', `${selectId === 'ai-model' ? 'Fournisseur' : 'Modèle'} : ${triggerText.textContent}`);
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
+        search.hidden = !searchable();
+        search.placeholder = allowsCustom()
+            ? (state.language === 'en' ? 'Search or type a model ID…' : 'Rechercher ou saisir un ID…')
+            : (state.language === 'en' ? 'Search…' : 'Rechercher…');
+        renderList();
+    }
 
-        Array.from(select.options).forEach(opt => {
-            const div = document.createElement('div');
-            div.className = 'custom-select-option';
-            if (opt.value === select.value) {
-                div.classList.add('selected');
-            }
-            div.textContent = opt.textContent;
-            div.dataset.value = opt.value;
-            div.title = opt.title || opt.textContent;
+    search.addEventListener('input', renderList);
+    search.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { closeAllCustomSelects(); trigger.focus(); return; }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            list.querySelector('.custom-select-option')?.click();
+        }
+        if (e.key === 'ArrowDown') { e.preventDefault(); list.querySelector('.custom-select-option')?.focus(); }
+    });
 
-            if (selectId === 'ai-model') {
-                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-                div.style.color = colors[opt.value] || 'inherit';
-                div.style.fontWeight = '600';
-            }
-
-            div.addEventListener('click', (e) => {
-                e.stopPropagation();
-                select.value = opt.value;
-                select.dispatchEvent(new Event('change'));
-                closeAllCustomSelects();
-            });
-
-            optionsContainer.appendChild(div);
-        });
+    // Keep the open list inside the panel that holds it: those panels clip
+    // their overflow, and a list sticking out made the whole chat view scroll
+    // sideways. Right-anchor when the right edge would overflow, then narrow.
+    function fitDropdown() {
+        const style = optionsContainer.style;
+        style.left = ''; style.right = ''; style.maxWidth = '';
+        const holder = wrapper.closest('.ai-view, .settings-pane, .modal-content') || document.documentElement;
+        const bounds = holder.getBoundingClientRect();
+        const right = Math.min(bounds.right, window.innerWidth) - 6;
+        const left = Math.max(bounds.left, 0) + 6;
+        let rect = optionsContainer.getBoundingClientRect();
+        if (rect.right > right) { style.left = 'auto'; style.right = '0'; rect = optionsContainer.getBoundingClientRect(); }
+        if (rect.left < left) style.maxWidth = `${Math.max(160, Math.floor(rect.right - left))}px`;
     }
 
     trigger.addEventListener('click', (e) => {
@@ -1755,17 +1932,33 @@ function createCustomSelect(selectId, opts) {
         closeAllCustomSelects();
         if (!isOpen) {
             wrapper.classList.add('open');
+            if (search.value) { search.value = ''; renderList(); }
+            fitDropdown();
+            if (!search.hidden) search.focus({ preventScroll: true });
+            // Scroll the list only: scrollIntoView would also scroll the
+            // clipped ancestors.
+            const selected = list.querySelector('.selected');
+            if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.clientHeight / 2 + selected.offsetHeight / 2);
         }
+        trigger.setAttribute('aria-expanded', String(!isOpen));
+    });
+    trigger.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); trigger.click(); }
+        if (e.key === 'Escape') { wrapper.classList.remove('open'); trigger.setAttribute('aria-expanded', 'false'); }
     });
 
+    // Re-creating the dropdown for the same <select> must not stack observers
+    // and listeners from the previous instance.
+    if (typeof select._customSelectCleanup === 'function') select._customSelectCleanup();
     const observer = new MutationObserver(() => {
         updateOptions();
     });
     observer.observe(select, { childList: true, characterData: true, subtree: true });
-
-    select.addEventListener('change', () => {
-        updateOptions();
-    });
+    select.addEventListener('change', updateOptions);
+    select._customSelectCleanup = () => {
+        observer.disconnect();
+        select.removeEventListener('change', updateOptions);
+    };
 
     updateOptions();
 }
@@ -1773,6 +1966,7 @@ function createCustomSelect(selectId, opts) {
 function closeAllCustomSelects() {
     document.querySelectorAll('.custom-select-container').forEach(c => {
         c.classList.remove('open');
+        c.querySelector('.custom-select-trigger')?.setAttribute('aria-expanded', 'false');
     });
 }
 

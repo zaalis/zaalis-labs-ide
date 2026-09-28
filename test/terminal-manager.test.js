@@ -9,7 +9,9 @@ const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = requ
 // ce module doit voir le test ignoré, pas échouer : c'est exactement la
 // dégradation que TerminalManager applique au produit.
 function ptyAvailable() {
-  try { new TerminalManager().create({ userId: 'probe', cwd: process.cwd() }).proc.kill(); return true; }
+  // Charger le module suffit : tuer un ConPTY aussitôt créé fait échouer
+  // l'agent de node-pty sous Windows (« AttachConsole failed » sur stderr).
+  try { require('node-pty'); return true; }
   catch { return false; }
 }
 
@@ -41,5 +43,12 @@ test('le PTY persistant exécute une commande et rend son code de sortie', { ski
     assert.equal(result.timedOut, false);
     assert.equal(result.session.profile.id, DEFAULT_TERMINAL_PROFILE);
     assert.equal(result.session.origin, 'agent');
-  } finally { manager.close(result.session); }
+  } finally {
+    if (!result.session.closed) {
+      const exited = new Promise(resolve => result.session.events.once('exit', resolve));
+      manager.write(result.session, 'exit\r');
+      await Promise.race([exited, new Promise(resolve => setTimeout(resolve, 1500))]);
+    }
+    manager.close(result.session);
+  }
 });

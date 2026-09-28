@@ -63,7 +63,7 @@ impl Tool for ComputerTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "computer".into(),
-            description: "Controler Windows lorsque l'utilisateur l'a explicitement active. Inspecter avant et apres chaque action; aucune donnee sensible ni validation irreversible.".into(),
+            description: "Contrôler le bureau macOS lorsque l'utilisateur l'a explicitement activé et que les autorisations Accessibilité et Enregistrement de l'écran sont accordées. Commence par observe ou inspect. Pour ouvrir une application, utilise son chemin .app dans Applications ou un nom macOS autorisé. Après activation, inspect vérifie l'écran, puis utilise key/type/click/scroll pour terminer. Aucune donnée sensible ni validation irréversible. Pour le web, utilise l'outil browser (navigateur intégré) ; ne pilote un navigateur externe ouvert sur le Mac que si l'utilisateur le demande explicitement.".into(),
             input_schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["observe","inspect","menus","move","click","scroll","type","key","activate_app"]},"target":{"type":"string"},"x":{"type":"number"},"y":{"type":"number"},"width":{"type":"number"},"height":{"type":"number"},"dx":{"type":"number"},"dy":{"type":"number"},"button":{"type":"string"},"text":{"type":"string"},"key":{"type":"string"},"modifiers":{"type":"array","items":{"type":"string"}},"path":{"type":"string"},"include_image":{"type":"boolean"},"include_ui":{"type":"boolean"},"include_ocr":{"type":"boolean"},"max_elements":{"type":"integer"},"max_dimension":{"type":"integer"}},"required":["action"],"additionalProperties":false}),
         }
     }

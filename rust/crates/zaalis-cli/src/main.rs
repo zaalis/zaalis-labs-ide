@@ -359,10 +359,14 @@ fn render_event(frame: &EventFrame) {
             usage: session_total,
             ..
         } => eprintln!(
-            "{DIM}{} tokens · {} outils · {} rounds{RESET}",
+            "{DIM}{} tokens · {} outils · {} rounds · web: {} requête(s), {} résultat(s), {} page(s) lue(s) · contexte compacté: {}{RESET}",
             session_total.total_tokens(),
             session_total.tool_calls,
-            session_total.rounds
+            session_total.rounds,
+            session_total.web_queries,
+            session_total.web_results,
+            session_total.web_pages_read,
+            session_total.context_compactions,
         ),
         Event::AgentFailed { agent_id, error } => eprintln!("{RED}[{agent_id}] {error}{RESET}"),
         Event::ProviderError {

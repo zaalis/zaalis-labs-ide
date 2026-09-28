@@ -1,76 +1,41 @@
-# zaalis labs IDE — macOS
+# zaalis labs IDE pour macOS
 
-Local IDE by zaalis labs with a shared Rust agent core, a thin local Node.js HTTP adapter, and a native macOS application powered by Electron.
+IDE local de zaalis labs avec le cœur agent Rust, un serveur Node.js local et une application Electron pour macOS. Cette branche reprend les fonctions communes de `main` et fournit les intégrations natives macOS : navigateur intégré, terminal, dictée, contrôle du bureau et mises à jour par DMG.
 
-This repository is the macOS edition. The Windows and Linux editions live in their own repositories and share the same server, interface and Rust core.
+## Installer l'application
 
-## Launch with the macOS installer
+Téléchargez le DMG adapté à votre Mac depuis la [dernière version publiée](https://github.com/zaalis/zaalis-labs-ide/releases/latest) :
 
-Download the `.dmg` matching your Mac from the [latest release](https://github.com/zaalis/zaalis-labs-ide/releases/latest):
+- `zaalis-macos-arm64.dmg` pour les Mac Apple Silicon ;
+- `zaalis-macos-x64.dmg` pour les Mac Intel.
 
-- `zaalis-macos-arm64.dmg` — Apple Silicon (M1, M2, M3, M4…)
-- `zaalis-macos-x64.dmg` — Intel
+Ouvrez le DMG et glissez **zaalis IDE** dans Applications. Les données de l'application sont conservées dans `~/Library/Application Support/zaalis`.
 
-Open the image and drag **zaalis IDE** into your Applications folder.
+## Démarrer depuis les sources
 
-## Launch manually
+Prérequis : Node.js 22 ou plus récent et Rust 1.90 ou plus récent.
 
-Prerequisites: Node.js 22 or newer and Rust 1.90 or newer.
-
-```bash
+```sh
 npm install
-cargo build --manifest-path rust/Cargo.toml -p zaalis-agentd
+npm run build:cli
 npm start
 ```
 
-Then open:
+Ouvrez ensuite `http://localhost:3000`. Ce mode sert au développement de l'interface et du serveur ; les fonctions nécessitant le shell Electron demandent une application empaquetée.
 
-```text
-http://localhost:3000
+## Reconstruire les applications macOS
+
+Installez les outils de ligne de commande Xcode (`swiftc`, `codesign`, `hdiutil`) et les cibles Rust `aarch64-apple-darwin` et `x86_64-apple-darwin`, puis lancez :
+
+```sh
+npm install
+npm run build:macos
 ```
 
-## Desktop control
+Les résultats sont `native/installer/zaalis-macos-arm64.dmg` et `native/installer/zaalis-macos-x64.dmg`. La construction inclut le serveur, le CLI et l'agent Rust, le module natif du terminal, Electron, les assistants Swift et le navigateur intégré.
 
-AI computer control runs through `macos-computer-bridge`, a Swift helper built and signed with the application, driven by the Electron shell. The shell owns the two system permissions the feature needs — **Accessibility** and **Screen Recording** — which macOS grants to the signed bundle in System Settings › Privacy & Security. The activity overlay, the same purple gradient border and control dock as the Linux and Windows editions, is drawn by the shell as click-through windows on every display.
+Le contrôle du bureau demande les autorisations **Accessibilité** et **Enregistrement de l'écran** dans Réglages Système › Confidentialité et sécurité. Pour conserver ces autorisations après une mise à jour, signez les versions distribuées avec la même identité de signature. Voir [README_MACOS.md](README_MACOS.md).
 
-`ZAALIS_CODESIGN_ID` should name a persistent signing identity. Ad-hoc signing produces a new code hash at every build, which silently revokes those two approvals after each update.
+## Licence
 
-## Local models
-
-Local GGUF models run through llama.cpp, downloaded on demand into `~/Library/Application Support/zaalis/engine`. macOS publishes a single binary per architecture and it already embeds **Metal**, so there is no GPU variant to download as on Windows or Linux:
-
-- **Metal** is the default and uses the GPU through the unified memory
-- **CPU** forces computation on the processor (`-ngl 0`), useful when the unified memory is already saturated, and is the automatic fallback when a model is too large to start on the GPU
-
-The binary matches the architecture of the packaged server, so an Apple Silicon build uses the arm64 engine and an Intel build the x64 one. Ollama is also supported and is started automatically when installed (Ollama.app or Homebrew).
-
-## Command sandbox
-
-Commands always run with a minimal environment and process-tree cleanup. Set
-`ZAALIS_SANDBOX_MODE=strict` to require native filesystem and network isolation;
-startup fails closed when the platform backend is unavailable. A workspace
-release build places `zaalis-sandbox` beside the daemon, which uses Seatbelt on
-macOS.
-
-## Rebuild the macOS application
-
-Prerequisites: Node.js, Rust 1.90 or newer (with both Apple targets), Xcode command line tools (`swiftc`, `codesign`, `hdiutil`).
-
-```bash
-sh native/build_macos_dmg.sh
-```
-
-The generated installers can be found here:
-
-```text
-native/installer/zaalis-macos-arm64.dmg
-native/installer/zaalis-macos-x64.dmg
-```
-
-## License and copyright
-
-Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
-
-zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) file and the [NOTICE](NOTICE) file included in this repository.
-
-No ownership rights are transferred by accessing, cloning, using, modifying, or contributing to this repository.
+Copyright © 2026 Bryan Boquel / zaalis. Tous droits réservés. Les conditions d'utilisation et de contribution figurent dans [LICENSE](LICENSE) et [NOTICE](NOTICE).

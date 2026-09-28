@@ -11,7 +11,12 @@ const { AutomationManager } = require('./automation-manager');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
+const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
+const compatProviders = require('./compat-providers');
+const { BrowserHost } = require('./zaalis-browser/host');
+const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
+const { launchMacosUpdater, resolveMacosAppBundle } = require('./macos-updater');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -19,11 +24,8 @@ try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
-// Sur macOS, le controle du bureau vit dans la coquille Electron : c'est elle
-// qui detient les autorisations Accessibilite et Enregistrement de l'ecran
-// (accordees au bundle signe), lance le binaire Swift macos-computer-bridge et
-// affiche l'overlay. Le serveur ne fait que lui parler en HTTP loopback, avec
-// l'URL et le secret qu'elle lui transmet au demarrage.
+// Electron owns the macOS Accessibility and Screen Recording permissions and
+// exposes its Swift helper through an authenticated loopback bridge.
 const COMPUTER_STOP_SECRET = process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || '';
 const automationManager = new AutomationManager({
   bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '',
@@ -35,7 +37,7 @@ const TUNNEL_HEADER = 'x-zaalis-tunnel-origin';
 const TUNNEL_ORIGIN_TOKEN = crypto.randomBytes(32).toString('base64url');
 
 // Base directory for static assets and writable data.
-// When packaged into an .exe (pkg), __dirname points inside the read-only
+// When packaged with pkg, __dirname points inside the read-only
 // snapshot, so we use the folder next to the executable instead.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 let APP_VERSION = '0.0.0';
@@ -122,7 +124,10 @@ function userApiKeys(user) {
   const out = {};
   for (const p of KEY_PROVIDERS) {
     const enc = user && user.apiKeys && user.apiKeys[p];
-    if (enc) { const v = decryptSecret(enc); if (v) out[p] = v; }
+    // Toute clé déchiffrée est aussi enregistrée pour le masquage de sortie :
+    // détenir la clé et savoir la masquer deviennent le même geste, donc un
+    // fournisseur ajouté plus tard ne peut pas oublier la seconde moitié.
+    if (enc) { const v = decryptSecret(enc); if (v) { registerSecret(`clé ${p}`, v); out[p] = v; } }
   }
   return out;
 }
@@ -503,6 +508,13 @@ app.use(express.static(path.join(APP_DIR, 'interface'), {
   }
 }));
 
+// Electron attends ce contrôle local avant de montrer la fenêtre. Il ne révèle
+// aucune donnée utilisateur et reste inaccessible depuis le tunnel grâce au
+// filtre de routes appliqué plus haut.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, apiRevision: 'desktop-launcher-v2' });
+});
+
 // ---------------------------------------------------------------------------
 // AUTH API (public)
 // ---------------------------------------------------------------------------
@@ -584,6 +596,28 @@ app.post('/api/internal/rust-computer', async (req, res) => {
   }
 });
 
+// Private loopback bridge used only by the Rust `browser` tool: the agent's
+// web actions happen in the integrated browser, visible to the user.
+app.post('/api/internal/rust-browser', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BROWSER_TOOL_TOKEN)) return res.status(401).json({ error: 'Jeton browser invalide.' });
+  const body = req.body || {};
+  const action = String(body.action || '');
+  try {
+    if (action === 'open_external') {
+      const ok = openInExternalBrowser(body.url);
+      return res.json({ summary: ok ? 'Ouvert dans le navigateur externe' : 'URL refusée', result: ok ? `Ouvert dans le navigateur par défaut : ${body.url}` : 'Seules les URL http(s) sont acceptées.' });
+    }
+    if (!browserHost.available()) return res.status(503).json({ error: 'Navigateur intégré indisponible (application zaalis IDE requise).' });
+    const args = { ...body };
+    delete args.action;
+    const result = await browserHost.agentTool(action, args);
+    return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
 // Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
 // est un processus séparé, sans cookie de session : il s'authentifie avec le
 // secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
@@ -633,6 +667,23 @@ app.use('/api', (req, res, next) => {
   return res.status(401).json({ error: 'Authentification requise.' });
 });
 
+// Per-account preference survives logout and application reinstalls because
+// users.json lives in the stable user data directory.
+const UI_PERMISSION_MODES = new Set(['supervised', 'semi', 'auto']);
+app.get('/api/preferences', (req, res) => {
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
+});
+app.put('/api/preferences', (req, res) => {
+  const permissionMode = String(req.body?.permissionMode || '');
+  if (!UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === req.user.id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+  user.permissionMode = permissionMode;
+  saveUsers(users);
+  res.json({ permissionMode });
+});
+
 // Update profile
 app.post('/api/profile', (req, res) => {
   const { pseudo, photo } = req.body || {};
@@ -655,7 +706,8 @@ app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
     config: sharedConfigForUser(req.user),
-    terminalProfiles: terminalManager.profiles()
+    terminalProfiles: terminalManager.profiles(),
+    defaultTerminalProfile: DEFAULT_TERMINAL_PROFILE
   });
 });
 
@@ -758,6 +810,105 @@ app.put('/api/keys', (req, res) => {
     res.json({ keys: apiKeysStatus(user) });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// OpenAI-compatible providers: keys live in the same encrypted vault as the
+// built-in ones (`compat:<id>`), URLs of self-hosted entries in compatUrls.
+function compatBaseUrl(user, provider) {
+  const saved = user && user.compatUrls && user.compatUrls[provider.id];
+  return provider.editableUrl && saved ? saved : provider.baseUrl;
+}
+function compatKey(user, provider) {
+  const enc = user && user.apiKeys && user.apiKeys[compatProviders.vaultName(provider.id)];
+  const value = enc ? decryptSecret(enc) : '';
+  if (value) registerSecret(`clé ${provider.id}`, value);
+  return value;
+}
+function compatReady(user, provider) {
+  if (!compatBaseUrl(user, provider)) return false;
+  return provider.keyless ? true : !!compatKey(user, provider);
+}
+function compatStatus(user) {
+  return compatProviders.PROVIDERS.map((provider) => {
+    const key = compatKey(user, provider);
+    return {
+      id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
+      defaultUrl: provider.baseUrl, models: provider.models,
+      keyless: !!provider.keyless, editableUrl: !!provider.editableUrl, local: !!provider.local,
+      key: { set: !!key, last4: key ? key.slice(-4) : '' },
+      // Keyless local servers only count once the user saved them explicitly.
+      configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
+    };
+  });
+}
+// Every configured endpoint goes to the daemon at once, so switching provider
+// does not restart it. The keys travel as separate environment variables.
+function compatEndpointsFor(user) {
+  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => ({
+    id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '',
+  }));
+}
+
+app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
+
+// PUT /api/compat/keys { keys: { deepseek: 'sk-…' | null }, baseUrls: { lmstudio: 'http://…' | null } }
+app.put('/api/compat/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Modification des clés réservée au desktop.' });
+  try {
+    const keys = (req.body && req.body.keys) || {};
+    const urls = (req.body && req.body.baseUrls) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    user.compatUrls = user.compatUrls || {};
+    for (const provider of compatProviders.PROVIDERS) {
+      if (provider.id in keys) {
+        const value = keys[provider.id];
+        if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
+        else if (typeof value === 'string' && value.trim()) user.apiKeys[compatProviders.vaultName(provider.id)] = encryptSecret(value.trim());
+      }
+      if (provider.editableUrl && provider.id in urls) {
+        if (urls[provider.id] === null || urls[provider.id] === '') { delete user.compatUrls[provider.id]; continue; }
+        const url = compatProviders.normalizeBaseUrl(urls[provider.id]);
+        if (!url) return res.status(400).json({ error: `URL invalide pour ${provider.label}.` });
+        user.compatUrls[provider.id] = url;
+      }
+    }
+    saveUsers(users);
+    res.json({ providers: compatStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/compat/models?provider=deepseek -> live /models of that provider,
+// fetched from this PC with the user's own key.
+const compatModelCache = new Map();
+app.get('/api/compat/models', async (req, res) => {
+  const provider = compatProviders.get(req.query.provider);
+  if (!provider) return res.status(404).json({ error: 'Fournisseur inconnu.' });
+  const baseUrl = compatBaseUrl(req.user, provider);
+  const key = compatKey(req.user, provider);
+  const cacheKey = crypto.createHash('sha256').update(`${req.user.id}|${provider.id}|${baseUrl}|${key}`).digest('hex');
+  const cached = compatModelCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  if (!baseUrl || (!provider.keyless && !key)) return res.json({ models: provider.models, live: false });
+  try {
+    const answer = await fetch(`${baseUrl}/models`, {
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!answer.ok) return res.json({ models: provider.models, live: false, error: `HTTP ${answer.status}` });
+    const data = await answer.json();
+    const list = Array.isArray(data && data.data) ? data.data : Array.isArray(data && data.models) ? data.models : [];
+    const live = [...new Set(list.map((item) => (typeof item === 'string' ? item : item && (item.id || item.name))).filter(Boolean).map(String))];
+    const models = [...provider.models.filter((id) => live.includes(id)), ...live.filter((id) => !provider.models.includes(id)).sort()];
+    compatModelCache.set(cacheKey, { at: Date.now(), models });
+    res.json({ models: models.length ? models : provider.models, live: models.length > 0 });
+  } catch (error) {
+    res.json({ models: provider.models, live: false, error: error.name === 'TimeoutError' ? 'délai dépassé' : 'injoignable' });
   }
 });
 
@@ -1083,66 +1234,59 @@ app.post('/api/exec', (req, res) => {
 // These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
 // are strictly read-only, bounded in output, and path-guarded to the project.
 
-// zaalis browser est un projet frere (meme auteur). Sur macOS il s'installe
-// comme n'importe quelle application, dans /Applications ou dans le dossier
-// Applications de l'utilisateur : on cherche le bundle aux deux endroits.
-const ZAALIS_BROWSER_APP = [
-  '/Applications/zaalis browser.app',
-  path.join(os.homedir(), 'Applications', 'zaalis browser.app'),
-].find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
-const ZAALIS_BROWSER_PING = 'http://127.0.0.1:8715/zaalis/ping';
+// The vendored browser runs in this server while the Electron shell renders its
+// views inside the IDE. Its private Unix socket is passed in by the shell.
 const SEARCH_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+const browserHost = new BrowserHost({
+  dataDir: process.env.ZAALIS_BROWSER_DATA_DIR ||
+    (process.env.ZAALIS_DATA_DIR ? path.join(DATA_DIR, 'Browser')
+      : path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'Browser')),
+  legacyDataDir: (process.env.ZAALIS_BROWSER_DATA_DIR || process.env.ZAALIS_DATA_DIR) ? '' : undefined,
+  secretFile: BROWSER_SECRET_FILE,
+  idePort: PORT,
+  log: (line) => console.error(line),
+});
+browserHost.connect();
+// Jeton stable du processus pour l'outil Rust `browser` : il ne change pas
+// entre deux tours, donc le démon n'est pas relancé à chaque requête.
+const BROWSER_TOOL_TOKEN = crypto.randomBytes(32).toString('base64url');
 
-async function pingZaalisBrowser(timeoutMs) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+function integratedBrowserUnavailable() {
+  return {
+    ok: false, status: 503,
+    body: {
+      error: 'browser_unavailable',
+      message: 'Le navigateur intégré est disponible dans l\'application zaalis IDE (fenêtre native).',
+    },
+  };
+}
+
+function browserOffline() {
+  const core = browserHost.core;
+  return !!(core && core.settings && core.settings.offline);
+}
+
+async function openInIntegratedBrowser(targetUrl, { background = false } = {}) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
+  if (!browserHost.available()) return integratedBrowserUnavailable();
   try {
-    const r = await fetch(ZAALIS_BROWSER_PING, { signal: ctrl.signal });
-    return r.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.open(url, { background });
+    return { ok: true, status: 200, body: { ok: true, target: 'integrated', ...opened } };
+  } catch (error) {
+    return { ok: false, status: 502, body: { error: error.message || 'navigateur intégré indisponible' } };
   }
 }
 
-// S'assure que zaalis browser tourne, en le lancant si besoin (chemin fixe
-// ci-dessus). L'API locale du navigateur demarre des l'ouverture du process,
-// avant meme que la fenetre/WebView2 soit prete : on patiente donc un peu
-// apres le premier ping reussi pour laisser le premier onglet s'initialiser
-// (sinon une recherche envoyee trop tot est silencieusement ignoree).
-let launchingBrowser = null;
-async function ensureZaalisBrowserRunning() {
-  if (await pingZaalisBrowser(800)) return true;
-  if (launchingBrowser) return launchingBrowser;
-
-  launchingBrowser = (async () => {
-    if (!ZAALIS_BROWSER_APP) return false;
-    try {
-      // `open -a` laisse LaunchServices demarrer le bundle : c'est ce qui
-      // preserve ses autorisations systeme et sa fenetre au premier plan.
-      const child = spawn('open', ['-a', ZAALIS_BROWSER_APP], { detached: true, stdio: 'ignore', env: execEnv() });
-      child.on('error', () => {});
-      child.unref();
-    } catch {
-      return false;
-    }
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      if (await pingZaalisBrowser(800)) {
-        await new Promise((r) => setTimeout(r, 700)); // laisse le premier onglet s'initialiser
-        return true;
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    return false;
-  })();
-
+// An external browser is opened only when explicitly requested.
+function openInExternalBrowser(targetUrl) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return false;
   try {
-    return await launchingBrowser;
-  } finally {
-    launchingBrowser = null;
-  }
+    const child = spawn('/usr/bin/open', [url], { detached: true, stdio: 'ignore' });
+    child.unref();
+    return true;
+  } catch { return false; }
 }
 
 function decodeHtmlEntities(value) {
@@ -1337,52 +1481,6 @@ async function fetchPageExcerpt(url) {
   }
 }
 
-async function openInZaalisBrowser(targetUrl, { background = false, timeoutMs = 4000 } = {}) {
-  const url = safeHttpUrl(targetUrl);
-  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return {
-      ok: false,
-      status: 503,
-      body: {
-        error: 'browser_unavailable',
-        message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-      },
-    };
-  }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const bg = background ? '&background=1' : '';
-    const r = await fetch(`http://127.0.0.1:8715/zaalis/newtab?url=${encodeURIComponent(url)}${bg}`, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          error: 'offline_mode',
-          message: body.message || 'Mode local securise actif : recherche impossible.',
-        },
-      };
-    }
-    if (!r.ok || body.error) return { ok: false, status: r.status || 502, body: { error: body.error || `browser HTTP ${r.status}` } };
-    return { ok: true, status: 200, body };
-  } catch (e) {
-    return {
-      ok: false,
-      status: 502,
-      body: {
-        error: e && e.name === 'AbortError' ? 'zaalis browser ne repond pas' : 'zaalis browser est indisponible',
-        detail: e && e.message,
-      },
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function deepSearchQueries(query) {
   const base = String(query || '').replace(/\s+/g, ' ').trim();
   const out = [base, `${base} official source`, `${base} documentation`, `${base} analysis`];
@@ -1410,53 +1508,39 @@ app.get('/api/favicon', async (req, res) => {
 app.get('/api/browser-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   const mode = String(req.query.mode || 'newtab').toLowerCase();
-  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const visibleParam = background ? '&background=1' : '';
-  const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
-  const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
-
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return res.status(503).json({
-      error: 'browser_unavailable',
-      message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-    });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, query: q, target: 'external', url });
   }
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4000);
+  if (!browserHost.available()) {
+    const unavailable = integratedBrowserUnavailable();
+    return res.status(unavailable.status).json(unavailable.body);
+  }
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return res.status(409).json({
-        error: 'offline_mode',
-        message: body.message || 'Mode local securise actif : recherche impossible.',
-      });
-    }
-    if (!r.ok || body.error) {
-      return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
-    }
-    res.json({ ok: true, query: q, mode, background, browser: body });
-  } catch (e) {
-    const msg = e && e.name === 'AbortError'
-      ? 'zaalis browser ne repond pas'
-      : 'zaalis browser est indisponible';
-    res.status(502).json({ error: msg, detail: e && e.message });
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.search(q, { newTab: mode !== 'active' });
+    res.json({ ok: true, query: q, mode, target: 'integrated', url: opened.url });
+  } catch (error) {
+    res.status(502).json({ error: error.message || 'navigateur intégré indisponible' });
   }
 });
 
 app.get('/api/browser-open', async (req, res) => {
   const url = safeHttpUrl(req.query.url);
   if (!url) return res.status(400).json({ error: 'url is required' });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, url, target: 'external' });
+  }
   const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const r = await openInZaalisBrowser(url, { background });
+  const r = await openInIntegratedBrowser(url, { background });
   if (!r.ok) return res.status(r.status).json(r.body);
-  res.json({ ok: true, url, browser: r.body });
+  res.json({ ok: true, url, target: 'integrated', browser: r.body });
+});
+
+app.get('/api/browser/status', (req, res) => {
+  res.json({ available: browserHost.available(), started: !!browserHost.core, tabs: browserHost.tabs() });
 });
 
 app.post('/api/deep-search', async (req, res) => {
@@ -1467,10 +1551,15 @@ app.post('/api/deep-search', async (req, res) => {
   const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
   const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
 
-  // First open the search page in zaalis browser. If secure local mode blocks it,
-  // do not perform server-side web requests behind the user's back.
-  const firstOpen = await openInZaalisBrowser(searchPageUrl(query), { background: false, timeoutMs: 5000 });
-  if (!firstOpen.ok) return res.status(firstOpen.status).json(firstOpen.body);
+  // The search opens first in the integrated browser, so the user sees it
+  // happen. If its secure local mode is on, no web request is made at all.
+  if (browserOffline()) {
+    return res.status(409).json({ error: 'offline_mode', message: 'Mode local sécurisé actif : recherche impossible.' });
+  }
+  let searchTab = null;
+  if (browserHost.available()) {
+    try { searchTab = await browserHost.search(query, { newTab: true }); } catch {}
+  }
 
   const searchedQueries = deepSearchQueries(query);
   const all = [];
@@ -1497,10 +1586,12 @@ app.post('/api/deep-search', async (req, res) => {
     result.quote = usefulQuote(result.excerpt || result.description || result.snippet);
   }
 
-  const opened = [{ url: searchPageUrl(query), kind: 'search', foreground: true }];
-  for (const result of all.slice(0, openTabs)) {
-    const openedTab = await openInZaalisBrowser(result.url, { background: true, timeoutMs: 4000 });
-    if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false });
+  const opened = searchTab ? [{ url: searchTab.url, kind: 'search', foreground: true, target: 'integrated' }] : [];
+  if (searchTab) {
+    for (const result of all.slice(0, openTabs)) {
+      const openedTab = await openInIntegratedBrowser(result.url, { background: true });
+      if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false, target: 'integrated' });
+    }
   }
 
   res.json({ ok: true, query, searchedQueries, results: all, opened });
@@ -1934,6 +2025,11 @@ const MODELS_DIR = path.join(DATA_DIR, 'models');   // installed *.gguf files
 const ENGINE_DIR = path.join(DATA_DIR, 'engine');   // extracted llama.cpp builds
 const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
 const ENGINE_PORT = 8091;
+function ggufModelPath(name) {
+  const value = String(name || '');
+  if (!value || path.basename(value) !== value || !value.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF invalide.');
+  return path.join(MODELS_DIR, value);
+}
 
 function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
 ensureDir(MODELS_DIR);
@@ -2121,6 +2217,74 @@ function startGgufPullTask({ repo, file, url }) {
   return task;
 }
 
+function startGgufPullTask({ repo, file, url }) {
+  sweepGgufPullTasks();
+  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
+  if (!url) throw new Error('url, ou repo+file requis');
+
+  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
+  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
+  const dest = path.join(MODELS_DIR, base);
+  const tmp = dest + '.part';
+
+  for (const task of ggufPullTasks.values()) {
+    if (!terminalGgufPullStatus(task.status) && task.dest === dest) return task;
+  }
+
+  const ac = new AbortController();
+  const task = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    repo,
+    file,
+    url,
+    name: base,
+    dest,
+    tmp,
+    status: 'queued',
+    completed: 0,
+    total: 0,
+    error: '',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    doneAt: 0,
+    ac,
+  };
+  ggufPullTasks.set(task.id, task);
+
+  task.promise = (async () => {
+    try {
+      ensureDir(MODELS_DIR);
+      if (fs.existsSync(dest)) {
+        const size = fs.statSync(dest).size;
+        task.completed = size;
+        task.total = size;
+        task.status = 'success';
+        return;
+      }
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = 'downloading';
+      await downloadTo(url, tmp, (rec, tot) => {
+        task.completed = rec;
+        task.total = tot || task.total || 0;
+        task.status = 'downloading';
+        task.updatedAt = Date.now();
+      }, ac.signal);
+      fs.renameSync(tmp, dest);
+      task.completed = task.total || task.completed;
+      task.status = 'success';
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = ac.signal.aborted ? 'canceled' : 'error';
+      task.error = ac.signal.aborted ? 'Téléchargement annulé.' : ((e && e.message) || String(e));
+    } finally {
+      task.updatedAt = Date.now();
+      task.doneAt = Date.now();
+    }
+  })();
+
+  return task;
+}
+
 // Les binaires llama.cpp pour macOS sont publies en .tar.gz ; on garde le repli
 // unzip pour une eventuelle archive .zip telechargee a la main par l'utilisateur.
 function extractArchive(archivePath, destDir) {
@@ -2204,46 +2368,32 @@ let engineRequestedVariant = null;
 // `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
 async function ensureEngine(modelFile, preferredVariant, opts) {
   opts = opts || {};
-  const modelPath = path.join(MODELS_DIR, modelFile);
+  const modelPath = ggufModelPath(modelFile);
   if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
   // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
   let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
+  const desiredVariant = preferredVariant || detectEngineVariant();
   const optsKey = `${ctx}|${ngl}`;
-  const requestedVariant = normalizeEngineVariant(preferredVariant || detectEngineVariant());
-  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return; }
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
   engineStarting = (async () => {
     await stopEngine();
-    const startVariant = async (v) => {
-      const exe = await ensureEngineBinary(v);
-      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
-      // Le binaire macOS embarque toujours Metal : le mode CPU doit donc
-      // desactiver explicitement le deport de couches sur le GPU.
-      if (v === 'cpu') args.push('-ngl', '0');
-      else if (ngl > 0) args.push('-ngl', String(ngl));
-      engineOpts = optsKey;
-      const proc = spawn(exe, args, { stdio: 'ignore', cwd: path.dirname(exe), env: execEnv() });
-      proc.on('error', () => {});
-      engineProc = proc; engineModelFile = modelFile; engineVariant = v; engineRequestedVariant = requestedVariant;
-      proc.once('exit', () => {
-        if (engineProc === proc) {
-          engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
-        }
-      });
-      await waitForHealth(ENGINE_PORT, 180000);
-    };
-    // Un modele trop lourd pour la memoire unifiee fait echouer le demarrage
-    // Metal : on retombe alors sur le calcul processeur, plus lent mais sur.
-    try {
-      await startVariant(requestedVariant);
-    } catch (e) {
-      await stopEngine();
-      if (requestedVariant === 'cpu') throw e;
-      await startVariant('cpu');
-    }
+    let variant = desiredVariant;
+    let exe;
+    try { exe = await ensureEngineBinary(variant); }
+    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
+    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
+    if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
+    engineOpts = optsKey;
+    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+    proc.on('error', () => {});
+    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
+    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
+    await waitForHealth(ENGINE_PORT, 180000);
   })();
   try { await engineStarting; } finally { engineStarting = null; }
 }
@@ -2275,9 +2425,9 @@ app.get('/api/gguf-engine', (req, res) => {
 // model into memory (LM Studio style). Streams NDJSON: loading -> ready/error.
 app.post('/api/gguf-load', async (req, res) => {
   const b = req.body || {};
-  const name = path.basename(String(b.name || ''));
+  const name = String(b.name || '');
   res.setHeader('Content-Type', 'application/x-ndjson');
-  if (!name.toLowerCase().endsWith('.gguf')) {
+  try { ggufModelPath(name); } catch {
     try { res.write(JSON.stringify({ status: 'error', error: 'Nom de modèle invalide.' }) + '\n'); } catch {}
     return res.end();
   }
@@ -2305,10 +2455,11 @@ app.post('/api/gguf-unload', async (req, res) => {
 // POST /api/gguf-delete { name }
 app.post('/api/gguf-delete', async (req, res) => {
   try {
-    const name = path.basename(String((req.body && req.body.name) || ''));
-    if (!name.toLowerCase().endsWith('.gguf')) return res.status(400).json({ error: 'Nom invalide.' });
+    const name = String((req.body && req.body.name) || '');
+    let target;
+    try { target = ggufModelPath(name); } catch { return res.status(400).json({ error: 'Nom invalide.' }); }
     if (engineModelFile === name) await stopEngine();
-    fs.unlinkSync(path.join(MODELS_DIR, name));
+    fs.unlinkSync(target);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2383,6 +2534,60 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 
 app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
 
+async function capabilitiesForUser(user, provider, model) {
+  const id = String(provider || '').trim().toLowerCase();
+  if (compatProviders.isCompat(id)) {
+    const provider = compatProviders.get(id);
+    if (!provider) throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+    return compatProviders.capabilities(id, model, compatReady(user, provider));
+  }
+  if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
+    throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+  }
+  const name = String(model || modelCatalog.SUBMODELS[id]?.[0] || '').trim();
+  if (!name) throw Object.assign(new Error('Modèle requis.'), { status: 400 });
+  const shared = sharedConfigForUser(user);
+  const info = { ready: true };
+  if (id === 'local') {
+    info.ready = false;
+    try {
+      const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const answer = await fetch(`${url}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }), signal: AbortSignal.timeout(2500),
+      });
+      if (answer.ok) {
+        const show = await answer.json();
+        info.ready = true;
+        info.localCapabilities = show.capabilities || [];
+        const contextEntry = Object.entries(show.model_info || {}).find(([key, value]) =>
+          key.endsWith('.context_length') && Number.isFinite(Number(value)) && Number(value) >= 512);
+        if (contextEntry) info.contextWindow = Number(contextEntry[1]);
+      }
+    } catch {}
+  } else if (id === 'gguf') {
+    try { info.ready = fs.existsSync(ggufModelPath(name)); } catch { info.ready = false; }
+    info.contextWindow = shared.ggufCtx;
+  } else {
+    const providerInfo = modelCatalog.PROVIDERS.find((entry) => entry.id === id);
+    info.ready = !!userApiKeys(user)[providerInfo.keyName];
+  }
+  return modelCapabilities(id, name, info);
+}
+
+app.get('/api/model-capabilities', async (req, res) => {
+  try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
+app.post('/api/rust-core/cancel', async (req, res) => {
+  try {
+    const sessionId = String(req.body && req.body.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: 'sessionId requis.' });
+    res.json(await rustAgentBridge.cancel(req.user.id, sessionId, req.body && req.body.agentId));
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
 // ---------------------------------------------------------------------------
 // CODESTRALE BRIDGE — the two descriptors the companion app reads.
 // ---------------------------------------------------------------------------
@@ -2438,6 +2643,34 @@ app.post('/api/rust-core/decision', async (req, res) => {
   }
 });
 
+// The agent's browser tool exists only where the integrated browser does: in
+// the desktop app, never for the phone remote.
+function browserToolConfig(req) {
+  if (req.isMobile || req.isTunnel || !browserHost.available()) return {};
+  return { browserEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-browser`, browserToken: BROWSER_TOOL_TOKEN };
+}
+
+// Web searches made by the agent's server-side tools are replayed in the
+// integrated browser so the user sees them happen (desktop only).
+function mirrorWebTools(req, emit) {
+  if (req.isMobile || req.isTunnel) return emit;
+  let opened = 0;
+  return (event) => {
+    try {
+      if (event && event.type === 'tool_started' && browserHost.available()) {
+        const input = event.input || {};
+        if ((event.tool === 'web_search' || event.tool === 'deep_search') && input.query) {
+          browserHost.search(String(input.query), { newTab: true }).catch(() => {});
+        } else if (event.tool === 'web_fetch' && input.url && opened < 6) {
+          opened++;
+          openInIntegratedBrowser(String(input.url), { background: true }).catch(() => {});
+        }
+      }
+    } catch {}
+    return emit(event);
+  };
+}
+
 async function rustAgentHttp(req, res, next) {
   const status = rustAgentBridge.status();
   if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
@@ -2478,22 +2711,36 @@ async function rustAgentHttp(req, res, next) {
       computerToken = crypto.randomBytes(32).toString('base64url');
       computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
     }
-    // A GGUF turn needs the local engine loaded with that exact file first —
-    // the single chat already did this, the agent path did not.
-    if (model === 'gguf') {
-      if (!body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    const selectedTeam = Array.isArray(body.team) ? body.team : null;
+    const ggufNames = selectedTeam
+      ? [...new Set(selectedTeam.filter((agent) => agent.model?.provider === 'gguf').map((agent) => agent.model.model).filter(Boolean))]
+      : model === 'gguf' ? [body.submodel] : [];
+    if (ggufNames.length > 1) throw Object.assign(new Error('Une équipe ne peut charger qu’un modèle GGUF à la fois.'), { status: 400 });
+    if (model === 'gguf' && !body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    if (ggufNames.length) {
       const shared = sharedConfigForUser(req.user);
-      await ensureEngine(body.submodel, (body.config && body.config.ggufVariant) || shared.ggufVariant, {
+      await ensureEngine(ggufNames[0], (body.config && body.config.ggufVariant) || shared.ggufVariant, {
         ctx: (body.config && body.config.ggufCtx) || shared.ggufCtx,
         gpuLayers: (body.config && body.config.ggufGpuLayers) !== undefined ? body.config.ggufGpuLayers : shared.ggufGpuLayers,
       });
     }
+    const modelFacts = selectedTeam ? null : await capabilitiesForUser(req.user, model, body.submodel);
+    const team = selectedTeam ? await Promise.all(selectedTeam.map(async (agent) => ({
+      ...agent,
+      model: {
+        ...agent.model,
+        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
+        capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
+      },
+    }))) : null;
+    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root || body.projectRoot),
-      model,
-      submodel: body.submodel,
+      model: lead.provider,
+      submodel: lead.model,
+      modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
       systemPrompt: body.systemPrompt,
       permissionMode: body.permissionMode || 'supervised',
@@ -2501,14 +2748,22 @@ async function rustAgentHttp(req, res, next) {
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
       history: Array.isArray(body.history) ? body.history : [],
-      team: Array.isArray(body.team) ? body.team : null,
+      team,
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
       mcpServers: rustMcpServersFor(req.user),
-      runtimeConfig: computerToken ? {
+      runtimeConfig: {
+        ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
+        ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
-      } : undefined,
+        } : {}),
+      },
       signal: controller.signal,
-    }, emit);
+    }, mirrorWebTools(req, emit));
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();
@@ -2549,12 +2804,17 @@ async function rustChatHttp(req, res, next) {
       if (!body.submodel) return res.status(400).json({ error: 'Aucun modèle GGUF sélectionné.' });
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
+    const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
+    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root),
-      model: String(body.model),
-      submodel: body.submodel,
+      model: target.provider,
+      submodel: target.model,
+      modelCapabilities: bindingCapabilities(modelFacts),
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
       message: String(body.message),
       systemPrompt: body.systemPrompt,
       permissionMode: 'read-only',
@@ -2568,6 +2828,8 @@ async function rustChatHttp(req, res, next) {
           ? sharedConfigForUser(req.user).ollamaUrl
           : body.config && body.config.ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
       },
       signal: (() => {
         const controller = new AbortController();
@@ -2575,7 +2837,7 @@ async function rustChatHttp(req, res, next) {
         res.once('close', () => { if (!res.writableEnded) controller.abort(); });
         return controller.signal;
       })(),
-    }, () => {});
+    }, mirrorWebTools(req, () => {}));
     return res.json({
       response: result.response || '',
       thinking: result.thinking || undefined,
@@ -2690,9 +2952,10 @@ app.get('/api/check-update', async (req, res) => {
       || assets.find((a) => /\.dmg$/i.test(a.name));
     const latestVersion = release.tag_name || null;
     const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
-    // If this tag was already installed but the executable still reports an
-    // older version, the release asset was built from the wrong source.
-    // Surface it instead of offering the same update forever.
+    // We already installed this exact tag, yet we still report an older version:
+    // the published macOS DMG was built from a different version than the
+    // tag claims. Without saying so, the app just re-offers the same update
+    // forever and the update looks broken when it actually succeeded.
     res.json({
       tag_name: latestVersion,
       name: release.name || latestVersion || null,
@@ -2709,8 +2972,8 @@ let downloadProgress = 0;
 let downloadedInstallerPath = null;
 let pendingUpdateTag = null;
 
-// Persist the tag whose DMG was opened. This makes a re-tagged or stale DMG
-// diagnosable after relaunch, rather than looking like an endless update loop.
+// Remember which release tag we last installed, so /api/check-update can tell a
+// genuine new version from a tag whose asset was built at another version.
 const LAST_UPDATE_TAG_FILE = path.join(DATA_DIR, 'last-update-tag');
 function tagFromUpdateUrl(raw) {
   const m = String(raw || '').match(/\/releases\/download\/([^/]+)\//);
@@ -2784,37 +3047,49 @@ app.get('/api/update/progress', (req, res) => {
   res.json({ progress: downloadProgress, dest: downloadedInstallerPath });
 });
 
+// The detached macOS updater verifies the downloaded DMG and signed bundle,
+// then replaces the installed app after Electron has shut down.
 app.post('/api/update/install', (req, res) => {
   try {
+    if (process.platform !== 'darwin' || !process.pkg) {
+      return res.status(409).json({ error: 'La mise a jour automatique est disponible depuis l application macOS installee.' });
+    }
     const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.dmg');
     if (!fs.existsSync(installerPath)) {
       return res.status(409).json({ error: 'Installer not downloaded yet.' });
     }
 
-    // On demande au Finder de monter l'image disque : c'est lui qui detient le
-    // processus, donc le montage survit a la fermeture de l'IDE. L'utilisateur
-    // glisse ensuite l'application dans /Applications, comme pour toute app
-    // macOS — remplacer un bundle signe pendant qu'il tourne le casserait.
-    const child = spawn('open', [installerPath], {
-      detached: true,
-      stdio: 'ignore',
-      env: execEnv()
+    const appBundlePath = resolveMacosAppBundle(process.env.ZAALIS_APP_BUNDLE_PATH, APP_DIR);
+    if (!appBundlePath) {
+      return res.status(409).json({ error: 'Le bundle macOS installe est introuvable.' });
+    }
+
+    // Comme sous Windows, un processus detache prend le relais avant que l'IDE
+    // se ferme. Il verifie le DMG, prepare le nouveau bundle, attend l'arret
+    // d'Electron et du serveur, remplace l'application puis la relance. En cas
+    // d'echec il restaure l'ancien bundle et ouvre le DMG pour installation
+    // manuelle, afin de ne jamais laisser l'utilisateur sans application.
+    const parsedTag = parseVersionTag(pendingUpdateTag);
+    const updateLog = path.join(os.homedir(), 'Library', 'Logs', 'zaalis', 'zaalis-update.log');
+    const runner = launchMacosUpdater({
+      installerPath,
+      appBundlePath,
+      logPath: updateLog,
+      lastTagFile: LAST_UPDATE_TAG_FILE,
+      expectedVersion: parsedTag ? parsedTag.join('.') : '',
+      expectedArch: process.arch,
+      serverPid: process.pid,
+      shellPid: process.env.ZAALIS_SHELL_PID,
     });
-    child.on('error', () => {});
-    child.unref();
 
-    try {
-      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
-    } catch {}
-
-    res.json({ success: true, installerPath, manual: true });
+    res.json({ success: true, installerPath, automatic: true, log: updateLog, runnerPid: runner.pid });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ---------------------------------------------------------------------------
-// REMOTE CONTROL — pair a phone to this PC over a Cloudflare quick tunnel
+// REMOTE CONTROL — pair a phone to this Mac over a Cloudflare quick tunnel
 // ---------------------------------------------------------------------------
 // The desktop user starts it -> we boot `cloudflared`, which opens a public
 // HTTPS URL forwarding to this local server. A signed pairing token in the QR
@@ -3037,7 +3312,9 @@ async function startOllamaIfNeeded() {
     '/usr/local/bin/ollama',
     'ollama',
   ];
-  const exe = candidates.find((p) => p !== 'ollama' && fs.existsSync(p)) || 'ollama';
+  // Prefer the standard install path; otherwise fall back to `ollama` on the
+  // PATH (the 'error' handler below makes a missing binary harmless).
+  const exe = candidates.find((p) => p !== 'ollama' && p && fs.existsSync(p)) || 'ollama';
   try {
     const child = spawn(exe, ['serve'], {
       detached: true,

@@ -54,9 +54,17 @@ const SETTINGS_SELECT_IDS = [
     'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
     'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
     'settings-default-chat-select', 'settings-default-agent-select',
-    'settings-default-reasoning-select', 'settings-channel-select'
+    'settings-default-reasoning-select', 'settings-default-permission-select', 'settings-channel-select'
 ];
 let _settingsSelectsReady = false;
+let terminalProfiles = [];
+let defaultTerminalProfile = '';
+function terminalProfileDefault() {
+    return terminalProfiles.find(profile => profile.id === defaultTerminalProfile && profile.available)?.id
+        || terminalProfiles.find(profile => profile.available)?.id
+        || terminalProfiles[0]?.id
+        || 'cmd';
+}
 function initSettingsCustomSelects() {
     if (_settingsSelectsReady) return;
     if (typeof createCustomSelect !== 'function') return;
@@ -72,7 +80,7 @@ function sharedHardwareConfigPayload() {
         ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
         ggufVariant: c.ggufVariant || '',
         ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
-        terminalProfile: c.terminalProfile || 'cmd'
+        terminalProfile: c.terminalProfile || terminalProfileDefault()
     };
 }
 
@@ -81,6 +89,7 @@ function sharedHardwareConfigPayload() {
 function populateTerminalProfiles(profiles) {
     const select = $('#settings-terminal-profile');
     if (!select || !Array.isArray(profiles)) return;
+    terminalProfiles = profiles;
     select.replaceChildren(...profiles.map((profile) => {
         const option = document.createElement('option');
         option.value = profile.id;
@@ -88,8 +97,8 @@ function populateTerminalProfiles(profiles) {
         option.disabled = !profile.available;
         return option;
     }));
-    const saved = state.config.terminalProfile || 'cmd';
-    state.config.terminalProfile = select.querySelector(`option[value="${saved}"]:not(:disabled)`) ? saved : 'cmd';
+    const saved = state.config.terminalProfile;
+    state.config.terminalProfile = profiles.some(profile => profile.id === saved && profile.available) ? saved : terminalProfileDefault();
     select.value = state.config.terminalProfile;
 }
 
@@ -104,7 +113,7 @@ function applySharedHardwareConfig(config) {
         const raw = config.ggufGpuLayers;
         c.ggufGpuLayers = (raw === '' || raw === undefined || raw === null) ? '' : (parseInt(raw, 10) || 0);
     }
-    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || 'cmd');
+    if ('terminalProfile' in config) c.terminalProfile = String(config.terminalProfile || terminalProfileDefault());
 }
 
 async function syncSharedHardwareConfig() {
@@ -122,7 +131,10 @@ async function loadSharedHardwareConfig() {
         const res = await fetch('/api/config');
         if (!res.ok) return;
         const data = await res.json();
-        if (data) populateTerminalProfiles(data.terminalProfiles);
+        if (data) {
+            defaultTerminalProfile = data.defaultTerminalProfile || '';
+            populateTerminalProfiles(data.terminalProfiles);
+        }
         if (data && data.configured && data.config) {
             applySharedHardwareConfig(data.config);
             populateTerminalProfiles(data.terminalProfiles);
@@ -153,6 +165,7 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
+    setVal('settings-default-permission-select', ['supervised', 'semi', 'auto'].includes(state.permissionMode) ? state.permissionMode : c.defaultPermissionMode);
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -161,6 +174,7 @@ function populateSettingsControls() {
 
 $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
+    loadCompatProviders();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -176,6 +190,173 @@ $('#cancel-btn').addEventListener('click', () => $('#settings-modal').classList.
 $('#settings-modal').addEventListener('click', e => { if (e.target.id === 'settings-modal') $('#settings-modal').classList.remove('active'); });
 
 const API_KEY_FIELDS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
+// ----- OpenAI-compatible providers (DeepSeek, OpenRouter, LM Studio…) -----
+// Served by zaalis itself: the server keeps the keys encrypted and the Rust
+// core calls each provider directly from this PC.
+window.compatProviders = [];
+async function loadCompatProviders() {
+    try {
+        const response = await fetch('/api/compat/providers');
+        if (!response.ok) return;
+        window.compatProviders = (await response.json()).providers || [];
+    } catch { return; }
+    renderCompatModelOptions();
+    renderCompatKeyFields();
+}
+// Only configured providers appear in the model list; the others stay one
+// click away in Settings, so the list remains short and readable.
+function renderCompatModelOptions() {
+    const group = $('#compat-model-group');
+    if (!group) return;
+    const select = $('#ai-model');
+    const wanted = state.config.aiModel;
+    const add = group.querySelector('option[data-action="add"]');
+    group.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
+    window.compatProviders.filter(provider => provider.configured).forEach(provider => {
+        const option = document.createElement('option');
+        option.value = `compat:${provider.id}`;
+        option.textContent = provider.label;
+        option.title = `${provider.label} — ${provider.baseUrl}`;
+        group.insertBefore(option, add);
+    });
+    if (String(wanted || '').startsWith('compat:') && select.value !== wanted
+        && Array.from(select.options).some(option => option.value === wanted)) {
+        const submodel = state.config.aiSubmodel;
+        select.value = wanted;
+        updateSubmodelDropdown();
+        if (submodel && Array.from(submodelSelect.options).some(option => option.value === submodel)) submodelSelect.value = submodel;
+        window.ZaalisWorkspace?.refreshCapabilities(true);
+    }
+}
+function compatHost(url) {
+    try { return new URL(url).host; } catch { return ''; }
+}
+function renderCompatKeyFields() {
+    const target = $('#compat-key-fields');
+    if (!target) return;
+    const en = state.language === 'en';
+    target.replaceChildren();
+    window.compatProviders.forEach(provider => {
+        const row = document.createElement('div');
+        row.className = 'form-group';
+        row.dataset.compatProvider = provider.id;
+        row.dataset.search = `${provider.label} ${provider.id} ${provider.baseUrl}`.toLowerCase();
+        const head = document.createElement('div');
+        head.className = 'key-label-row';
+        const label = document.createElement('label');
+        label.htmlFor = `compat-key-${provider.id}`;
+        label.textContent = provider.label;
+        const host = document.createElement('span');
+        host.className = 'compat-host';
+        host.textContent = compatHost(provider.baseUrl);
+        label.appendChild(host);
+        const status = document.createElement('span');
+        status.className = 'key-status';
+        if (provider.key.set || provider.configured) {
+            status.classList.add('set');
+            status.textContent = provider.key.set ? (en ? 'Saved' : 'Enregistrée') : (en ? 'Active' : 'Activé');
+            if (provider.key.last4) {
+                const last4 = document.createElement('span');
+                last4.className = 'key-last4';
+                last4.textContent = ` ····${provider.key.last4}`;
+                status.appendChild(last4);
+            }
+            const clear = document.createElement('button');
+            clear.type = 'button';
+            clear.className = 'compat-clear';
+            clear.textContent = en ? 'Remove' : 'Retirer';
+            clear.addEventListener('click', () => removeCompatProvider(provider));
+            status.appendChild(clear);
+        }
+        head.append(label, status);
+        const input = document.createElement('input');
+        input.type = 'password';
+        input.id = `compat-key-${provider.id}`;
+        input.dataset.compatKey = provider.id;
+        input.autocomplete = 'new-password';
+        input.spellcheck = false;
+        input.placeholder = provider.key.set ? '••••••••••••'
+            : provider.keyless ? (en ? 'API key (optional)' : 'Clé API (facultative)') : (en ? 'API key' : 'Clé API');
+        row.append(head, input);
+        if (provider.editableUrl) {
+            const url = document.createElement('input');
+            url.type = 'url';
+            url.className = 'compat-url';
+            url.dataset.compatUrl = provider.id;
+            url.spellcheck = false;
+            url.value = provider.configured || provider.baseUrl !== provider.defaultUrl ? provider.baseUrl : '';
+            url.placeholder = provider.defaultUrl || 'https://exemple.com/v1';
+            url.setAttribute('aria-label', `${provider.label} — URL`);
+            row.appendChild(url);
+        }
+        target.appendChild(row);
+    });
+    filterCompatKeyFields();
+}
+function filterCompatKeyFields() {
+    const query = ($('#compat-filter')?.value || '').trim().toLowerCase();
+    let visible = 0;
+    $$('#compat-key-fields [data-compat-provider]').forEach(row => {
+        const show = !query || row.dataset.search.includes(query);
+        row.hidden = !show;
+        if (show) visible++;
+    });
+    let empty = $('#compat-key-fields .compat-empty');
+    if (!visible && !empty) {
+        empty = document.createElement('div');
+        empty.className = 'compat-empty';
+        empty.textContent = state.language === 'en' ? 'No provider matches.' : 'Aucun fournisseur ne correspond.';
+        $('#compat-key-fields')?.appendChild(empty);
+    } else if (visible && empty) empty.remove();
+}
+$('#compat-filter')?.addEventListener('input', filterCompatKeyFields);
+async function removeCompatProvider(provider) {
+    try {
+        const response = await fetch('/api/compat/keys', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: { [provider.id]: null }, baseUrls: provider.editableUrl ? { [provider.id]: null } : {} })
+        });
+        if (!response.ok) return;
+        window.compatProviders = (await response.json()).providers || [];
+        renderCompatModelOptions();
+        renderCompatKeyFields();
+    } catch {}
+}
+async function saveCompatSettings() {
+    const keys = {};
+    const baseUrls = {};
+    $$('#compat-key-fields input[data-compat-key]').forEach(input => {
+        if (input.value.trim()) keys[input.dataset.compatKey] = input.value.trim();
+    });
+    $$('#compat-key-fields input[data-compat-url]').forEach(input => {
+        const provider = window.compatProviders.find(p => p.id === input.dataset.compatUrl);
+        const value = input.value.trim();
+        const current = provider && (provider.configured || provider.baseUrl !== provider.defaultUrl) ? provider.baseUrl : '';
+        // A keyless local server (LM Studio) is enabled by saving its URL.
+        if (value !== current || (value && provider && !provider.configured)) baseUrls[input.dataset.compatUrl] = value || null;
+    });
+    if (!Object.keys(keys).length && !Object.keys(baseUrls).length) return;
+    const response = await fetch('/api/compat/keys', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys, baseUrls })
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'compat');
+    window.compatProviders = data.providers || [];
+    renderCompatModelOptions();
+    renderCompatKeyFields();
+}
+function openCompatSettings() {
+    $('#settings-btn')?.click();
+    setSettingsSection('api');
+    requestAnimationFrame(() => {
+        $('#compat-settings-title')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+        $('#compat-filter')?.focus({ preventScroll: true });
+    });
+}
+$('#ai-model')?.addEventListener('custom-select-action', event => {
+    if (event.detail === 'add') openCompatSettings();
+});
 
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
@@ -368,12 +549,14 @@ $('#save-btn').addEventListener('click', async () => {
     if (defChat) c.aiModel = defChat;
     c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
     c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
+    const selectedPermission = getVal('settings-default-permission-select');
+    if (selectedPermission && typeof setPermissionMode === 'function') setPermissionMode(selectedPermission);
     // ----- Hardware advanced -----
     c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
     const nglVal = getVal('gguf-ngl-select');
     c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
     // ----- Integrated terminal -----
-    const previousTerminalProfile = c.terminalProfile || 'cmd';
+    const previousTerminalProfile = c.terminalProfile || terminalProfileDefault();
     const terminalProfileSelect = $('#settings-terminal-profile');
     if (terminalProfileSelect && terminalProfileSelect.value) c.terminalProfile = terminalProfileSelect.value;
     if (c.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
@@ -404,6 +587,7 @@ $('#save-btn').addEventListener('click', async () => {
             const data = await res.json();
             updateApiKeyInputs(data.keys || {});
         }
+        await saveCompatSettings();
         btn.textContent = 'OK';
         setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
     } catch {
@@ -883,6 +1067,7 @@ async function loadGgufModels() {
         if (modelSelect.value === 'gguf') {
             updateSubmodelDropdown();
             if (typeof createCustomSelect === 'function') createCustomSelect('ai-submodel');
+            window.ZaalisWorkspace?.refreshCapabilities(true);
         }
         // Keep the topbar model loader in sync with installed models + engine state.
         if (typeof syncModelLoader === 'function') syncModelLoader(data);
@@ -1145,10 +1330,12 @@ async function checkForUpdates() {
                     if (releaseNameEl) releaseNameEl.textContent = data.name || data.tag_name;
                     if (progContainer) progContainer.classList.remove('hidden');
                     if (waiting) waiting.classList.add('hidden');
-                    // A tag which has already been applied but is still offered
-                    // means its published DMG was built with another version.
+                    // Deja installe ce tag et la version n'a pas bouge : le fichier
+                    // publie n'a pas ete compile a la version que le tag annonce.
+                    // Sans ce message, la mise a jour se represente sans fin et
+                    // semble echouer alors qu'elle a reussi.
                     if (statusText) statusText.textContent = data.tagMismatch
-                        ? `Deja installe. Le DMG publie sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un DMG compile en ${String(data.tag_name || '').replace(/^v/i, '')}.`
+                        ? `Déjà installé. Le DMG publié sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un DMG compilé en ${String(data.tag_name || '').replace(/^v/i, '')}.`
                         : "Pret a telecharger";
                     if (progressBar) progressBar.style.width = '0%';
                     if (stepDownload) {
@@ -1242,35 +1429,40 @@ if (confirmUpdateBtn) {
                         if (progContainer) progContainer.classList.remove('hidden');
                         if (waiting) waiting.classList.add('hidden');
                         progressBar.style.width = '100%';
+                        // Sert de drapeau "deja telecharge" : le serveur retient
+                        // le vrai chemin, l'UI n'a pas a le connaitre.
                         downloadedUpdatePath = pData.dest || data.dest || 'zaalis-update.dmg';
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. Ouvrez le DMG puis remplacez zaalis IDE dans Applications.";
-                        // macOS cannot replace a running, signed app bundle.
-                        // The Finder mounts the downloaded image and preserves
-                        // the standard signed-DMG installation flow.
+                        statusText.textContent = "Telechargement termine. L'IDE va se fermer, installer la mise a jour et redemarrer.";
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
                         confirmUpdateBtn.classList.remove('btn-primary');
                         confirmUpdateBtn.classList.add('btn-warning');
-                        confirmUpdateBtn.textContent = "Ouvrir le DMG";
+                        confirmUpdateBtn.textContent = "Installer et redemarrer";
                         confirmUpdateBtn.onclick = async () => {
                             confirmUpdateBtn.disabled = true;
-                            confirmUpdateBtn.textContent = "Ouverture...";
+                            confirmUpdateBtn.textContent = "Installation...";
+                            statusText.textContent = "Preparation de la mise a jour... l'IDE va redemarrer automatiquement.";
+                            if (waiting) waiting.classList.remove('hidden');
                             try {
                                 const iRes = await fetch('/api/update/install', { method: 'POST' });
                                 if (!iRes.ok) {
                                     const iData = await iRes.json().catch(() => ({}));
                                     throw new Error(iData.error || 'HTTP ' + iRes.status);
                                 }
-                                statusText.textContent = "Le DMG est ouvert. Glissez zaalis IDE dans Applications, puis relancez l'application.";
+                                statusText.textContent = "Installation en cours. L'IDE va se fermer puis redemarrer.";
                             } catch (err) {
+                                // Le serveur peut disparaitre juste apres avoir confie
+                                // l'installation au processus detache : ce n'est pas un echec.
+                                if (err && err.name === 'TypeError') return;
                                 statusText.textContent = "Erreur: " + err.message;
                                 confirmUpdateBtn.disabled = false;
-                                confirmUpdateBtn.textContent = "Ouvrir le DMG";
+                                confirmUpdateBtn.textContent = "Installer et redemarrer";
+                                if (waiting) waiting.classList.add('hidden');
                             }
                         };
                     } else if (pData.progress < 0) {
@@ -1619,6 +1811,19 @@ if (catalogSearch) catalogSearch.addEventListener('keydown', e => {
 // ==========================================================
 //  INIT
 // ==========================================================
+function migrateRetiredModelState() {
+    const c = state.config;
+    let changed = false;
+    if (String(c.aiModel || '').startsWith('hermes:')) {
+        const id = c.aiModel.slice(7).replace(/^nebius-token-factory$/, 'nebius');
+        c.aiModel = window.compatProviders.some(p => p.id === id) ?`compat:${id}` : 'codex';
+        changed = true;
+    }
+    if (String(c.aiSubmodel || '').startsWith('hermes:')) { c.aiSubmodel = c.aiSubmodel.slice(7); changed = true; }
+    for (const key of ['hermesModelId', 'hermesThinking']) if (key in c) { delete c[key]; changed = true; }
+    if (changed) saveState();
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     loadState();
 
@@ -1641,6 +1846,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    await loadCompatProviders();
+    migrateRetiredModelState();
     await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
@@ -1658,12 +1865,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Restore Ollama URL in settings modal
     const _set = (sel, val) => { const el = $(sel); if (el) el.value = val; };
     if (modelSelect) {
+        const savedSubmodel = state.config.aiSubmodel;
         modelSelect.value = state.config.aiModel || 'codex';
         if (!modelSelect.value) modelSelect.value = 'codex';
         modelSelect.dispatchEvent(new Event('change'));
         
-        if (state.config.aiSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === state.config.aiSubmodel)) {
-            submodelSelect.value = state.config.aiSubmodel;
+        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
+            submodelSelect.value = savedSubmodel;
         } else {
             // Default to newest submodel (first in the list) if saved one not found
             const subs = SUBMODELS[modelSelect.value] || [];
@@ -1680,6 +1888,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Maintenant que le modele est restaure : evaluer la compatibilite de
     // l'effort de reflexion et la disponibilite des pieces jointes.
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();
+    window.ZaalisWorkspace?.refreshCapabilities(true);
     if (typeof updateAttachAvailability === 'function') updateAttachAvailability();
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');

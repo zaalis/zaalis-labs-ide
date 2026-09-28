@@ -10,8 +10,14 @@ use zaalis_core::{
     Result, ToolCallId, ZaalisError,
 };
 use zaalis_fs::Workspace;
-use zaalis_guard::{AccessRequest, Guard};
+use zaalis_guard::{AccessRequest, Guard, ReviewRequest, ReviewVerdict};
 use zaalis_protocol::ToolOutcome;
+
+/// How long a reviewer may take before the question goes to the user.
+///
+/// Short on purpose: the alternative to a fast answer is the prompt that would
+/// have been shown anyway, so waiting longer buys nothing.
+const REVIEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
@@ -86,11 +92,23 @@ struct PendingCall {
     cancel: CancellationToken,
 }
 
+/// Where a permanent approval goes once the user grants it.
+///
+/// The tool runtime runs in tests, in the CLI and in the daemon, and only the
+/// daemon has a database — so storage is injected rather than assumed. Without
+/// a sink, "toujours" still holds for the life of the process; with one, it
+/// holds for good.
+pub trait RuleSink: Send + Sync + std::fmt::Debug {
+    fn persist(&self, rule: &zaalis_core::PermissionRule);
+}
+
 #[derive(Debug, Default)]
 pub struct ToolRuntime {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
     guard: Mutex<Guard>,
     pending: Mutex<HashMap<RequestId, PendingCall>>,
+    rule_sink: Option<Arc<dyn RuleSink>>,
+    reviewer: Option<Arc<dyn zaalis_guard::Reviewer>>,
 }
 
 impl ToolRuntime {
@@ -99,6 +117,19 @@ impl ToolRuntime {
             guard: Mutex::new(guard),
             ..Self::default()
         }
+    }
+
+    pub fn with_rule_sink(mut self, sink: Arc<dyn RuleSink>) -> Self {
+        self.rule_sink = Some(sink);
+        self
+    }
+
+    /// Install the second opinion consulted for grey-zone decisions.
+    ///
+    /// Without one, every `Ask` reaches the user exactly as before.
+    pub fn with_reviewer(mut self, reviewer: Arc<dyn zaalis_guard::Reviewer>) -> Self {
+        self.reviewer = Some(reviewer);
+        self
     }
 
     pub fn register<T: Tool + 'static>(&self, tool: T) -> Result<()> {
@@ -131,6 +162,18 @@ impl ToolRuntime {
 
     pub fn pending_count(&self) -> usize {
         self.pending.lock().expect("pending lock poisoned").len()
+    }
+
+    /// Take the permanent rules approved since the last call.
+    ///
+    /// Exposed rather than persisted here because this runtime has no storage:
+    /// the daemon owns the database and writes them out after resolving an
+    /// answer.
+    pub fn drain_new_rules(&self) -> Vec<zaalis_core::PermissionRule> {
+        self.guard
+            .lock()
+            .expect("guard lock poisoned")
+            .drain_new_rules()
     }
 
     pub async fn invoke(
@@ -176,6 +219,45 @@ impl ToolRuntime {
                 },
             },
             Decision::Ask { summary, .. } => {
+                // Before stopping the user, let the reviewer look — but only
+                // where the mode invited less supervision, and never for a
+                // finding no mode may approve.
+                if let Some(verdict) = self
+                    .consult_reviewer(&access, &context, &summary, &risks, &evaluation.findings)
+                    .await
+                {
+                    match verdict {
+                        ReviewVerdict::Approve { reason } => {
+                            // Recorded as a one-shot grant so the audit trail
+                            // shows the decision and who made it, and so a
+                            // second identical call is reviewed afresh.
+                            self.guard
+                                .lock()
+                                .expect("guard lock poisoned")
+                                .record_reviewed(&access, &reason);
+                            return run_tool(
+                                tool,
+                                invocation.call_id,
+                                invocation.input,
+                                context,
+                                cancel,
+                            )
+                            .await;
+                        }
+                        ReviewVerdict::Refuse { reason } => {
+                            return ToolDispatch::Complete {
+                                call_id: invocation.call_id,
+                                outcome: ToolOutcome::Denied {
+                                    summary: format!("{} refusé", invocation.name),
+                                    reason: format!("relecture automatique : {reason}"),
+                                },
+                            }
+                        }
+                        // Falls through to the prompt, which is what would have
+                        // happened without a reviewer at all.
+                        ReviewVerdict::Escalate { .. } => {}
+                    }
+                }
                 let request_id = RequestId::new();
                 let prompt = PermissionPrompt {
                     request_id: request_id.clone(),
@@ -199,6 +281,40 @@ impl ToolRuntime {
                 );
                 ToolDispatch::PermissionRequired(prompt)
             }
+        }
+    }
+
+    /// Ask the reviewer, when one is installed and the decision may be
+    /// delegated.
+    ///
+    /// A reviewer that hangs must not hang the agent, so the call is bounded;
+    /// a timeout is an escalation, which is the same thing that happens when no
+    /// reviewer exists.
+    async fn consult_reviewer(
+        &self,
+        access: &AccessRequest,
+        context: &ToolContext,
+        summary: &str,
+        risks: &[String],
+        findings: &[zaalis_guard::Finding],
+    ) -> Option<ReviewVerdict> {
+        let reviewer = self.reviewer.as_ref()?;
+        if !zaalis_guard::may_delegate(context.permissions.mode, findings) {
+            return None;
+        }
+        let request = ReviewRequest {
+            tool: access.tool.clone(),
+            kind: access.kind,
+            target: access.target.clone().unwrap_or_default(),
+            risks: risks.to_vec(),
+            summary: summary.to_owned(),
+            mode: context.permissions.mode,
+        };
+        match tokio::time::timeout(REVIEW_TIMEOUT, reviewer.review(&request)).await {
+            Ok(verdict) => Some(verdict),
+            Err(_) => Some(ReviewVerdict::Escalate {
+                reason: "relecteur sans réponse".into(),
+            }),
         }
     }
 
@@ -233,6 +349,11 @@ impl ToolRuntime {
                     .lock()
                     .expect("guard lock poisoned")
                     .record_answer(&pending.access, true, scope);
+                if let Some(sink) = &self.rule_sink {
+                    for rule in self.drain_new_rules() {
+                        sink.persist(&rule);
+                    }
+                }
                 Ok(run_tool(
                     pending.tool,
                     pending.call_id,

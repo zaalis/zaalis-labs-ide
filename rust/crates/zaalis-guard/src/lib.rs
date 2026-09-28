@@ -18,9 +18,13 @@
 
 pub mod command;
 pub mod engine;
+pub mod powershell;
+pub mod reviewer;
 
 pub use command::{analyse, CommandAnalysis, Finding, Segment, KNOWN_SAFE_BINARIES};
 pub use engine::{AccessRequest, AuditEntry, Evaluation, GrantKey, Guard};
+pub use powershell::Obfuscation;
+pub use reviewer::{may_delegate, AlwaysAsk, ReviewRequest, ReviewVerdict, Reviewer};
 
 #[cfg(test)]
 mod tests {

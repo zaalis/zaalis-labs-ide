@@ -33,6 +33,7 @@
 //! third-party agent tool, and the core has no functional dependency on any
 //! vendor beyond the model providers a user configures.
 
+pub mod bindings;
 pub mod envelope;
 pub mod event;
 pub mod method;
@@ -40,7 +41,7 @@ pub mod method;
 pub use envelope::{
     JsonRpcVersion, RpcError, RpcId, RpcMessage, RpcNotification, RpcRequest, RpcResponse,
 };
-pub use event::{AgentReport, Event, EventFrame, ToolOutcome, ToolProgress};
+pub use event::{AgentReport, Event, EventFrame, EventKind, ToolOutcome, ToolProgress};
 pub use method::{
     AgentAddParams, AgentRemoveParams, AgentResult, AgentSpec, AgentUpdateParams,
     BudgetExtendParams, CheckpointRestoreParams, ClientMethod, HealthResult, HistoryMessage,

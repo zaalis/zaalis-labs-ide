@@ -1,0 +1,19 @@
+[package]
+name = "zaalis-netpolicy"
+description = "Per-domain egress policy for commands the agent runs, enforced by a local allow/deny proxy."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+zaalis-core = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time", "macros"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

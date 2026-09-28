@@ -133,8 +133,9 @@ impl OpenAiConfig {
                     ..Capabilities::default()
                 },
             ),
-            // These two have their own dialects.
-            ProviderId::Claude | ProviderId::Gemini => return None,
+            // These two have their own dialects, and a compatible endpoint has
+            // no fixed URL: see [`OpenAiConfig::compat`].
+            ProviderId::Claude | ProviderId::Gemini | ProviderId::Compat => return None,
         };
 
         Some(Self {
@@ -148,6 +149,28 @@ impl OpenAiConfig {
         })
     }
 
+    /// A user-configured OpenAI-compatible endpoint. The key is optional because
+    /// a self-hosted server (LM Studio, vLLM…) often runs without one.
+    pub fn compat(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self {
+            provider: ProviderId::Compat,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            api_key: api_key.filter(|key| !key.trim().is_empty()),
+            auth: AuthScheme::Bearer,
+            default_model: String::new(),
+            // The per-model facts sent by the server decide; nothing is sent
+            // by default because unknown fields make some gateways fail.
+            reasoning: ReasoningStyle::None,
+            capabilities: Capabilities {
+                reasoning: true,
+                streamed_reasoning: true,
+                max_context: 128_000,
+                max_concurrency: 4,
+                ..Capabilities::default()
+            },
+        }
+    }
+
     /// Point at a different endpoint (self-hosted gateway, proxy, custom port).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
@@ -158,9 +181,10 @@ impl OpenAiConfig {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// Whether a local engine needs no key at all.
+    /// Whether a local engine needs no key at all. A compatible endpoint is
+    /// registered with its key when it needs one, so the server decides.
     pub fn needs_key(&self) -> bool {
-        !self.provider.is_local()
+        !self.provider.is_local() && self.provider != ProviderId::Compat
     }
 }
 
@@ -247,38 +271,45 @@ impl ModelProvider for OpenAiProvider {
         Ok(transport::stream_response(
             response,
             cancel,
-            StreamParser::for_provider(self.config.provider),
+            StreamParser::for_provider(self.config.provider).with_fallback_tools(
+                !self.config.capabilities.for_binding(&request.binding).native_tools
+                    && !request.tools.is_empty(),
+            ),
         ))
     }
 }
 
 /// Build the request body.
 pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool) -> Value {
+    let capabilities = config.capabilities.for_binding(&request.binding);
     let model = request
         .binding
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.clone());
 
-    let mut messages = Vec::new();
-    if !request.system.trim().is_empty() {
-        messages.push(json!({ "role": "system", "content": request.system }));
-    }
+    let mut system = request.system.trim().to_owned();
     // A provider without native tool calling (GGUF/llama.cpp) is given the tools
     // as a strict JSON protocol instead. The instructions and the parser in
     // `finish` are two halves of the same contract.
-    let fallback_tools = !request.tools.is_empty() && !config.capabilities.native_tools;
+    let fallback_tools = !request.tools.is_empty() && !capabilities.native_tools;
     if fallback_tools {
-        messages.push(json!({
-            "role": "system",
-            "content": fallback_tool_instructions(&request.tools),
-        }));
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&fallback_tool_instructions(&request.tools));
+    }
+
+    let mut messages = Vec::new();
+    if !system.is_empty() {
+        messages.push(json!({ "role": "system", "content": system }));
     }
     for message in &request.messages {
         messages.push(encode_message(
             message,
             config.provider,
-            config.capabilities.vision,
+            capabilities.vision,
+            capabilities.native_tools,
         ));
     }
 
@@ -288,7 +319,7 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
         "stream": stream,
     });
 
-    if !request.tools.is_empty() && config.capabilities.native_tools {
+    if !request.tools.is_empty() && capabilities.native_tools {
         body["tools"] = Value::Array(
             request
                 .tools
@@ -304,10 +335,21 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
     }
-    if config.reasoning == ReasoningStyle::Effort {
-        if let Some(effort) = effort_label(request.reasoning) {
+    let reasoning_style = request.binding.capabilities.as_ref().and_then(|facts| facts.reasoning)
+        .map(|mode| match mode {
+            zaalis_core::ReasoningMode::Effort => ReasoningStyle::Effort,
+            _ => ReasoningStyle::None,
+        }).unwrap_or(config.reasoning);
+    if reasoning_style == ReasoningStyle::Effort {
+        let effort = if config.provider == ProviderId::Gguf {
+            gguf_effort_label(request.reasoning)
+        } else { effort_label(request.reasoning) };
+        if let Some(effort) = effort {
             body["reasoning_effort"] = json!(effort);
         }
+    }
+    if config.provider == ProviderId::Gguf {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": request.reasoning.0 > 0 });
     }
     // Ask for usage on the final streamed chunk; providers that ignore the
     // option simply omit it, which the parser already tolerates.
@@ -323,6 +365,20 @@ fn effort_label(level: ReasoningLevel) -> Option<&'static str> {
         1 => Some("low"),
         2 => Some("medium"),
         _ => Some("high"),
+    }
+}
+
+fn gguf_effort_label(level: ReasoningLevel) -> Option<&'static str> {
+    match level.0 {
+        0 => None,
+        1 => Some("minimal"),
+        2 => Some("low"),
+        3 => Some("medium"),
+        4 => Some("high"),
+        5 => Some("xhigh"),
+        // llama.cpp/OpenAI-compatible transports do not define a distinct
+        // ultra wire value, so it is clamped to max.
+        _ => Some("max"),
     }
 }
 
@@ -490,7 +546,7 @@ fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
     })
 }
 
-fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Value {
+fn encode_message(message: &Message, provider: ProviderId, vision: bool, native_tools: bool) -> Value {
     match message {
         Message::User { text, images } if images.is_empty() || !vision => {
             json!({ "role": "user", "content": text })
@@ -503,7 +559,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
         Message::Assistant {
             provider_state: Some(state),
             ..
-        } if state.provider == provider => state.value.clone(),
+        } if state.provider == provider && native_tools => state.value.clone(),
         Message::Assistant {
             text, tool_calls, ..
         } => {
@@ -511,7 +567,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             // Native `tool_calls` are only understood where native tools are on.
             // Under the GGUF fallback the call already lives in `text` as the
             // JSON envelope, so no native array is attached.
-            if !tool_calls.is_empty() && provider != ProviderId::Gguf {
+            if !tool_calls.is_empty() && native_tools {
                 value["tool_calls"] = Value::Array(
                     tool_calls
                         .iter()
@@ -538,7 +594,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             content,
             ..
         } => {
-            if provider == ProviderId::Gguf {
+            if !native_tools {
                 json!({
                     "role": "user",
                     "content": format!("[Résultat de l'outil {name}]\n{content}"),
@@ -575,6 +631,7 @@ pub struct StreamParser {
     text: String,
     reasoning: String,
     content_parts: Vec<Value>,
+    fallback_tools: bool,
 }
 
 impl StreamParser {
@@ -585,8 +642,14 @@ impl StreamParser {
     pub fn for_provider(provider: ProviderId) -> Self {
         Self {
             provider: Some(provider),
+            fallback_tools: provider == ProviderId::Gguf,
             ..Self::default()
         }
+    }
+
+    fn with_fallback_tools(mut self, enabled: bool) -> Self {
+        self.fallback_tools = enabled;
+        self
     }
 
     /// Feed raw bytes, returning the events they produced.
@@ -717,7 +780,7 @@ impl StreamParser {
         // GGUF fallback: no native tool call arrived, so try to read a strict
         // JSON envelope out of the text. Anything that is not exactly the
         // envelope is left as a normal answer — fail-closed, nothing runs.
-        if calls.is_empty() && self.provider == Some(ProviderId::Gguf) {
+        if calls.is_empty() && self.fallback_tools {
             if let Some(call) = parse_fallback_tool_call(&self.text) {
                 calls.push(call);
             }
@@ -741,7 +804,7 @@ impl StreamParser {
             }
             // The GGUF fallback state carries the call in its `content` text, so
             // no native `tool_calls` array is replayed to it.
-            if !calls.is_empty() && provider != ProviderId::Gguf {
+            if !calls.is_empty() && !self.fallback_tools {
                 state["tool_calls"] = Value::Array(
                     calls
                         .iter()
@@ -996,6 +1059,23 @@ mod tests {
     }
 
     #[test]
+    fn gguf_thinking_toggle_and_ultra_are_sent_to_llama_cpp() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let off = build_request(&config, &request(), false);
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(off.get("reasoning_effort").is_none());
+        let mut active = request();
+        active.reasoning = ReasoningLevel(7);
+        active.binding.capabilities = Some(zaalis_core::ModelCapabilities {
+            reasoning: Some(zaalis_core::ReasoningMode::Effort),
+            ..Default::default()
+        });
+        let on = build_request(&config, &active, false);
+        assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(on["reasoning_effort"], "max");
+    }
+
+    #[test]
     fn a_tool_result_is_encoded_with_its_call_id() {
         let mut request = request();
         request.messages.push(Message::Assistant {
@@ -1234,10 +1314,35 @@ mod tests {
     }
 
     #[test]
+    fn gguf_merges_tool_instructions_into_the_initial_system_message() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let request = TurnRequest::new(
+            ModelBinding::new(ProviderId::Gguf, Some("local".into())),
+            "tu es un agent",
+            vec![Message::user("lis a.js")],
+        )
+        .with_tools(vec![ToolSpec {
+            name: "read".into(),
+            description: "Lire un fichier".into(),
+            schema: json!({"type":"object"}),
+        }]);
+
+        let body = build_request(&config, &request, true);
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"].as_str().unwrap_or("").contains("tool_call"));
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
     fn a_gguf_tool_result_is_replayed_as_user_text() {
         let value = encode_message(
             &Message::tool_result("c1", "read", "contenu"),
             ProviderId::Gguf,
+            false,
             false,
         );
         assert_eq!(value["role"], "user");

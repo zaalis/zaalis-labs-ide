@@ -61,6 +61,13 @@ test('codestrale bridge answers on its secret and stays confined to agent turns'
       body: JSON.stringify({ email: 'codestrale@zaalis.local', password: 'password123' }),
     });
     assert.equal(register.status, 200);
+    const configResponse = await fetch(`http://localhost:${PORT}/api/config`, {
+      headers: { cookie: register.headers.get('set-cookie') },
+    });
+    assert.equal(configResponse.status, 200);
+    const config = await configResponse.json();
+    assert.ok(config.terminalProfiles.some((profile) => profile.id === config.defaultTerminalProfile && profile.available));
+    if (process.platform === 'win32') assert.equal(config.defaultTerminalProfile, 'cmd');
 
     // A wrong or missing secret never authenticates.
     for (const headers of [{}, { [HEADER]: 'a'.repeat(64) }]) {

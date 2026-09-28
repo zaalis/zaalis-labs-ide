@@ -1,6 +1,7 @@
 use crate::control::NativePlanTool;
 use crate::event_bus::EventBus;
 use crate::interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
+use crate::prompt::discover_project_guidance;
 use crate::runner::{run_agent, run_lifecycle_hook, AgentRun};
 use crate::spawn::{NativeMergeTool, NativeSpawnTool};
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,8 @@ pub struct AgentSessionSnapshot {
     pub reports: HashMap<AgentId, AgentReport>,
     #[serde(default)]
     pub plan_mode: bool,
+    #[serde(default)]
+    pub event_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -47,12 +50,16 @@ pub struct SessionConfig {
     pub workspace: Workspace,
     pub mode: SessionRunMode,
     pub system_prompt: String,
+    /// Bounded conventions from AGENTS.md and ZAALIS.md at the workspace root.
+    /// They are rendered as lower-priority project guidance by the prompt composer.
+    pub project_guidance: String,
     pub max_concurrency: usize,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
 
 impl SessionConfig {
     pub fn new(workspace: Workspace, mode: SessionRunMode) -> Self {
+        let project_guidance = discover_project_guidance(workspace.root());
         Self {
             session_id: SessionId::new(),
             workspace,
@@ -60,6 +67,7 @@ impl SessionConfig {
             system_prompt:
                 "Tu es un agent Zaalis. Utilise les outils typés, vérifie ton travail, et rapporte au passé ce que tu as réellement fait."
                     .into(),
+            project_guidance,
             max_concurrency: 8,
             extensions: None,
         }
@@ -161,10 +169,11 @@ impl AgentSession {
             histories: self.inner.histories.lock().await.clone(),
             reports: self.inner.reports.lock().await.clone(),
             plan_mode: self.inner.plan_mode.load(Ordering::SeqCst),
+            event_seq: self.inner.events.current_sequence(),
         }
     }
 
-    pub async fn restore(&self, snapshot: AgentSessionSnapshot) -> Result<()> {
+    pub async fn restore(&self, mut snapshot: AgentSessionSnapshot) -> Result<()> {
         if snapshot.session_id != self.inner.config.session_id
             || snapshot.workspace != self.inner.config.workspace.root()
             || snapshot.mode != self.inner.config.mode
@@ -179,6 +188,15 @@ impl AgentSession {
         {
             return Err(ZaalisError::invalid("snapshot avec identités incohérentes"));
         }
+        let interrupted: Vec<_> = snapshot.tree.iter().filter(|node| !node.state.is_terminal()).map(|node| node.id.clone()).collect();
+        for id in interrupted {
+            if let Some(node) = snapshot.tree.get_mut(&id) {
+                node.state = AgentState::Failed { error: "Exécution interrompue par l'arrêt du moteur. La conversation et les résultats sauvegardés sont disponibles pour reprise.".into() };
+                node.finished_at_ms = Some(now_ms());
+            }
+        }
+        for history in snapshot.histories.values_mut() { crate::context::repair_interrupted_tools(history); }
+        self.inner.events.resume_sequence(snapshot.event_seq);
         *self.inner.tree.lock().await = snapshot.tree;
         *self.inner.histories.lock().await = snapshot.histories;
         *self.inner.reports.lock().await = snapshot.reports;
@@ -187,6 +205,8 @@ impl AgentSession {
             .store(snapshot.plan_mode, Ordering::SeqCst);
         Ok(())
     }
+
+    pub fn resume_event_sequence(&self, seq: u64) { self.inner.events.resume_sequence(seq); }
 
     pub async fn add_root(&self, node: AgentNode) -> Result<AgentId> {
         let agent = node.clone();
@@ -594,6 +614,9 @@ impl AgentSession {
 }
 
 impl SessionInner {
+    pub(crate) async fn checkpoint_history(&self, id: &AgentId, history: &[Message]) {
+        self.histories.lock().await.insert(id.clone(), history.to_vec());
+    }
     pub(crate) async fn finish_agent(&self, id: &AgentId, result: Result<AgentRun>) {
         match result {
             Ok(run) => {

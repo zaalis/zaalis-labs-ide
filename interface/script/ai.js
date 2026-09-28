@@ -10,6 +10,37 @@ const MODE_ICONS = {
     auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>`
 };
 
+function setPermissionMode(mode, persist = true) {
+    if (!['supervised', 'semi', 'auto'].includes(mode)) return;
+    state.permissionMode = mode;
+    state.config.defaultPermissionMode = mode;
+    saveState();
+    syncModeSelectorUI();
+    const setting = $('#settings-default-permission-select');
+    if (setting) setting.value = mode;
+    if (persist) {
+        fetch('/api/preferences', {
+            method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ permissionMode: mode })
+        }).then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        }).catch(() => showToast('Préférence', 'Le mode reste actif, mais sa sauvegarde sur le compte a échoué.', { icon: '!' }));
+    }
+}
+
+async function loadPermissionPreference() {
+    try {
+        const response = await fetch('/api/preferences');
+        if (!response.ok) return;
+        const preference = await response.json();
+        if (['supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
+            setPermissionMode(preference.permissionMode, false);
+        } else {
+            setPermissionMode('supervised', false);
+        }
+    } catch { /* Local preference still works while the account is offline. */ }
+}
+
 function setupModeSelector(btnId, menuId) {
     const btn = $('#' + btnId);
     const menu = $('#' + menuId);
@@ -26,7 +57,7 @@ function setupModeSelector(btnId, menuId) {
         item.addEventListener('click', (e) => {
             e.stopPropagation();
             const perm = item.dataset.perm;
-            state.permissionMode = perm;
+            setPermissionMode(perm);
             
             // Sync all selectors (chat + agents)
             $$('.mode-dropdown').forEach(m => {
@@ -387,8 +418,9 @@ document.addEventListener('click', e => {
     const img = e.target.closest && e.target.closest('.generated-image');
     if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
 });
-// Web links inside AI/system answers open in zaalis browser, so source links
-// from /deep-search stay in the same browsing workspace.
+// Web links inside AI/system answers open in the integrated browser (globe
+// panel), so /deep-search sources stay in the same browsing workspace. Outside
+// the native app there is no integrated browser: the link opens normally.
 document.addEventListener('click', async e => {
     const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
     if (!a || !a.closest('#chat-messages, #agents-log')) return;
@@ -429,9 +461,8 @@ function formatAIResponse(text) {
 }
 
 function isMaxReasoning() {
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
-    return state.reasoningLevel === (modes.length - 1);
+    const levels = reasoningLevels();
+    return levels.length > 1 && Number(state.reasoningLevel) === Number(levels[levels.length - 1].value);
 }
 
 function addMsg(container, type, label, text, isHTML = false) {
@@ -522,9 +553,8 @@ async function readAgentEventStream(res, onEvent) {
             result = event.result || {};
         } else if (event.type === 'error') {
             streamError = event.error || 'Erreur agent.';
-        } else if (typeof onEvent === 'function') {
-            onEvent(event);
         }
+        if (typeof onEvent === 'function') onEvent(event);
     };
     while (true) {
         const { done, value } = await reader.read();
@@ -565,6 +595,8 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             reasoningLevel: state.reasoningLevel,
             images,
             history,
+            conversationId: options.conversationId,
+            sessionId: options.sessionId,
             computerControl: options.computerControl === undefined ? !!state.computerControl : !!options.computerControl,
             stream: wantsStream
         }),
@@ -839,6 +871,12 @@ function setChatBusy(on) {
 async function sendChat(input) {
     const model = modelSelect.value;
     const submodel = submodelSelect.value;
+    if (model === 'gguf' && !submodel) {
+        showToast(state.language === 'en' ? 'No GGUF model' : 'Aucun modèle GGUF',
+            state.language === 'en' ? 'Install a local model before starting this chat.' : 'Installez un modèle local avant de démarrer ce chat.', { icon: '!' });
+        $('#gguf-install-shortcut')?.focus();
+        return;
+    }
 
     const lang = state.language || 'fr';
     const draft = (input && typeof input === 'object') ? input : createChatDraft(input);
@@ -846,7 +884,7 @@ async function sendChat(input) {
     const { aiText = '', names = [], images = [] } = draft;
 
     const isLocal = model === 'local' || model === 'gguf';
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     let completed = false;
     let aborted = false;
 
@@ -873,6 +911,8 @@ async function sendChat(input) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
+    saveConversation('chat');
+    const activeConversation = state.conversations.find(conv => conv.id === state.currentConvId);
     const liveActivity = createLiveAgentActivity($('#chat-messages'));
     let liveActivityFinished = false;
     const body = addTypingMsg($('#chat-messages'), modelLabel);
@@ -909,7 +949,12 @@ async function sendChat(input) {
     setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            conversationId: activeConversation?.id,
+            sessionId: activeConversation?.sessionId,
+            onEvent: (event) => {
+                if (liveActivity) liveActivity.onEvent(event);
+                window.ZaalisWorkspace?.onAgentEvent(event);
+            }
         });
         stopThinking(body);
         if (data.error) {
@@ -1311,6 +1356,16 @@ function createLiveAgentActivity(container) {
                 : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
             const html = agentToolResultsHTML(results);
             toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            const usage = data && data.usage;
+            const webQueries = Number(usage && usage.webQueries || 0);
+            const webResults = Number(usage && usage.webResults || 0);
+            const webPagesRead = Number(usage && usage.webPagesRead || 0);
+            if (webQueries || webResults || webPagesRead) {
+                const researchLabel = lang === 'en'
+                    ? `Web evidence: ${webQueries} ${webQueries === 1 ? 'query' : 'queries'}, ${webResults} ${webResults === 1 ? 'result' : 'results'}, ${webPagesRead} ${webPagesRead === 1 ? 'page read' : 'pages read'}.`
+                    : `Recherche web : ${webQueries} ${pluralFr(webQueries, 'requête', 'requêtes')}, ${webResults} ${pluralFr(webResults, 'résultat', 'résultats')}, ${webPagesRead} ${pluralFr(webPagesRead, 'page lue', 'pages lues')}.`;
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(researchLabel)}</div>`);
+            }
             if (details) details.removeAttribute('open');
             body.classList.remove('live-agent-active');
             followScroll(container);
@@ -1564,7 +1619,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
     if (!state.projectRoot) return;
     const out = $(opts.container || '#chat-messages');
     const retryHistory = Array.isArray(opts.history) ? opts.history : state.chatHistory.slice();
-    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex]?.text || model).split(' ')[0];
+    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex] ? providerShortLabel(modelSelect.options[modelSelect.selectedIndex]) : model);
     const persistToChat = opts.persistToChat !== false;
 
     // Re-send the files involved so the model can copy the exact text.
@@ -1650,7 +1705,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         ? 'Here is the content you requested. Analyze it and answer the user now (do not request these same files again).\n\n'
         : 'Voici le contenu que tu as demandé. Analyse-le et réponds maintenant à l\'utilisateur (ne redemande pas ces mêmes fichiers).\n\n') + ctx;
 
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     const body = addTypingMsg(out, modelLabel);
     const controller = new AbortController();
     chatAbort = controller;
@@ -1836,24 +1891,29 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
         }
     ];
     const { aiText = '', names = [], images = [] } = taskDraft;
+    if (!state.currentAgentConvId) state.currentAgentConvId = crypto.randomUUID();
     const response = await fetch('/api/rust-agent-team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
         body: JSON.stringify({
             team, message: task + aiText, root: state.projectRoot,
             permissionMode: state.permissionMode, language: lang,
-            reasoningLevel: state.reasoningLevel, images, stream: true
+            reasoningLevel: state.reasoningLevel, images, stream: true,
+            conversationId: state.currentAgentConvId,
+            sessionId: state.agentConversations.find(conv => conv.id === state.currentAgentConvId)?.sessionId
         })
     });
     if (response.status === 404 || response.status === 503) return false;
 
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', task + (names.length ? `\n📎 ${names.join(', ')}` : ''));
+    saveConversation('agents');
     const body = addTypingMsg($('#agents-log'), labels[lead.agent] || lead.agent);
     const activity = createLiveAgentActivity($('#agents-log'));
     const byId = new Map();
     const data = await readAgentEventStream(response, (event) => {
         handleRustInteractiveEvent(event).catch(() => {});
         if (activity) activity.onEvent(event);
+        window.ZaalisWorkspace?.onAgentEvent(event);
         if (event.type === 'rust_event' && event.event) {
             const frame = event.event;
             if (frame.type === 'agent_spawned' && frame.agent) {
@@ -2229,6 +2289,7 @@ function saveConversation(kind = 'chat') {
         else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     }
 
+    window.ZaalisWorkspace?.flushConversation(kind);
     persistChats(kind);
     renderHistory();
 }
@@ -2346,7 +2407,7 @@ function loadConversation(kind, id) {
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
-        state.chatHistory = (conv.messages || [])
+        state.chatHistory = Array.isArray(conv.apiHistory) ? conv.apiHistory.map(item => ({ ...item })) : (conv.messages || [])
             .filter(m => m.type === 'user' || m.type === 'ai')
             .map(m => ({
                 role: m.type === 'user' ? 'user' : 'assistant',
@@ -2465,6 +2526,7 @@ function renderHistory() {
         renderProjectPanelHistory('chat');
         renderProjectPanelHistory('agents');
         if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+        window.ZaalisWorkspace?.refresh();
         return;
     }
     if (typeof initRecentProjects === 'function') {
@@ -2473,6 +2535,7 @@ function renderHistory() {
     renderProjectPanelHistory('chat');
     renderProjectPanelHistory('agents');
     if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+    window.ZaalisWorkspace?.refresh();
 }
 
 // Start a brand-new conversation for the given kind (in the current context).
@@ -2680,7 +2743,10 @@ function isVisionCompatible(model, submodel) {
         case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
-        default: return false;
+        default:
+            // OpenAI-compatible gateways: same rule as compat-providers.js.
+            return String(model || '').startsWith('compat:')
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }
 }
 function chatImagesAllowed() {
@@ -2721,51 +2787,16 @@ function updateAttachAvailability() {
     }
 }
 
-const REASONING_MODES = {
-    codex: [
-        { label: 'HIGH', effort: 'high' },
-        { label: 'MED', effort: 'medium' },
-        { label: 'LOW', effort: 'low' },
-        { label: 'OFF', effort: 'none' }
-    ],
-    claude: [
-        { label: 'MAX', budget: 8192 },
-        { label: 'HIGH', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gemini: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    grok: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'OFF', budget: 0 }
-    ],
-    mistral: [
-        { label: 'ON', budget: 1 },
-        { label: 'OFF', budget: 0 }
-    ],
-    kimi: [
-        { label: 'MAX', budget: 2 },
-        { label: 'HIGH', budget: 1 },
-        { label: 'LOW', budget: 0 }
-    ],
-    local: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gguf: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ]
-};
+const REASONING_SHORT_LABELS = { off: 'OFF', none: 'OFF', minimal: 'MIN', low: 'LOW', medium: 'MED', high: 'HIGH', xhigh: 'XHIGH', max: 'MAX', ultra: 'ULTRA' };
+
+// Levels come from /api/model-capabilities (cached by workspace.js) on the
+// runtime's 0..4 scale. An empty list means the model reasons natively or not
+// at all: nothing is adjustable, so the slider stays locked.
+function reasoningLevels() {
+    const { model, submodel } = reasoningContext();
+    const caps = window.ZaalisWorkspace?.getCapabilities(model, submodel);
+    return caps?.reasoning?.supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
+}
 
 // Determine which agent acts as the lead (chef de projet) right now.
 function currentLeadAgent() {
@@ -2796,91 +2827,83 @@ function reasoningContext() {
     return { model: modelSelect.value, submodel: submodelSelect.value };
 }
 
-function isReasoningCompatible(model, submodel) {
-    if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-5') || submodel.includes('fable'))) return true;
-    // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
-    if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
-    if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
-    // Grok 4.x reasoning models reason natively and reject reasoning_effort,
-    // so there is no controllable budget to expose — keep the slider locked.
-    if (model === 'mistral' && (submodel === 'mistral-medium-3-5' || submodel === 'mistral-small-latest')) return true;
-    if (model === 'kimi') return true;
-    return false;
+function reasoningLevelIndex(levels) {
+    return Math.max(0, levels.findIndex(level => Number(level.value) === Number(state.reasoningLevel)));
 }
 
 function updateSliderVisuals() {
     const sliderBar = $('#reasoning-slider-bar');
     if (!sliderBar) return;
+    const levels = reasoningLevels();
+    const index = reasoningLevelIndex(levels);
     const handle = sliderBar.querySelector('.slider-handle');
-    const notches = sliderBar.querySelectorAll('.slider-notch');
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
-
-    const totalLevels = modes.length;
-    const currentLevel = state.reasoningLevel;
-    
-    let percentage = 100;
-    if (totalLevels > 1) {
-        percentage = (1 - (currentLevel / (totalLevels - 1))) * 100;
+    if (handle) handle.style.top = (levels.length > 1 ? (1 - index / (levels.length - 1)) * 100 : 100) + '%';
+    sliderBar.querySelectorAll('.slider-notch, .slider-dot').forEach(node => {
+        node.classList.toggle('active', levels.length > 1 && Number(node.dataset.index) === index);
+    });
+    if (levels.length) {
+        sliderBar.setAttribute('aria-valuenow', String(levels[index].value));
+        sliderBar.setAttribute('aria-valuetext', levels[index].label || levels[index].id);
+    } else {
+        sliderBar.removeAttribute('aria-valuenow');
+        sliderBar.removeAttribute('aria-valuetext');
     }
-    
-    if (handle) handle.style.top = percentage + '%';
-
-    notches.forEach(n => {
-        const l = parseInt(n.dataset.level);
-        n.classList.toggle('active', l === currentLevel);
-    });
-    sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-        d.classList.toggle('active', parseInt(d.dataset.level) === currentLevel);
-    });
 }
 
-function checkReasoningCompatibility() {
-    const { model, submodel } = reasoningContext();
+// Rebuilds the notches for the selected model; called whenever its
+// capabilities arrive (workspace.js refreshCapabilities).
+function renderReasoningSlider(caps) {
     const sliderBar = $('#reasoning-slider-bar');
     if (!sliderBar) return;
-    
-    const compatible = isReasoningCompatible(model, submodel);
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
     const track = sliderBar.querySelector('.slider-track');
     const handle = sliderBar.querySelector('.slider-handle');
+    const tooltip = sliderBar.querySelector('.reasoning-tooltip');
+    const lang = state.language || 'fr';
+    const levels = caps?.reasoning?.supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
+    const shown = levels.length ? levels : [{ id: 'off', label: 'OFF', value: 0 }];
 
     sliderBar.querySelectorAll('.slider-notch').forEach(n => n.remove());
     track.querySelectorAll('.slider-dot').forEach(d => d.remove());
-
-    modes.forEach((m, idx) => {
-        const levelFromBottom = modes.length - 1 - idx;
-        const pct = modes.length > 1 ? (levelFromBottom / (modes.length - 1)) : 1;
-
+    shown.forEach((level, index) => {
+        const fromTop = shown.length > 1 ? 1 - index / (shown.length - 1) : 1;
         const notch = document.createElement('div');
         notch.className = 'slider-notch';
-        if (levelFromBottom === modes.length - 1) notch.classList.add('notch-max');
-        notch.dataset.level = levelFromBottom;
-        notch.textContent = m.label;
-        // Set dynamic top positioning to align perfectly with the track and handle
-        notch.style.top = `calc(28px + ${(1 - pct) * 124}px)`;
+        if (shown.length > 1 && index === shown.length - 1) notch.classList.add('notch-max');
+        notch.dataset.index = index;
+        notch.textContent = REASONING_SHORT_LABELS[level.id] || String(level.label || level.id).toUpperCase();
+        notch.title = level.label || level.id;
+        notch.style.top = `calc(28px + ${fromTop * 128}px)`;
         sliderBar.insertBefore(notch, track);
 
-        // Small dot on the track marking this tier (palier).
         const dot = document.createElement('div');
         dot.className = 'slider-dot';
-        dot.dataset.level = levelFromBottom;
-        dot.style.top = ((1 - pct) * 100) + '%';
-        track.insertBefore(dot, handle); // keep handle on top
+        dot.dataset.index = index;
+        dot.style.top = (fromTop * 100) + '%';
+        track.insertBefore(dot, handle);
     });
-    
-    if (compatible) {
-        sliderBar.classList.remove('locked');
-        if (state.reasoningLevel >= modes.length) {
-            state.reasoningLevel = modes.length - 1;
-        }
+
+    sliderBar.classList.toggle('locked', levels.length < 2);
+    sliderBar.title = caps?.provider === 'gguf'
+        ? 'Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.'
+        : '';
+    sliderBar.setAttribute('aria-disabled', String(levels.length < 2));
+    if (levels.length > 1) {
+        sliderBar.setAttribute('aria-valuemin', String(levels[0].value));
+        sliderBar.setAttribute('aria-valuemax', String(levels[levels.length - 1].value));
     } else {
-        sliderBar.classList.add('locked');
-        state.reasoningLevel = 0;
+        sliderBar.removeAttribute('aria-valuemin');
+        sliderBar.removeAttribute('aria-valuemax');
     }
-    
+    if (tooltip) {
+        tooltip.textContent = caps?.reasoning?.mode === 'native'
+            ? (lang === 'en' ? 'Native reasoning, not adjustable' : 'Raisonnement natif, non réglable')
+            : (TRANSLATIONS[lang]?.['incompatible-tooltip'] || 'Modèle incompatible');
+    }
     updateSliderVisuals();
+}
+
+function checkReasoningCompatibility() {
+    window.ZaalisWorkspace?.refreshCapabilities();
 }
 
 function initReasoningSlider() {
@@ -2888,114 +2911,93 @@ function initReasoningSlider() {
     if (!sliderBar) return;
     const handle = sliderBar.querySelector('.slider-handle');
     const track = sliderBar.querySelector('.slider-track');
-    
+    sliderBar.setAttribute('role', 'slider');
+    sliderBar.setAttribute('aria-label', state.language === 'en' ? 'Reasoning level' : 'Niveau de raisonnement');
+    sliderBar.tabIndex = 0;
+
     let tooltipTimeout = null;
     function showIncompatibleTooltip() {
         sliderBar.classList.add('show-tooltip');
         if (tooltipTimeout) clearTimeout(tooltipTimeout);
-        tooltipTimeout = setTimeout(() => {
-            sliderBar.classList.remove('show-tooltip');
-        }, 2000);
+        tooltipTimeout = setTimeout(() => sliderBar.classList.remove('show-tooltip'), 2000);
     }
 
-    let isDragging = false;
+    function indexAt(clientY, levels) {
+        const rect = track.getBoundingClientRect();
+        const fromTop = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+        return Math.round((1 - fromTop) * (levels.length - 1));
+    }
 
+    function preview(index) {
+        sliderBar.querySelectorAll('.slider-notch, .slider-dot').forEach(node => {
+            node.classList.toggle('active', Number(node.dataset.index) === index);
+        });
+    }
+
+    function commit(levels, index) {
+        state.reasoningLevel = Number(levels[index].value);
+        updateSliderVisuals();
+        window.ZaalisWorkspace?.syncReasoning();
+        saveState();
+    }
+
+    sliderBar.addEventListener('keydown', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        const current = reasoningLevelIndex(levels);
+        const target = ({ ArrowUp: current + 1, ArrowRight: current + 1,
+            ArrowDown: current - 1, ArrowLeft: current - 1,
+            Home: 0, End: levels.length - 1 })[e.key];
+        if (target === undefined) return;
+        e.preventDefault();
+        commit(levels, Math.max(0, Math.min(levels.length - 1, target)));
+    });
+    sliderBar.addEventListener('wheel', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        e.preventDefault();
+        const current = reasoningLevelIndex(levels);
+        commit(levels, Math.max(0, Math.min(levels.length - 1, current + (e.deltaY < 0 ? 1 : -1))));
+    }, { passive: false });
+
+    let dragging = false;
     sliderBar.addEventListener('mousedown', e => {
-        if (sliderBar.classList.contains('locked')) {
+        const levels = reasoningLevels();
+        if (sliderBar.classList.contains('locked') || levels.length < 2) {
             showIncompatibleTooltip();
             return;
         }
-        
         e.preventDefault();
-        isDragging = true;
-        handle.classList.add('dragging');
-        
         const notch = e.target.closest('.slider-notch');
         if (notch) {
-            const level = parseInt(notch.dataset.level);
-            const model = reasoningContext().model;
-            const modes = REASONING_MODES[model] || REASONING_MODES.local;
-            const totalLevels = modes.length;
-            const targetPercentage = (1 - (level / (totalLevels - 1))) * 100;
-            handle.style.top = targetPercentage + '%';
-            
-            sliderBar.querySelectorAll('.slider-notch').forEach(n => {
-                n.classList.toggle('active', parseInt(n.dataset.level) === level);
-            });
-            sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-                d.classList.toggle('active', parseInt(d.dataset.level) === level);
-            });
-        } else {
-            onMouseMove(e);
+            commit(levels, Number(notch.dataset.index));
+            return;
         }
-        
+        dragging = true;
+        handle.classList.add('dragging');
+        onMouseMove(e);
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
     });
 
     function onMouseMove(e) {
-        if (!isDragging) return;
-        const trackRect = track.getBoundingClientRect();
-        let yPercent = (e.clientY - trackRect.top) / trackRect.height;
-        yPercent = Math.max(0, Math.min(1, yPercent));
-        const percentage = yPercent * 100;
-        handle.style.top = percentage + '%';
-
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
-        const totalLevels = modes.length;
-        
-        let snapLevel = 0;
-        let minDiff = Infinity;
-        
-        for (let i = 0; i < totalLevels; i++) {
-            const targetPercentage = (1 - (i / (totalLevels - 1))) * 100;
-            const diff = Math.abs(percentage - targetPercentage);
-            if (diff < minDiff) {
-                minDiff = diff;
-                snapLevel = i;
-            }
-        }
-
-        sliderBar.querySelectorAll('.slider-notch').forEach(n => {
-            const l = parseInt(n.dataset.level);
-            n.classList.toggle('active', l === snapLevel);
-        });
-        sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-            d.classList.toggle('active', parseInt(d.dataset.level) === snapLevel);
-        });
+        if (!dragging) return;
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        const rect = track.getBoundingClientRect();
+        handle.style.top = (Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) * 100) + '%';
+        preview(indexAt(e.clientY, levels));
     }
 
     function onMouseUp(e) {
-        if (!isDragging) return;
-        isDragging = false;
+        if (!dragging) return;
+        dragging = false;
         handle.classList.remove('dragging');
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
-
-        const trackRect = track.getBoundingClientRect();
-        let yPercent = (e.clientY - trackRect.top) / trackRect.height;
-        yPercent = Math.max(0, Math.min(1, yPercent));
-        const percentage = yPercent * 100;
-
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
-        const totalLevels = modes.length;
-
-        let level = 0;
-        let minDiff = Infinity;
-        
-        for (let i = 0; i < totalLevels; i++) {
-            const targetPercentage = (1 - (i / (totalLevels - 1))) * 100;
-            const diff = Math.abs(percentage - targetPercentage);
-            if (diff < minDiff) {
-                minDiff = diff;
-                level = i;
-            }
-        }
-
-        state.reasoningLevel = level;
-        updateSliderVisuals();
+        const levels = reasoningLevels();
+        if (levels.length < 2) { updateSliderVisuals(); return; }
+        commit(levels, indexAt(e.clientY, levels));
     }
 }
 

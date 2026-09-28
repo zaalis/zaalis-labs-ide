@@ -5,6 +5,7 @@
 //! without knowing which vendor produced them.
 
 mod anthropic;
+mod compat;
 mod gemini;
 mod openai;
 mod pool;
@@ -13,6 +14,7 @@ mod transport;
 mod types;
 
 pub use anthropic::{build_request as build_anthropic_request, AnthropicConfig, AnthropicProvider};
+pub use compat::{split_compat_model, CompatProvider, COMPAT_SEPARATOR};
 pub use gemini::{build_request as build_gemini_request, GeminiConfig, GeminiProvider};
 pub use openai::{build_request as build_openai_request, parse_complete as parse_openai_complete};
 pub use openai::{AuthScheme, OpenAiConfig, OpenAiProvider, StreamParser as OpenAiStreamParser};

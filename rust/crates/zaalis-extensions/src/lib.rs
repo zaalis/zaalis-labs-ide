@@ -2,6 +2,7 @@
 //! workspace/user documents, and Hooks compile to ordinary guarded `run`
 //! invocations. No extension bypasses `ToolRuntime` permissions.
 
+mod browser;
 mod computer;
 mod hooks;
 mod mcp;
@@ -38,6 +39,9 @@ impl ExtensionRuntime {
     pub fn register_tools(&self, runtime: &ToolRuntime) -> Result<()> {
         runtime.register(mcp::McpTool::new(Arc::clone(&self.mcp)))?;
         runtime.register(skills::SkillTool::new(Arc::clone(&self.skills)))?;
+        if let Some(tool) = browser::BrowserTool::from_env()? {
+            runtime.register(tool)?;
+        }
         if let Some(tool) = computer::ComputerTool::from_env()? {
             runtime.register(tool)?;
         }

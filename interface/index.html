@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.15">
-    <link rel="stylesheet" href="app.css?v=1.0.15">
+    <link rel="stylesheet" href="base.css?v=1.0.17">
+    <link rel="stylesheet" href="app.css?v=1.0.17">
+    <link rel="stylesheet" href="workspace.css?v=1.1.1">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -310,18 +311,26 @@
                 <!-- Model + Sub-model selector -->
                 <div class="model-selector-bar">
                     <select id="ai-model">
-                        <option value="codex">Codex (OpenAI)</option>
-                        <option value="claude">Claude (Anthropic)</option>
-                        <option value="gemini">Gemini (Google)</option>
-                        <option value="grok">Grok (xAI)</option>
-                        <option value="mistral">Mistral (Le Chat)</option>
-                        <option value="kimi">Kimi (Moonshot AI)</option>
-                        <option value="local">Ollama (Local)</option>
-                        <option value="gguf">GGUF (Local)</option>
+                        <optgroup label="Cloud">
+                            <option value="codex">Codex (OpenAI)</option>
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="gemini">Gemini (Google)</option>
+                            <option value="grok">Grok (xAI)</option>
+                            <option value="mistral">Mistral (Le Chat)</option>
+                            <option value="kimi">Kimi (Moonshot AI)</option>
+                        </optgroup>
+                        <optgroup label="Local">
+                            <option value="local">Ollama (Local)</option>
+                            <option value="gguf">GGUF (Local)</option>
+                        </optgroup>
+                        <optgroup label="Compatibles OpenAI" id="compat-model-group">
+                            <option value="__compat_add__" data-action="add">Ajouter un fournisseur…</option>
+                        </optgroup>
                     </select>
                     <select id="ai-submodel">
                         <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                     </select>
+                    <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
                 </div>
 
                 <!-- Token / context meter -->
@@ -515,17 +524,14 @@
                         <input type="checkbox" class="agent-check" data-agent="local">
                         <div class="agent-dot local"></div>
                         <div class="agent-info">
-                            <span class="agent-name">Ollama</span>
-                            <select class="agent-role-select" data-agent="local">
-                                <option value="developer">Developpeur</option>
-                                <option value="lead">Chef de projet</option>
-                                <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
-                                <option value="optimizer">Optimiseur</option>
-                                <option value="tester">Testeur</option>
+                            <span class="agent-name">Kimi</span>
+                            <select class="agent-role-select" data-agent="kimi">
+                                <option value="developer">Developpeur</option><option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option><option value="reviewer">Reviewer</option>
+                                <option value="optimizer">Optimiseur</option><option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="local"></select>
+                        <select class="agent-model-select" data-agent="kimi"></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- GGUF -->
@@ -754,6 +760,11 @@
                         <div class="key-label-row"><label for="key-moonshot">Moonshot AI (Kimi)</label><span class="key-status" id="key-status-moonshot"></span></div>
                         <input type="password" id="key-moonshot" placeholder="...">
                     </div>
+                    <hr class="settings-separator">
+                    <h3 id="compat-settings-title">Autres fournisseurs (compatibles OpenAI)</h3>
+                    <p class="form-hint">Appel direct depuis ce PC vers le fournisseur choisi. Les clés sont chiffrées localement et ne passent par aucun service tiers. Un fournisseur apparaît dans la liste des modèles dès que sa clé est enregistrée.</p>
+                    <input type="search" id="compat-filter" class="compat-filter" placeholder="Filtrer les fournisseurs…" aria-label="Filtrer les fournisseurs" autocomplete="off" spellcheck="false">
+                    <div id="compat-key-fields" class="compat-key-fields"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -882,6 +893,17 @@
                     <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
+                            <label for="settings-default-permission-select" data-i18n="settings-default-permission-label">Mode de travail par défaut</label>
+                            <p data-i18n="settings-default-permission-hint">Le dernier mode choisi est repris au prochain démarrage et après reconnexion.</p>
+                        </div>
+                        <select id="settings-default-permission-select">
+                            <option value="supervised" data-i18n="perm-supervised">Supervisé</option>
+                            <option value="semi" data-i18n="perm-semi">Semi-auto</option>
+                            <option value="auto" data-i18n="perm-auto">Autonome</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
                             <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">Modèle chat par défaut</label>
                             <p data-i18n="settings-default-chat-hint">Modèle sélectionné par défaut dans le chat.</p>
                         </div>
@@ -935,7 +957,7 @@
                             <p data-i18n="settings-default-folder-hint">Dossier proposé en premier dans le sélecteur de projet.</p>
                         </div>
                         <div class="settings-folder-pick">
-                            <input type="text" id="settings-default-folder" placeholder="C:\\...">
+                            <input type="text" id="settings-default-folder" placeholder="/Users/vous/Documents/...">
                             <button type="button" class="btn btn-ghost" id="settings-pick-folder-btn" data-i18n="settings-browse-btn">Parcourir</button>
                         </div>
                     </div>
@@ -1046,12 +1068,28 @@
             <p class="form-hint" data-i18n="open-project-hint">Entrez le chemin absolu vers le dossier de votre projet.</p>
             <div class="form-group">
                 <label for="project-path-input" data-i18n="folder-path-label">Chemin du dossier</label>
-                <input type="text" id="project-path-input" placeholder="C:\Users\...">
+                <input type="text" id="project-path-input" placeholder="/Users/vous/Documents/...">
             </div>
         </div>
         <div class="modal-footer">
             <button class="btn btn-ghost" id="cancel-project-btn" data-i18n="cancel-project-btn">Annuler</button>
             <button class="btn btn-primary" id="confirm-project-btn" data-i18n="confirm-project-btn">Ouvrir</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== PROJECT PATH MOVED MODAL ========== -->
+<div class="modal-overlay" id="project-path-moved-modal">
+    <div class="modal modal-sm" role="alertdialog" aria-modal="true" aria-labelledby="project-path-moved-title">
+        <div class="modal-header">
+            <h2 id="project-path-moved-title">Chemin du projet modifié</h2>
+        </div>
+        <div class="modal-body">
+            <p class="form-hint" id="project-path-moved-message"></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-danger" id="delete-moved-project-btn" type="button">Supprimer le projet</button>
+            <button class="btn btn-primary" id="update-moved-project-btn" type="button">Mettre à jour le chemin</button>
         </div>
     </div>
 </div>
@@ -1216,8 +1254,8 @@
                 <div class="update-step" id="update-step-install">
                     <div class="update-step-badge"><span class="step-number">2</span></div>
                     <div class="update-step-text">
-                        <strong>Installation manuelle</strong>
-                        <span>Fermez votre IDE, puis double-cliquez sur zaalis-update.exe.</span>
+                        <strong>Installation automatique</strong>
+                        <span>L’IDE se ferme, installe la nouvelle version, puis redémarre automatiquement.</span>
                     </div>
                 </div>
             </div>
@@ -1278,11 +1316,12 @@
 
 <script src="catalog.js?v=1.0.15"></script>
 <script src="help.js?v=1.0.15"></script>
-<script src="script/state.js?v=1.0.15" defer></script>
-<script src="script/ui.js?v=1.0.15" defer></script>
-<script src="script/commands.js?v=1.0.15" defer></script>
-<script src="script/ai.js?v=1.0.15" defer></script>
+<script src="script/state.js?v=1.0.17" defer></script>
+<script src="script/ui.js?v=1.0.17" defer></script>
+<script src="script/commands.js?v=1.0.17" defer></script>
+<script src="script/ai.js?v=1.0.17" defer></script>
 <script src="script/remote.js?v=1.0.15" defer></script>
-<script src="script/main.js?v=1.0.15" defer></script>
+<script src="script/main.js?v=1.0.17" defer></script>
+<script src="script/workspace.js?v=1.1.1" defer></script>
 </body>
 </html>

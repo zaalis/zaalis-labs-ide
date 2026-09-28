@@ -36,7 +36,7 @@ pub const HEALTH: &str = "health";
 pub const SESSION_EVENT: &str = "session.event";
 
 /// Every method a client may call, for exhaustive dispatch on the server side.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum ClientMethod {
     SessionCreate,
     SessionResume,

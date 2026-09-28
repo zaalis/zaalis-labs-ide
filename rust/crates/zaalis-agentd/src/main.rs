@@ -10,6 +10,14 @@ use zeroize::Zeroizing;
 
 #[tokio::main]
 async fn main() {
+    // Before anything else, and in particular before a single provider key is
+    // read into this address space: from here on the process is the last copy
+    // of the vault, and crash dumps and debuggers both hand that copy out.
+    let hardening = zaalis_hardening::harden_current_process();
+    for skipped in &hardening.skipped {
+        eprintln!("agentd: durcissement partiel — {skipped}");
+    }
+
     if let Err(error) = run().await {
         eprintln!("agentd: {}", error.message);
         std::process::exit(1);

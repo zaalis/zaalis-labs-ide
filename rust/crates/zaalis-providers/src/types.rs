@@ -349,6 +349,22 @@ impl Default for Capabilities {
     }
 }
 
+impl Capabilities {
+    pub fn for_binding(mut self, binding: &ModelBinding) -> Self {
+        if let Some(facts) = &binding.capabilities {
+            if let Some(value) = facts.native_tools { self.native_tools = value; }
+            if let Some(value) = facts.vision { self.vision = value; }
+            if let Some(value) = facts.max_context.filter(|value| *value >= 512) {
+                self.max_context = value;
+            }
+            if let Some(mode) = facts.reasoning {
+                self.reasoning = mode != zaalis_core::ReasoningMode::None;
+            }
+        }
+        self
+    }
+}
+
 /// Accumulates streamed tool-call fragments into finished invocations.
 ///
 /// Providers deliver arguments as JSON text in arbitrary chunks, sometimes

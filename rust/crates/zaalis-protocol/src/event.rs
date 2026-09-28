@@ -47,8 +47,15 @@ impl EventFrame {
 /// The tag is `type`, matching the shape `interface/script/ai.js` and `cli.js`
 /// already switch on today, so both existing renderers extend rather than get
 /// rewritten.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The generated JavaScript bindings enumerate variants through
+/// `EventKind`, so a new event reaches every client without anyone editing a
+/// list by hand — and the round-trip test below fails if serde and strum ever
+/// disagree about a tag.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, strum::EnumDiscriminants)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[strum_discriminants(name(EventKind))]
+#[strum_discriminants(derive(strum::EnumIter, strum::IntoStaticStr, Hash))]
+#[strum_discriminants(strum(serialize_all = "snake_case"))]
 pub enum Event {
     // ── Session ──────────────────────────────────────────────────────────
     /// A turn began.

@@ -31,7 +31,8 @@ pub use agent::{
 pub use error::{ErrorCode, Result, ZaalisError};
 pub use ids::{AgentId, CheckpointId, RequestId, SegmentId, SessionId, ToolCallId};
 pub use model::{
-    BindingOrigin, InheritFromParent, ModelBinding, ModelPolicy, ProviderId, ReasoningLevel,
+    BindingOrigin, InheritFromParent, ModelBinding, ModelCapabilities, ModelPolicy, ProviderId,
+    ReasoningLevel, ReasoningMode,
 };
 pub use permission::{
     AccessKind, Decision, DecisionReason, GrantScope, PermissionAnswer, PermissionMode,

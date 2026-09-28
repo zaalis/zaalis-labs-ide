@@ -14,11 +14,15 @@
     "build:rust:x64": "cargo build --manifest-path rust/Cargo.toml --workspace --release --target x86_64-apple-darwin && sh scripts/stage-rust-binaries.sh native/dist-macos-x64-server",
     "build:rust:arm64": "cargo build --manifest-path rust/Cargo.toml --workspace --release --target aarch64-apple-darwin && sh scripts/stage-rust-binaries.sh native/dist-macos-arm64-server",
     "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper && sh scripts/stage-rust-binaries.sh",
-    "build:macos": "sh native/build_macos_dmg.sh"
+    "build:macos": "sh native/build_macos_dmg.sh",
+    "sync:browser": "node scripts/sync-zaalis-browser.js"
   },
   "pkg": {
     "assets": [
-      "interface/**/*"
+      "interface/**/*",
+      "zaalis-browser/app/interface/**/*",
+      "zaalis-browser/app/assets/**/*",
+      "zaalis-browser/app/UPSTREAM.json"
     ]
   },
   "keywords": [],
@@ -32,10 +36,10 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
-    "@electron/packager": "^20.0.1",
     "@yao-pkg/pkg": "^6.22.0",
-    "electron": "^42.5.0",
     "node-pty": "^1.1.0",
+    "@electron/packager": "^20.0.1",
+    "electron": "^42.5.0",
     "png2icons": "^2.0.1"
   }
 }

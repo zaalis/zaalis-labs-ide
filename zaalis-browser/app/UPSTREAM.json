@@ -1,0 +1,28 @@
+{
+  "upstream": "zaalis Browser (édition Windows, Electron)",
+  "commit": "80fcd8db5e66a666b8444b2da63911434276fb10",
+  "commitDate": "2026-07-30T18:06:30+02:00",
+  "uncommitted": [
+    "M interface/panel.html"
+  ],
+  "syncedAt": "2026-09-27T18:07:33.642Z",
+  "patches": [
+    "dossier de données propre à l’IDE",
+    "secret du pont IDE fourni par le serveur",
+    "API HTTP 8715 laissée au navigateur autonome",
+    "pas de réserve pour les boutons de fenêtre",
+    "photo de profil recadrée par l’hôte natif",
+    "points d’entrée pour l’IDE"
+  ],
+  "files": {
+    "main.js": "c2b14587c34b7adb43ad8c2a65b3e9f2cfd5a39f500e7db3a5f9309d38dc7bda",
+    "LICENSE": "0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0",
+    "assets/logo-zaalis.png": "7cd77bb7c4609ab7b399cb62ac8bbb1794f80ebca9a5ca72673a6f010264265d",
+    "interface/aichat.html": "b2360de13aa2a4814e6f89864d984f7bcb9b5cfd6a8f33b5ec79a2b4fafe720b",
+    "interface/aisearch.html": "d8b4f5b76dfd2097418346d66afd80bfe817f3bd29fcf7755cf4aeb29ccbf497",
+    "interface/chrome.html": "14db71f95bf0f86836c863f5b775621318ff194ab805260207118d271326c318",
+    "interface/incognito.html": "6bb9d8bdc3303206133b5f65b8904bad6754c51667ce37f1dea399a50a2c6f5f",
+    "interface/index.html": "ddb9cf22e5bdb3af73b9b5815849aa0f173b75d3452d1c10137b12b43f34fdd9",
+    "interface/panel.html": "a5b05cd4869e01dfe9a15accee6d06a971452660b5d0c036078aa4ea935ec6f5"
+  }
+}

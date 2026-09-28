@@ -1,24 +1,12 @@
-# zaalis IDE - macOS Electron package
+# Paquets natifs macOS
 
-This macOS copy ships as local Electron `.app` packages for Intel x64 and Apple
-Silicon arm64, plus a double-click installer archive. The app includes its own
-Chromium runtime, the zaalis local server, and the zaalis CLI.
-
-Build:
-
-```bat
-native\build_macos.bat
-```
-
-Outputs:
+`npm run build:macos` lance `native/build_macos_dmg.sh` et produit un DMG pour chaque architecture :
 
 ```text
-native\installer\zaalis-macos-x64.tar.gz
-native\installer\zaalis-macos-arm64.tar.gz
-native\installer\zaalis-macos-universal-installer.tar.gz
+native/installer/zaalis-macos-arm64.dmg
+native/installer/zaalis-macos-x64.dmg
 ```
 
-The universal installer archive contains an installer command that chooses the
-right Electron `.app` for Intel or Apple Silicon and copies it to
-`/Applications` when possible, otherwise to `~/Applications`.
-Windows installer files are intentionally not kept in this macOS package folder.
+Chaque image contient `zaalis IDE.app`, son serveur et son cœur Rust, Electron, le navigateur intégré et les assistants Swift. L'application est signée après assemblage. Définissez `MACOS_CODESIGN_IDENTITY` et `ZAALIS_CODESIGN_ID` sur la même identité durable pour une distribution ; sans cela, la construction locale utilise une signature ad hoc.
+
+Voir [README_MACOS.md](../README_MACOS.md) pour les prérequis, l'installation et les autorisations système.

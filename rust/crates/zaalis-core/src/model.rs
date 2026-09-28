@@ -31,10 +31,15 @@ pub enum ProviderId {
     Local,
     /// llama.cpp server, on the local machine.
     Gguf,
+    /// Any OpenAI-compatible endpoint the user configured in zaalis itself
+    /// (OpenRouter, DeepSeek, Fireworks, a self-hosted gateway…). The model
+    /// string is `<endpoint>::<model>`; the endpoint's URL and key are held by
+    /// the daemon and never travel in the binding.
+    Compat,
 }
 
 impl ProviderId {
-    pub const ALL: [ProviderId; 8] = [
+    pub const ALL: [ProviderId; 9] = [
         ProviderId::Codex,
         ProviderId::Claude,
         ProviderId::Gemini,
@@ -43,6 +48,7 @@ impl ProviderId {
         ProviderId::Kimi,
         ProviderId::Local,
         ProviderId::Gguf,
+        ProviderId::Compat,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -55,6 +61,7 @@ impl ProviderId {
             ProviderId::Kimi => "kimi",
             ProviderId::Local => "local",
             ProviderId::Gguf => "gguf",
+            ProviderId::Compat => "compat",
         }
     }
 
@@ -69,6 +76,7 @@ impl ProviderId {
             ProviderId::Kimi => "Moonshot AI",
             ProviderId::Local => "Ollama",
             ProviderId::Gguf => "llama.cpp",
+            ProviderId::Compat => "Compatible OpenAI",
         }
     }
 
@@ -92,8 +100,8 @@ impl fmt::Display for ProviderId {
     }
 }
 
-/// How much reasoning to ask for, on the 0..=4 scale the interface slider
-/// already uses. Each provider adapter maps it onto its own vocabulary
+/// How much reasoning to ask for, on the 0..=7 scale used by local models.
+/// Existing cloud providers expose their own shorter lists. Each adapter maps it onto its own vocabulary
 /// (`reasoning_effort`, `thinking.budget_tokens`, `thinkingConfig`…), because no
 /// two providers agree on units.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -104,7 +112,7 @@ impl ReasoningLevel {
     pub const OFF: ReasoningLevel = ReasoningLevel(0);
 
     pub fn clamped(value: u8) -> Self {
-        ReasoningLevel(value.min(4))
+        ReasoningLevel(value.min(7))
     }
 
     pub fn is_off(self) -> bool {
@@ -136,6 +144,28 @@ pub enum BindingOrigin {
     Fallback,
 }
 
+/// Model-specific facts discovered from the model server or explicit catalogue.
+/// Missing facts retain the adapter's defaults for backwards compatibility.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_tools: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningMode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningMode {
+    None,
+    Native,
+    Effort,
+}
+
 /// Provider + model + reasoning, as bound to one agent.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelBinding {
@@ -149,6 +179,8 @@ pub struct ModelBinding {
     pub reasoning: ReasoningLevel,
     #[serde(default = "default_origin")]
     pub origin: BindingOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
 }
 
 fn default_origin() -> BindingOrigin {
@@ -162,6 +194,7 @@ impl ModelBinding {
             model,
             reasoning: ReasoningLevel::OFF,
             origin: BindingOrigin::ExplicitUser,
+            capabilities: None,
         }
     }
 
@@ -182,6 +215,7 @@ impl ModelBinding {
             model: self.model.clone(),
             reasoning: self.reasoning,
             origin: BindingOrigin::InheritedFromParent,
+            capabilities: self.capabilities.clone(),
         }
     }
 
@@ -233,6 +267,7 @@ mod tests {
         assert_eq!(ProviderId::Kimi.as_str(), "kimi");
         assert_eq!(ProviderId::Local.as_str(), "local");
         assert_eq!(ProviderId::Gguf.as_str(), "gguf");
+        assert_eq!(ProviderId::Compat.as_str(), "compat");
     }
 
     #[test]
@@ -284,7 +319,7 @@ mod tests {
 
     #[test]
     fn reasoning_level_is_clamped_to_the_slider_range() {
-        assert_eq!(ReasoningLevel::clamped(9), ReasoningLevel(4));
+        assert_eq!(ReasoningLevel::clamped(9), ReasoningLevel(7));
         assert!(ReasoningLevel::default().is_off());
     }
 }

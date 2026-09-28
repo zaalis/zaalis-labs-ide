@@ -54,8 +54,10 @@ impl PtyCapture {
         self.truncated |= visible.len() < bytes.len();
     }
 
+    /// Same masking contract as the non-PTY capture: nothing leaves this crate
+    /// with a live credential in it, whichever runtime produced the bytes.
     fn drain(&mut self) -> (String, bool) {
-        let output = String::from_utf8_lossy(&self.bytes).into_owned();
+        let output = zaalis_secrets::sanitize(&String::from_utf8_lossy(&self.bytes)).into_owned();
         self.bytes.clear();
         (output, self.truncated)
     }

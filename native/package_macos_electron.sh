@@ -43,6 +43,8 @@ mkdir -p "$APP_RES" "$BUNDLE"
 cp "$ROOT/native/electron/package.json" "$APP_RES/package.json"
 cp "$ROOT/native/electron/main.js" "$APP_RES/main.js"
 cp "$ROOT/native/electron/preload.js" "$APP_RES/preload.js"
+cp "$ROOT/native/electron/browser-bridge.js" "$APP_RES/browser-bridge.js"
+cp "$ROOT/native/electron/browser-preload.js" "$APP_RES/browser-preload.js"
 if command -v swiftc >/dev/null 2>&1; then
   swiftc -target "$SWIFT_TARGET" -O \
     -framework Foundation -framework Speech -framework AVFoundation \
