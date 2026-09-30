@@ -1,6 +1,6 @@
 {
   "name": "connexion-ide",
-  "version": "1.0.15",
+  "version": "1.0.16",
   "description": "Local Zaalis IDE with an Express server, CLI, and native macOS shell (Electron).",
   "main": "server.js",
   "bin": "server.js",

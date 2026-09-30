@@ -2,9 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const packagerModule = require('@electron/packager');
-
-const packager = packagerModule.packager || packagerModule.default || packagerModule;
 const PRODUCT_NAME = 'zaalis IDE';
 const EXECUTABLE_NAME = 'zaalis-ide';
 
@@ -25,6 +22,8 @@ function copyFile(src, dest) {
 }
 
 async function main() {
+  const packagerModule = await import('@electron/packager');
+  const packager = packagerModule.packager || packagerModule.default || packagerModule;
   const [platform, arch, sourceDistArg, finalDistArg] = process.argv.slice(2);
   if (!platform || !arch || !sourceDistArg || !finalDistArg) usage();
 
