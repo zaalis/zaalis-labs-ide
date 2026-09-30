@@ -158,28 +158,35 @@ syncComputerControlUI();
 
 // Approval modal
 let pendingApproval = null;
+const approvalQueue = [];
+
+function showNextApproval() {
+    if (pendingApproval || !approvalQueue.length) return;
+    pendingApproval = approvalQueue.shift();
+    $('#approval-desc').textContent = pendingApproval.description;
+    $('#approval-content').textContent = pendingApproval.content;
+    $('#approval-modal').classList.add('active');
+    $('#approve-action').focus();
+}
 
 function requestApproval(description, content) {
     return new Promise((resolve) => {
-        $('#approval-desc').textContent = description;
-        $('#approval-content').textContent = content;
-        $('#approval-modal').classList.add('active');
-        pendingApproval = resolve;
+        approvalQueue.push({ description, content, resolve });
+        showNextApproval();
     });
 }
 
-$('#approve-action').addEventListener('click', () => {
+function answerApproval(allow) {
+    const current = pendingApproval;
+    pendingApproval = null;
     $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(true); pendingApproval = null; }
-});
-$('#deny-action').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
-$('#close-approval').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
+    if (current) current.resolve(allow);
+    showNextApproval();
+}
+
+$('#approve-action').addEventListener('click', () => answerApproval(true));
+$('#deny-action').addEventListener('click', () => answerApproval(false));
+$('#close-approval').addEventListener('click', () => answerApproval(false));
 
 // ==========================================================
 //  AI PANEL TABS
@@ -469,7 +476,7 @@ function addMsg(container, type, label, text, isHTML = false) {
     const div = document.createElement('div');
     div.className = 'msg msg-' + type;
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -493,7 +500,7 @@ function addTypingMsg(container, label) {
     const div = document.createElement('div');
     div.className = 'msg msg-ai';
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -514,6 +521,7 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         body: JSON.stringify({
             model, submodel, message, systemPrompt,
             root: state.projectRoot,
+            terminalSessionId: terminalSessionId || undefined,
             config: safeConfig,
             language: state.language || 'fr',
             reasoningLevel: state.reasoningLevel,
@@ -956,6 +964,7 @@ async function sendChat(input) {
                 window.ZaalisWorkspace?.onAgentEvent(event);
             }
         });
+        if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, activeConversation);
         stopThinking(body);
         if (data.error) {
             if (liveActivity) liveActivity.fail(data.error);
@@ -1317,6 +1326,19 @@ function createLiveAgentActivity(container) {
                 toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
                 setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
                 followScroll(container);
+                return;
+            }
+            if (event.type === 'permission_required') {
+                const label = lang === 'en' ? 'Waiting for your approval' : 'En attente de votre autorisation';
+                setStatus(label);
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(label)} : ${escapeHTML(event.summary || event.target || '')}</div>`);
+                followScroll(container);
+                return;
+            }
+            if (event.type === 'rust_event' && event.event?.type === 'permission_resolved') {
+                setStatus(event.event.allowed
+                    ? (lang === 'en' ? 'Approved; running command' : 'Autorisé ; exécution en cours')
+                    : (lang === 'en' ? 'Action denied' : 'Action refusée'));
                 return;
             }
             if (event.type === 'tool_done') {
@@ -1932,6 +1954,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
             }
         }
     });
+    if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, state.agentConversations.find(conv => conv.id === state.currentAgentConvId));
     stopThinking(body);
     if (data.error) {
         if (activity) activity.fail(data.error);
@@ -2233,6 +2256,7 @@ function projectLabel() {
 const PERSISTED_MSG_CLASSES = [
     'deep-search-host',
     'has-image',
+    'live-agent-body',
     'max-reasoning-text'
 ];
 function persistedBodyClasses(body) {
@@ -2243,7 +2267,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
 }
 
 function saveConversation(kind = 'chat') {
@@ -2260,6 +2284,7 @@ function saveConversation(kind = 'chat') {
         };
         const classes = persistedBodyClasses(body);
         if (classes.length) entry.bodyClasses = classes;
+        if (body?.classList.contains('live-agent-body')) entry.activity = true;
         if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
@@ -2379,21 +2404,34 @@ function mergeConversations(local, server, curId) {
 }
 
 // Restore a saved conversation into its view (chat or agents).
-function loadConversation(kind, id) {
+async function loadConversation(kind, id) {
     const cfg = HIST[kind];
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
-    state[cfg.current] = id;
 
     // Link the chat to its project: re-open the folder it belongs to (or drop the
     // project for a classic "no project" chat) so the AI keeps the right context.
-    applyConversationProject(conv);
+    if (await applyConversationProject(conv) === false) return;
+    state[cfg.current] = id;
 
     const container = $(cfg.container);
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
         const hasRichHtml = m.html && m.type !== 'user';
         const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        if (m.activity || body.querySelector('.live-agent-activity')) {
+            body.classList.add('live-agent-body');
+            body.closest('.msg').classList.add('live-agent-msg');
+            body.querySelectorAll('details').forEach(detail => detail.removeAttribute('open'));
+        } else if (!hasRichHtml && m.type === 'ai' && !m.image) {
+            // Older histories kept only text. Restore formatting without treating
+            // user content as HTML, and fold old flattened tool transcripts.
+            if (/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')) {
+                body.innerHTML = `<details class="ghost-tool-group"><summary>${state.language === 'en' ? 'Previous tool activity' : 'Activité des outils sauvegardée'}</summary><pre class="ghost-tool-pre">${escapeHTML(m.text || '')}</pre></details>`;
+                body.classList.add('live-agent-body');
+                body.closest('.msg').classList.add('live-agent-msg');
+            } else body.innerHTML = formatAIResponse(m.text || '');
+        }
         (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
             if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
         });
@@ -2408,7 +2446,7 @@ function loadConversation(kind, id) {
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
         state.chatHistory = Array.isArray(conv.apiHistory) ? conv.apiHistory.map(item => ({ ...item })) : (conv.messages || [])
-            .filter(m => m.type === 'user' || m.type === 'ai')
+            .filter(m => m.type === 'user' || (m.type === 'ai' && !m.activity && !/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')))
             .map(m => ({
                 role: m.type === 'user' ? 'user' : 'assistant',
                 content: m.image
@@ -2448,17 +2486,33 @@ function recentPathByName(name) {
 }
 
 // Switch the open project so a loaded/continued chat matches its folder.
-function applyConversationProject(conv) {
-    if (!conv) return;
-    if (!conv.project) {                       // classic chat -> no project
+async function applyConversationProject(conv) {
+    if (!conv) return false;
+    if (!conv.project && !conv.projectPath) {   // classic chat -> no project
         if (state.projectRoot && typeof clearProject === 'function') {
             clearProject({ preserveConversation: true });
         }
-        return;
+        return true;
     }
     const target = conv.projectPath || recentPathByName(conv.project);
     if (target && target !== state.projectRoot && typeof openProject === 'function') {
-        openProject(target, false, { preserveConversation: true });
+        return await openProject(target, false, { preserveConversation: true });
+    }
+    return !!target;
+}
+
+async function applyWorkspaceSelection(selection, conv) {
+    if (!selection?.root) return;
+    const opened = await openProject(selection.root, true, { preserveConversation: true });
+    if (!opened) return;
+    if (conv) {
+        conv.projectPath = selection.root;
+        conv.project = projectLabel();
+        conv.sessionId = null; // next turn creates a sandbox for the new folder
+    }
+    if (selection.terminalId) {
+        await attachIntegratedTerminal(selection.terminalId);
+        window.ZaalisWorkspace?.setPanel('terminal');
     }
 }
 
@@ -2553,6 +2607,10 @@ function newConversation(kind = 'chat') {
 async function deleteConversation(kind, id) {
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
+    if (state[cfg.current] === id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+        toast(lang === 'en' ? 'Stop the running task before deleting this chat.' : 'Arrêtez la tâche en cours avant de supprimer ce chat.');
+        return;
+    }
     const conv = state[cfg.store].find(c => c.id === id);
     const title = conv ? conv.title : '';
     const ok = await customConfirm(`"${title}"`, {
@@ -2567,6 +2625,7 @@ async function deleteConversation(kind, id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
+        if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
     }
     persistChats(kind);
     renderHistory();
@@ -2745,6 +2804,7 @@ function isVisionCompatible(model, submodel) {
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default:
             // OpenAI-compatible gateways: same rule as compat-providers.js.
+            if (model === 'compat:chatgpt') return true;
             return String(model || '').startsWith('compat:')
                 && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }

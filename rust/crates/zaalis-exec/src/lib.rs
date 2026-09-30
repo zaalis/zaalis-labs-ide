@@ -231,6 +231,10 @@ impl ExecRuntime {
         cancel: CancellationToken,
     ) -> Result<CommandOutput> {
         validate_command(command)?;
+        #[cfg(windows)]
+        let resolved_command = resolve_windows_version_command(command);
+        #[cfg(windows)]
+        let command = resolved_command.as_deref().unwrap_or(command);
         if self.sandbox_policy.required == SandboxLevel::Strict {
             return run_strict(&self.root, command, timeout, cancel).await;
         }
@@ -405,6 +409,54 @@ fn validate_command(command: &str) -> Result<()> {
         return Err(ZaalisError::invalid("commande invalide ou trop longue"));
     }
     Ok(())
+}
+
+/// A version probe can use Blender's standard Windows install directory even
+/// when the GUI installer did not add blender.exe to PATH. The permission guard
+/// has already reviewed the original `blender --version` command.
+#[cfg(windows)]
+fn resolve_windows_version_command(command: &str) -> Option<String> {
+    let mut words = command.split_whitespace();
+    let executable = words.next()?;
+    let flag = words.next()?;
+    if words.next().is_some()
+        || !executable.eq_ignore_ascii_case("blender")
+        || !["--version", "-v"].iter().any(|option| flag.eq_ignore_ascii_case(option))
+    {
+        return None;
+    }
+    if std::env::var_os("PATH").is_some_and(|value| {
+        std::env::split_paths(&value).any(|directory| directory.join("blender.exe").is_file())
+    }) {
+        return None;
+    }
+    let roots = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from);
+    let path = find_blender_executable(roots)?;
+    Some(format!("\"{}\" {flag}", path.display()))
+}
+
+#[cfg(windows)]
+fn find_blender_executable(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    for root in roots {
+        for parent in [root.join("Blender Foundation"), root.join("Programs").join("Blender Foundation")] {
+            let Ok(entries) = std::fs::read_dir(parent) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(version) = name.strip_prefix("Blender ") else { continue };
+                let numbers = version.split('.').map(str::parse::<u32>).collect::<std::result::Result<Vec<_>, _>>();
+                let Ok(numbers) = numbers else { continue };
+                let executable = entry.path().join("blender.exe");
+                if executable.is_file() {
+                    candidates.push((numbers, executable));
+                }
+            }
+        }
+    }
+    candidates.into_iter().max_by(|left, right| left.0.cmp(&right.0)).map(|(_, path)| path)
 }
 
 fn spawn_shell(
@@ -728,6 +780,19 @@ mod tests {
         } else {
             "sleep 5"
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installed_blender_is_found_without_a_path_entry() {
+        let root = TempDir::new().expect("tempdir");
+        for version in ["5.2", "5.10"] {
+            let directory = root.path().join("Blender Foundation").join(format!("Blender {version}"));
+            std::fs::create_dir_all(&directory).expect("version directory");
+            std::fs::write(directory.join("blender.exe"), []).expect("executable fixture");
+        }
+        let found = find_blender_executable([root.path().to_path_buf()]).expect("installed Blender");
+        assert!(found.ends_with(Path::new("Blender 5.10").join("blender.exe")));
     }
 
     #[tokio::test]

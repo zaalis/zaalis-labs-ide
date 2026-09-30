@@ -5,8 +5,8 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
-const brainMcp = require('./brain-mcp-client');
 const mcpRegistry = require('./mcp-registry');
+const opale = require('./opale-connector');
 const { AutomationManager } = require('./automation-manager');
 const { createWindowsComputerAction } = require('./windows-computer');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
@@ -15,6 +15,9 @@ const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
 const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
 const compatProviders = require('./compat-providers');
+const chatgptSubscription = require('./chatgpt-subscription');
+const workspaceContext = require('./workspace-context');
+const workspaceTokens = new Map();
 const { BrowserHost } = require('./zaalis-browser/host');
 const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
 // QR generation for the phone remote-control pairing. Guarded so a missing
@@ -49,6 +52,7 @@ try {
     APP_VERSION = pkg.version || APP_VERSION;
   } catch {}
 }
+chatgptSubscription.setVersion(APP_VERSION);
 
 // ---------------------------------------------------------------------------
 // Local accounts + sessions (no external dependency)
@@ -588,6 +592,24 @@ app.post('/api/internal/rust-computer', async (req, res) => {
   }
 });
 
+// A desktop-only capability, scoped to this user's active agent. It exposes
+// project selection without granting arbitrary filesystem or terminal access.
+app.post('/api/internal/rust-workspace', (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
+  try {
+    const projects = workspaceContext.knownProjects(context.user, context.projectRoot);
+    if (req.body.action === 'list') return res.json({ summary: 'Projets connus', projects, root: context.root, terminal: context.terminal });
+    if (req.body.action !== 'open') return res.status(400).json({ error: 'Action workspace inconnue.' });
+    const root = workspaceContext.selectProject(projects, req.body.project);
+    const terminal = req.body.terminal === false ? null : terminalManager.snapshot(terminalManager.create({ userId: context.user.id, cwd: root, profileId: sharedConfigForUser(context.user).terminalProfile, origin: 'user' }));
+    context.selected = { root, terminalId: terminal?.id || null };
+    return res.json({ summary: 'Projet ouvert : ' + path.basename(root), ...context.selected, nextTurn: 'Le projet et le terminal seront affichés à la fin de cette réponse. Confirme cette ouverture puis termine le tour. Les outils de fichiers de ce tour restent liés à l’ancien dossier.' });
+  } catch (error) { return res.status(400).json({ error: error.message }); }
+});
+
 // Private loopback bridge used only by the Rust `browser` tool: the agent's
 // web actions happen in the integrated browser, visible to the user.
 app.post('/api/internal/rust-browser', async (req, res) => {
@@ -607,6 +629,43 @@ app.post('/api/internal/rust-browser', async (req, res) => {
     return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
   } catch (error) {
     return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Private loopback adapter used only by the Rust core: it presents the user's
+// ChatGPT subscription as one more OpenAI-compatible endpoint. The core sends
+// chat-completions with a per-launch key; the OAuth tokens never leave this
+// process and are renewed here.
+app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
+  const refuse = (status, message) => res.status(status).json({ error: { message } });
+  const user = chatgptProxyUser(req);
+  if (!user) return refuse(401, 'Jeton ChatGPT interne invalide.');
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id });
+    const upstream = await withChatgptToken(user.id, (token) =>
+      chatgptSubscription.openResponseStream(token, request, { signal: controller.signal }));
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    const reader = chatgptSubscription.createSseReader();
+    const translator = chatgptSubscription.createChunkTranslator(request.model);
+    const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+    for await (const chunk of upstream.body) {
+      for (const event of reader.push(chunk)) write(translator.push(event));
+    }
+    for (const event of reader.finish()) write(translator.push(event));
+    write(translator.finish());
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    const message = error.message || String(error);
+    if (!res.headersSent) return refuse(error.status || 502, message);
+    try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch {}
+    return res.end();
   }
 });
 
@@ -711,7 +770,7 @@ app.get('/api/config', (req, res) => {
 app.post('/api/terminal/sessions', (req, res) => {
   try {
     if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
-    const cwd = resolveBase((req.body && req.body.cwd) || APP_DIR);
+    const cwd = workspaceContext.agentRoot({ root: req.body?.cwd || os.homedir() }, req.user);
     const profileId = sharedConfigForUser(req.user).terminalProfile;
     const session = terminalManager.create({ userId: req.user.id, cwd, profileId, origin: 'user' });
     res.json(terminalManager.snapshot(session));
@@ -818,13 +877,14 @@ function compatKey(user, provider) {
   return value;
 }
 function compatReady(user, provider) {
+  if (provider.oauth) return !!chatgptSession(user);
   if (!compatBaseUrl(user, provider)) return false;
   return provider.keyless ? true : !!compatKey(user, provider);
 }
 function compatStatus(user) {
   return compatProviders.PROVIDERS.map((provider) => {
     const key = compatKey(user, provider);
-    return {
+    const status = {
       id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
       defaultUrl: provider.baseUrl, models: provider.models,
       keyless: !!provider.keyless, editableUrl: !!provider.editableUrl, local: !!provider.local,
@@ -832,15 +892,169 @@ function compatStatus(user) {
       // Keyless local servers only count once the user saved them explicitly.
       configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
     };
+    if (provider.oauth) {
+      // Signed in with an account instead of a key.
+      status.oauth = provider.oauth;
+      status.configured = !!chatgptSession(user);
+    }
+    return status;
   });
 }
 // Every configured endpoint goes to the daemon at once, so switching provider
 // does not restart it. The keys travel as separate environment variables.
 function compatEndpointsFor(user) {
-  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => ({
-    id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '',
-  }));
+  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+    // The daemon reaches the subscription through the loopback adapter above.
+    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/chatgpt/v1`, key: chatgptProxyKey(user.id) }
+    : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
 }
+
+// ---------------------------------------------------------------------------
+// CHATGPT SUBSCRIPTION — account session kept in the same encrypted vault
+// ---------------------------------------------------------------------------
+function chatgptSession(user) {
+  if (!user || !user.chatgptAuth) return null;
+  try {
+    const session = JSON.parse(decryptSecret(user.chatgptAuth));
+    if (!session || !session.accessToken) return null;
+    registerSecret('jeton ChatGPT', session.accessToken);
+    registerSecret('jeton de renouvellement ChatGPT', session.refreshToken);
+    return session;
+  } catch { return null; }
+}
+function storeChatgptSession(userId, session) {
+  const users = loadUsers();
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur non trouve.'), { status: 404 });
+  if (session) user.chatgptAuth = encryptSecret(JSON.stringify(session));
+  else delete user.chatgptAuth;
+  saveUsers(users);
+  return user;
+}
+function chatgptStatus(user) {
+  const session = chatgptSession(user);
+  return session
+    ? { connected: true, email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
+    : { connected: false };
+}
+
+// A valid access token for this user. Refresh tokens are single-use, so one
+// renewal at most runs per user and every concurrent caller waits for it.
+// `rejected` is a token the backend just refused: it is renewed unless another
+// request already did so.
+const chatgptRefreshes = new Map();
+async function chatgptAccessToken(userId, { rejected = '' } = {}) {
+  const session = chatgptSession(loadUsers().find((u) => u.id === userId));
+  if (!session) {
+    throw Object.assign(new Error('Abonnement ChatGPT non connecté. Connectez-le dans Paramètres › Clés API.'), { status: 401 });
+  }
+  const stale = rejected ? session.accessToken === rejected : chatgptSubscription.needsRefresh(session);
+  if (!stale) return session.accessToken;
+  let pending = chatgptRefreshes.get(userId);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const renewed = await chatgptSubscription.refreshSession(session);
+        storeChatgptSession(userId, renewed);
+        return renewed.accessToken;
+      } catch (error) {
+        // A revoked session cannot come back: forget it so Settings shows the truth.
+        if (error.relogin) storeChatgptSession(userId, null);
+        throw error;
+      } finally {
+        chatgptRefreshes.delete(userId);
+      }
+    })();
+    chatgptRefreshes.set(userId, pending);
+  }
+  return pending;
+}
+async function withChatgptToken(userId, call) {
+  const token = await chatgptAccessToken(userId);
+  try {
+    return await call(token);
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    return call(await chatgptAccessToken(userId, { rejected: token }));
+  }
+}
+
+// Key the Rust core presents to the loopback adapter. Drawn at launch and
+// bound to one user: it opens nothing but that user's own subscription.
+const CHATGPT_PROXY_SECRET = crypto.randomBytes(32);
+function chatgptProxySignature(userId) {
+  return crypto.createHmac('sha256', CHATGPT_PROXY_SECRET).update(String(userId)).digest('base64url');
+}
+function chatgptProxyKey(userId) {
+  const key = `${userId}.${chatgptProxySignature(userId)}`;
+  registerSecret('clé interne ChatGPT', key);
+  return key;
+}
+function chatgptProxyUser(req) {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const at = raw.lastIndexOf('.');
+  if (at <= 0) return null;
+  const userId = raw.slice(0, at);
+  if (!safeEqual(raw.slice(at + 1), chatgptProxySignature(userId))) return null;
+  return loadUsers().find((u) => u.id === userId) || null;
+}
+
+app.get('/api/chatgpt/status', (req, res) => res.json(chatgptStatus(req.user)));
+
+// Sign-in with a code typed on auth.openai.com. The device id stays here; the
+// interface only ever holds the code to show and an opaque flow id.
+const chatgptFlows = new Map();
+app.post('/api/chatgpt/device-start', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    const flow = await chatgptSubscription.requestDeviceCode();
+    for (const [id, entry] of chatgptFlows) {
+      if (entry.userId === req.user.id || entry.expiresAt < Date.now()) chatgptFlows.delete(id);
+    }
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    chatgptFlows.set(flowId, { ...flow, userId: req.user.id, nextPollAt: 0, polling: false });
+    res.json({ flowId, userCode: flow.userCode, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
+});
+
+// POST /api/chatgpt/device-poll { flowId } -> { status: pending | connected | expired }
+app.post('/api/chatgpt/device-poll', async (req, res) => {
+  const flowId = String((req.body && req.body.flowId) || '');
+  const flow = chatgptFlows.get(flowId);
+  if (!flow || flow.userId !== req.user.id) return res.json({ status: 'expired' });
+  if (Date.now() > flow.expiresAt) { chatgptFlows.delete(flowId); return res.json({ status: 'expired' }); }
+  // OpenAI sets the polling pace; a hurried interface is simply told to wait.
+  if (flow.polling || Date.now() < flow.nextPollAt) return res.json({ status: 'pending' });
+  flow.polling = true;
+  try {
+    const session = await chatgptSubscription.pollDeviceCode(flow);
+    flow.nextPollAt = Date.now() + flow.interval * 1000 - 500;
+    if (!session) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    const user = storeChatgptSession(req.user.id, session);
+    res.json({ status: 'connected', account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    // A network blip is not a refusal: the interface keeps waiting.
+    if (!error.status) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    res.status(error.status).json({ status: 'error', error: error.message || String(error) });
+  } finally {
+    flow.polling = false;
+  }
+});
+
+app.delete('/api/chatgpt/session', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try {
+    for (const [id, entry] of chatgptFlows) if (entry.userId === req.user.id) chatgptFlows.delete(id);
+    const user = storeChatgptSession(req.user.id, null);
+    res.json({ account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
 
 app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
 
@@ -856,6 +1070,7 @@ app.put('/api/compat/keys', (req, res) => {
     user.apiKeys = user.apiKeys || {};
     user.compatUrls = user.compatUrls || {};
     for (const provider of compatProviders.PROVIDERS) {
+      if (provider.oauth) continue;
       if (provider.id in keys) {
         const value = keys[provider.id];
         if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
@@ -883,9 +1098,23 @@ app.get('/api/compat/models', async (req, res) => {
   if (!provider) return res.status(404).json({ error: 'Fournisseur inconnu.' });
   const baseUrl = compatBaseUrl(req.user, provider);
   const key = compatKey(req.user, provider);
-  const cacheKey = crypto.createHash('sha256').update(`${req.user.id}|${provider.id}|${baseUrl}|${key}`).digest('hex');
+  // An account has its own catalogue: signing in again must not reuse the last one.
+  const session = provider.oauth ? chatgptSession(req.user) : null;
+  const cacheKey = crypto.createHash('sha256')
+    .update(`${req.user.id}|${provider.id}|${baseUrl}|${key}|${session ? session.connectedAt : ''}`).digest('hex');
   const cached = compatModelCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  if (provider.oauth) {
+    if (!session) return res.json({ models: provider.models, live: false });
+    try {
+      const live = await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token));
+      if (!live.length) return res.json({ models: provider.models, live: false });
+      compatModelCache.set(cacheKey, { at: Date.now(), models: live });
+      return res.json({ models: live, live: true });
+    } catch (error) {
+      return res.json({ models: provider.models, live: false, error: error.status === 401 ? 'session expirée' : 'injoignable' });
+    }
+  }
   if (!baseUrl || (!provider.keyless && !key)) return res.json({ models: provider.models, live: false });
   try {
     const answer = await fetch(`${baseUrl}/models`, {
@@ -905,20 +1134,72 @@ app.get('/api/compat/models', async (req, res) => {
 });
 
 
-// MCP configuration: Zaalis Brain is distinct from personal MCP servers.
+// MCP configuration: personal servers, plus Opale when it is present (below).
 function publicMcpServers(user) { return (user.mcpServers || []).map((s) => ({ ...s, token: undefined, tokenConfigured: !!s.token })); }
 function rustMcpServersFor(user) {
-  return [
-    ...(user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' })),
-    ...(user.brainMcp && user.brainMcp.enabled && user.brainMcp.endpoint && user.brainMcp.token
-      ? [{ id: 'zaalis-brain', name: 'Zaalis Brain', endpoint: user.brainMcp.endpoint, token: decryptSecret(user.brainMcp.token), enabled: true, allow: [], deny: [] }]
-      : []),
-  ];
+  return (user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' }));
 }
-app.get('/api/brain-mcp', (req, res) => { const s = req.user.brainMcp || {}; res.json({ configured: !!(s.endpoint && s.token), enabled: !!s.enabled, endpoint: s.endpoint || '', state: s.enabled ? 'disconnected' : 'not_configured' }); });
-app.put('/api/brain-mcp', (req, res) => {
-  try { const b = req.body || {}, users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = users[i].brainMcp || {}; const endpoint = String(b.endpoint === undefined ? old.endpoint || '' : b.endpoint).trim(); const token = String(b.token || '') || (old.token ? decryptSecret(old.token) : ''); if ((b.enabled || endpoint || token) && !brainMcp.validateConfig({ endpoint, token })) return res.status(400).json({ error: 'Route ou jeton Zaalis Brain invalide.' }); users[i].brainMcp = { enabled: !!b.enabled, endpoint, token: token ? encryptSecret(token) : '' }; saveUsers(users); res.json({ configured: !!(endpoint && token), enabled: !!b.enabled, endpoint, state: b.enabled ? 'disconnected' : 'not_configured' }); } catch (e) { res.status(500).json({ error: e.message }); }
+// Opale is a separate application, linked by default: when it is present and
+// running, the agent gets its vault unless the user switched the link off.
+const opaleLinked = (user) => !(user && user.opale && user.opale.connected === false);
+
+// Servers handed to the agent runtime for one run. Opale is resolved live from
+// its instance file: neither its port nor its token is stored here, so the
+// link survives Opale restarting on another port.
+async function agentMcpServersFor(user) {
+  const servers = rustMcpServersFor(user);
+  if (!opaleLinked(user)) return servers;
+  const entry = await opale.mcpServer().catch(() => null);
+  return entry ? [...servers.filter((server) => server.id !== opale.SERVER_ID), entry] : servers;
+}
+
+// ---------------------------------------------------------------------------
+// OPALE — the notes application, a separate project (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/opale/status   is Opale installed / running / linked
+// POST   /api/opale/connect  start it if needed and (re)enable the link
+// DELETE /api/opale/connect  stop giving the agent access to the vault
+// POST   /api/opale/open     bring the Opale window up
+function setOpaleConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.opale = connected ? { connected: true, connectedAt: new Date().toISOString() } : { connected: false };
+  saveUsers(users);
+}
+const opaleReply = (user, status, extra = {}) => ({ ...status, connected: opaleLinked(user), ...extra });
+app.get('/api/opale/status', async (req, res) => {
+  try {
+    const status = await opale.status(APP_DIR);
+    // Linked by default: let the running Opale show who is there.
+    if (status.running && opaleLinked(req.user)) opale.greet().catch(() => {});
+    res.json(opaleReply(req.user, status));
+  } catch (error) { res.status(500).json({ error: error.message || String(error) }); }
 });
+app.post('/api/opale/connect', async (req, res) => {
+  try {
+    const inst = await opale.launch(APP_DIR);
+    const greeting = await opale.hello(inst);
+    const tools = await opale.tools(inst);
+    setOpaleConnected(req.user.id, true);
+    res.json({ ...(await opale.status(APP_DIR)), connected: true, vault: greeting.vault || inst.vault, tools: tools.map((tool) => tool.name) });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
+});
+app.delete('/api/opale/connect', async (req, res) => {
+  try {
+    setOpaleConnected(req.user.id, false);
+    const inst = await opale.running();
+    if (inst) await opale.bye(inst);
+    res.json({ ...(await opale.status(APP_DIR)), connected: false });
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/opale/open', async (req, res) => {
+  try { await opale.show(APP_DIR); res.json(opaleReply(req.user, await opale.status(APP_DIR))); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || String(error) }); }
+});
+
 app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
 app.get('/api/automation/status', (req, res) => res.json(automationManager.snapshot()));
 app.post('/api/automation/stop', async (req, res) => res.json(await automationManager.stop()));
@@ -2605,10 +2886,24 @@ async function rustAgentHttp(req, res, next) {
   const controller = new AbortController();
   let computerToken = '';
   let computerSession = null;
+  let workspaceEntry = null;
+  let workspaceRun = null;
   req.once('aborted', () => controller.abort());
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     const body = req.body || {};
+    let savedConversations = [];
+    if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
+    const conversation = savedConversations.find(item => item.id === body.conversationId);
+    const root = workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id), conversation);
+    let workspaceConfig = {};
+    if (!req.isMobile && !req.isTunnel && !req.isBrowser) {
+      workspaceEntry = workspaceTokens.get(req.user.id);
+      if (!workspaceEntry) { workspaceEntry = { token: crypto.randomBytes(32).toString('base64url'), agents: new Map() }; workspaceTokens.set(req.user.id, workspaceEntry); }
+      const terminal = terminalManager.get(String(body.terminalSessionId || ''), req.user.id);
+      workspaceRun = { user: req.user, root, projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
+      workspaceConfig = { workspaceEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-workspace`, workspaceToken: workspaceEntry.token };
+    }
     const model = String(body.model || '');
     const message = String(body.message || '');
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
@@ -2647,12 +2942,12 @@ async function rustAgentHttp(req, res, next) {
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
-      root: resolveBase(body.root || body.projectRoot),
+      root,
       model: lead.provider,
       submodel: lead.model,
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
-      systemPrompt: body.systemPrompt,
+      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
       permissionMode: body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -2661,19 +2956,24 @@ async function rustAgentHttp(req, res, next) {
       team,
       sessionId: body.sessionId,
       conversationId: body.conversationId,
-      mcpServers: rustMcpServersFor(req.user),
+      mcpServers: await agentMcpServersFor(req.user),
       runtimeConfig: {
         ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
         compatEndpoints: compatEndpointsFor(req.user),
         ...browserToolConfig(req),
+        ...workspaceConfig,
         ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
         } : {}),
       },
       signal: controller.signal,
-    }, mirrorWebTools(req, emit));
+    }, mirrorWebTools(req, event => {
+      if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) workspaceEntry.agents.set(String(event.event.agent.id), workspaceRun);
+      emit(event);
+    }));
+    if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();
@@ -2687,6 +2987,7 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   } finally {
+    if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun) workspaceEntry.agents.delete(id);
     if (computerToken) computerRuns.delete(computerToken);
     if (computerSession) {
       try { await automationManager.complete(computerSession); } catch { try { await automationManager.stop(computerSession, 'Tache interrompue.'); } catch {} }
@@ -2732,7 +3033,7 @@ async function rustChatHttp(req, res, next) {
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
       history: Array.isArray(body.history) ? body.history : [],
-      mcpServers: rustMcpServersFor(req.user),
+      mcpServers: await agentMcpServersFor(req.user),
       runtimeConfig: {
         ollamaUrl: req.isMobile
           ? sharedConfigForUser(req.user).ollamaUrl
@@ -3195,7 +3496,7 @@ app.post('/api/remote/start', async (req, res) => {
     const url = await startTunnel();
     const token = makeMobileToken(req.user.id);
     const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;
-    const qr = await QRCode.toDataURL(pairUrl, { margin: 1, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
+    const qr = await QRCode.toDataURL(pairUrl, { margin: 4, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
     res.json({ url: pairUrl, qr, since: cfStartedAt });
   } catch (e) {
     stopTunnel();

@@ -6,13 +6,20 @@
 // Every entry speaks the OpenAI chat-completions dialect, so one adapter serves
 // them all (rust/crates/zaalis-providers/src/compat.rs). Keys are encrypted in
 // users.json like the built-in providers and only ever sent to `baseUrl`.
-// No external agent, CLI or account session is involved.
+// No external agent or CLI is involved.
 //
 // `models` is a starting list; when a key is saved the live `/models` endpoint
 // of the provider completes it. `editableUrl` lets the user point the entry at
 // their own server; `keyless` entries work without a key (local servers).
+//
+// An `oauth` entry has no key: the user signs in with their account and the
+// Rust core reaches it through a loopback adapter in server.js that speaks
+// chat-completions on its behalf (see chatgpt-subscription.js). `baseUrl` is
+// then the upstream that adapter calls.
 
 const PROVIDERS = Object.freeze([
+  { id: 'chatgpt', label: 'ChatGPT (abonnement)', baseUrl: 'https://chatgpt.com/backend-api/codex', oauth: 'chatgpt',
+    models: ['gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'] },
   { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-pro', 'deepseek-flash'] },
   { id: 'zai', label: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/paas/v4',
@@ -90,9 +97,28 @@ function binding(provider, model) {
   return { provider: 'compat', model: `${entry.id}::${name}` };
 }
 
+// The subscription backend takes `low | medium | high`, which is also all the
+// Rust chat-completions adapter can express: no level is offered beyond that.
+const SUBSCRIPTION_REASONING = Object.freeze([
+  { id: 'low', label: 'Faible', value: 1 },
+  { id: 'medium', label: 'Moyen', value: 2 },
+  { id: 'high', label: 'Élevé', value: 3 },
+]);
+
 function capabilities(provider, model, ready) {
   const entry = get(provider);
   const lower = String(model || '').toLowerCase();
+  if (entry.oauth) {
+    return {
+      provider: `${PREFIX}${entry.id}`,
+      model: String(model || ''),
+      reasoning: { mode: 'effort', supported: true, levels: SUBSCRIPTION_REASONING },
+      contextWindow: 272000,
+      tools: true,
+      vision: true,
+      ready: !!ready,
+    };
+  }
   return {
     provider: `${PREFIX}${entry.id}`,
     model: String(model || ''),

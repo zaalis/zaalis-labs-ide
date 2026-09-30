@@ -34,6 +34,12 @@ Commands run by agents use a reduced environment and process-tree cleanup. Set `
 
 On Windows, the application attempts to use AppContainer or Windows Sandbox. When neither mechanism is available, it retains standard Job Object containment and does not claim strict isolation.
 
+## Opale (notes application)
+
+Opale is a separate project: a standalone Markdown notes application (a vault is a folder of `.md` files linked with `[[…]]`). It does not live in this repository; by default its folder is `opale` on the Desktop.
+
+The two are linked by default. When Opale is present on the PC and running, the agent can read, write and reorganise the open vault through Opale's local MCP endpoint, with nothing to configure. **Settings → MCP → Opale** shows the state, starts Opale, or switches the link off. The IDE side of the link is `opale-connector.js`.
+
 ## Rebuild the Windows application
 
 Prerequisites:

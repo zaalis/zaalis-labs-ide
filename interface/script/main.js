@@ -24,8 +24,9 @@ function setSettingsSection(section) {
     const title = $('#settings-active-title');
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
-        title.dataset.i18n = i18nKey;
-        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
+        if (key === 'mcp') title.removeAttribute('data-i18n');
+        else title.dataset.i18n = i18nKey;
+        title.textContent = TRANSLATIONS[state.language || 'fr']?.[i18nKey] || i18nKey;
     }
 }
 
@@ -175,6 +176,7 @@ function populateSettingsControls() {
 $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
     loadCompatProviders();
+    loadChatgptAccount();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -237,6 +239,8 @@ function renderCompatKeyFields() {
     const en = state.language === 'en';
     target.replaceChildren();
     window.compatProviders.forEach(provider => {
+        // Signed in with an account, not a key: it has its own block above.
+        if (provider.oauth) return;
         const row = document.createElement('div');
         row.className = 'form-group';
         row.dataset.compatProvider = provider.id;
@@ -356,6 +360,197 @@ function openCompatSettings() {
 }
 $('#ai-model')?.addEventListener('custom-select-action', event => {
     if (event.detail === 'add') openCompatSettings();
+});
+
+// ----- ChatGPT subscription (Plus / Pro) -----
+// The user types a code on OpenAI's site; the server holds the session and
+// the interface only polls until the code is confirmed.
+const chatgptSub = { flow: null, timer: null };
+function chatgptSubText(fr, en) { return state.language === 'en' ? en : fr; }
+function renderChatgptAccount(account) {
+    const status = $('#chatgpt-sub-status');
+    if (!status) return;
+    const connected = !!(account && account.connected);
+    const details = connected ? [account.email, account.plan && account.plan.toUpperCase()].filter(Boolean).join(' · ') : '';
+    status.textContent = connected
+        ? chatgptSubText('Abonnement ChatGPT actif', 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
+        : chatgptSubText('Non connecté', 'Not connected');
+    status.classList.toggle('connected', connected);
+    $('#chatgpt-sub-connect').hidden = connected || !!chatgptSub.flow;
+    $('#chatgpt-sub-disconnect').hidden = !connected;
+}
+function showChatgptError(message) {
+    const box = $('#chatgpt-sub-error');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+function stopChatgptFlow() {
+    clearTimeout(chatgptSub.timer);
+    chatgptSub.flow = null;
+    chatgptSub.timer = null;
+    const panel = $('#chatgpt-sub-flow');
+    if (panel) panel.hidden = true;
+}
+async function loadChatgptAccount() {
+    if (chatgptSub.flow) return;
+    try {
+        const response = await fetch('/api/chatgpt/status');
+        if (response.ok) renderChatgptAccount(await response.json());
+    } catch {}
+}
+function applyChatgptProviders(data) {
+    renderChatgptAccount(data.account);
+    if (!Array.isArray(data.providers)) return;
+    window.compatProviders = data.providers;
+    renderCompatModelOptions();
+    renderCompatKeyFields();
+}
+async function pollChatgptFlow() {
+    const flow = chatgptSub.flow;
+    if (!flow) return;
+    let data = null;
+    try {
+        const response = await fetch('/api/chatgpt/device-poll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flowId: flow.flowId })
+        });
+        data = await response.json().catch(() => null);
+    } catch {}
+    if (chatgptSub.flow !== flow) return;
+    if (data && data.status === 'connected') {
+        stopChatgptFlow();
+        applyChatgptProviders(data);
+        showToast('ChatGPT', chatgptSubText('Abonnement connecté. Le fournisseur « ChatGPT (abonnement) » est disponible dans la liste des modèles.', 'Subscription connected. “ChatGPT (abonnement)” is now in the model list.'));
+        return;
+    }
+    if (data && (data.status === 'expired' || data.status === 'error') || Date.now() > flow.expiresAt) {
+        stopChatgptFlow();
+        renderChatgptAccount({ connected: false });
+        showChatgptError((data && data.error) || chatgptSubText('Le code a expiré. Relancez la connexion.', 'The code expired. Start again.'));
+        return;
+    }
+    // Still waiting (or the server was briefly unreachable): ask again.
+    chatgptSub.timer = setTimeout(pollChatgptFlow, flow.interval * 1000);
+}
+async function startChatgptFlow() {
+    const button = $('#chatgpt-sub-connect');
+    showChatgptError('');
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/chatgpt/device-start', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || chatgptSubText('Connexion impossible.', 'Sign-in failed.'));
+        chatgptSub.flow = data;
+        $('#chatgpt-sub-code').textContent = data.userCode;
+        $('#chatgpt-sub-flow').hidden = false;
+        button.hidden = true;
+        chatgptSub.timer = setTimeout(pollChatgptFlow, data.interval * 1000);
+    } catch (error) {
+        showChatgptError(error.message);
+    } finally {
+        button.disabled = false;
+    }
+}
+$('#chatgpt-sub-connect')?.addEventListener('click', startChatgptFlow);
+$('#chatgpt-sub-cancel')?.addEventListener('click', () => { stopChatgptFlow(); loadChatgptAccount(); });
+$('#chatgpt-sub-open')?.addEventListener('click', async () => {
+    const url = chatgptSub.flow?.verificationUrl;
+    if (!url) return;
+    // The default browser is where the user is already signed in to ChatGPT.
+    try {
+        const response = await fetch(`/api/browser-open?external=1&url=${encodeURIComponent(url)}`);
+        if (!response.ok) throw new Error('browser-open');
+    } catch {
+        window.open(url, '_blank', 'noopener,noreferrer');
+    }
+});
+$('#chatgpt-sub-copy')?.addEventListener('click', async event => {
+    const code = chatgptSub.flow?.userCode;
+    if (!code) return;
+    try { await navigator.clipboard.writeText(code); } catch { return; }
+    const button = event.currentTarget;
+    const label = button.textContent;
+    button.textContent = chatgptSubText('Copié', 'Copied');
+    setTimeout(() => { button.textContent = label; }, 1500);
+});
+$('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
+    showChatgptError('');
+    try {
+        const response = await fetch('/api/chatgpt/session', { method: 'DELETE' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || chatgptSubText('Déconnexion impossible.', 'Sign-out failed.'));
+        applyChatgptProviders(data);
+    } catch (error) {
+        showChatgptError(error.message);
+    }
+});
+
+// ----- Opale (notes application) -----
+// The server detects a running or installed Opale; one click stores the
+// user's consent and the agent gets the vault tools on its next run.
+function opaleText(fr, en) { return state.language === 'en' ? en : fr; }
+function renderOpale(status) {
+    const label = $('#opale-status');
+    if (!label) return;
+    const vault = status && status.vault && status.vault.name ? ` — ${opaleText('coffre', 'vault')} « ${status.vault.name} »` : '';
+    let text;
+    if (!status) text = opaleText('État inconnu', 'Unknown');
+    else if (!status.detected) text = opaleText('Opale introuvable sur ce PC', 'Opale not found on this PC');
+    else if (!status.connected) text = opaleText('Lien coupé', 'Link switched off') + (status.running ? vault : '');
+    else if (status.running) text = opaleText('Relié', 'Linked') + vault;
+    else text = opaleText('Relié — Opale est fermé', 'Linked — Opale is closed');
+    label.textContent = text;
+    label.classList.toggle('connected', !!(status && status.connected && status.running));
+    const connect = $('#opale-connect');
+    connect.hidden = !status || !status.detected || status.connected;
+    $('#opale-open').hidden = !(status && status.detected);
+    $('#opale-open').textContent = status && status.running ? opaleText('Ouvrir Opale', 'Open Opale') : opaleText('Lancer Opale', 'Start Opale');
+    $('#opale-disconnect').hidden = !(status && status.detected && status.connected);
+}
+function showOpaleError(message) {
+    const box = $('#opale-error');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+async function opaleRequest(method, route) {
+    const response = await fetch(route, { method });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || opaleText('Opale ne répond pas.', 'Opale is not responding.'));
+    return data;
+}
+async function loadOpaleStatus() {
+    try { const status = await opaleRequest('GET', '/api/opale/status'); renderOpale(status); return status; }
+    catch { renderOpale(null); return null; }
+}
+async function connectOpale(button) {
+    showOpaleError('');
+    if (button) button.disabled = true;
+    try {
+        const status = await opaleRequest('POST', '/api/opale/connect');
+        renderOpale(status);
+        const vault = status.vault && status.vault.name ? ` « ${status.vault.name} »` : '';
+        showToast('Opale', opaleText(`Coffre${vault} relié. L’assistant peut travailler dans vos notes.`, `Vault${vault} linked. The assistant can work in your notes.`), { icon: '✓' });
+        return true;
+    } catch (error) {
+        showOpaleError(error.message);
+        if (!$('#settings-modal')?.classList.contains('active')) showToast('Opale', error.message, { icon: '!' });
+        return false;
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+$('#opale-connect')?.addEventListener('click', event => connectOpale(event.currentTarget));
+$('#opale-disconnect')?.addEventListener('click', async () => {
+    showOpaleError('');
+    try { renderOpale(await opaleRequest('DELETE', '/api/opale/connect')); }
+    catch (error) { showOpaleError(error.message); }
+});
+$('#opale-open')?.addEventListener('click', async () => {
+    showOpaleError('');
+    try { renderOpale(await opaleRequest('POST', '/api/opale/open')); }
+    catch (error) { showOpaleError(error.message); }
 });
 
 function updateApiKeyInputs(status) {
@@ -479,15 +674,8 @@ function parseImportedMcpConfig(value) {
 }
 async function loadMcpSettings() {
     try {
-        const [brainRes, mcpRes] = await Promise.all([fetch('/api/brain-mcp'), fetch('/api/mcp')]);
-        if (brainRes.ok) {
-            const brain = await brainRes.json();
-            const status = $('#brain-mcp-status');
-            if (status) status.textContent = brain.enabled ? (brain.configured ? '● Configuré' : '● À compléter') : 'Non configuré';
-            if ($('#brain-mcp-enabled')) $('#brain-mcp-enabled').checked = !!brain.enabled;
-            if ($('#brain-mcp-endpoint')) $('#brain-mcp-endpoint').value = brain.endpoint || '';
-            if ($('#brain-mcp-token')) { $('#brain-mcp-token').value = ''; $('#brain-mcp-token').placeholder = brain.configured ? 'Laisser vide pour conserver le jeton' : 'Coller le jeton à 64 caractères'; }
-        }
+        loadOpaleStatus();
+        const mcpRes = await fetch('/api/mcp');
         if (mcpRes.ok) {
             const data = await mcpRes.json();
             personalMcpServers = Array.isArray(data.servers) ? data.servers.map(newPersonalMcp) : [];
@@ -574,8 +762,6 @@ $('#save-btn').addEventListener('click', async () => {
     try {
         const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers }) });
         if (!mcpRes.ok) throw new Error('MCP');
-        const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!$('#brain-mcp-enabled')?.checked, endpoint: ($('#brain-mcp-endpoint')?.value || '').trim(), token: ($('#brain-mcp-token')?.value || '').trim() }) });
-        if (!brainRes.ok) throw new Error('MCP');
         await syncSharedHardwareConfig();
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {

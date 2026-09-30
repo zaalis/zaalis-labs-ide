@@ -25,7 +25,14 @@ async function main() {
   }
   const home = await fetch(base);
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /gguf-install-shortcut/);
+  const page = await home.text();
+  assert.match(page, /gguf-install-shortcut/);
+  assert.match(page, /chatgpt-sub-connect/);
+  assert.match(page, /remote-qr-stage/);
+  const historyScript = await (await fetch(base + '/script/ai.js')).text();
+  assert.match(historyScript, /'live-agent-body'/);
+  const navScript = await (await fetch(base + '/script/workspace.js')).text();
+  assert.match(navScript, /createConversationMenu/);
   const register = await fetch(`${base}/api/auth/register`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: 'package-smoke@zaalis.local', password: 'password123' }),
@@ -42,7 +49,10 @@ async function main() {
     body: JSON.stringify({ permissionMode: 'auto' }) });
   assert.equal(pref.status, 200);
   assert.equal((await (await fetch(`${base}/api/preferences`, { headers })).json()).permissionMode, 'auto');
-  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences OK\n');
+  assert.deepEqual(await (await fetch(`${base}/api/chatgpt/status`, { headers })).json(), { connected: false });
+  const providers = (await (await fetch(`${base}/api/compat/providers`, { headers })).json()).providers;
+  assert.equal(providers.find((provider) => provider.id === 'chatgpt').oauth, 'chatgpt');
+  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in OK\n');
 }
 
 main().catch(error => { process.stderr.write(`${error.stack || error}\n`); process.exitCode = 1; })

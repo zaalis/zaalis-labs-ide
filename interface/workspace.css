@@ -27,6 +27,17 @@ body:not(.project-open) .workspace-navigation{max-height:none;flex:1}
 .ws-conversation .ws-icon svg{width:13px;height:13px}
 .ws-conversation>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-conversation.active{color:var(--text-0);background:var(--bg-hover)}
+.ws-conversation-row{display:flex;align-items:center;gap:4px;min-width:0;position:relative;border-radius:7px;}
+.ws-conversation-row>.ws-conversation,.ws-conversation-row>.dropdown-chat-item{flex:1;min-width:0;}
+.ws-conversation-row .ws-conversation>span:last-child{flex:1;}
+.conversation-menu{position:relative;flex:none;color:var(--text-2);}
+.conversation-menu>summary{display:flex;align-items:center;justify-content:center;list-style:none;width:28px;height:30px;border-radius:6px;cursor:pointer;}
+.conversation-menu>summary::-webkit-details-marker{display:none;}
+.conversation-menu>summary:hover,.conversation-menu[open]>summary{background:var(--bg-hover);color:var(--text-0);}
+.conversation-menu-delete{position:absolute;right:0;top:100%;z-index:10;min-width:168px;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);color:var(--red);box-shadow:0 8px 24px rgba(0,0,0,.25);text-align:left;white-space:nowrap;}
+.conversation-menu-delete:hover{background:var(--bg-hover);}
+.ws-conversation-row:last-child .conversation-menu-delete{top:auto;bottom:100%;}
+.conversation-menu :is(summary,button):focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px;}
 .ws-empty-project{display:block;padding:4px 10px 4px 17px;font-size:11px;line-height:1.6;color:var(--ws-muted);text-align:left}
 #sidebar-conversations-section,#sidebar-splitter{display:none!important}
 #sidebar-stack{min-height:120px}

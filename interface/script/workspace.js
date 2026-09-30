@@ -236,7 +236,7 @@
     function safelyNavigate(action) {
         if (isBusy()) { showError(new Error(text('Arrêtez la tâche en cours avant de changer de conversation.', 'Stop the running task before switching conversations.'))); return; }
         saveConversation(activeKind());
-        action();
+        Promise.resolve(action()).catch(showError);
         document.body.classList.remove('ws-mobile-navigation');
         mobileMenu.setAttribute('aria-expanded', 'false');
     }
@@ -280,12 +280,14 @@
             if (expanded.get(key) !== false) {
                 const list = el('div', 'ws-project-chats');
                 for (const { conv, kind } of [...group.items].reverse()) {
-                    const row = button(conv.title || 'Conversation', kind === 'agents' ? 'agents' : 'chat', () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
+                    const wrapper = el('div', 'ws-conversation-row');
+                    const row = button(conv.title || 'Conversation', null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
                     row.dataset.focusKey = `${kind}:${conv.id}`;
                     const selected = kind === activeKind() && conv.id === state[kind === 'chat' ? 'currentConvId' : 'currentAgentConvId'];
                     row.classList.toggle('active', selected);
                     if (selected) row.setAttribute('aria-current', 'page');
-                    list.append(row);
+                    wrapper.append(row, createConversationMenu(kind, conv));
+                    list.append(wrapper);
                 }
                 if (!group.items.length) {
                     if (group.path) list.append(button(text('Ouvrir les fichiers', 'Open files'), null, () => safelyNavigate(() => openProject(group.path, false)), 'ws-empty-project'));
@@ -502,7 +504,7 @@
         select.addEventListener('change', () => { otherSelection = select.value; renderOtherChat(); });
         pane.append(label, select);
         const { conv, kind } = options.find(({ conv, kind }) => `${kind}:${conv.id}` === otherSelection);
-        pane.append(button(text('Continuer cette conversation au centre', 'Continue this conversation in the main view'), 'chat', () => safelyNavigate(() => { loadConversation(kind, conv.id); setMode('chat'); setPanel(null); })));
+        pane.append(button(text('Continuer cette conversation au centre', 'Continue this conversation in the main view'), 'chat', () => safelyNavigate(async () => { await loadConversation(kind, conv.id); setMode('chat'); setPanel(null); })));
         const content = el('div', 'ws-other-messages');
         for (const message of conv.messages || []) {
             const item = el('article', `ws-other-message ws-other-${message.type}`);

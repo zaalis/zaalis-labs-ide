@@ -382,6 +382,37 @@ function conversationsForProject(projectPath, folderName, kind) {
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
 }
 
+// A real menu keeps opening a chat separate from deleting it. Native details
+// supports mouse, touch and keyboard without nesting buttons inside buttons.
+function createConversationMenu(kind, conv) {
+    const english = state.language === 'en';
+    const menu = document.createElement('details');
+    menu.className = 'conversation-menu';
+    const trigger = document.createElement('summary');
+    trigger.setAttribute('aria-label', (english ? 'Actions for ' : 'Actions pour ') + (conv.title || 'Conversation'));
+    trigger.title = english ? 'Chat actions' : 'Actions du chat';
+    trigger.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'conversation-menu-delete';
+    remove.textContent = english ? 'Delete chat…' : 'Supprimer le chat…';
+    remove.addEventListener('click', async event => {
+        event.stopPropagation();
+        menu.open = false;
+        await deleteConversation(kind, conv.id);
+    });
+    menu.addEventListener('click', event => event.stopPropagation());
+    menu.addEventListener('keydown', event => { if (event.key === 'Escape') { menu.open = false; trigger.focus(); } });
+    menu.addEventListener('toggle', () => {
+        if (menu.open) document.querySelectorAll('.conversation-menu[open]').forEach(other => { if (other !== menu) other.open = false; });
+    });
+    menu.append(trigger, remove);
+    return menu;
+}
+document.addEventListener('click', event => {
+    document.querySelectorAll('.conversation-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+});
+
 function initRecentProjects() {
     const recent = getRecentProjects();
     const container = $('#recent-projects');
@@ -489,10 +520,7 @@ function initRecentProjects() {
                 if (state[currentStoreKey] === conv.id) {
                     chatRow.classList.add('active');
                 }
-                chatRow.innerHTML = `
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    <span></span>
-                `;
+                chatRow.innerHTML = '<span></span>';
                 chatRow.querySelector('span').textContent = conv.title;
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
@@ -501,7 +529,10 @@ function initRecentProjects() {
                         if (opened && typeof loadConversation === 'function') loadConversation(kind, conv.id);
                     });
                 });
-                chatsContainer.appendChild(chatRow);
+                const wrapper = document.createElement('div');
+                wrapper.className = 'ws-conversation-row';
+                wrapper.append(chatRow, createConversationMenu(kind, conv));
+                chatsContainer.appendChild(wrapper);
             });
         }
         container.appendChild(chatsContainer);
@@ -1371,6 +1402,8 @@ function showApp(email) {
         const emailEl = $('#profile-email');
         if (emailEl) emailEl.textContent = email;
     }
+    // Opale is linked by default: let it know the IDE is there.
+    if (typeof loadOpaleStatus === 'function') loadOpaleStatus();
 }
 function showAuthOverlay() {
     $('#auth-overlay').classList.remove('hidden');

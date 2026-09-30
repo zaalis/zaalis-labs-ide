@@ -29,6 +29,33 @@ function findAgentd(baseDir) {
   return candidates.find((candidate) => fs.existsSync(candidate)) || '';
 }
 
+// A connected MCP server can come with a Skill: the one line that tells the
+// model the server exists, and the instructions it loads on demand. They are
+// written where the core reads user Skills. Only folders this bridge created
+// (marked below) are ever replaced or removed.
+const MANAGED_SKILL_MARKER = '.zaalis-managed';
+function syncManagedSkills(configDir, skills) {
+  const root = path.join(configDir, 'skills');
+  const wanted = new Map();
+  for (const skill of skills || []) {
+    const name = String(skill && skill.name || '');
+    if (/^[A-Za-z0-9_.-]{1,80}$/.test(name) && typeof skill.instructions === 'string') wanted.set(name, skill.instructions);
+  }
+  let existing = [];
+  try { existing = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name); } catch {}
+  for (const name of existing) {
+    const dir = path.join(root, name);
+    if (!wanted.has(name) && fs.existsSync(path.join(dir, MANAGED_SKILL_MARKER))) fs.rmSync(dir, { recursive: true, force: true });
+  }
+  for (const [name, instructions] of wanted) {
+    const dir = path.join(root, name);
+    if (fs.existsSync(dir) && !fs.existsSync(path.join(dir, MANAGED_SKILL_MARKER))) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, MANAGED_SKILL_MARKER), '');
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), instructions.replace(/\r\n?/g, '\n'), 'utf8');
+  }
+}
+
 class AgentdClient {
   constructor({ executable, dataDir, configDir, keys, extensionEnv, runtimeConfig }) {
     const env = { ...process.env, ...(extensionEnv || {}), ZAALIS_AGENTD_DATA_DIR: dataDir, ZAALIS_USER_CONFIG_DIR: configDir };
@@ -39,6 +66,8 @@ class AgentdClient {
     // Integrated browser (desktop only): endpoint of the Rust `browser` tool.
     if (runtimeConfig && runtimeConfig.browserEndpoint) env.ZAALIS_BROWSER_ENDPOINT = String(runtimeConfig.browserEndpoint);
     if (runtimeConfig && runtimeConfig.browserToken) env.ZAALIS_BROWSER_TOOL_TOKEN = String(runtimeConfig.browserToken);
+    if (runtimeConfig && runtimeConfig.workspaceEndpoint) env.ZAALIS_WORKSPACE_ENDPOINT = String(runtimeConfig.workspaceEndpoint);
+    if (runtimeConfig && runtimeConfig.workspaceToken) env.ZAALIS_WORKSPACE_TOKEN = String(runtimeConfig.workspaceToken);
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -158,9 +187,11 @@ class RustAgentBridge {
     fs.mkdirSync(configDir, { recursive: true });
     const extensionEnv = {};
     const servers = {};
+    const skills = [];
     for (const [index, source] of (mcpServers || []).filter((server) => server && server.enabled !== false).slice(0, 32).entries()) {
       const id = String(source.id || '').trim();
       if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) continue;
+      if (source.skill) skills.push(source.skill);
       const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
       if (source.token) extensionEnv[tokenName] = String(source.token);
       servers[id] = {
@@ -172,6 +203,7 @@ class RustAgentBridge {
     }
     const target = path.join(configDir, 'mcp.json');
     fs.writeFileSync(target, JSON.stringify({ servers }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    syncManagedSkills(configDir, skills);
     const client = new AgentdClient({ executable: this.executable, dataDir: userDir, configDir, keys, extensionEnv, runtimeConfig });
     this.clients.set(userId, { fingerprint, client });
     return client;
@@ -198,6 +230,14 @@ class RustAgentBridge {
         // the conversation already owns them. The daemon still restores its
         // durable agent tree and model history from the same session id.
         made = await client.request('session.resume', { session_id: String(options.sessionId), from_seq: Number.MAX_SAFE_INTEGER });
+        // A moved project or a chat attached to a different folder must never
+        // revive a daemon session with the old filesystem sandbox.
+        const canonical = value => {
+          let resolved;
+          try { resolved = fs.realpathSync(value); } catch { resolved = path.resolve(value || ''); }
+          return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        };
+        if (!made.workspace || canonical(made.workspace) !== canonical(options.root)) made = null;
       } catch (error) {
         if (!/introuvable|not found|fermée|closed/i.test(String(error.message || ''))) throw error;
       }
@@ -309,4 +349,4 @@ class RustAgentBridge {
   }
 }
 
-module.exports = { AgentdClient, RustAgentBridge, findAgentd };
+module.exports = { AgentdClient, RustAgentBridge, findAgentd, syncManagedSkills };
