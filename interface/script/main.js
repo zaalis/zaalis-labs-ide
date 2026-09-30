@@ -610,23 +610,117 @@ async function refreshSecureSettings() {
 }
 
 let personalMcpServers = [];
+// Brand marks shown next to the servers we have a preset for.
+const MCP_LOGOS = { blender: 'image/blender.png' };
 function mcpId(value) {
     return String(value || 'mcp').toLowerCase().trim().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'mcp';
+}
+function mcpUniqueId(value) {
+    const base = mcpId(value);
+    let id = base;
+    for (let n = 2; personalMcpServers.some(server => server.id === id); n++) id = base.slice(0, 76) + '-' + n;
+    return id;
 }
 function mcpEscape(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 }
+function mcpLogo(server) {
+    const program = String(server.command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+    const key = server.id === 'blender' || program === 'blender-mcp' ? 'blender' : '';
+    return key ? `<img class="mcp-server-logo" src="${MCP_LOGOS[key]}" alt="" width="22" height="22">` : '';
+}
+// Arguments are typed on one line; quotes keep an argument with spaces whole.
+function mcpSplitArgs(text) {
+    const args = [];
+    let current = '', quote = '', started = false;
+    for (const ch of String(text || '')) {
+        if (quote) { if (ch === quote) quote = ''; else current += ch; }
+        else if (ch === '"' || ch === "'") { quote = ch; started = true; }
+        else if (/\s/.test(ch)) { if (started || current) args.push(current); current = ''; started = false; }
+        else current += ch;
+    }
+    if (started || current) args.push(current);
+    return args;
+}
+function mcpJoinArgs(args) {
+    return (Array.isArray(args) ? args : []).map(arg => (arg === '' || /[\s"']/.test(arg)) ? (arg.includes('"') ? `'${arg}'` : `"${arg}"`) : arg).join(' ');
+}
+// One NAME=value per line. A saved value is never sent back by the server: its
+// name comes alone, and leaving it empty keeps what is stored.
+function mcpEnvText(env) {
+    return Object.entries(env || {}).map(([name, value]) => `${name}=${value}`).join('\n');
+}
+function mcpParseEnv(text) {
+    const env = {};
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const at = line.indexOf('=');
+        const name = (at < 0 ? line : line.slice(0, at)).trim();
+        if (name) env[name] = at < 0 ? '' : line.slice(at + 1).trim();
+    }
+    return env;
+}
+function mcpIsStdio(seed) {
+    const declared = String(seed.transport || seed.type || '').toLowerCase();
+    return declared ? declared === 'stdio' : !!seed.command && !seed.endpoint && !seed.url;
+}
 function newPersonalMcp(seed = {}) {
+    const stdio = mcpIsStdio(seed);
     return {
-        id: seed.id || mcpId(seed.name || 'mcp-' + (personalMcpServers.length + 1)),
+        id: seed.id || mcpUniqueId(seed.name || 'mcp-' + (personalMcpServers.length + 1)),
         name: seed.name || 'Nouveau MCP',
+        transport: stdio ? 'stdio' : 'http',
         endpoint: seed.endpoint || seed.url || '',
+        command: typeof seed.command === 'string' ? seed.command : '',
+        args: Array.isArray(seed.args) ? seed.args.map(String) : [],
+        env: seed.env && typeof seed.env === 'object' && !Array.isArray(seed.env) ? Object.fromEntries(Object.entries(seed.env).map(([name, value]) => [name, String(value == null ? '' : value)])) : {},
+        envConfigured: Array.isArray(seed.envConfigured) ? seed.envConfigured : [],
         enabled: seed.enabled !== false,
         token: '',
         tokenConfigured: !!seed.tokenConfigured,
         allow: Array.isArray(seed.allow) ? seed.allow : [],
-        deny: Array.isArray(seed.deny) ? seed.deny : []
+        deny: Array.isArray(seed.deny) ? seed.deny : [],
+        test: null
     };
+}
+// What is sent to the server: the settings, without the card's display state.
+function mcpPayload(server) {
+    const common = { id: server.id, name: server.name, enabled: server.enabled, allow: server.allow, deny: server.deny };
+    return server.transport === 'stdio'
+        ? { ...common, transport: 'stdio', command: server.command, args: server.args, env: server.env }
+        : { ...common, transport: 'http', endpoint: server.endpoint, token: server.token };
+}
+function mcpShowTest(card, test) {
+    const status = card.querySelector('.mcp-test-status');
+    if (!status) return;
+    status.dataset.state = test ? test.state : '';
+    status.textContent = test ? test.text : '';
+    status.title = (test && test.detail) || '';
+}
+async function testPersonalMcp(server, card) {
+    const button = card.querySelector('.mcp-test');
+    server.test = { state: 'running', text: 'Connexion au serveur…' };
+    mcpShowTest(card, server.test);
+    if (button) button.disabled = true;
+    try {
+        const res = await fetch('/api/mcp/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server: mcpPayload(server) }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Le serveur MCP ne répond pas.');
+        const count = `${data.count} outil${data.count > 1 ? 's' : ''} disponible${data.count > 1 ? 's' : ''}`;
+        const target = data.target;
+        server.test = !target || target.reachable
+            ? { state: 'ok', text: `Connecté — ${count}${target ? ` · ${target.label} détecté sur le port ${target.port}` : ''}` }
+            : { state: 'warn', text: `Serveur prêt (${count}), mais ${target.label} ne répond pas sur le port ${target.port} : ouvrez ${target.label} et démarrez le serveur de son add-on MCP.` };
+        server.test.detail = [data.serverName && `${data.serverName} ${data.serverVersion || ''}`.trim(), data.executable].filter(Boolean).join('\n');
+    } catch (error) {
+        server.test = { state: 'error', text: error.message || 'Le serveur MCP ne répond pas.' };
+    }
+    // The list may have been redrawn while the request was running.
+    const current = document.querySelector(`.mcp-server-card[data-mcp-index="${personalMcpServers.indexOf(server)}"]`);
+    if (current) {
+        mcpShowTest(current, server.test);
+        const currentButton = current.querySelector('.mcp-test');
+        if (currentButton) currentButton.disabled = false;
+    }
 }
 function renderPersonalMcpServers() {
     const list = $('#mcp-personal-list');
@@ -635,41 +729,80 @@ function renderPersonalMcpServers() {
         list.innerHTML = '<div class="settings-status-row"><span>Aucun serveur personnel</span><strong>Prêt à ajouter</strong></div>';
         return;
     }
-    list.innerHTML = personalMcpServers.map((server, index) => `
+    list.innerHTML = personalMcpServers.map((server, index) => {
+        const stdio = server.transport === 'stdio';
+        const connection = stdio
+            ? `<div class="mcp-server-grid">
+                <div class="form-group"><label>Commande</label><input class="mcp-command" value="${mcpEscape(server.command)}" placeholder="blender-mcp, npx, uvx ou chemin complet du programme" spellcheck="false"></div>
+                <div class="form-group"><label>Arguments <span class="form-hint">(optionnel)</span></label><input class="mcp-args" value="${mcpEscape(mcpJoinArgs(server.args))}" placeholder="-y @exemple/serveur-mcp" spellcheck="false"></div>
+            </div>`
+            : `<div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:8000/mcp" spellcheck="false"></div>
+            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>`;
+        const environment = stdio
+            ? `<div class="form-group mcp-env-group"><label>Variables d’environnement <span class="form-hint">(une par ligne, NOM=valeur${server.envConfigured.length ? ' ; une valeur vide conserve celle déjà enregistrée' : ''})</span></label><textarea class="mcp-env" rows="3" spellcheck="false" placeholder="BLENDER_MCP_PORT=9876">${mcpEscape(mcpEnvText(server.env))}</textarea></div>`
+            : '';
+        return `
         <article class="mcp-server-card" data-mcp-index="${index}">
             <div class="form-group settings-row-group">
-                <div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>Serveur Streamable HTTP personnel</p></div>
+                <div class="mcp-server-title">${mcpLogo(server)}<div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>${stdio ? 'Programme local (stdio), lancé par zaalis IDE' : 'Serveur Streamable HTTP personnel'}</p></div></div>
                 <label class="zs-switch"><input class="mcp-enabled" type="checkbox" ${server.enabled ? 'checked' : ''}><span class="zs-slider"></span></label>
             </div>
             <div class="mcp-server-grid">
                 <div class="form-group"><label>Nom</label><input class="mcp-name" value="${mcpEscape(server.name)}" maxlength="120"></div>
-                <div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:9876/mcp" spellcheck="false"></div>
+                <div class="form-group"><label>Connexion</label><div class="mcp-transport" role="group" aria-label="Type de connexion">
+                    <button type="button" data-transport="stdio" aria-pressed="${stdio}">Programme local</button>
+                    <button type="button" data-transport="http" aria-pressed="${!stdio}">URL (HTTP)</button>
+                </div></div>
             </div>
-            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>
-            <details class="form-group"><summary>Règles avancées</summary><div class="mcp-server-grid"><div class="form-group"><label>Autoriser (noms d’outils, séparés par virgules)</label><input class="mcp-allow" value="${mcpEscape(server.allow.join(', '))}"></div><div class="form-group"><label>Refuser</label><input class="mcp-deny" value="${mcpEscape(server.deny.join(', '))}"></div></div></details>
-            <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
-        </article>`).join('');
+            ${connection}
+            <details class="form-group"><summary>Règles avancées</summary><div class="mcp-server-grid"><div class="form-group"><label>Autoriser (noms d’outils, séparés par virgules)</label><input class="mcp-allow" value="${mcpEscape(server.allow.join(', '))}"></div><div class="form-group"><label>Refuser</label><input class="mcp-deny" value="${mcpEscape(server.deny.join(', '))}"></div></div>${environment}</details>
+            <div class="mcp-server-actions">
+                <button class="btn btn-ghost mcp-action-btn mcp-test" type="button">Tester la connexion</button>
+                <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
+                <p class="mcp-test-status" role="status" aria-live="polite"></p>
+            </div>
+        </article>`;
+    }).join('');
     list.querySelectorAll('.mcp-server-card').forEach(card => {
         const index = Number(card.dataset.mcpIndex);
         const server = personalMcpServers[index];
+        const field = selector => card.querySelector(selector);
+        const names = selector => field(selector).value.split(',').map(v => v.trim()).filter(Boolean);
         const sync = () => {
-            server.name = card.querySelector('.mcp-name').value.trim() || 'MCP personnel';
-            server.endpoint = card.querySelector('.mcp-endpoint').value.trim();
-            server.enabled = card.querySelector('.mcp-enabled').checked;
-            server.token = card.querySelector('.mcp-token').value.trim();
-            server.allow = card.querySelector('.mcp-allow').value.split(',').map(v => v.trim()).filter(Boolean);
-            server.deny = card.querySelector('.mcp-deny').value.split(',').map(v => v.trim()).filter(Boolean);
-            server.id = server.id || mcpId(server.name);
+            server.name = field('.mcp-name').value.trim() || 'MCP personnel';
+            server.enabled = field('.mcp-enabled').checked;
+            server.allow = names('.mcp-allow');
+            server.deny = names('.mcp-deny');
+            if (server.transport === 'stdio') {
+                server.command = field('.mcp-command').value.trim();
+                server.args = mcpSplitArgs(field('.mcp-args').value);
+                server.env = mcpParseEnv(field('.mcp-env').value);
+            } else {
+                server.endpoint = field('.mcp-endpoint').value.trim();
+                server.token = field('.mcp-token').value.trim();
+            }
+            server.id = server.id || mcpUniqueId(server.name);
         };
-        card.querySelectorAll('input').forEach(input => input.addEventListener('change', sync));
-        card.querySelector('.mcp-remove').addEventListener('click', () => { personalMcpServers.splice(index, 1); renderPersonalMcpServers(); });
+        card.querySelectorAll('input, textarea').forEach(input => input.addEventListener('change', sync));
+        card.querySelectorAll('.mcp-transport button').forEach(button => button.addEventListener('click', () => {
+            if (button.dataset.transport === server.transport) return;
+            sync();
+            server.transport = button.dataset.transport;
+            server.test = null;
+            renderPersonalMcpServers();
+        }));
+        field('.mcp-test').addEventListener('click', () => { sync(); testPersonalMcp(server, card); });
+        field('.mcp-remove').addEventListener('click', () => { personalMcpServers.splice(index, 1); renderPersonalMcpServers(); });
+        mcpShowTest(card, server.test);
     });
 }
 function parseImportedMcpConfig(value) {
     const raw = value && typeof value === 'object' ? value : {};
     if (Array.isArray(raw)) return raw;
     if (Array.isArray(raw.servers)) return raw.servers;
-    if (raw.mcpServers && typeof raw.mcpServers === 'object') return Object.entries(raw.mcpServers).map(([name, config]) => ({ name, ...(config || {}) }));
+    const named = raw.mcpServers && typeof raw.mcpServers === 'object' ? raw.mcpServers
+        : (raw.servers && typeof raw.servers === 'object' ? raw.servers : null);
+    if (named) return Object.entries(named).map(([name, config]) => ({ name, ...(config || {}) }));
     return [];
 }
 async function loadMcpSettings() {
@@ -678,16 +811,39 @@ async function loadMcpSettings() {
         const mcpRes = await fetch('/api/mcp');
         if (mcpRes.ok) {
             const data = await mcpRes.json();
-            personalMcpServers = Array.isArray(data.servers) ? data.servers.map(newPersonalMcp) : [];
+            personalMcpServers = [];
+            for (const server of (Array.isArray(data.servers) ? data.servers : [])) personalMcpServers.push(newPersonalMcp(server));
             renderPersonalMcpServers();
         }
     } catch {}
 }
 
 $('#mcp-add-personal').addEventListener('click', () => { personalMcpServers.push(newPersonalMcp()); renderPersonalMcpServers(); });
-$('#mcp-add-blender').addEventListener('click', () => {
-    personalMcpServers.push(newPersonalMcp({ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp', enabled: false }));
-    renderPersonalMcpServers();
+// Blender is driven through its `blender-mcp` program: the server says whether
+// it is installed on this PC, and the card is tested as soon as it is added.
+$('#mcp-add-blender').addEventListener('click', async () => {
+    const existing = personalMcpServers.findIndex(server => server.id === 'blender');
+    if (existing >= 0) {
+        const card = document.querySelector(`.mcp-server-card[data-mcp-index="${existing}"]`);
+        if (card) { card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); testPersonalMcp(personalMcpServers[existing], card); }
+        return;
+    }
+    try {
+        const res = await fetch('/api/mcp/presets/blender');
+        if (!res.ok) throw new Error('preset');
+        const data = await res.json();
+        const server = newPersonalMcp(data.server);
+        personalMcpServers.push(server);
+        renderPersonalMcpServers();
+        const card = document.querySelector(`.mcp-server-card[data-mcp-index="${personalMcpServers.length - 1}"]`);
+        if (card) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        if (!data.installed) {
+            server.test = { state: 'error', text: data.hint || 'Le programme blender-mcp est introuvable sur ce PC.' };
+            if (card) mcpShowTest(card, server.test);
+        } else if (card) testPersonalMcp(server, card);
+    } catch {
+        toast('Impossible de préparer le serveur Blender MCP.', { icon: '!' });
+    }
 });
 $('#mcp-import-config').addEventListener('click', () => $('#mcp-config-file').click());
 $('#mcp-config-file').addEventListener('change', async event => {
@@ -695,13 +851,13 @@ $('#mcp-config-file').addEventListener('change', async event => {
     if (!file) return;
     try {
         const imported = parseImportedMcpConfig(JSON.parse(await file.text()));
-        const usable = imported.filter(item => item && (item.url || item.endpoint));
-        if (!usable.length) throw new Error('Aucun serveur HTTP importable');
-        personalMcpServers.push(...usable.map(newPersonalMcp));
+        const usable = imported.filter(item => item && typeof item === 'object' && (item.url || item.endpoint || item.command));
+        if (!usable.length) throw new Error('Aucun serveur importable');
+        for (const item of usable) personalMcpServers.push(newPersonalMcp({ ...item, id: mcpUniqueId(item.id || item.name) }));
         renderPersonalMcpServers();
-        toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}.`);
+        toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}. Vérifiez-les, puis enregistrez.`);
     } catch {
-        toast('Ce fichier ne contient pas de serveurs MCP HTTP importables. Les configurations stdio (command/args) doivent être exposées via une URL MCP.', { icon: '!' });
+        toast('Ce fichier ne contient aucun serveur MCP importable (une URL ou une commande par serveur).', { icon: '!' });
     } finally { event.target.value = ''; }
 });
 
@@ -760,8 +916,20 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
-        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers }) });
-        if (!mcpRes.ok) throw new Error('MCP');
+        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers.map(mcpPayload) }) });
+        if (!mcpRes.ok) {
+            const problem = await mcpRes.json().catch(() => ({}));
+            toast(problem.error || 'Les serveurs MCP n’ont pas pu être enregistrés.', { icon: '!' });
+            throw new Error('MCP');
+        }
+        // Secrets are stored now: the cards go back to showing names only.
+        const savedMcp = await mcpRes.json().catch(() => null);
+        if (savedMcp && Array.isArray(savedMcp.servers)) {
+            const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
+            personalMcpServers = [];
+            for (const server of savedMcp.servers) personalMcpServers.push({ ...newPersonalMcp(server), test: tests.get(server.id) || null });
+            renderPersonalMcpServers();
+        }
         await syncSharedHardwareConfig();
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {

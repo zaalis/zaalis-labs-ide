@@ -238,6 +238,7 @@ $('#project-btn').addEventListener('click', e => {
 document.addEventListener('click', () => {
     projectDropdown.classList.remove('open');
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
 });
 
 $('#open-project-btn').addEventListener('click', async e => {
@@ -1341,9 +1342,21 @@ function updateProfileUI() {
     if (removePhoto) removePhoto.classList.toggle('hidden', !state.profile.photo);
 }
 
-$('#sidebar-profile').addEventListener('click', e => {
+const sidebarProfileBtn = $('#sidebar-profile');
+function toggleProfilePopup() {
+    const open = $('#profile-popup').classList.toggle('open');
+    sidebarProfileBtn.setAttribute('aria-expanded', String(open));
+}
+sidebarProfileBtn.addEventListener('click', e => {
     e.stopPropagation();
-    $('#profile-popup').classList.toggle('open');
+    toggleProfilePopup();
+});
+sidebarProfileBtn.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleProfilePopup();
+    }
 });
 
 // Clicks inside the popup must not bubble to the document handler (which closes it).
@@ -1380,6 +1393,7 @@ $('#save-profile').addEventListener('click', () => {
     saveState();
     updateProfileUI();
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
     saveProfileToServer();
 });
 
@@ -1530,53 +1544,32 @@ async function checkAuthAndInit() {
 //  UI: collapse sidebar / resize panels / collapse agent models / bounce
 // ==========================================================
 // One toggle (same icon, same place) collapses the sidebar to a thin rail.
+// All the visual work (width, fades, the profile row staying anchored at the
+// bottom) is driven by CSS classes in app.css; this only flips state, keeps
+// the user's chosen expanded width, and manages ARIA.
 const sbToggle = $('#sidebar-toggle');
-if (sbToggle) sbToggle.addEventListener('click', () => {
+if (sbToggle) {
     const sidebar = $('#sidebar');
     const app = $('#app');
-    const collapsed = sidebar.classList.toggle('collapsed');
-    app.classList.toggle('sidebar-collapsed', collapsed);
+    sbToggle.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
+    sbToggle.addEventListener('click', () => {
+        const collapsed = sidebar.classList.toggle('collapsed');
+        app.classList.toggle('sidebar-collapsed', collapsed);
+        sbToggle.setAttribute('aria-expanded', String(!collapsed));
 
-    if (collapsed) {
-        const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
-        if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
-        sidebar.style.width = '46px';
-        sidebar.style.minWidth = '46px';
-    } else {
-        const expandedWidth = sidebar.dataset.expandedWidth || '240px';
-        sidebar.style.width = expandedWidth;
-        sidebar.style.minWidth = '180px';
-    }
-
-    const projectBtn = $('#project-btn');
-    const stack = $('#sidebar-stack');
-    const profile = $('#sidebar-profile');
-    const profileName = $('#profile-name');
-    if (projectBtn) {
-        projectBtn.style.maxWidth = collapsed ? '0' : '';
-        projectBtn.style.paddingLeft = collapsed ? '0' : '';
-        projectBtn.style.paddingRight = collapsed ? '0' : '';
-        projectBtn.style.opacity = collapsed ? '0' : '';
-        projectBtn.style.transform = collapsed ? 'translateX(-14px)' : '';
-        projectBtn.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (stack) {
-        stack.style.opacity = collapsed ? '0' : '';
-        stack.style.transform = collapsed ? 'translateX(-18px)' : '';
-        stack.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (profile) {
-        profile.style.justifyContent = collapsed ? 'center' : '';
-        profile.style.gap = collapsed ? '0' : '';
-        profile.style.padding = collapsed ? '8px 0' : '';
-    }
-    if (profileName) {
-        profileName.style.maxWidth = collapsed ? '0' : '';
-        profileName.style.opacity = collapsed ? '0' : '';
-        profileName.style.transform = collapsed ? 'translateX(-12px)' : '';
-        profileName.style.pointerEvents = collapsed ? 'none' : '';
-    }
-});
+        if (collapsed) {
+            // Remember the width the user had set (manual resize or default)
+            // so expanding restores it instead of snapping to a fixed value.
+            const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
+            if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
+            sidebar.style.width = '';
+            sidebar.style.minWidth = '';
+        } else {
+            sidebar.style.width = sidebar.dataset.expandedWidth || '';
+            sidebar.style.minWidth = '';
+        }
+    });
+}
 
 // Drag the edges to resize the sidebar and the AI panel.
 function makeResizer(id, target, side) {

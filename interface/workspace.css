@@ -43,7 +43,13 @@ body:not(.project-open) .workspace-navigation{max-height:none;flex:1}
 #sidebar-stack{min-height:120px}
 body:not(.project-open) #sidebar-stack{display:none}
 #sidebar-files-section{flex:1;min-height:0}
-#sidebar.collapsed .workspace-navigation,#app.sidebar-collapsed .workspace-navigation{display:none}
+/* Desktop-only, like the other rail-collapse rules below: at <=900px #sidebar
+   is the mobile drawer and always shows its full content (see the
+   "RESPONSIVE BREAKPOINTS" section further down). */
+@media (min-width:901px){#sidebar.collapsed .workspace-navigation{display:none}}
+/* The dock overlay (below) is position:absolute; anchor it to #workspace
+   itself (not the viewport) so it lands under the topbar instead of over it. */
+#workspace{position:relative}
 .workspace-rail{display:flex;flex:none;flex-direction:column;align-items:center;width:48px;padding:6px 4px;gap:6px;background:var(--bg-1);border-left:1px solid var(--border);z-index:2}
 .ws-rail-button{width:38px;min-height:40px;display:flex;align-items:center;justify-content:center;position:relative}
 .ws-rail-button>span:not(.ws-icon){display:none}
@@ -105,9 +111,14 @@ body[data-sidebar-view="files"]:not(.project-open) .ws-files-empty{display:flex}
 .ws-view-switch .ws-icon svg{width:14px;height:14px}
 .ws-view-switch:hover{background:var(--bg-hover);color:var(--text-0);border-color:var(--border)}
 .ws-view-switch:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
-#sidebar.collapsed .ws-sidebar-title,#sidebar.collapsed .ws-files-empty,#app.sidebar-collapsed .ws-sidebar-title,#app.sidebar-collapsed .ws-files-empty{display:none!important}
-#sidebar.collapsed .ws-view-switch,#app.sidebar-collapsed .ws-view-switch{justify-content:center;margin:6px 4px;padding:6px 0;border-color:transparent}
-#sidebar.collapsed .ws-view-switch>span:not(.ws-icon),#app.sidebar-collapsed .ws-view-switch>span:not(.ws-icon){display:none}
+/* Rail-collapse styling for these only applies on desktop widths: below
+   901px #sidebar is the mobile drawer and always shows its full content,
+   even if it was left "collapsed" from an earlier desktop width. */
+@media (min-width:901px){
+    #sidebar.collapsed .ws-sidebar-title,#sidebar.collapsed .ws-files-empty{display:none!important}
+    #sidebar.collapsed .ws-view-switch{justify-content:center;margin:6px 4px;padding:6px 0;border-color:transparent}
+    #sidebar.collapsed .ws-view-switch>span:not(.ws-icon){display:none}
+}
 
 /* Reasoning: one vertical control beside the AI panel or chat composer. */
 #ai-panel{margin-left:0!important}
@@ -156,15 +167,98 @@ body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 48px);max-w
 body[data-workspace-mode="chat"] .chat-input-bottom-right{min-width:0}
 @container (max-width:620px){.ws-composer-meta .token-text{display:none}.ws-composer-meta .custom-select-trigger{max-width:120px}}
 @container (max-width:480px){.ws-composer-meta .token-meter,.ws-composer-meta .custom-select-container:first-child{display:none}}
-@media(max-width:1200px){.workspace-dock:not([hidden]){position:absolute;right:48px;top:0;bottom:0;width:min(420px,calc(100% - 48px))!important;max-width:none;z-index:20;box-shadow:-12px 0 32px rgba(0,0,0,.3)}.ws-dock-splitter{display:none!important}}
-@media(max-width:1100px){body[data-workspace-mode="chat"] .chat-input-bottom-right{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}body[data-workspace-mode="chat"] .ws-composer-meta{flex:1 1 100%}}
 body[data-workspace-mode="editor"] .chat-input-area{container-type:inline-size}
-@container (max-width:400px){.chat-input-bottom{flex-wrap:wrap;gap:6px}.chat-input-bottom-right{flex:1 1 100%;justify-content:flex-end}}
+/* Narrow composer: the controls may wrap, but only when they really do not fit.
+   Chat mode carries the model selectors in the right group, so there it takes
+   its own row; in editor mode it is just mic + send and stays on the same line
+   as the attach / permission / PC-control buttons. */
+@container (max-width:400px){.chat-input-bottom{flex-wrap:wrap;gap:6px}.chat-input-bottom-right{margin-left:auto;justify-content:flex-end}body[data-workspace-mode="chat"] .chat-input-bottom-right{flex:1 1 100%}}
+/* Editor mode, narrower still: the permission button keeps its icon and chevron, its label
+   stays available to assistive tech, and everything holds on one line. */
+@container (max-width:268px){body[data-workspace-mode="editor"] .chat-input-bottom .mode-select-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}}
 body[data-workspace-mode="chat"] .chat-history,body[data-workspace-mode="editor"] .chat-history{display:none!important}
 .ws-mobile-menu{display:none}
-@media(max-width:1200px){.workspace-dock{max-width:45vw;min-width:280px}#sidebar{width:215px;min-width:180px}.topbar-label-btn span{display:none}body[data-workspace-mode="editor"] #ai-panel{width:340px;min-width:280px}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 32px)}body[data-workspace-mode="chat"] .chat-messages{padding-left:max(16px,calc((100% - var(--ws-column))/2));padding-right:max(16px,calc((100% - var(--ws-column))/2))}}
-@media(max-width:900px){#workspace{display:flex!important;position:relative}#sidebar{position:absolute;left:0;top:0;bottom:0;width:270px!important;z-index:25;box-shadow:10px 0 35px rgba(0,0,0,.25);display:none!important}body.ws-mobile-navigation #sidebar{display:flex!important}#resizer-left,#resizer-right{display:none!important}.ws-mobile-menu{display:inline-flex}.ws-mobile-menu>span:not(.ws-icon){display:none}.topbar-left{gap:6px}.logo>span{display:none}#topbar{padding:0 8px;height:46px}.topbar-center{display:none}.topbar-right{gap:4px}.workspace-dock{position:absolute;right:48px;top:0;bottom:0;width:min(500px,calc(100% - 48px))!important;max-width:none;min-width:0;z-index:20;box-shadow:-10px 0 35px rgba(0,0,0,.25)}.ws-dock-splitter{display:none}.workspace-rail{margin-left:auto}body[data-workspace-mode="chat"] #ai-panel{min-width:0;flex:1;width:0!important;max-height:none;height:auto}body[data-workspace-mode="editor"] #editor-panel{min-width:0;flex:1}body[data-workspace-mode="editor"] #ai-panel{width:42%;min-width:240px;max-height:none;height:auto}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{margin-bottom:12px}.workspace-modes .ws-button{font-size:11px;padding:4px 7px}}
-@media(max-width:580px){body[data-workspace-mode="editor"] #workspace{flex-wrap:wrap!important}body[data-workspace-mode="editor"] #editor-panel{height:42%;flex:1 1 calc(100% - 48px)}body[data-workspace-mode="editor"] #ai-panel{height:58%;width:calc(100% - 48px);flex:1 1 calc(100% - 48px);min-width:0}body[data-workspace-mode="editor"] .workspace-rail{position:absolute;right:0;top:0;bottom:0}body[data-workspace-mode="editor"] .workspace-dock #editor-panel{height:100%}.workspace-modes .ws-icon{display:none}#catalog-btn,#help-btn,#lang-select{display:none}body[data-workspace-mode="chat"] .chat-messages{padding:16px 12px}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 20px)}body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{padding:8px}body[data-workspace-mode="chat"] #chat-input{font-size:16px}.workspace-dock .ws-dock-head{min-height:44px}.ws-conversation,.ws-project-toggle,.ws-rail-button{min-height:44px}}
+
+/* ============================================================
+   RESPONSIVE BREAKPOINTS — single source of truth for the sidebar,
+   the right-hand dock and the editor/AI panel layout. Each block only
+   changes what differs from the desktop default declared above it;
+   states compound as the viewport narrows (a 500px window matches
+   every block down to and including "tiny"). Do not add a competing
+   media query elsewhere for these elements — extend the matching
+   block here instead.
+
+   ≥1201px  desktop — dock is docked inline, resizable via the splitter.
+   901–1200 medium  — the dock becomes a floating overlay drawer.
+   581–900  small   — the sidebar itself becomes a drawer too.
+   ≤580     tiny    — one main panel at a time (editor/AI panel stack).
+
+   Z-index scale (kept flat and explicit on purpose):
+     2   workspace-rail (normal flow, always visible)
+     20  workspace-dock overlay (medium and below)
+     25  sidebar mobile drawer (small and below — above the dock overlay)
+     50  dropdowns/popups (project switcher, profile, model picker)
+     90  reasoning slider / composer bars
+     100+ modals (settings, catalog, help, confirm... all .modal-overlay)
+     9999 toasts
+   The native browser surface (WebView2) is a separate OS window painted
+   above every DOM layer regardless of CSS z-index, so it cannot be put
+   "under" a modal with CSS: script/workspace.js hides it instead
+   whenever a drawer or modal would otherwise sit on top of it. */
+
+@media(max-width:1200px){
+    /* ---- medium: dock overlay ---- */
+    .workspace-dock:not([hidden]){position:absolute;right:48px;top:0;bottom:0;width:min(420px,calc(100% - 48px));min-width:280px;max-width:none;z-index:20;box-shadow:-12px 0 32px rgba(0,0,0,.3)}
+    .ws-dock-splitter{display:none!important}
+    #sidebar{width:215px;min-width:180px}
+    .topbar-label-btn span{display:none}
+    body[data-workspace-mode="editor"] #ai-panel{width:340px;min-width:280px}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,
+    body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 32px)}
+    body[data-workspace-mode="chat"] .chat-messages{padding-left:max(16px,calc((100% - var(--ws-column))/2));padding-right:max(16px,calc((100% - var(--ws-column))/2))}
+}
+@media(max-width:1100px){
+    body[data-workspace-mode="chat"] .chat-input-bottom-right{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}
+    body[data-workspace-mode="chat"] .ws-composer-meta{flex:1 1 100%}
+}
+@media(max-width:900px){
+    /* ---- small: the sidebar becomes a drawer too ---- */
+    #sidebar{position:absolute;left:0;top:0;bottom:0;width:270px!important;min-width:0!important;z-index:25;box-shadow:10px 0 35px rgba(0,0,0,.25);display:none!important}
+    body.ws-mobile-navigation #sidebar{display:flex!important}
+    #resizer-left,#resizer-right{display:none!important}
+    .ws-mobile-menu{display:inline-flex}
+    .ws-mobile-menu>span:not(.ws-icon){display:none}
+    .topbar-left{gap:6px}
+    .logo>span{display:none}
+    #topbar{padding:0 8px;height:46px}
+    .topbar-center{display:none}
+    .topbar-right{gap:4px}
+    .workspace-dock:not([hidden]){right:48px;width:min(500px,calc(100% - 48px));min-width:0}
+    .workspace-rail{margin-left:auto}
+    #reasoning-slider-bar{transform:scale(.9);transform-origin:left center}
+    body[data-workspace-mode="chat"] #ai-panel{min-width:0;flex:1;width:0!important;max-height:none;height:auto}
+    body[data-workspace-mode="editor"] #editor-panel{min-width:0;flex:1}
+    body[data-workspace-mode="editor"] #ai-panel{width:42%;min-width:240px;max-height:none;height:auto}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{margin-bottom:12px}
+    .workspace-modes .ws-button{font-size:11px;padding:4px 7px}
+}
+@media(max-width:580px){
+    /* ---- tiny: one main panel at a time ---- */
+    body[data-workspace-mode="editor"] #workspace{flex-wrap:wrap!important}
+    body[data-workspace-mode="editor"] #editor-panel{height:42%;flex:1 1 calc(100% - 48px)}
+    body[data-workspace-mode="editor"] #ai-panel{height:58%;width:calc(100% - 48px);flex:1 1 calc(100% - 48px);min-width:0}
+    body[data-workspace-mode="editor"] .workspace-rail{position:absolute;right:0;top:0;bottom:0}
+    body[data-workspace-mode="editor"] .workspace-dock #editor-panel{height:100%}
+    .workspace-modes .ws-icon{display:none}
+    #catalog-btn,#help-btn,#lang-select{display:none}
+    body[data-workspace-mode="chat"] .chat-messages{padding:16px 12px}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,
+    body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 20px)}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{padding:8px}
+    body[data-workspace-mode="chat"] #chat-input{font-size:16px}
+    .workspace-dock .ws-dock-head{min-height:44px}
+    .ws-conversation,.ws-project-toggle,.ws-rail-button{min-height:44px}
+}
 @media(prefers-reduced-motion:reduce){.workspace-modes *, .workspace-navigation *, .workspace-dock *, .workspace-rail *{transition:none!important;animation:none!important}}
 /* Keep space for the separate reasoning rail at every viewport width. */
 body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px)}

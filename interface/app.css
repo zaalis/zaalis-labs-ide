@@ -203,7 +203,27 @@
 .mcp-server-card details.form-group summary{font-size:13px;font-weight:600;color:var(--text-1);cursor:pointer;}
 .mcp-server-card details.form-group .mcp-server-grid{margin-top:14px;}
 .mcp-server-card .settings-row-copy p{margin-top:4px;}
-.mcp-server-card .mcp-remove{color:#ff8f8f;margin-top:16px;}
+.mcp-server-card .mcp-remove{color:#ff8f8f;}
+.mcp-server-card .mcp-test{color:var(--text-0);}
+.btn.mcp-action-btn{display:inline-flex;align-items:center;justify-content:center;}
+.mcp-btn-logo{width:18px;height:18px;margin-right:8px;flex-shrink:0;object-fit:contain;}
+.mcp-server-card > .mcp-server-grid{margin-bottom:12px;}
+.mcp-server-title{display:flex;align-items:center;gap:12px;min-width:0;}
+.mcp-server-logo{width:22px;height:22px;flex-shrink:0;object-fit:contain;}
+.mcp-transport{display:flex;gap:4px;padding:3px;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;}
+.mcp-transport button{flex:1 1 0;min-height:32px;padding:6px 10px;border-radius:6px;font-size:13px;font-weight:600;color:var(--text-2);white-space:nowrap;transition:background .15s,color .15s;}
+.mcp-transport button:hover{color:var(--text-0);}
+.mcp-transport button[aria-pressed="true"]{background:var(--accent);color:#fff;}
+.mcp-server-card textarea.mcp-env{display:block;width:100%;min-height:72px;padding:10px 12px;background:var(--bg-1);border:1px solid var(--border);border-radius:8px;color:var(--text-0);font-family:var(--font-mono);font-size:13px;line-height:1.5;resize:vertical;outline:none;}
+.mcp-server-card textarea.mcp-env:focus{border-color:var(--accent);}
+.mcp-server-card details.form-group .mcp-env-group{margin-top:14px;}
+.mcp-server-card .form-group label .form-hint{display:inline;margin:0;font-size:12px;font-weight:500;}
+.mcp-server-actions{display:flex;align-items:center;flex-wrap:wrap;gap:10px;margin-top:16px;}
+.mcp-test-status{flex:1 1 240px;min-width:0;margin:0;font-size:13px;line-height:1.45;color:var(--text-2);overflow-wrap:anywhere;}
+.mcp-test-status:empty{display:none;}
+.mcp-test-status[data-state="ok"]{color:var(--green,#22c55e);}
+.mcp-test-status[data-state="warn"]{color:var(--yellow,#e0b341);}
+.mcp-test-status[data-state="error"]{color:var(--red,#ef4444);}
 @media (max-width:700px){.mcp-server-card .mcp-server-grid{grid-template-columns:1fr;}.mcp-personal-toolbar{align-items:flex-start;flex-direction:column;}}
 .settings-pane[data-settings-pane="hardware"] .settings-status-row strong{font-size:14px;color:#fff;}
 .settings-installed-box{margin-top:12px;}
@@ -453,30 +473,38 @@
 .resizer:hover::before,.resizer.dragging::before{opacity:.9;width:2px;}
 .resizing-panel{transition:none!important;}
 
-/* Collapsible left sidebar — collapses to a thin rail keeping the toggle (ChatGPT-style) */
-#sidebar{transition:width .28s cubic-bezier(.4,0,.2,1), min-width .28s cubic-bezier(.4,0,.2,1);}
-/* Collapsed the sidebar clips again: the labels are only faded out, so with
-   overflow visible they would hang over the editor while the width animates. */
-#sidebar.collapsed{width:46px!important;min-width:46px!important;overflow:hidden;}
-#app.sidebar-collapsed #sidebar{width:46px!important;min-width:46px!important;}
-#app.sidebar-collapsed #resizer-left{display:none;}
-/* Collapsed content slides/fades instead of disappearing abruptly. */
-#sidebar.collapsed .project-dropdown{display:none;}
-#sidebar.collapsed .sidebar-project{justify-content:center;padding:8px 0;}
+/* Collapsible left sidebar — only the WIDTH animates, down to a rail that keeps
+   the toggle and the profile avatar. Every block keeps its place in the flex
+   column (hidden blocks fade, they are not removed), so the profile row stays
+   anchored at the bottom with the avatar at the same x as when open.
+   Only #sidebar.collapsed drives this; #app.sidebar-collapsed just hides the
+   resizer. The rail exists on desktop widths only: at <=900px the sidebar is
+   the mobile drawer (workspace.css) and always shows its full content. */
+#sidebar{--sidebar-rail-w:52px;--sidebar-ease:cubic-bezier(.4,0,.2,1);transition:width .28s var(--sidebar-ease),min-width .28s var(--sidebar-ease);}
 .sidebar-project{display:flex;align-items:center;gap:4px;overflow:visible;}
-.sidebar-project .project-btn{flex:1;min-width:0;overflow:hidden;transform:translateX(0);transition:opacity .2s ease,transform .28s cubic-bezier(.4,0,.2,1),max-width .28s cubic-bezier(.4,0,.2,1),padding .28s cubic-bezier(.4,0,.2,1);}
-#sidebar.collapsed .sidebar-project .project-btn{flex:0 0 0;max-width:0;padding-left:0;padding-right:0;opacity:0;transform:translateX(-14px);pointer-events:none;}
-#app.sidebar-collapsed #sidebar .sidebar-project .project-btn{flex:0 0 0;max-width:0;padding-left:0;padding-right:0;opacity:0!important;transform:translateX(-14px);pointer-events:none;}
-#sidebar .sidebar-stack{transition:opacity .22s ease,transform .28s cubic-bezier(.4,0,.2,1);}
-#sidebar.collapsed .sidebar-stack{opacity:0;transform:translateX(-18px);pointer-events:none;}
-#app.sidebar-collapsed #sidebar .sidebar-stack{opacity:0!important;transform:translateX(-18px);pointer-events:none;}
-#sidebar.collapsed .sidebar-profile{justify-content:center;gap:0;padding:8px 0;}
-#app.sidebar-collapsed #sidebar .sidebar-profile{justify-content:center;gap:0;padding:8px 0;}
-#sidebar .profile-name{display:inline-block;max-width:150px;overflow:hidden;white-space:nowrap;transition:opacity .2s ease,transform .28s cubic-bezier(.4,0,.2,1),max-width .28s cubic-bezier(.4,0,.2,1);}
-#sidebar.collapsed .profile-name{max-width:0;opacity:0;transform:translateX(-12px);pointer-events:none;}
-#app.sidebar-collapsed #sidebar .profile-name{max-width:0;opacity:0!important;transform:translateX(-12px);pointer-events:none;}
+.sidebar-project .project-btn{flex:1;min-width:0;overflow:hidden;transform:translateX(0);transition:opacity .2s ease,transform .28s var(--sidebar-ease),max-width .28s var(--sidebar-ease),padding .28s var(--sidebar-ease),visibility 0s;}
+#sidebar .sidebar-stack{transition:opacity .22s ease,transform .28s var(--sidebar-ease),visibility 0s;}
+/* Clip the profile row itself (not the whole sidebar) so the popup, a sibling,
+   can still open over the editor while the sidebar is a rail. */
+.sidebar-profile{overflow:hidden;}
+.sidebar-profile:focus-visible{outline:2px solid var(--accent-hover);outline-offset:-2px;}
+#sidebar .profile-name{display:inline-block;min-width:0;max-width:150px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;transition:opacity .2s ease,transform .28s var(--sidebar-ease),max-width .28s var(--sidebar-ease);}
 .sidebar-toggle{flex-shrink:0;width:30px;height:30px;display:flex;align-items:center;justify-content:center;border-radius:var(--radius);color:var(--text-2);transition:all .15s;}
 .sidebar-toggle:hover{background:var(--bg-hover);color:var(--text-0);}
+.sidebar-toggle:focus-visible{outline:2px solid var(--accent-hover);outline-offset:2px;}
+@media (min-width:901px){
+    #sidebar.collapsed{width:var(--sidebar-rail-w)!important;min-width:var(--sidebar-rail-w)!important;}
+    #app.sidebar-collapsed #resizer-left{display:none;}
+    #sidebar.collapsed .project-dropdown{display:none;}
+    /* Hidden content fades/slides out; visibility flips after the fade so it
+       also leaves the tab order, and comes back instantly on expand. */
+    #sidebar.collapsed .sidebar-project .project-btn{flex:0 0 0;max-width:0;padding-left:0;padding-right:0;opacity:0;transform:translateX(-14px);pointer-events:none;visibility:hidden;transition-delay:0s,0s,0s,0s,.28s;}
+    #sidebar.collapsed .sidebar-stack{opacity:0;transform:translateX(-18px);pointer-events:none;visibility:hidden;transition-delay:0s,0s,.28s;}
+    #sidebar.collapsed .profile-name{max-width:0;opacity:0;transform:translateX(-12px);}
+}
+@media (prefers-reduced-motion:reduce){
+    #sidebar,#sidebar *{transition-duration:0s!important;transition-delay:0s!important;}
+}
 
 /* Sidebar split view: files stay open, project conversations stay visible below. */
 .sidebar-stack{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;}
@@ -1643,41 +1671,17 @@ body.ai-busy.project-open .project-history-list .convo-item.active::before{
 .msg-body img,.reasoning-body img{max-width:100%;height:auto;}
 
 /* ============================================================
-   NARROW WINDOW — the workspace stacks instead of overflowing
+   NARROW WINDOW — the panes shrink before anything stacks
    ============================================================
    The three panes have hard minimums: sidebar 240 + editor 200 + AI panel 380
    + two resizers = ~844px.  Below that the AI panel kept its 380px and ran off
    the right edge, where #workspace{overflow:hidden} silently cut it in half --
    the chat and the reasoning block became unreachable.  Now the panes shrink
-   first, then the editor and the AI panel stack vertically. */
+   first. Stacking, the mobile sidebar drawer, the dock overlay and every
+   breakpoint below this one are the single responsibility of workspace.css
+   (see its "RESPONSIVE BREAKPOINTS" section) — duplicating them here caused
+   two media queries to govern the same layout at once. */
 @media (max-width:1040px){
     #sidebar{flex-shrink:1;}
     #ai-panel{flex-shrink:1;}
-}
-@media (max-width:820px){
-    /* Top bar: icon-only actions so they stay on screen and clickable. */
-    #topbar{padding:0 10px;gap:8px;}
-    .topbar-label-btn span{display:none;}
-    .topbar-label-btn{padding-left:8px;padding-right:8px;}
-    #workspace{
-        display:grid;
-        grid-template-columns:auto minmax(0,1fr);
-        grid-template-rows:minmax(0,1fr) minmax(0,1fr);
-    }
-    #sidebar{grid-column:1;grid-row:1 / span 2;}
-    #resizer-left,#resizer-right{display:none;}
-    #editor-panel{grid-column:2;grid-row:1;min-width:0;}
-    #ai-panel{
-        grid-column:2;grid-row:2;
-        width:auto!important;min-width:0;
-        border-left:0;border-top:1px solid var(--border);
-    }
-    /* The reasoning slider hugs the panel's left edge; keep it off the text. */
-    #reasoning-slider-bar{transform:scale(.9);transform-origin:left center;}
-}
-@media (max-width:560px){
-    #workspace{grid-template-columns:minmax(0,1fr);}
-    #sidebar{display:none;}
-    #editor-panel,#ai-panel{grid-column:1;}
-    .topbar-center{display:none;}
 }

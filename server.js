@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
 const mcpRegistry = require('./mcp-registry');
+const voiceStt = require('./voice-stt');
 const opale = require('./opale-connector');
 const { AutomationManager } = require('./automation-manager');
 const { createWindowsComputerAction } = require('./windows-computer');
@@ -1135,9 +1136,80 @@ app.get('/api/compat/models', async (req, res) => {
 
 
 // MCP configuration: personal servers, plus Opale when it is present (below).
-function publicMcpServers(user) { return (user.mcpServers || []).map((s) => ({ ...s, token: undefined, tokenConfigured: !!s.token })); }
-function rustMcpServersFor(user) {
-  return (user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' }));
+// A personal server is either an HTTP endpoint (optional bearer token) or a
+// local program (stdio) with its arguments and environment. The token and the
+// environment values are secrets: encrypted at rest, never sent back to a client.
+const storedMcpServers = (user) => ((user && user.mcpServers) || []).filter((server) => server && typeof server === 'object').map(mcpRegistry.upgradeLegacy);
+function publicMcpServers(user) {
+  return storedMcpServers(user).map((stored) => {
+    const { token, env, ...server } = stored;
+    if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...server, transport: 'http', tokenConfigured: !!token };
+    const names = Object.keys(env || {});
+    return { ...server, transport: 'stdio', env: Object.fromEntries(names.map((name) => [name, ''])), envConfigured: names };
+  });
+}
+// The same entry with its secrets in clear, as a connection needs it.
+function runnableMcpServer(stored) {
+  if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...stored, token: stored.token ? decryptSecret(stored.token) : '' };
+  const env = {};
+  for (const [name, value] of Object.entries(stored.env || {})) { const plain = value ? decryptSecret(value) : ''; if (plain) env[name] = plain; }
+  return { ...stored, env };
+}
+function rustMcpServersFor(user) { return storedMcpServers(user).filter((server) => server.enabled).map(runnableMcpServer); }
+// What is written to users.json for one submitted server. A secret left blank
+// keeps the value already stored under the same server id.
+function storeMcpServer(input, previous) {
+  const server = mcpRegistry.normaliseServer(input);
+  if (!server) throw new Error('Serveur MCP invalide : indiquez une URL (HTTPS, ou HTTP en local) ou une commande locale.');
+  const before = previous.get(server.id);
+  if (server.transport === 'stdio') {
+    const kept = before && mcpRegistry.transportOf(before) === 'stdio' ? before.env || {} : {};
+    const env = {};
+    for (const [name, value] of Object.entries(server.env)) { const secret = value ? encryptSecret(value) : kept[name] || ''; if (secret) env[name] = secret; }
+    return { ...server, env };
+  }
+  const token = String((input && input.token) || '') || (before && before.token && decryptSecret(before.token)) || '';
+  return { ...server, token: token ? encryptSecret(token) : '' };
+}
+
+// What each personal server announces (its tools and instructions), remembered
+// so a run does not pay a connection before it starts: a stale answer is served
+// while it is refreshed, a silent server is only retried after a short pause.
+const MCP_DESCRIBE_TTL_MS = 5 * 60_000;
+const MCP_DESCRIBE_RETRY_MS = 30_000;
+const MCP_DESCRIBE_TIMEOUT_MS = 8_000;
+const mcpDescriptions = new Map();
+function mcpDescriptionKey(server) {
+  return crypto.createHash('sha256').update(JSON.stringify([server.id, mcpRegistry.transportOf(server), server.endpoint, server.token, server.command, server.args, server.env])).digest('hex');
+}
+function rememberMcpDescription(server, info) {
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(mcpDescriptionKey(server), { at: Date.now(), info, pending: null });
+}
+function refreshMcpDescription(server) {
+  const key = mcpDescriptionKey(server);
+  const entry = mcpDescriptions.get(key) || { at: 0, info: null, pending: null };
+  if (entry.pending) return entry.pending;
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(key, entry);
+  entry.pending = mcpRegistry.describe(server, { timeoutMs: MCP_DESCRIBE_TIMEOUT_MS })
+    .then((info) => { entry.info = info; }, () => {})
+    .finally(() => { entry.at = Date.now(); entry.pending = null; });
+  return entry.pending;
+}
+async function mcpDescription(server) {
+  const entry = mcpDescriptions.get(mcpDescriptionKey(server));
+  const age = entry ? Date.now() - entry.at : Infinity;
+  if (!entry || (!entry.info && (entry.pending || age > MCP_DESCRIBE_RETRY_MS))) await refreshMcpDescription(server);
+  else if (entry.info && age > MCP_DESCRIBE_TTL_MS) refreshMcpDescription(server);
+  const known = mcpDescriptions.get(mcpDescriptionKey(server));
+  return (known && known.info) || null;
+}
+// A personal server with the Skill that tells the model it exists.
+async function withMcpSkill(server) {
+  const info = await mcpDescription(server).catch(() => null);
+  const skill = info && mcpRegistry.buildSkill(server, info);
+  return skill ? { ...server, skill } : server;
 }
 // Opale is a separate application, linked by default: when it is present and
 // running, the agent gets its vault unless the user switched the link off.
@@ -1147,7 +1219,7 @@ const opaleLinked = (user) => !(user && user.opale && user.opale.connected === f
 // its instance file: neither its port nor its token is stored here, so the
 // link survives Opale restarting on another port.
 async function agentMcpServersFor(user) {
-  const servers = rustMcpServersFor(user);
+  const servers = await Promise.all(rustMcpServersFor(user).map(withMcpSkill));
   if (!opaleLinked(user)) return servers;
   const entry = await opale.mcpServer().catch(() => null);
   return entry ? [...servers.filter((server) => server.id !== opale.SERVER_ID), entry] : servers;
@@ -1201,6 +1273,33 @@ app.post('/api/opale/open', async (req, res) => {
 });
 
 app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
+// GET /api/mcp/presets/:id -> a ready-made server entry, and whether the
+// program it starts is installed on this PC.
+app.get('/api/mcp/presets/:id', (req, res) => {
+  const found = mcpRegistry.preset(req.params.id);
+  if (!found) return res.status(404).json({ error: 'Préréglage MCP inconnu.' });
+  const executable = mcpRegistry.resolveCommand(found.server.command);
+  res.json({ server: found.server, installed: !!executable, executable, hint: executable ? '' : found.hint });
+});
+// POST /api/mcp/test { server } -> what that server answers right now. The
+// form is tested as typed, before it is saved.
+app.post('/api/mcp/test', async (req, res) => {
+  const started = Date.now();
+  try {
+    const previous = new Map(storedMcpServers(req.user).map((server) => [server.id, server]));
+    const server = runnableMcpServer(storeMcpServer(req.body && req.body.server, previous));
+    const [info, target] = await Promise.all([mcpRegistry.describe(server, { timeoutMs: 20_000 }), mcpRegistry.probe(server)]);
+    rememberMcpDescription(server, info);
+    const tools = info.tools.filter((tool) => tool && typeof tool.name === 'string').map((tool) => ({ name: tool.name.slice(0, 128), allowed: mcpRegistry.allowed(server, tool.name) }));
+    res.json({
+      ok: true, transport: mcpRegistry.transportOf(server), count: tools.length, tools: tools.slice(0, 200),
+      serverName: String((info.serverInfo && info.serverInfo.name) || '').slice(0, 120), serverVersion: String((info.serverInfo && info.serverInfo.version) || '').slice(0, 40),
+      executable: info.executable, target, ms: Date.now() - started,
+    });
+  } catch (error) {
+    res.json({ ok: false, error: String((error && error.message) || error).slice(0, 400), ms: Date.now() - started });
+  }
+});
 app.get('/api/automation/status', (req, res) => res.json(automationManager.snapshot()));
 app.post('/api/automation/stop', async (req, res) => res.json(await automationManager.stop()));
 app.post('/api/agent-runs/:id/cancel', async (req, res) => {
@@ -1211,7 +1310,42 @@ app.post('/api/agent-runs/:id/cancel', async (req, res) => {
   }
 });
 app.put('/api/mcp', (req, res) => {
-  try { const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null; if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' }); const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = new Map((users[i].mcpServers || []).map((s) => [s.id, s])); users[i].mcpServers = incoming.slice(0, 32).map((s) => { const n = mcpRegistry.normaliseServer(s); if (!n) throw new Error('Serveur MCP invalide. HTTPS requis sauf loopback HTTP.'); const token = String(s.token || '') || (old.get(n.id) && decryptSecret(old.get(n.id).token)) || ''; return { ...n, token: token ? encryptSecret(token) : '' }; }); saveUsers(users); res.json({ servers: publicMcpServers(users[i]) }); } catch (e) { res.status(400).json({ error: e.message }); }
+  try {
+    const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null;
+    if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' });
+    const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id);
+    const previous = new Map(storedMcpServers(users[i]).map((server) => [server.id, server]));
+    const servers = incoming.slice(0, 32).map((server) => storeMcpServer(server, previous));
+    if (new Set(servers.map((server) => server.id)).size !== servers.length) throw new Error('Deux serveurs MCP portent le même identifiant.');
+    users[i].mcpServers = servers;
+    saveUsers(users);
+    // Learn what the enabled servers offer now, not during the next message.
+    for (const server of rustMcpServersFor(users[i])) refreshMcpDescription(server);
+    res.json({ servers: publicMcpServers(users[i]) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// ---------------------------------------------------------------------------
+// VOICE — dictation button of the chat, voice search of the browser (protected)
+// ---------------------------------------------------------------------------
+// GET  /api/voice-status   which transcription engine is ready
+// GET  /api/voice-options  speech synthesis voices (none on this edition)
+// POST /api/stt { audio: <base64 PCM WAV>, language? } -> { text, engine }
+app.get('/api/voice-status', (req, res) => res.json(voiceStt.status({ keys: userApiKeys(req.user) })));
+app.get('/api/voice-options', (req, res) => res.json({ voices: [] }));
+app.post('/api/stt', async (req, res) => {
+  try {
+    const encoded = String((req.body && req.body.audio) || '');
+    if (!encoded) return res.status(400).json({ error: 'audio requis' });
+    const result = await voiceStt.transcribe({
+      audio: Buffer.from(encoded, 'base64'), language: req.body.language,
+      keys: userApiKeys(req.user), tempDir: path.join(DATA_DIR, 'voice'),
+    });
+    res.json(result);
+  } catch (error) {
+    // `error` is the code the browser's voice search matches on; `hint` is the
+    // sentence shown to the user.
+    res.status(error.status || 500).json({ error: error.code || 'stt-failed', hint: String((error && error.message) || error).slice(0, 300) });
+  }
 });
 // ---------------------------------------------------------------------------
 // PER-USER CHATS API (protected)

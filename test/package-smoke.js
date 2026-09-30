@@ -52,7 +52,31 @@ async function main() {
   assert.deepEqual(await (await fetch(`${base}/api/chatgpt/status`, { headers })).json(), { connected: false });
   const providers = (await (await fetch(`${base}/api/compat/providers`, { headers })).json()).providers;
   assert.equal(providers.find((provider) => provider.id === 'chatgpt').oauth, 'chatgpt');
-  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in OK\n');
+  // Personal MCP servers: the Blender preset, the stdio transport and the
+  // migration of the first (HTTP) preset are all in the packaged server.
+  assert.equal((await fetch(base + '/image/blender.png')).status, 200);
+  const preset = await (await fetch(`${base}/api/mcp/presets/blender`, { headers })).json();
+  assert.deepEqual([preset.server.transport, preset.server.command], ['stdio', 'blender-mcp']);
+  const migrated = await (await fetch(`${base}/api/mcp`, { method: 'PUT', headers,
+    body: JSON.stringify({ servers: [{ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp' }] }) })).json();
+  assert.deepEqual([migrated.servers[0].transport, migrated.servers[0].command], ['stdio', 'blender-mcp']);
+  const missing = await (await fetch(`${base}/api/mcp/test`, { method: 'POST', headers,
+    body: JSON.stringify({ server: { name: 'missing', command: 'zaalis-no-such-program' } }) })).json();
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /introuvable/);
+  // Dictation: the endpoint exists, and silence costs no transcription.
+  const dictation = await (await fetch(base + '/script/ai.js')).text();
+  assert.match(dictation, /\/api\/stt/);
+  assert.equal((await (await fetch(`${base}/api/voice-status`, { headers })).json()).stt.ready, true);
+  const silence = Buffer.alloc(44 + 16000 * 2);
+  silence.write('RIFF', 0, 'ascii'); silence.writeUInt32LE(36 + 32000, 4); silence.write('WAVEfmt ', 8, 'ascii');
+  silence.writeUInt32LE(16, 16); silence.writeUInt16LE(1, 20); silence.writeUInt16LE(1, 22); silence.writeUInt32LE(16000, 24);
+  silence.writeUInt32LE(32000, 28); silence.writeUInt16LE(2, 32); silence.writeUInt16LE(16, 34);
+  silence.write('data', 36, 'ascii'); silence.writeUInt32LE(32000, 40);
+  const heard = await (await fetch(`${base}/api/stt`, { method: 'POST', headers,
+    body: JSON.stringify({ audio: silence.toString('base64'), language: 'fr' }) })).json();
+  assert.deepEqual(heard, { text: '', engine: 'none', silent: true });
+  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in, MCP stdio, dictation OK\n');
 }
 
 main().catch(error => { process.stderr.write(`${error.stack || error}\n`); process.exitCode = 1; })

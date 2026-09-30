@@ -1448,26 +1448,42 @@ void Dispatch(const std::wstring& json)
         if (GetString(message, L"type") != L"browser") return;
         std::wstring action = GetString(message, L"action");
         if (action == L"bounds" || action == L"show") {
+            // A caller-supplied rect can be malformed (NaN/Infinity from a bad
+            // layout read, or a size the resize collapsed to nothing): never
+            // let that reach SetWindowPos. Below a sane minimum we hide the
+            // native surface instead of showing a near-invisible sliver that
+            // would still sit on top of the DOM and could eat input.
+            constexpr LONG kMinVisiblePx = 4;
+            bool boundsValid = true;
             if (message.HasKey(L"bounds")) {
                 JsonObject bounds = message.GetNamedObject(L"bounds");
                 const double scale = GetNumber(message, L"devicePixelRatio", DpiScale());
                 if (!std::isfinite(scale) || scale < 0.25 || scale > 8) return;
-                auto coordinate = [&](const wchar_t* name) {
-                    double value = GetNumber(bounds, name) * scale;
-                    return (LONG)std::clamp(value, -32768.0, 32768.0);
-                };
+                auto rawCoordinate = [&](const wchar_t* name) { return GetNumber(bounds, name) * scale; };
+                const double rawX = rawCoordinate(L"x"), rawY = rawCoordinate(L"y");
+                const double rawW = rawCoordinate(L"width"), rawH = rawCoordinate(L"height");
+                if (!std::isfinite(rawX) || !std::isfinite(rawY) || !std::isfinite(rawW) || !std::isfinite(rawH)) return;
+                auto coordinate = [](double value) { return (LONG)std::clamp(value, -32768.0, 32768.0); };
                 RECT parent{}; GetClientRect(GetParent(g_hwnd), &parent);
-                LONG x = coordinate(L"x"), y = coordinate(L"y");
-                LONG right = std::clamp(x + std::max<LONG>(0, coordinate(L"width")), 0L, parent.right);
-                LONG bottom = std::clamp(y + std::max<LONG>(0, coordinate(L"height")), 0L, parent.bottom);
+                LONG x = coordinate(rawX), y = coordinate(rawY);
+                LONG right = std::clamp(x + std::max<LONG>(0, coordinate(rawW)), 0L, parent.right);
+                LONG bottom = std::clamp(y + std::max<LONG>(0, coordinate(rawH)), 0L, parent.bottom);
                 x = std::clamp(x, 0L, parent.right); y = std::clamp(y, 0L, parent.bottom);
-                SetWindowPos(g_hwnd, HWND_TOP, x, y, std::max<LONG>(0, right - x), std::max<LONG>(0, bottom - y), SWP_NOACTIVATE);
+                const LONG width = std::max<LONG>(0, right - x), height = std::max<LONG>(0, bottom - y);
+                boundsValid = width >= kMinVisiblePx && height >= kMinVisiblePx;
+                SetWindowPos(g_hwnd, HWND_TOP, x, y, width, height, SWP_NOACTIVATE);
             }
-            if (action == L"show" && !g_visible) {
+            if (action == L"show" && boundsValid && !g_visible) {
                 g_visible = true;
                 ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
                 for (auto& entry : g_views) ApplyVisibility(entry.second.get());
                 Json j; j.str(L"ev", L"panel").boolean(L"visible", true);
+                Emit(j);
+            } else if (!boundsValid && g_visible) {
+                g_visible = false;
+                ShowWindow(g_hwnd, SW_HIDE);
+                for (auto& entry : g_views) ApplyVisibility(entry.second.get());
+                Json j; j.str(L"ev", L"panel").boolean(L"visible", false);
                 Emit(j);
             }
             PushHostState();

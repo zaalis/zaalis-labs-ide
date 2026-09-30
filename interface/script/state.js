@@ -476,7 +476,12 @@ const TRANSLATIONS = {
         'recent-project-empty': "Aucun projet recent",
         'history-no-project': 'Aucun projet',
         'history-new-here': 'Nouveau chat ici',
-        'default-username': 'Utilisateur'
+        'default-username': 'Utilisateur',
+        'ws-fork-conversation': 'Nouvelle conversation depuis celle-ci',
+        'ws-fork-title-prefix': 'Suite — ',
+        'ws-fork-system-message': 'Nouvelle conversation issue de : {title}',
+        'ws-fork-disabled-agents': 'Le fork n’est disponible que pour les conversations de chat, pas pour les sessions d’agents.',
+        'ws-fork-disabled-none': 'Sélectionnez une conversation à consulter pour pouvoir la dériver.'
     },
     en: {
         'agent-mode-label': 'Agent Mode',
@@ -688,7 +693,12 @@ const TRANSLATIONS = {
         'recent-project-empty': 'No recent projects',
         'history-no-project': 'No project',
         'history-new-here': 'New chat here',
-        'default-username': 'User'
+        'default-username': 'User',
+        'ws-fork-conversation': 'New conversation from this one',
+        'ws-fork-title-prefix': 'Follow-up — ',
+        'ws-fork-system-message': 'New conversation branched from: {title}',
+        'ws-fork-disabled-agents': 'Forking is only available for chat conversations, not agent sessions.',
+        'ws-fork-disabled-none': 'Select a conversation to read before branching it.'
     }
 };
 

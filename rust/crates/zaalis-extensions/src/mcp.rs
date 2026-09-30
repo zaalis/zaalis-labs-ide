@@ -20,6 +20,33 @@ use zaalis_tools::{Tool, ToolContext, ToolDefinition, ToolResult};
 
 const MCP_PROTOCOL: &str = "2025-03-26";
 const MAX_MCP_RESPONSE: usize = 2 * 1024 * 1024;
+/// What a local MCP program needs to start at all: where programs and the
+/// user's folders are. Interpreters launched through a shim (`npx`, `uvx`, a
+/// Python virtual environment) fail without the profile and cache locations.
+/// Nothing else of this process's environment — provider keys included — is
+/// handed over; `mcp-registry.js` applies the same list when it tests a server.
+const STDIO_BASE_ENV: [&str; 20] = [
+    "PATH",
+    "PATHEXT",
+    "SystemRoot",
+    "SystemDrive",
+    "WINDIR",
+    "ComSpec",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "ProgramFiles(x86)",
+    "LANG",
+    "LC_ALL",
+];
 
 #[derive(Clone)]
 pub enum McpTransport {
@@ -408,15 +435,7 @@ impl StdioConnection {
     ) -> Result<Self> {
         let mut command = Command::new(executable);
         command.args(args).env_clear();
-        for name in [
-            "PATH",
-            "SystemRoot",
-            "WINDIR",
-            "TEMP",
-            "TMP",
-            "HOME",
-            "USERPROFILE",
-        ] {
+        for name in STDIO_BASE_ENV {
             if let Some(value) = std::env::var_os(name) {
                 command.env(name, value);
             }
@@ -462,10 +481,9 @@ impl StdioConnection {
                 if line.len() > MAX_MCP_RESPONSE {
                     return Err(ZaalisError::invalid("réponse MCP trop volumineuse"));
                 }
-                let value: Value = serde_json::from_str(&line)?;
-                if value.get("id").and_then(Value::as_u64) != Some(id) {
+                let Some(value) = stdio_reply(&line, id) else {
                     continue;
-                }
+                };
                 if let Some(error) = value.get("error") {
                     return Err(ZaalisError::io(format!(
                         "MCP: {}",
@@ -609,6 +627,21 @@ impl HttpConnection {
         }
         parse_http(&bytes, &content_type)
     }
+}
+
+/// The reply to request `id` carried by one stdout line, if it is one.
+///
+/// A server also writes notifications and its own requests on the same stream,
+/// and those number their ids independently: a server request `{"id":1,
+/// "method":…}` is not the answer to our request 1. Blank lines and stray
+/// non-JSON output (a banner printed by a launcher) are skipped the same way
+/// instead of tearing the connection down.
+fn stdio_reply(line: &str, id: u64) -> Option<Value> {
+    let value: Value = serde_json::from_str(line.trim()).ok()?;
+    if value.get("method").is_some() || value.get("id").and_then(Value::as_u64) != Some(id) {
+        return None;
+    }
+    Some(value)
 }
 
 async fn read_bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R) -> Result<Option<String>> {
@@ -806,6 +839,106 @@ mod tests {
         assert_eq!(
             read_bounded_line(&mut reader).await.unwrap().as_deref(),
             Some("{\"ok\":true}")
+        );
+    }
+
+    #[test]
+    fn stdio_reply_skips_everything_but_the_awaited_answer() {
+        assert!(stdio_reply("", 1).is_none());
+        assert!(stdio_reply("Starting server…", 1).is_none());
+        assert!(stdio_reply(
+            r#"{"jsonrpc":"2.0","method":"notifications/message","params":{}}"#,
+            1
+        )
+        .is_none());
+        // A request from the server reusing our id is not our answer.
+        assert!(stdio_reply(r#"{"jsonrpc":"2.0","id":1,"method":"roots/list"}"#, 1).is_none());
+        assert!(stdio_reply(r#"{"jsonrpc":"2.0","id":2,"result":{}}"#, 1).is_none());
+        let reply = stdio_reply(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\r",
+            1,
+        )
+        .expect("the awaited reply");
+        assert_eq!(reply["result"]["ok"], true);
+    }
+
+    /// A real child process: handshake, a call, the configured environment
+    /// reaching the program and the rest of ours staying behind.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn stdio_server_round_trip_with_a_scoped_environment() {
+        let dir = TempDir::new().unwrap();
+        let script = dir.path().join("server.ps1");
+        fs::write(
+            &script,
+            concat!(
+                "$in = [Console]::In\n",
+                "while (($line = $in.ReadLine()) -ne $null) {\n",
+                "  $m = $line | ConvertFrom-Json\n",
+                "  if ($m.id -eq $null) { continue }\n",
+                "  if ($m.method -eq 'initialize') {\n",
+                "    [Console]::Out.WriteLine('starting up')\n",
+                "    [Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":' + $m.id + ',\"method\":\"roots/list\"}')\n",
+                "    [Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":' + $m.id + ',\"result\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{}}}')\n",
+                "  } else {\n",
+                "    [Console]::Out.WriteLine('{\"jsonrpc\":\"2.0\",\"id\":' + $m.id + ',\"result\":{\"mark\":\"' + $env:ZAALIS_TEST_MARK + '\",\"leak\":\"' + $env:CARGO_MANIFEST_DIR + '\",\"tool\":\"' + $m.params.name + '\"}}')\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .unwrap();
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").expect("SystemRoot"))
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        let mut server = McpServer::new(
+            "local",
+            McpTransport::Stdio {
+                executable: powershell,
+                args: vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-ExecutionPolicy".into(),
+                    "Bypass".into(),
+                    "-File".into(),
+                    script.to_string_lossy().into_owned(),
+                ],
+                env: BTreeMap::from([("ZAALIS_TEST_MARK".to_owned(), "from-config".to_owned())]),
+            },
+        )
+        .unwrap();
+        server.timeout = Duration::from_secs(60);
+        let registry = McpRegistry::new();
+        registry.register(server).unwrap();
+        assert!(std::env::var_os("CARGO_MANIFEST_DIR").is_some());
+        let result = registry
+            .call("local", "echo", json!({}), CancellationToken::new())
+            .await
+            .unwrap();
+        assert_eq!(result["tool"], "echo");
+        assert_eq!(result["mark"], "from-config");
+        assert_eq!(result["leak"], "");
+    }
+
+    #[test]
+    fn stdio_config_loads_with_its_arguments_and_timeout() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".zaalis")).unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let config = json!({"servers":{"blender":{
+            "transport":"stdio","executable":executable,"args":["--flag"],"env_from":{},
+            "name":"Blender MCP","allow":[],"deny":["execute_blender_code"],"timeout_ms":120000
+        }}});
+        fs::write(dir.path().join(".zaalis/mcp.json"), config.to_string()).unwrap();
+        let workspace = zaalis_fs::Workspace::open(dir.path()).unwrap();
+        let registry = McpRegistry::load(&workspace, None).unwrap();
+        let state = registry.server("blender").unwrap();
+        assert_eq!(state.config.name, "Blender MCP");
+        assert_eq!(state.config.timeout, Duration::from_secs(120));
+        assert!(!state.config.allows("execute_blender_code"));
+        assert!(
+            matches!(&state.config.transport, McpTransport::Stdio { args, .. } if args == &["--flag".to_owned()])
         );
     }
 

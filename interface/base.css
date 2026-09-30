@@ -752,6 +752,13 @@ input,select,textarea{font-family:inherit;color:inherit;}
     background: rgba(239, 68, 68, 0.12) !important;
     animation: voice-pulse 1.5s infinite;
 }
+/* Recording is over: the audio is being turned into text. */
+.voice-btn.transcribing {
+    color: var(--accent) !important;
+    background: rgba(99, 102, 241, 0.14) !important;
+    animation: voice-pulse 1s infinite;
+    cursor: progress;
+}
 @keyframes voice-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.6; }

@@ -261,6 +261,22 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                                         ReportNativeCapabilities();
                                         return S_OK;
                                     }).Get(), &token);
+                            // The dictation button records the microphone from the app's own
+                            // page. Granting that here spares a permission prompt; every other
+                            // origin or permission keeps WebView2's default behaviour.
+                            g_webview->add_PermissionRequested(
+                                Callback<ICoreWebView2PermissionRequestedEventHandler>(
+                                    [](ICoreWebView2*, ICoreWebView2PermissionRequestedEventArgs* args) -> HRESULT {
+                                        COREWEBVIEW2_PERMISSION_KIND kind = COREWEBVIEW2_PERMISSION_KIND_UNKNOWN_PERMISSION;
+                                        args->get_PermissionKind(&kind);
+                                        LPWSTR uri = nullptr;
+                                        args->get_Uri(&uri);
+                                        bool trusted = uri && IsAppSource(uri);
+                                        CoTaskMemFree(uri);
+                                        if (trusted && kind == COREWEBVIEW2_PERMISSION_KIND_MICROPHONE)
+                                            args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
+                                        return S_OK;
+                                    }).Get(), &token);
                             g_webview->Navigate(APP_URL.c_str());
                             return S_OK;
                         }).Get());

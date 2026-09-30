@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const mcpRegistry = require('./mcp-registry');
 // Noms de méthodes et étiquettes d'événements générés depuis
 // rust/crates/zaalis-protocol.  Les retaper ici serait le bug silencieux
 // classique : le cœur émet un événement que personne ne rend, sans erreur.
@@ -34,6 +35,40 @@ function findAgentd(baseDir) {
 // written where the core reads user Skills. Only folders this bridge created
 // (marked below) are ever replaced or removed.
 const MANAGED_SKILL_MARKER = '.zaalis-managed';
+
+// Tool calls to a local program (a render, a long script) outlast the 15 s the
+// runtime grants by default; this is the most its configuration accepts.
+const STDIO_MCP_TIMEOUT_MS = 120000;
+
+// One `servers` entry of the runtime's mcp.json, or null when the server
+// cannot be started. Secrets never enter the file: the token and the values of
+// a stdio server's environment travel in `extensionEnv` and the file only
+// names the variable to read. The runtime rejects the whole file on a single
+// bad entry, so a program that is missing or cannot be resolved is left out.
+function runtimeMcpEntry(source, index, extensionEnv) {
+  const common = {
+    ...(source.name ? { name: String(source.name) } : {}),
+    allow: Array.isArray(source.allow) ? source.allow : [], deny: Array.isArray(source.deny) ? source.deny : [],
+  };
+  if (mcpRegistry.transportOf(source) !== 'stdio') {
+    if (!mcpRegistry.parseEndpoint(source.endpoint)) return null;
+    const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
+    if (source.token) extensionEnv[tokenName] = String(source.token);
+    return { transport: 'streamable_http', endpoint: String(source.endpoint || ''), ...(source.token ? { oauth_env: tokenName } : {}), ...common };
+  }
+  let executable = mcpRegistry.resolveCommand(source.command);
+  try { executable = executable && fs.realpathSync.native(executable); } catch { executable = ''; }
+  const args = Array.isArray(source.args) ? source.args.map(String) : [];
+  if (!executable || args.length > 64) return null;
+  const envFrom = {};
+  for (const [position, [name, value]] of Object.entries(source.env && typeof source.env === 'object' ? source.env : {}).entries()) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || position >= 64) continue;
+    const holder = `ZAALIS_MCP_ENV_${index}_${position}`;
+    extensionEnv[holder] = String(value == null ? '' : value);
+    envFrom[name] = holder;
+  }
+  return { transport: 'stdio', executable, args, env_from: envFrom, timeout_ms: STDIO_MCP_TIMEOUT_MS, ...common };
+}
 function syncManagedSkills(configDir, skills) {
   const root = path.join(configDir, 'skills');
   const wanted = new Map();
@@ -191,15 +226,10 @@ class RustAgentBridge {
     for (const [index, source] of (mcpServers || []).filter((server) => server && server.enabled !== false).slice(0, 32).entries()) {
       const id = String(source.id || '').trim();
       if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) continue;
+      const entry = runtimeMcpEntry(source, index, extensionEnv);
+      if (!entry) continue;
       if (source.skill) skills.push(source.skill);
-      const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
-      if (source.token) extensionEnv[tokenName] = String(source.token);
-      servers[id] = {
-        transport: 'streamable_http', endpoint: String(source.endpoint || ''),
-        ...(source.name ? { name: String(source.name) } : {}),
-        ...(source.token ? { oauth_env: tokenName } : {}),
-        allow: Array.isArray(source.allow) ? source.allow : [], deny: Array.isArray(source.deny) ? source.deny : [],
-      };
+      servers[id] = entry;
     }
     const target = path.join(configDir, 'mcp.json');
     fs.writeFileSync(target, JSON.stringify({ servers }, null, 2), { encoding: 'utf8', mode: 0o600 });
@@ -349,4 +379,4 @@ class RustAgentBridge {
   }
 }
 
-module.exports = { AgentdClient, RustAgentBridge, findAgentd, syncManagedSkills };
+module.exports = { AgentdClient, RustAgentBridge, findAgentd, syncManagedSkills, runtimeMcpEntry };
