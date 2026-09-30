@@ -3,8 +3,8 @@
 // Electron-compatible surface for zaalis Browser running inside zaalis-server.
 //
 // zaalis-browser/app/main.js is the real zaalis Browser main process. Here it
-// drives Chromium through Electron views owned by the IDE shell
-// (native/electron/browser-bridge.js), through the private channel managed
+// does not drive Chromium through Electron but WebView2 views owned by the IDE
+// shell (native/browser/BrowserHost.cpp), through the private channel managed
 // by host.js. Only the parts of Electron the browser actually uses exist, with
 // Electron's semantics: views, webContents, sessions, ipcMain, menus, dialogs.
 
@@ -13,7 +13,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// Legacy WebView2 status mapping and Chromium net error codes from Electron.
+// Chromium net error codes as Electron reports them in did-fail-load, indexed
+// by COREWEBVIEW2_WEB_ERROR_STATUS.
 const WEB_ERROR_CODES = {
   0: -2, 1: -200, 2: -201, 3: -110, 4: -206, 5: -207, 6: -109, 7: -118, 8: -320,
   9: -103, 10: -101, 11: -106, 12: -102, 13: -105, 14: -3, 15: -310, 16: -9,
@@ -27,7 +28,7 @@ const WEB_ERROR_NAMES = {
   '-310': 'ERR_TOO_MANY_REDIRECTS', '-320': 'ERR_INVALID_RESPONSE',
 };
 
-// Browser channel permission kinds -> Electron permission names.
+// WebView2 permission kinds -> Electron permission names.
 const PERMISSION_NAMES = {
   1: 'media', 2: 'media', 3: 'geolocation', 4: 'notifications', 5: 'sensors',
   6: 'clipboard-read', 7: 'automatic-downloads', 8: 'fileSystem', 9: 'autoplay',
@@ -628,8 +629,7 @@ function createElectron(host, hooks = {}) {
           emitSafe(wc, 'did-finish-load');
           wc.settleLoads(null);
         } else {
-          const status = Number(message.status);
-          const code = status < 0 ? status : WEB_ERROR_CODES[status] !== undefined ? WEB_ERROR_CODES[status] : -2;
+          const code = WEB_ERROR_CODES[message.status] !== undefined ? WEB_ERROR_CODES[message.status] : -2;
           emitSafe(wc, 'did-fail-load', {}, code, WEB_ERROR_NAMES[String(code)] || 'ERR_FAILED', String(message.url || wc.url), true);
           const error = new Error(WEB_ERROR_NAMES[String(code)] || 'ERR_FAILED');
           error.code = code;

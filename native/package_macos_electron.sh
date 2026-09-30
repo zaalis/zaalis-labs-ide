@@ -67,6 +67,11 @@ if [ ! -f "$BUNDLE/zaalis-agentd" ]; then
   exit 1
 fi
 cp "$ROOT/package.json" "$BUNDLE/package.json"
+cp -R "$ROOT/zaalis-browser" "$BUNDLE/zaalis-browser"
+mkdir -p "$BUNDLE/native"
+cp -R "$ROOT/native/blender" "$BUNDLE/native/blender"
+cp -R "$ROOT/native/whisper" "$BUNDLE/whisper"
+chmod 755 "$BUNDLE/whisper/whisper-cli"
 if [ -f "$ROOT/README_MACOS.md" ]; then
   cp "$ROOT/README_MACOS.md" "$BUNDLE/README.txt"
 fi

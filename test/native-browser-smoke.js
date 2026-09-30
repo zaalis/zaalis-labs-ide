@@ -1,14 +1,14 @@
 'use strict';
 
-// Run only against a deliberately started zaalis IDE.app with Electron's
-// remote debugging port 9222 enabled. Restores the prior UI layout.
+// Run only against a deliberately started local zaalis.exe with WebView2 CDP
+// enabled on 9222. It reads UI state and restores the prior layout.
 const timeout = ms => new Promise((_, reject) => setTimeout(() => reject(new Error('CDP timeout')), ms));
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 async function main() {
   const targets = await (await fetch('http://127.0.0.1:9222/json/list')).json();
-  const page = targets.find(target => target.type === 'page' && /^http:\/\/(?:127\.0\.0\.1|localhost):3000\/?/.test(target.url));
-  if (!page) throw new Error('Fenêtre principale introuvable dans Electron.');
+  const page = targets.find(target => target.type === 'page' && target.url.startsWith('http://localhost:3000/'));
+  if (!page) throw new Error('Fenêtre principale introuvable dans WebView2.');
   const socket = new WebSocket(page.webSocketDebuggerUrl);
   await Promise.race([new Promise((resolve, reject) => { socket.onopen = resolve; socket.onerror = reject; }), timeout(5000)]);
   let id = 0;
@@ -46,11 +46,11 @@ async function main() {
     const browser = await evaluate(`new Promise(resolve => {
       const handler = event => {
         if (event.data?.type !== 'browserState') return;
-        window.zaalisNative.browser.removeEventListener?.('message', handler);
+        window.chrome.webview.removeEventListener('message', handler);
         resolve({ ready: event.data.ready, visible: event.data.visible, tabs: event.data.tabs?.length, error: event.data.error || '' });
       };
-      window.zaalisNative.browser.addEventListener('message', handler);
-      window.zaalisNative.browser.postMessage({ type: 'browser', action: 'state' });
+      window.chrome.webview.addEventListener('message', handler);
+      window.chrome.webview.postMessage({ type: 'browser', action: 'state' });
       setTimeout(() => resolve({ error: 'Aucun état navigateur reçu' }), 3000);
     })`);
     if (observed.mode !== 'chat' || !observed.pane || !observed.fallbackHidden || observed.hostWidth < 100 || observed.hostHeight < 100 || !browser.ready || !browser.visible || browser.tabs < 1 || browser.error) {

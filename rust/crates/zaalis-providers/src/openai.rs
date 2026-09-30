@@ -513,23 +513,33 @@ fn fallback_tool_instructions(tools: &[ToolSpec]) -> String {
 
 /// Extract a tool call from a fallback model's answer, strictly.
 ///
-/// The whole answer (optionally inside one ```code fence) must be the envelope
-/// `{"tool_call":{"name":…,"arguments":{…}}}`. Anything else — extra prose, a
-/// missing name, a non-object `arguments`, malformed JSON — returns `None`, so
-/// the runtime never executes on an ambiguous output. Argument *validity* is
-/// then enforced by the tool itself when it deserialises them.
+/// A bare envelope or a single fenced envelope after a short preface is
+/// accepted. Multiple blocks, trailing prose, and malformed arguments remain
+/// ambiguous and are never executed. The tool validates its own arguments.
 fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
-    let mut trimmed = text.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-    {
-        trimmed = rest.trim_start();
-    }
-    if let Some(rest) = trimmed.strip_suffix("```") {
-        trimmed = rest.trim_end();
-    }
-    let value: Value = serde_json::from_str(trimmed.trim()).ok()?;
+    let trimmed = text.trim();
+    let envelope = if let Some(open) = trimmed.find("```") {
+        // Small local models often announce the action before the one JSON
+        // block. Accept that shape, but never extract a call from a response
+        // containing another fence, a second call, or trailing prose.
+        let preface = trimmed[..open].trim();
+        if preface.chars().count() > 500 || preface.contains("tool_call") {
+            return None;
+        }
+        let fenced = &trimmed[open + 3..];
+        let (language, body) = fenced.split_once('\n')?;
+        if !language.trim().is_empty() && !language.trim().eq_ignore_ascii_case("json") {
+            return None;
+        }
+        let (body, trailing) = body.split_once("```")?;
+        if !trailing.trim().is_empty() {
+            return None;
+        }
+        body.trim()
+    } else {
+        trimmed
+    };
+    let value: Value = serde_json::from_str(envelope).ok()?;
     let call = value.get("tool_call")?;
     let name = call.get("name").and_then(Value::as_str)?.trim().to_owned();
     if name.is_empty() {
@@ -560,6 +570,14 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool, native_
             provider_state: Some(state),
             ..
         } if state.provider == provider && native_tools => state.value.clone(),
+        Message::Assistant {
+            provider_state: Some(state),
+            ..
+        } if state.provider == provider => {
+            // The fallback call is withheld from the visible text stream, but
+            // the local model still needs to see its own call on the next round.
+            json!({ "role": "assistant", "content": state.value.get("content").cloned().unwrap_or(Value::Null) })
+        }
         Message::Assistant {
             text, tool_calls, ..
         } => {
@@ -706,7 +724,7 @@ impl StreamParser {
         let Some(delta) = delta else { return };
 
         if let Some(content) = delta.get("content") {
-            emit_content(content, events);
+            emit_content(content, events, self.fallback_tools);
             collect_content(content, &mut self.text, &mut self.content_parts);
         }
         // Several providers expose reasoning under their own key; accept all the
@@ -785,6 +803,14 @@ impl StreamParser {
                 calls.push(call);
             }
         }
+        if self.fallback_tools && calls.is_empty() && !self.text.is_empty() {
+            let visible = if self.text.contains("\"tool_call\"") {
+                "Le modèle local a produit un appel d'outil invalide. Aucune commande n'a été exécutée ; reformulez la demande ou réessayez.".to_owned()
+            } else {
+                self.text.clone()
+            };
+            events.push(TurnEvent::TextDelta { text: visible });
+        }
         let has_calls = !calls.is_empty();
         for call in &calls {
             events.push(TurnEvent::ToolCallCompleted { call: call.clone() });
@@ -852,9 +878,9 @@ impl WireParser for StreamParser {
     }
 }
 
-fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
+fn emit_content(content: &Value, events: &mut Vec<TurnEvent>, suppress_text: bool) {
     match content {
-        Value::String(text) if !text.is_empty() => {
+        Value::String(text) if !text.is_empty() && !suppress_text => {
             events.push(TurnEvent::TextDelta { text: text.clone() });
         }
         Value::Array(parts) => {
@@ -873,7 +899,7 @@ fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
                     events.push(TurnEvent::ReasoningDelta {
                         text: text.to_owned(),
                     });
-                } else {
+                } else if !suppress_text {
                     events.push(TurnEvent::TextDelta {
                         text: text.to_owned(),
                     });
@@ -887,7 +913,17 @@ fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
 fn collect_content(content: &Value, text: &mut String, content_parts: &mut Vec<Value>) {
     match content {
         Value::String(delta) => text.push_str(delta),
-        Value::Array(parts) => content_parts.extend(parts.iter().cloned()),
+        Value::Array(parts) => {
+            for part in parts {
+                let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+                if !kind.contains("think") && !kind.contains("reason") {
+                    if let Some(value) = part.get("text").or_else(|| part.get("content")).and_then(Value::as_str) {
+                        text.push_str(value);
+                    }
+                }
+            }
+            content_parts.extend(parts.iter().cloned());
+        }
         _ => {}
     }
 }
@@ -1352,8 +1388,7 @@ mod tests {
 
     #[test]
     fn the_fallback_parser_is_strict_and_fail_closed() {
-        // Not JSON, prose around the envelope, empty name, non-object args: all
-        // refused, so nothing runs on an ambiguous answer.
+        // Not JSON, inline prose, empty name, non-object args: all refused.
         assert!(parse_fallback_tool_call("je vais lire le fichier").is_none());
         assert!(
             parse_fallback_tool_call("Voici : {\"tool_call\":{\"name\":\"read\"}} — fait")
@@ -1377,18 +1412,28 @@ mod tests {
             .expect("fenced envelope");
         assert_eq!(fenced.name, "grep");
         assert_eq!(fenced.arguments, json!({}));
+        let announced = parse_fallback_tool_call(
+            "Je vais vérifier quelle version de Blender est installée.\n```json\n{\"tool_call\":{\"name\":\"run\",\"arguments\":{\"command\":\"blender --version\"}}}\n```",
+        )
+        .expect("a short preface followed by one tool block");
+        assert_eq!(announced.name, "run");
+        assert_eq!(announced.arguments["command"], "blender --version");
+        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nEncore du texte").is_none());
+        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\n```json\n{\"tool_call\":{\"name\":\"read\"}}\n```").is_none());
     }
 
     #[test]
     fn a_gguf_stream_emitting_the_envelope_yields_one_tool_call() {
-        let envelope = "{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":\"a.js\"}}}";
+        let envelope = "Je vais lire le fichier.\n```json\n{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":\"a.js\"}}}\n```";
         let chunk = format!(
             "data: {}\n\n",
             json!({"choices":[{"delta":{"content": envelope}}]})
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
-        parser.push(&chunk);
+        let streamed = parser.push(&chunk);
+        assert!(!streamed.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         let events = parser.finish();
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         let call = events
             .iter()
             .find_map(|event| match event {
@@ -1398,6 +1443,22 @@ mod tests {
             .expect("the envelope must become a tool call");
         assert_eq!(call.name, "read");
         assert_eq!(call.arguments["path"], "a.js");
+        let state = events.iter().find_map(|event| match event {
+            TurnEvent::AssistantState { state } => Some(state.clone()),
+            _ => None,
+        }).expect("assistant state");
+        let replay = encode_message(
+            &Message::Assistant {
+                text: String::new(),
+                reasoning: None,
+                tool_calls: vec![call.clone()],
+                provider_state: Some(state),
+            },
+            ProviderId::Gguf,
+            false,
+            false,
+        );
+        assert!(replay["content"].as_str().unwrap_or("").contains("tool_call"));
         assert!(matches!(
             events.last(),
             Some(TurnEvent::Completed {
@@ -1413,8 +1474,9 @@ mod tests {
             json!({"choices":[{"delta":{"content":"Voici la réponse en texte."}}]})
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
-        parser.push(&chunk);
+        assert!(parser.push(&chunk).is_empty());
         let events = parser.finish();
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text == "Voici la réponse en texte.")));
         assert!(!events
             .iter()
             .any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
@@ -1424,5 +1486,18 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         ));
+    }
+
+    #[test]
+    fn malformed_gguf_tool_output_is_explained_without_showing_the_internal_json() {
+        let chunk = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":"```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nTerminé"}}]})
+        );
+        let mut parser = StreamParser::for_provider(ProviderId::Gguf);
+        assert!(parser.push(&chunk).is_empty());
+        let events = parser.finish();
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text.contains("invalide") && !text.contains("tool_call"))));
     }
 }

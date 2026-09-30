@@ -476,7 +476,7 @@ impl Daemon {
             .collect();
         let tree = managed.runtime.tree().await;
         let agents: Vec<_> = tree.iter().cloned().collect();
-        Ok((json!({"resumed":true,"session_id":input.session_id,"agents":agents,
+        Ok((json!({"resumed":true,"session_id":input.session_id,"agents":agents,"workspace":managed.runtime.snapshot().await.workspace,
             "seq":self.store.last_event_sequence(&input.session_id).map_err(RpcError::from)?}), replay))
     }
 

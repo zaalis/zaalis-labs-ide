@@ -16,9 +16,9 @@ use zaalis_guard::AccessRequest;
 use zaalis_store::SecretValue;
 use zaalis_tools::{Tool, ToolContext, ToolDefinition, ToolResult};
 
-const ACTIONS: [&str; 14] = [
+const ACTIONS: [&str; 15] = [
     "tabs", "search", "open", "navigate", "select_tab", "close_tab", "page_text", "read_page",
-    "read_console", "read_network", "click", "fill", "execute_js", "open_external",
+    "screenshot", "read_console", "read_network", "click", "fill", "execute_js", "open_external",
 ];
 
 pub struct BrowserTool {
@@ -100,7 +100,8 @@ impl Tool for BrowserTool {
             description: "Navigateur intégré de zaalis IDE (panneau globe), visible par l'utilisateur. \
 C'est le navigateur par défaut pour TOUTE navigation ou recherche web visible : search (recherche), open (nouvel onglet), \
 navigate (onglet actif : url ou action back|forward|reload), tabs, select_tab/close_tab (id), page_text (texte de la page), \
-read_page (arbre d'accessibilité avec refs [ref_N]), read_console, read_network, click (ref|selector|text), \
+read_page (arbre d'accessibilité avec refs [ref_N]), screenshot (image de la partie visible de la page, montrée au modèle), \
+read_console, read_network, click (ref|selector|text), \
 fill (ref|selector, value, enter?), execute_js (code avec return). Appelle read_page avant click/fill. \
 open_external ouvre une URL dans le navigateur externe du PC : UNIQUEMENT si l'utilisateur le demande explicitement."
                 .into(),

@@ -2,9 +2,9 @@
 
 // zaalis Browser inside zaalis IDE.
 //
-// The Electron shell owns the browser views and opens a private Unix socket
-// before starting this server; its path and one-time token arrive through
-// ZAALIS_BROWSER_PIPE / ZAALIS_BROWSER_TOKEN.
+// The native shell (native/browser/BrowserHost.cpp) owns the WebView2 views and
+// opens a private named pipe before starting this server; the pipe name and a
+// one-time token arrive through ZAALIS_BROWSER_PIPE / ZAALIS_BROWSER_TOKEN.
 // This module speaks that pipe (newline-delimited JSON), runs the vendored
 // zaalis Browser main process (app/main.js) on the Electron-compatible surface
 // of electron-shim.js, and exposes what the IDE needs: open, search, reveal
@@ -14,7 +14,6 @@
 
 const fs = require('fs');
 const net = require('net');
-const os = require('os');
 const path = require('path');
 const Module = require('module');
 const { EventEmitter } = require('events');
@@ -33,9 +32,6 @@ class BrowserHost extends EventEmitter {
     this.pipePath = options.pipePath || process.env.ZAALIS_BROWSER_PIPE || '';
     this.token = options.token || process.env.ZAALIS_BROWSER_TOKEN || '';
     this.dataDir = options.dataDir || '';
-    this.legacyDataDir = options.legacyDataDir !== undefined ? options.legacyDataDir : (process.platform === 'darwin'
-      ? path.join(os.homedir(), 'Library', 'Application Support', 'zaalis browser')
-      : path.join(process.env.APPDATA || '', 'zaalis browser'));
     this.secretFile = options.secretFile || '';
     this.idePort = options.idePort || 3000;
     this.log = options.log || ((line) => console.error(line));
@@ -160,10 +156,10 @@ class BrowserHost extends EventEmitter {
     // zaalis Browser data (bookmarks, history, profiles, AI chats) once. The
     // standalone install is only read, never modified or required afterwards.
     try {
-      fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+      fs.mkdirSync(this.dataDir, { recursive: true });
       if (fs.existsSync(path.join(this.dataDir, 'settings.txt'))) return;
-      const legacy = this.legacyDataDir;
-      if (!legacy || !fs.existsSync(path.join(legacy, 'settings.txt'))) return;
+      const legacy = path.join(process.env.APPDATA || '', 'zaalis browser');
+      if (!process.env.APPDATA || !fs.existsSync(path.join(legacy, 'settings.txt'))) return;
       for (const file of DATA_FILES) {
         const from = path.join(legacy, file);
         if (fs.existsSync(from)) fs.copyFileSync(from, path.join(this.dataDir, file));
@@ -217,7 +213,7 @@ class BrowserHost extends EventEmitter {
 
   // The toolbar view grows over the page while a popup is open; the shell
   // clips it to the toolbar strip plus the popup box, as the standalone
-  // standalone browser does, since native views cannot blend with each other.
+  // Windows browser does, since native views cannot blend with each other.
   observeWebMessage(wc, message) {
     if (typeof message !== 'string' || !message.startsWith('chromeHeight\x1f')) return;
     const parts = message.split('\x1f').slice(1).map((value) => parseInt(value, 10));
@@ -257,8 +253,10 @@ class BrowserHost extends EventEmitter {
   }
 
   // The integrated browser's own page tools (read_page, click, fill, navigate,
-  // execute_js, read_console, read_network), plus tab management, for the IDE
-  // agent. The halo and animated cursor of the browser agent show every action.
+  // execute_js, read_console, read_network), plus tab management and a
+  // screenshot, for the IDE agent. The halo and animated cursor of the browser
+  // agent show every action. Every tool answers text, except `screenshot`:
+  // { text, image } where image is a base64 JPEG of the visible page.
   async agentTool(tool, args = {}) {
     const core = await this.ensureStarted();
     this.reveal();
@@ -296,6 +294,13 @@ class BrowserHost extends EventEmitter {
       const tab = core.activeTab();
       if (!tab) return 'Aucune page active.';
       return (await core.quickPageContext(tab)) || 'Page illisible pour le moment.';
+    }
+    if (tool === 'screenshot') {
+      const tab = core.activeTab();
+      if (!tab) return 'Aucune page active.';
+      const shot = await tab.view.webContents.cdp('Page.captureScreenshot', { format: 'jpeg', quality: 80 });
+      if (!shot || typeof shot.data !== 'string' || !shot.data) return 'Capture de la page impossible pour le moment.';
+      return { text: `Capture de la partie visible de ${tab.view.webContents.getURL()} (jointe au message suivant).`, image: shot.data };
     }
     const tab = core.activeTab();
     if (!tab) return 'Aucune page web active.';

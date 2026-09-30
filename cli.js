@@ -37,12 +37,12 @@ const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 // one file per working directory, like Claude Code's per-project sessions.
 const SESSIONS_DIR = path.join(CFG_DIR, 'sessions');
 
-// When packaged, the CLI lives in the app bundle's bundle/bin directory,
-// alongside the server in its parent directory.
+// When packaged, this CLI lives in {app}\bin\ while the other binaries
+// (zaalis-server.exe, zaalis.exe) sit in {app}\ — i.e. the PARENT folder.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 
 // Locate a sibling binary, looking in this folder then its parent (so the CLI
-// in bundle/bin finds zaalis-server in bundle). Returns the
+// in {app}\bin finds zaalis-server.exe / zaalis.exe in {app}). Returns the
 // first existing path, or null.
 function findBinary(name) {
   const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
@@ -340,7 +340,7 @@ async function ensureServer({ quiet } = {}) {
   if (await ping()) return true;
   if (!quiet) process.stderr.write(dim('Démarrage du serveur zaalis…\n'));
 
-  const serverExe = findBinary('zaalis-server');
+  const serverExe = findBinary('zaalis-server.exe');
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
@@ -745,7 +745,7 @@ src/app.js
 package.json
 \`\`\`
 
-4) Executer une commande shell macOS (/bin/sh):
+4) Executer une commande Windows cmd.exe:
 \`\`\`run
 npm test
 \`\`\`
@@ -2248,7 +2248,7 @@ function nextInput(opts = {}) {
       const menu = menuMatches();
       if (key.ctrl && key.name === 'c') return finish({ kind: 'exit' });
       // Shift+Tab cycles the AI permission level, live (no Enter to validate).
-      // Shift+Tab is available without invoking the macOS app switcher.
+      // (Alt+Tab can't be used — Windows captures it for app switching.)
       if (key.name === 'tab' && key.shift) { cyclePermission(); return repaint(); }
       if (key.name === 'return' || key.name === 'enter') {
         // With the suggestion menu open, Enter only accepts the highlighted
@@ -2575,16 +2575,13 @@ async function main() {
   }
 
   if (cmd === 'ide') {
-    const bundles = [
-      '/Applications/zaalis IDE.app',
-      path.join(os.homedir(), 'Applications', 'zaalis IDE.app'),
-    ];
-    const bundle = bundles.find((candidate) => fs.existsSync(candidate));
-    if (bundle) {
-      spawn('/usr/bin/open', ['-a', bundle], { detached: true, stdio: 'ignore' }).unref();
-      return;
-    }
-    console.log(brand('✗ ') + 'zaalis IDE.app introuvable.');
+    // The GUI is {app}\zaalis.exe (parent of {app}\bin). Never relaunch the CLI
+    // itself, which is also named zaalis.exe inside bin.
+    const self = process.execPath.toLowerCase();
+    const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
+      .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
+    if (exe) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
+    else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
     return;
   }
 

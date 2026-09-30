@@ -182,19 +182,19 @@ function maybeWarnSmallLocalModel() {
 modelSelect.addEventListener('change', () => {
     state.config.aiModel = modelSelect.value;
     updateSubmodelDropdown();
-
+    
     // Auto-select the newest submodel for the newly chosen provider
     const model = modelSelect.value;
     const subs = submodelsFor(model);
     if (subs.length) {
         submodelSelect.value = subs[0]; // Newest model is first in the list
     }
-
+    
     state.config.aiSubmodel = submodelSelect.value;
     saveState();
-
+    
     createCustomSelect('ai-submodel');
-
+    
     checkReasoningCompatibility();
     updateAttachAvailability();
     applyModelColor();
@@ -238,6 +238,7 @@ $('#project-btn').addEventListener('click', e => {
 document.addEventListener('click', () => {
     projectDropdown.classList.remove('open');
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
 });
 
 $('#open-project-btn').addEventListener('click', async e => {
@@ -382,6 +383,37 @@ function conversationsForProject(projectPath, folderName, kind) {
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
 }
 
+// A real menu keeps opening a chat separate from deleting it. Native details
+// supports mouse, touch and keyboard without nesting buttons inside buttons.
+function createConversationMenu(kind, conv) {
+    const english = state.language === 'en';
+    const menu = document.createElement('details');
+    menu.className = 'conversation-menu';
+    const trigger = document.createElement('summary');
+    trigger.setAttribute('aria-label', (english ? 'Actions for ' : 'Actions pour ') + (conv.title || 'Conversation'));
+    trigger.title = english ? 'Chat actions' : 'Actions du chat';
+    trigger.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'conversation-menu-delete';
+    remove.textContent = english ? 'Delete chat…' : 'Supprimer le chat…';
+    remove.addEventListener('click', async event => {
+        event.stopPropagation();
+        menu.open = false;
+        await deleteConversation(kind, conv.id);
+    });
+    menu.addEventListener('click', event => event.stopPropagation());
+    menu.addEventListener('keydown', event => { if (event.key === 'Escape') { menu.open = false; trigger.focus(); } });
+    menu.addEventListener('toggle', () => {
+        if (menu.open) document.querySelectorAll('.conversation-menu[open]').forEach(other => { if (other !== menu) other.open = false; });
+    });
+    menu.append(trigger, remove);
+    return menu;
+}
+document.addEventListener('click', event => {
+    document.querySelectorAll('.conversation-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+});
+
 function initRecentProjects() {
     const recent = getRecentProjects();
     const container = $('#recent-projects');
@@ -393,19 +425,19 @@ function initRecentProjects() {
     container.innerHTML = '';
     recent.forEach(p => {
         const folderName = p.split(/[\\/]/).pop();
-
+        
         // Row container
         const projectRow = document.createElement('div');
         projectRow.className = 'project-dropdown-row';
         projectRow.title = p;
         if (state.projectRoot === p) projectRow.classList.add('active');
-
+        
         // Chevron button
         const chev = document.createElement('button');
         chev.className = 'proj-dropdown-chev-btn';
         chev.type = 'button';
         chev.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="proj-dropdown-chev"><polyline points="9 18 15 12 9 6"/></svg>`;
-
+        
         // Project name button (opens project)
         const nameBtn = document.createElement('button');
         nameBtn.className = 'proj-dropdown-name-btn';
@@ -462,10 +494,10 @@ function initRecentProjects() {
         // Nested chats list container
         const chatsContainer = document.createElement('div');
         chatsContainer.className = 'project-dropdown-chats';
-
+        
         chatsContainer.style.display = 'block';
         chev.querySelector('.proj-dropdown-chev').classList.toggle('expanded', true);
-
+        
         // Toggle chats list expand
         chev.addEventListener('click', e => {
             e.stopPropagation();
@@ -489,10 +521,7 @@ function initRecentProjects() {
                 if (state[currentStoreKey] === conv.id) {
                     chatRow.classList.add('active');
                 }
-                chatRow.innerHTML = `
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    <span></span>
-                `;
+                chatRow.innerHTML = '<span></span>';
                 chatRow.querySelector('span').textContent = conv.title;
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
@@ -501,7 +530,10 @@ function initRecentProjects() {
                         if (opened && typeof loadConversation === 'function') loadConversation(kind, conv.id);
                     });
                 });
-                chatsContainer.appendChild(chatRow);
+                const wrapper = document.createElement('div');
+                wrapper.className = 'ws-conversation-row';
+                wrapper.append(chatRow, createConversationMenu(kind, conv));
+                chatsContainer.appendChild(wrapper);
             });
         }
         container.appendChild(chatsContainer);
@@ -693,7 +725,7 @@ function renderNoProjectConversations(container) {
     const storeKey = kind === 'agents' ? 'agentConversations' : 'conversations';
     const curIdKey = kind === 'agents' ? 'currentAgentConvId' : 'currentConvId';
     const curId = state[curIdKey];
-
+    
     const convs = (state[storeKey] || [])
         .filter(c => !c.project)
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
@@ -727,7 +759,7 @@ function renderNoProjectConversations(container) {
         const row = document.createElement('div');
         row.className = 'convo-item' + (conv.id === curId ? ' active' : '');
         row.title = conv.date || '';
-
+        
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
@@ -736,7 +768,7 @@ function renderNoProjectConversations(container) {
                 loadConversation(kind, conv.id);
             }
         });
-
+        
         const delBtn = document.createElement('button');
         delBtn.className = 'convo-del';
         delBtn.type = 'button';
@@ -750,7 +782,7 @@ function renderNoProjectConversations(container) {
                 deleteConversation(kind, conv.id);
             }
         });
-
+        
         row.appendChild(titleEl);
         row.appendChild(delBtn);
         container.appendChild(row);
@@ -1023,7 +1055,7 @@ function renderTabs() {
 function switchToFile(filePath) {
     if (!state.openFiles[filePath]) return;
     state.activeFile = filePath;
-
+    
     const fileData = state.openFiles[filePath];
     if (textarea.value !== fileData.content) {
         textarea.value = fileData.content;
@@ -1035,7 +1067,7 @@ function switchToFile(filePath) {
 
 function closeFile(filePath) {
     if (!state.openFiles[filePath]) return;
-
+    
     if (state.openFiles[filePath].unsaved) {
         const lang = state.language || 'fr';
         const msgConfirm = lang === 'en'
@@ -1140,15 +1172,15 @@ async function saveCurrentFile() {
         });
         const data = await res.json();
         if (data.error) throw new Error(data.error);
-
+        
         const lang = state.language || 'fr';
         fileData.unsaved = false;
         $('#status-saved').textContent = TRANSLATIONS[lang]['saved-indicator'] || 'Enregistre';
         $('#status-saved').style.color = 'var(--green)';
         renderTabs();
-        setTimeout(() => {
+        setTimeout(() => { 
             if (state.activeFile === filePath && !fileData.unsaved) {
-                $('#status-saved').textContent = '';
+                $('#status-saved').textContent = ''; 
             }
         }, 2000);
     } catch (err) {
@@ -1310,9 +1342,21 @@ function updateProfileUI() {
     if (removePhoto) removePhoto.classList.toggle('hidden', !state.profile.photo);
 }
 
-$('#sidebar-profile').addEventListener('click', e => {
+const sidebarProfileBtn = $('#sidebar-profile');
+function toggleProfilePopup() {
+    const open = $('#profile-popup').classList.toggle('open');
+    sidebarProfileBtn.setAttribute('aria-expanded', String(open));
+}
+sidebarProfileBtn.addEventListener('click', e => {
     e.stopPropagation();
-    $('#profile-popup').classList.toggle('open');
+    toggleProfilePopup();
+});
+sidebarProfileBtn.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleProfilePopup();
+    }
 });
 
 // Clicks inside the popup must not bubble to the document handler (which closes it).
@@ -1349,6 +1393,7 @@ $('#save-profile').addEventListener('click', () => {
     saveState();
     updateProfileUI();
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
     saveProfileToServer();
 });
 
@@ -1371,6 +1416,8 @@ function showApp(email) {
         const emailEl = $('#profile-email');
         if (emailEl) emailEl.textContent = email;
     }
+    // Opale is linked by default: let it know the IDE is there.
+    if (typeof loadOpaleStatus === 'function') loadOpaleStatus();
 }
 function showAuthOverlay() {
     $('#auth-overlay').classList.remove('hidden');
@@ -1497,53 +1544,32 @@ async function checkAuthAndInit() {
 //  UI: collapse sidebar / resize panels / collapse agent models / bounce
 // ==========================================================
 // One toggle (same icon, same place) collapses the sidebar to a thin rail.
+// All the visual work (width, fades, the profile row staying anchored at the
+// bottom) is driven by CSS classes in app.css; this only flips state, keeps
+// the user's chosen expanded width, and manages ARIA.
 const sbToggle = $('#sidebar-toggle');
-if (sbToggle) sbToggle.addEventListener('click', () => {
+if (sbToggle) {
     const sidebar = $('#sidebar');
     const app = $('#app');
-    const collapsed = sidebar.classList.toggle('collapsed');
-    app.classList.toggle('sidebar-collapsed', collapsed);
+    sbToggle.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
+    sbToggle.addEventListener('click', () => {
+        const collapsed = sidebar.classList.toggle('collapsed');
+        app.classList.toggle('sidebar-collapsed', collapsed);
+        sbToggle.setAttribute('aria-expanded', String(!collapsed));
 
-    if (collapsed) {
-        const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
-        if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
-        sidebar.style.width = '46px';
-        sidebar.style.minWidth = '46px';
-    } else {
-        const expandedWidth = sidebar.dataset.expandedWidth || '240px';
-        sidebar.style.width = expandedWidth;
-        sidebar.style.minWidth = '180px';
-    }
-
-    const projectBtn = $('#project-btn');
-    const stack = $('#sidebar-stack');
-    const profile = $('#sidebar-profile');
-    const profileName = $('#profile-name');
-    if (projectBtn) {
-        projectBtn.style.maxWidth = collapsed ? '0' : '';
-        projectBtn.style.paddingLeft = collapsed ? '0' : '';
-        projectBtn.style.paddingRight = collapsed ? '0' : '';
-        projectBtn.style.opacity = collapsed ? '0' : '';
-        projectBtn.style.transform = collapsed ? 'translateX(-14px)' : '';
-        projectBtn.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (stack) {
-        stack.style.opacity = collapsed ? '0' : '';
-        stack.style.transform = collapsed ? 'translateX(-18px)' : '';
-        stack.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (profile) {
-        profile.style.justifyContent = collapsed ? 'center' : '';
-        profile.style.gap = collapsed ? '0' : '';
-        profile.style.padding = collapsed ? '8px 0' : '';
-    }
-    if (profileName) {
-        profileName.style.maxWidth = collapsed ? '0' : '';
-        profileName.style.opacity = collapsed ? '0' : '';
-        profileName.style.transform = collapsed ? 'translateX(-12px)' : '';
-        profileName.style.pointerEvents = collapsed ? 'none' : '';
-    }
-});
+        if (collapsed) {
+            // Remember the width the user had set (manual resize or default)
+            // so expanding restores it instead of snapping to a fixed value.
+            const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
+            if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
+            sidebar.style.width = '';
+            sidebar.style.minWidth = '';
+        } else {
+            sidebar.style.width = sidebar.dataset.expandedWidth || '';
+            sidebar.style.minWidth = '';
+        }
+    });
+}
 
 // Drag the edges to resize the sidebar and the AI panel.
 function makeResizer(id, target, side) {
@@ -1772,7 +1798,7 @@ function createCustomSelect(selectId, opts) {
     trigger.setAttribute('role', 'button');
     trigger.tabIndex = 0;
     trigger.setAttribute('aria-haspopup', 'listbox');
-
+    
     const triggerText = document.createElement('span');
     triggerText.className = 'custom-select-trigger-text';
     trigger.appendChild(triggerText);

@@ -8,7 +8,9 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { BrowserBridge } = require('./browser-bridge');
+const { ElectronBrowserBridge } = require('./browser-bridge');
+const browserBridge = new ElectronBrowserBridge();
+let browserEnvironment = {};
 
 // A second launch must focus the existing window instead of spawning another
 // local server.  This is deliberately acquired before `ready`, as required by
@@ -46,15 +48,11 @@ app.commandLine.appendSwitch('disable-features', 'AutofillServerCommunication,Me
 // comme un cookie de session éphémère, d'où la reconnexion forcée à chaque
 // relancement de l'app, que le flush du store en sortie ne pouvait pas régler.
 app.setName('zaalis IDE');
-app.setPath('userData', process.env.ZAALIS_ELECTRON_USER_DATA_DIR ||
-  path.join(app.getPath('appData'), 'zaalis', 'electron'));
+app.setPath('userData', path.join(app.getPath('appData'), 'zaalis', 'electron'));
 
 const DEFAULT_PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 const APP_ROOT = app.isPackaged ? path.join(process.resourcesPath, 'app') : __dirname;
 const BUNDLE_DIR = path.join(APP_ROOT, 'bundle');
-const APP_BUNDLE_PATH = app.isPackaged && process.platform === 'darwin'
-  ? path.dirname(path.dirname(path.dirname(process.execPath)))
-  : '';
 const SERVER_BIN = process.platform === 'win32' ? 'zaalis-server.exe' : 'zaalis-server';
 const SERVER_PATH = path.join(BUNDLE_DIR, SERVER_BIN);
 const ICON_PATH = path.join(BUNDLE_DIR, 'image', process.platform === 'darwin' ? 'logo-zaalis.icns' : 'logo-zaalis.png');
@@ -77,10 +75,6 @@ let overlayWindows = [];
 let controlDock = null;
 const computerBridgeSecret = crypto.randomBytes(32).toString('hex');
 let computerHelperBuild = null;
-const browserBridge = new BrowserBridge({
-  getWindow: () => mainWindow,
-  log: (message) => appendLog('zaalis-browser.err.log', message),
-});
 
 function logDir() {
   const dir = path.join(app.getPath('userData'), 'logs');
@@ -139,7 +133,7 @@ function canListen(port) {
 
 async function pickPort() {
   if (await healthCheck(DEFAULT_PORT)) {
-    throw new Error(`Un serveur zaalis IDE utilise déjà le port ${DEFAULT_PORT}. Arrêtez cette instance avant de lancer l'application macOS pour activer ses fonctions natives.`);
+    return { port: DEFAULT_PORT, reuseExisting: true };
   }
   if (await canListen(DEFAULT_PORT)) {
     return { port: DEFAULT_PORT, reuseExisting: false };
@@ -174,15 +168,13 @@ async function startServer(port, reuseExisting) {
     cwd: BUNDLE_DIR,
     env: {
       ...process.env,
+      ...browserEnvironment,
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
       ZAALIS_SHELL_PID: String(process.pid),
-      ZAALIS_APP_BUNDLE_PATH: APP_BUNDLE_PATH,
       ZAALIS_COMPUTER_BRIDGE_URL: computerBridgePort ? `http://127.0.0.1:${computerBridgePort}` : '',
       ZAALIS_COMPUTER_BRIDGE_SECRET: computerBridgeSecret,
-      ZAALIS_BROWSER_PIPE: browserBridge.socketPath,
-      ZAALIS_BROWSER_TOKEN: browserBridge.token,
       ...(fs.existsSync(agentdPath) ? { ZAALIS_AGENTD_PATH: agentdPath } : {}),
     },
     stdio: ['ignore', out, err],
@@ -248,7 +240,7 @@ async function ensureComputerHelper() {
   const output = path.join(app.getPath('userData'), 'macos-computer-bridge');
   computerHelperBuild = new Promise((resolve) => {
     if (!fs.existsSync(source)) return resolve('');
-    const child = spawn('xcrun', ['swiftc', '-O', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ApplicationServices', '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'ScreenCaptureKit', source, '-o', output], { stdio: 'ignore' });
+    const child = spawn('xcrun', ['swiftc', '-O', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ApplicationServices', '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'ScreenCaptureKit', '-framework', 'Vision', source, '-o', output], { stdio: 'ignore' });
     child.once('error', () => resolve(''));
     child.once('close', (code) => resolve(code === 0 && fs.existsSync(output) ? output : ''));
   });
@@ -324,7 +316,7 @@ function overlayHTML() {
     .edge{position:fixed;inset:-6px;pointer-events:none;opacity:.8;filter:blur(28px);background:${flow};background-size:200% 100%;animation:zflow 7s linear infinite;-webkit-mask:${feather};mask:${feather}}
     .mist{position:fixed;inset:-25%;background:radial-gradient(ellipse at 15% 20%,rgba(157,89,255,.28),transparent 32%),radial-gradient(ellipse at 80% 84%,rgba(102,45,210,.28),transparent 38%);filter:blur(20px);animation:drift 12s ease-in-out infinite alternate}
     @keyframes zflow{from{background-position:0% 50%}to{background-position:200% 50%}}@keyframes drift{to{transform:translate3d(3%, -2%, 0) scale(1.06)}}
-  </style></head><body><div class="mist"></div><div class="edge"></div></body></html>`;
+  </style></head><body><div class="edge"></div></body></html>`;
 }
 
 function dockHTML() {
@@ -409,9 +401,9 @@ function createWindow(port) {
     },
   });
 
+  browserBridge.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
   mainWindow.once('ready-to-show', () => mainWindow.show());
-  mainWindow.webContents.on('did-finish-load', () => browserBridge.state());
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     if (!url.startsWith(baseUrl)) shell.openExternal(url);
@@ -545,20 +537,8 @@ ipcMain.handle('computer-dock-stop', async () => {
   requestServerAutomationStop();
   return { ok: true };
 });
-ipcMain.on('zaalis-browser-ui', (event, message) => {
-  if (mainWindow && event.sender === mainWindow.webContents) browserBridge.uiMessage(message);
-});
 
 let cookiesFlushed = false;
-// L'installateur detache envoie SIGTERM seulement apres avoir verifie et copie
-// le nouveau bundle. Intercepter ce signal permet a Electron de suivre son
-// chemin de fermeture normal (cookies, pont natif, serveur) avant le remplacement.
-process.on('SIGTERM', () => {
-  if (isQuitting) return;
-  isQuitting = true;
-  app.quit();
-});
-
 app.on('before-quit', (event) => {
   isQuitting = true;
   stopSpeechProcess();
@@ -578,10 +558,7 @@ app.on('before-quit', (event) => {
     cookiesFlushed = true;
     app.quit();
   };
-  const flush = Promise.allSettled([
-    session.defaultSession.cookies.flushStore(),
-    browserBridge.flushCookies(),
-  ]);
+  const flush = session.defaultSession.cookies.flushStore();
   // Ne jamais bloquer la fermeture indéfiniment si le flush traîne.
   const safety = setTimeout(done, 1500);
   Promise.resolve(flush)
@@ -627,9 +604,9 @@ app.whenReady().then(async () => {
   ensureZaalisSymlink();
 
   try {
-    await browserBridge.start();
     await startComputerBridge();
     const { port, reuseExisting } = await pickPort();
+    browserEnvironment = await browserBridge.start();
     await startServer(port, reuseExisting);
     createWindow(port);
   } catch (error) {

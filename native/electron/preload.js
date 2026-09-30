@@ -1,7 +1,6 @@
 'use strict';
 
 const { contextBridge, ipcRenderer } = require('electron');
-const browserListeners = new Map();
 
 contextBridge.exposeInMainWorld('zaalisNative', {
   platform: process.platform,
@@ -22,19 +21,13 @@ contextBridge.exposeInMainWorld('zaalisNative', {
     requestPermissions: () => ipcRenderer.invoke('mac-computer-request-permissions'),
     stop: () => ipcRenderer.invoke('computer-dock-stop'),
   },
-  browser: {
-    postMessage: (message) => ipcRenderer.send('zaalis-browser-ui', message),
-    addEventListener: (name, callback) => {
-      if (name !== 'message' || typeof callback !== 'function') return;
-      const listener = (_event, data) => callback({ data });
-      ipcRenderer.on('zaalis-browser-event', listener);
-      browserListeners.set(callback, listener);
-    },
-    removeEventListener: (name, callback) => {
-      if (name !== 'message') return;
-      const listener = browserListeners.get(callback);
-      if (listener) ipcRenderer.removeListener('zaalis-browser-event', listener);
-      browserListeners.delete(callback);
-    },
-  },
 });
+
+const nativeListeners = new Set();
+ipcRenderer.on('ide-native-event', (_event, data) => { for (const callback of nativeListeners) callback({ data }); });
+contextBridge.exposeInMainWorld('chrome', { webview: {
+  postMessage: message => ipcRenderer.send('ide-native-message', message),
+  addEventListener: (name, callback) => { if (name === 'message' && typeof callback === 'function') nativeListeners.add(callback); },
+  removeEventListener: (name, callback) => { if (name === 'message') nativeListeners.delete(callback); },
+} });
+ipcRenderer.invoke('ide-native-capabilities').then(data => { for (const callback of nativeListeners) callback({ data }); });

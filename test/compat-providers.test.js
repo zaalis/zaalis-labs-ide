@@ -136,6 +136,10 @@ test('keys stay in the zaalis vault and chat goes straight to the endpoint', asy
     child.kill();
     await new Promise((resolve) => child.once('exit', resolve));
     fake.server.close();
-    fs.rmSync(temp, { recursive: true, force: true });
+    // The daemon outlives the server by an instant and still holds its folder.
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { fs.rmSync(temp, { recursive: true, force: true }); break; }
+      catch { await new Promise((resolve) => setTimeout(resolve, 250)); }
+    }
   }
 });

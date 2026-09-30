@@ -81,7 +81,7 @@
     const mobileMenu = button(text('Projets', 'Projects'), 'menu', () => {
         document.body.classList.toggle('ws-mobile-navigation');
         mobileMenu.setAttribute('aria-expanded', String(document.body.classList.contains('ws-mobile-navigation')));
-        syncBrowser();
+        scheduleBrowserSync();
     }, 'ws-button ws-mobile-menu');
     mobileMenu.setAttribute('aria-expanded', 'false');
     modeControl.before(mobileMenu);
@@ -158,14 +158,16 @@
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
         width = event.key === 'Home' ? 300 : event.key === 'End' ? 760 : Math.max(300, Math.min(760, width + (event.key === 'ArrowLeft' ? 24 : -24)));
-        applyWidth(); saveLayout(); syncBrowser();
+        applyWidth(); saveLayout(); scheduleBrowserSync();
     });
     splitter.addEventListener('pointerdown', event => {
         if (event.button !== 0) return;
         event.preventDefault();
         splitter.setPointerCapture(event.pointerId);
         const startX = event.clientX, initial = width;
-        const move = e => { width = Math.max(300, Math.min(760, initial + startX - e.clientX)); applyWidth(); syncBrowser(); };
+        // Dragging fires many pointermove events per second: batch the native
+        // bounds update to one per animation frame instead of one per event.
+        const move = e => { width = Math.max(300, Math.min(760, initial + startX - e.clientX)); applyWidth(); scheduleBrowserSync(); };
         const end = () => { splitter.removeEventListener('pointermove', move); splitter.removeEventListener('pointerup', end); splitter.removeEventListener('pointercancel', end); saveLayout(); };
         splitter.addEventListener('pointermove', move);
         splitter.addEventListener('pointerup', end);
@@ -208,7 +210,7 @@
         if (visiblePanel === 'terminal') { panes.terminal.append(terminal); terminal.classList.remove('hidden'); }
         else if (terminal.parentElement === panes.terminal) { terminalAnchor.after(terminal); terminal.classList.add('hidden'); }
         applyWidth();
-        syncBrowser();
+        scheduleBrowserSync();
     }
     async function renderEditorFilesPane(force = false) {
         if (mode !== 'editor' || (filesPaneRoot === state.projectRoot && panes.files.childElementCount && !force)) return;
@@ -236,7 +238,7 @@
     function safelyNavigate(action) {
         if (isBusy()) { showError(new Error(text('Arrêtez la tâche en cours avant de changer de conversation.', 'Stop the running task before switching conversations.'))); return; }
         saveConversation(activeKind());
-        action();
+        Promise.resolve(action()).catch(showError);
         document.body.classList.remove('ws-mobile-navigation');
         mobileMenu.setAttribute('aria-expanded', 'false');
     }
@@ -280,12 +282,14 @@
             if (expanded.get(key) !== false) {
                 const list = el('div', 'ws-project-chats');
                 for (const { conv, kind } of [...group.items].reverse()) {
-                    const row = button(conv.title || 'Conversation', kind === 'agents' ? 'agents' : 'chat', () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
+                    const wrapper = el('div', 'ws-conversation-row');
+                    const row = button(conv.title || 'Conversation', null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
                     row.dataset.focusKey = `${kind}:${conv.id}`;
                     const selected = kind === activeKind() && conv.id === state[kind === 'chat' ? 'currentConvId' : 'currentAgentConvId'];
                     row.classList.toggle('active', selected);
                     if (selected) row.setAttribute('aria-current', 'page');
-                    list.append(row);
+                    wrapper.append(row, createConversationMenu(kind, conv));
+                    list.append(wrapper);
                 }
                 if (!group.items.length) {
                     if (group.path) list.append(button(text('Ouvrir les fichiers', 'Open files'), null, () => safelyNavigate(() => openProject(group.path, false)), 'ws-empty-project'));
@@ -308,8 +312,9 @@
     const browserAddress = el('input');
     browserAddress.type = 'url'; browserAddress.placeholder = 'https://'; browserAddress.required = true;
     browserAddress.setAttribute('aria-label', text('Adresse du site', 'Website address'));
-    // Outside the native app, this form opens the address in the default browser.
-    const externalOpen = button(text('Ouvrir dans le navigateur du Mac', 'Open in the Mac browser'));
+    // Outside the native app there is no integrated browser: this form opens
+    // the address in the PC's default browser, and says so.
+    const externalOpen = button(text('Ouvrir dans le navigateur du PC', 'Open in the PC browser'));
     externalOpen.type = 'submit';
     browserForm.append(browserAddress, externalOpen);
     browserFallback.append(browserForm);
@@ -317,13 +322,22 @@
     panes.browser.append(browserHost);
     let nativeAvailable = false;
     let lastBrowserCommand = '';
-    const nativeBrowser = window.zaalisNative?.browser || window.chrome?.webview;
-    function nativePost(message) { nativeBrowser?.postMessage(message); }
+    function nativePost(message) { window.chrome?.webview?.postMessage(message); }
+    // Every real overlay that can sit on top of the browser surface shares
+    // one of these markers: a .modal-overlay.active (settings, catalog,
+    // help, confirm, project, quant, remote, image lightbox...) or the
+    // full-screen #auth-overlay (toggled via the .hidden utility class, so
+    // its own computed display already reflects visibility).
+    // The top bar's model loader drops its panel over the page as well.
     function browserOccluded() {
-        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, .modal.active, .settings-overlay.active, #auth-overlay, .catalog-overlay.open, .help-overlay.open, .remote-overlay.open')].some(node => {
+        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel')].some(node => {
             const style = getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && node.getBoundingClientRect().height > 0;
         });
     }
+    // Reads layout and posts native bounds — the actual work. Never call this
+    // directly from an event handler that can fire in bursts (resize, drag,
+    // DOM mutations): go through scheduleBrowserSync so those bursts collapse
+    // into at most one read+post per animation frame.
     function syncBrowser() {
         if (!nativeAvailable) return;
         const rect = browserHost.getBoundingClientRect();
@@ -331,6 +345,11 @@
         const command = visible ? { type: 'browser', action: 'show', bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, devicePixelRatio: window.devicePixelRatio || 1 } : { type: 'browser', action: 'hide' };
         const signature = JSON.stringify(command);
         if (signature !== lastBrowserCommand) { nativePost(command); lastBrowserCommand = signature; }
+    }
+    let browserSyncFrame = 0;
+    function scheduleBrowserSync() {
+        if (browserSyncFrame) return;
+        browserSyncFrame = requestAnimationFrame(() => { browserSyncFrame = 0; syncBrowser(); });
     }
     browserForm.addEventListener('submit', async event => {
         event.preventDefault();
@@ -342,30 +361,34 @@
             if (!response.ok || data.error) throw new Error(data.error || 'Navigateur indisponible');
         } catch (error) { showError(error); }
     });
-    if (nativeBrowser) {
-        nativeBrowser.addEventListener('message', event => {
+    if (window.chrome?.webview) {
+        window.chrome.webview.addEventListener('message', event => {
             let data = event.data;
             if (typeof data === 'string') { try { data = JSON.parse(data); } catch { return; } }
             // The integrated browser asks to be shown (search, AI browsing...):
             // same effect as clicking the globe.
             if (data?.type === 'browserReveal') {
                 if (panel !== 'browser') setPanel('browser');
-                else syncBrowser();
+                else scheduleBrowserSync();
                 return;
             }
             if (data?.type === 'nativeCapabilities' || data?.type === 'browserState') {
                 nativeAvailable = data.browser === true || data.available === true;
                 browserFallback.hidden = nativeAvailable && !data.error;
                 if (data.error) { browserFallback.hidden = false; browserFallback.querySelector('p').textContent = data.error; }
-                syncBrowser();
+                scheduleBrowserSync();
             }
         });
         nativePost({ type: 'browser', action: 'state' });
     }
-    new ResizeObserver(syncBrowser).observe(browserHost);
-    new MutationObserver(syncBrowser).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'], subtree: true });
-    document.addEventListener('visibilitychange', syncBrowser);
-    window.addEventListener('resize', syncBrowser);
+    // Resize, DOM churn (a modal opening, streaming text toggling classes...),
+    // visibility and window-resize can all fire in quick bursts; every source
+    // funnels into the same one-frame-coalesced scheduler so a burst produces
+    // at most one bounds read and one native postMessage, never a flood.
+    new ResizeObserver(scheduleBrowserSync).observe(browserHost);
+    new MutationObserver(scheduleBrowserSync).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'], subtree: true });
+    document.addEventListener('visibilitychange', scheduleBrowserSync);
+    window.addEventListener('resize', scheduleBrowserSync);
 
     function emptyPane(pane, title, description) { pane.replaceChildren(el('div', 'ws-empty-state')); pane.firstChild.append(el('h3', '', title), el('p', '', description)); }
     const pendingArtifacts = new Map();
@@ -488,21 +511,89 @@
         }
     }
     let otherSelection = '';
+    function setOtherSelection(value) { otherSelection = value; renderOtherChat(); }
+    const wsTranslate = (key, fallback) => (TRANSLATIONS[state.language || 'fr'] || {})[key] || fallback;
+
+    // "Continuer cette conversation au centre": load the picked conversation
+    // into the center, and hand the conversation that WAS central back to
+    // "Autre chat" so the user can switch back to it — nothing is dropped,
+    // nothing is duplicated, both sides just trade places.
+    function swapCenterAndOtherConversation(kind, id) {
+        const oldKind = activeKind();
+        const oldConv = currentConversation(oldKind);
+        loadConversation(kind, id);
+        if (oldConv && (oldConv.id !== id || oldKind !== kind)) setOtherSelection(`${oldKind}:${oldConv.id}`);
+        setMode('chat');
+        setPanel(null);
+    }
+
+    // "Nouvelle conversation depuis celle-ci": fork the conversation currently
+    // shown at the center (not the one picked in the "Autre chat" selector).
+    // Only `chat` conversations can be forked — an active agent session is
+    // never handed to the fork, per product rule.
+    function forkCurrentConversation() {
+        if (activeKind() !== 'chat') return;
+        safelyNavigate(() => {
+            const parent = currentConversation('chat');
+            if (!parent) { showError(new Error(text('Envoyez au moins un message avant de créer une suite.', 'Send at least one message before branching a follow-up.'))); return; }
+            const forkedId = `${Date.now()}-fork`;
+            const forked = {
+                id: forkedId,
+                title: wsTranslate('ws-fork-title-prefix', text('Suite — ', 'Follow-up — ')) + (parent.title || text('Conversation', 'Conversation')),
+                date: new Date().toLocaleDateString(),
+                project: parent.project || null,
+                projectPath: parent.projectPath || null,
+                // Clean visible thread: only the fork banner. The parent's
+                // history is not copied as messages, artifacts or agent runs.
+                messages: [{
+                    type: 'system', label: null,
+                    text: wsTranslate('ws-fork-system-message', text('Nouvelle conversation issue de : {title}', 'New conversation branched from: {title}')).replace('{title}', parent.title || ''),
+                }],
+                // Deep copy so the fork never shares mutable references with
+                // the parent — editing one's memory never touches the other's.
+                apiHistory: Array.isArray(parent.apiHistory) ? parent.apiHistory.map(item => ({ ...item })) : [],
+            };
+            state.conversations.push(forked);
+            // Rotation: the forked chat takes the center, the parent moves to
+            // "Autre chat" on the right, and whatever was selected there before
+            // simply falls back into the left conversation list (it was never
+            // removed from state.conversations, so nothing else has to happen).
+            setOtherSelection(`chat:${parent.id}`);
+            loadConversation('chat', forkedId);
+            persistChats('chat');
+        });
+    }
+
     function renderOtherChat() {
         const pane = panes.chat;
         const options = allConversations();
         if (!options.length) { emptyPane(pane, text('Consulter un autre chat', 'Read another chat'), text('Les conversations enregistrées seront accessibles ici.', 'Saved conversations will be available here.')); return; }
         pane.replaceChildren();
+
+        const forkKind = activeKind();
+        const forkParent = currentConversation(forkKind);
+        const forkDisabledReason = forkKind !== 'chat'
+            ? wsTranslate('ws-fork-disabled-agents', text('Le fork n’est disponible que pour les conversations de chat, pas pour les sessions d’agents.', 'Forking is only available for chat conversations, not agent sessions.'))
+            : (!forkParent ? text('Envoyez au moins un message avant de créer une suite.', 'Send at least one message before branching a follow-up.') : '');
+        const forkLabel = wsTranslate('ws-fork-conversation', text('Nouvelle conversation depuis celle-ci', 'New conversation from this one'));
+        const forkBtn = button(forkLabel, 'plus', forkCurrentConversation);
+        if (forkDisabledReason) {
+            forkBtn.disabled = true;
+            forkBtn.title = forkDisabledReason;
+            forkBtn.setAttribute('aria-label', `${forkLabel} — ${forkDisabledReason}`);
+        }
+        pane.append(forkBtn);
+
         const label = el('label', 'ws-other-label', text('Conversation à consulter', 'Conversation to read'));
         const select = el('select', 'ws-select'); select.id = 'ws-other-conversation'; label.htmlFor = select.id;
         for (const { conv, kind } of options) { const opt = el('option', '', `${conv.project || text('Sans projet', 'Without project')} · ${conv.title}`); opt.value = `${kind}:${conv.id}`; select.append(opt); }
         if (options.some(({ conv, kind }) => `${kind}:${conv.id}` === otherSelection)) select.value = otherSelection;
         else select.selectedIndex = options.length - 1;
         otherSelection = select.value;
-        select.addEventListener('change', () => { otherSelection = select.value; renderOtherChat(); });
+        select.addEventListener('change', () => setOtherSelection(select.value));
         pane.append(label, select);
         const { conv, kind } = options.find(({ conv, kind }) => `${kind}:${conv.id}` === otherSelection);
-        pane.append(button(text('Continuer cette conversation au centre', 'Continue this conversation in the main view'), 'chat', () => safelyNavigate(() => { loadConversation(kind, conv.id); setMode('chat'); setPanel(null); })));
+        pane.append(button(text('Continuer cette conversation au centre', 'Continue this conversation in the main view'), 'chat', () => safelyNavigate(() => swapCenterAndOtherConversation(kind, conv.id))));
         const content = el('div', 'ws-other-messages');
         for (const message of conv.messages || []) {
             const item = el('article', `ws-other-message ws-other-${message.type}`);
@@ -602,7 +693,7 @@
     byId('terminal-close-btn').addEventListener('click', () => { if (panel === 'terminal') setPanel(null); });
     document.addEventListener('keydown', event => {
         if (event.ctrlKey && event.shiftKey && event.code === 'KeyE') { event.preventDefault(); setMode(mode === 'chat' ? 'editor' : 'chat'); }
-        if (event.key === 'Escape' && !document.querySelector('.modal-overlay.active')) { document.body.classList.remove('ws-mobile-navigation'); syncBrowser(); }
+        if (event.key === 'Escape' && !document.querySelector('.modal-overlay.active')) { document.body.classList.remove('ws-mobile-navigation'); scheduleBrowserSync(); }
     });
     window.ZaalisWorkspace = { setMode, setPanel, setSidebarView, refresh, renderNavigation, registerArtifacts, onAgentEvent, flushConversation, getCapabilities, refreshCapabilities, syncReasoning, safelyNavigate, get mode() { return mode; } };
     setMode(mode);

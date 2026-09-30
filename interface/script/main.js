@@ -24,8 +24,9 @@ function setSettingsSection(section) {
     const title = $('#settings-active-title');
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
-        title.dataset.i18n = i18nKey;
-        title.textContent = (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr'][i18nKey]) || title.textContent;
+        if (key === 'mcp') title.removeAttribute('data-i18n');
+        else title.dataset.i18n = i18nKey;
+        title.textContent = TRANSLATIONS[state.language || 'fr']?.[i18nKey] || i18nKey;
     }
 }
 
@@ -175,6 +176,7 @@ function populateSettingsControls() {
 $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
     loadCompatProviders();
+    loadChatgptAccount();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -237,6 +239,8 @@ function renderCompatKeyFields() {
     const en = state.language === 'en';
     target.replaceChildren();
     window.compatProviders.forEach(provider => {
+        // Signed in with an account, not a key: it has its own block above.
+        if (provider.oauth) return;
         const row = document.createElement('div');
         row.className = 'form-group';
         row.dataset.compatProvider = provider.id;
@@ -358,6 +362,336 @@ $('#ai-model')?.addEventListener('custom-select-action', event => {
     if (event.detail === 'add') openCompatSettings();
 });
 
+// ----- ChatGPT subscription (Plus / Pro) -----
+// The user types a code on OpenAI's site; the server holds the session and
+// the interface only polls until the code is confirmed.
+const chatgptSub = { flow: null, timer: null };
+function chatgptSubText(fr, en) { return state.language === 'en' ? en : fr; }
+function renderChatgptAccount(account) {
+    const status = $('#chatgpt-sub-status');
+    if (!status) return;
+    const connected = !!(account && account.connected);
+    const details = connected ? [account.email, account.plan && account.plan.toUpperCase()].filter(Boolean).join(' · ') : '';
+    status.textContent = connected
+        ? chatgptSubText('Abonnement ChatGPT actif', 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
+        : chatgptSubText('Non connecté', 'Not connected');
+    status.classList.toggle('connected', connected);
+    $('#chatgpt-sub-connect').hidden = connected || !!chatgptSub.flow;
+    $('#chatgpt-sub-disconnect').hidden = !connected;
+}
+function showChatgptError(message) {
+    const box = $('#chatgpt-sub-error');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+function stopChatgptFlow() {
+    clearTimeout(chatgptSub.timer);
+    chatgptSub.flow = null;
+    chatgptSub.timer = null;
+    const panel = $('#chatgpt-sub-flow');
+    if (panel) panel.hidden = true;
+}
+async function loadChatgptAccount() {
+    if (chatgptSub.flow) return;
+    try {
+        const response = await fetch('/api/chatgpt/status');
+        if (response.ok) renderChatgptAccount(await response.json());
+    } catch {}
+}
+function applyChatgptProviders(data) {
+    renderChatgptAccount(data.account);
+    if (!Array.isArray(data.providers)) return;
+    window.compatProviders = data.providers;
+    renderCompatModelOptions();
+    renderCompatKeyFields();
+}
+async function pollChatgptFlow() {
+    const flow = chatgptSub.flow;
+    if (!flow) return;
+    let data = null;
+    try {
+        const response = await fetch('/api/chatgpt/device-poll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ flowId: flow.flowId })
+        });
+        data = await response.json().catch(() => null);
+    } catch {}
+    if (chatgptSub.flow !== flow) return;
+    if (data && data.status === 'connected') {
+        stopChatgptFlow();
+        applyChatgptProviders(data);
+        showToast('ChatGPT', chatgptSubText('Abonnement connecté. Le fournisseur « ChatGPT (abonnement) » est disponible dans la liste des modèles.', 'Subscription connected. “ChatGPT (abonnement)” is now in the model list.'));
+        return;
+    }
+    if (data && (data.status === 'expired' || data.status === 'error') || Date.now() > flow.expiresAt) {
+        stopChatgptFlow();
+        renderChatgptAccount({ connected: false });
+        showChatgptError((data && data.error) || chatgptSubText('Le code a expiré. Relancez la connexion.', 'The code expired. Start again.'));
+        return;
+    }
+    // Still waiting (or the server was briefly unreachable): ask again.
+    chatgptSub.timer = setTimeout(pollChatgptFlow, flow.interval * 1000);
+}
+async function startChatgptFlow() {
+    const button = $('#chatgpt-sub-connect');
+    showChatgptError('');
+    button.disabled = true;
+    try {
+        const response = await fetch('/api/chatgpt/device-start', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || chatgptSubText('Connexion impossible.', 'Sign-in failed.'));
+        chatgptSub.flow = data;
+        $('#chatgpt-sub-code').textContent = data.userCode;
+        $('#chatgpt-sub-flow').hidden = false;
+        button.hidden = true;
+        chatgptSub.timer = setTimeout(pollChatgptFlow, data.interval * 1000);
+    } catch (error) {
+        showChatgptError(error.message);
+    } finally {
+        button.disabled = false;
+    }
+}
+$('#chatgpt-sub-connect')?.addEventListener('click', startChatgptFlow);
+$('#chatgpt-sub-cancel')?.addEventListener('click', () => { stopChatgptFlow(); loadChatgptAccount(); });
+$('#chatgpt-sub-open')?.addEventListener('click', async () => {
+    const url = chatgptSub.flow?.verificationUrl;
+    if (!url) return;
+    // The default browser is where the user is already signed in to ChatGPT.
+    try {
+        const response = await fetch(`/api/browser-open?external=1&url=${encodeURIComponent(url)}`);
+        if (!response.ok) throw new Error('browser-open');
+    } catch {
+        window.open(url, '_blank', 'noopener,noreferrer');
+    }
+});
+$('#chatgpt-sub-copy')?.addEventListener('click', async event => {
+    const code = chatgptSub.flow?.userCode;
+    if (!code) return;
+    try { await navigator.clipboard.writeText(code); } catch { return; }
+    const button = event.currentTarget;
+    const label = button.textContent;
+    button.textContent = chatgptSubText('Copié', 'Copied');
+    setTimeout(() => { button.textContent = label; }, 1500);
+});
+$('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
+    showChatgptError('');
+    try {
+        const response = await fetch('/api/chatgpt/session', { method: 'DELETE' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || chatgptSubText('Déconnexion impossible.', 'Sign-out failed.'));
+        applyChatgptProviders(data);
+    } catch (error) {
+        showChatgptError(error.message);
+    }
+});
+
+// ----- Opale (notes application) -----
+// The server detects a running or installed Opale; one click stores the
+// user's consent and the agent gets the vault tools on its next run.
+function opaleText(fr, en) { return state.language === 'en' ? en : fr; }
+function renderOpale(status) {
+    const label = $('#opale-status');
+    if (!label) return;
+    const vault = status && status.vault && status.vault.name ? ` — ${opaleText('coffre', 'vault')} « ${status.vault.name} »` : '';
+    let text;
+    if (!status) text = opaleText('État inconnu', 'Unknown');
+    else if (!status.detected) text = opaleText('Opale introuvable sur ce PC', 'Opale not found on this PC');
+    else if (!status.connected) text = opaleText('Lien coupé', 'Link switched off') + (status.running ? vault : '');
+    else if (status.running) text = opaleText('Relié', 'Linked') + vault;
+    else text = opaleText('Relié — Opale est fermé', 'Linked — Opale is closed');
+    label.textContent = text;
+    label.classList.toggle('connected', !!(status && status.connected && status.running));
+    const connect = $('#opale-connect');
+    connect.hidden = !status || !status.detected || status.connected;
+    $('#opale-open').hidden = !(status && status.detected);
+    $('#opale-open').textContent = status && status.running ? opaleText('Ouvrir Opale', 'Open Opale') : opaleText('Lancer Opale', 'Start Opale');
+    $('#opale-disconnect').hidden = !(status && status.detected && status.connected);
+}
+function showOpaleError(message) {
+    const box = $('#opale-error');
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+async function opaleRequest(method, route) {
+    const response = await fetch(route, { method });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || opaleText('Opale ne répond pas.', 'Opale is not responding.'));
+    return data;
+}
+async function loadOpaleStatus() {
+    try { const status = await opaleRequest('GET', '/api/opale/status'); renderOpale(status); return status; }
+    catch { renderOpale(null); return null; }
+}
+async function connectOpale(button) {
+    showOpaleError('');
+    if (button) button.disabled = true;
+    try {
+        const status = await opaleRequest('POST', '/api/opale/connect');
+        renderOpale(status);
+        const vault = status.vault && status.vault.name ? ` « ${status.vault.name} »` : '';
+        showToast('Opale', opaleText(`Coffre${vault} relié. L’assistant peut travailler dans vos notes.`, `Vault${vault} linked. The assistant can work in your notes.`), { icon: '✓' });
+        return true;
+    } catch (error) {
+        showOpaleError(error.message);
+        if (!$('#settings-modal')?.classList.contains('active')) showToast('Opale', error.message, { icon: '!' });
+        return false;
+    } finally {
+        if (button) button.disabled = false;
+    }
+}
+$('#opale-connect')?.addEventListener('click', event => connectOpale(event.currentTarget));
+$('#opale-disconnect')?.addEventListener('click', async () => {
+    showOpaleError('');
+    try { renderOpale(await opaleRequest('DELETE', '/api/opale/connect')); }
+    catch (error) { showOpaleError(error.message); }
+});
+$('#opale-open')?.addEventListener('click', async () => {
+    showOpaleError('');
+    try { renderOpale(await opaleRequest('POST', '/api/opale/open')); }
+    catch (error) { showOpaleError(error.message); }
+});
+
+// ----- Blender: built-in MCP connection, with a guided install -------------
+let blenderStatus = null;
+let blenderInstallPoll = null;
+let blenderStarting = false;   // "Ouvrir Blender" was clicked and Blender is on its way up
+function showBlenderError(message, box = $('#blender-error')) {
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+function renderBlender(status) {
+    blenderStatus = status;
+    const label = $('#blender-status');
+    if (!label) return;
+    const state = status ? status.state : '';
+    const name = status && status.version ? `Blender ${status.version}` : 'Blender';
+    const needsAddon = status && status.addon && !status.addon.installed;
+    label.textContent = !status ? 'État de Blender indisponible'
+        : state === 'missing' ? 'Blender n’est pas installé sur ce PC'
+        : state === 'unsupported' ? `${name} détecté — la version ${status.minVersion} ou plus récente est requise`
+        : state === 'install' ? `${name} détecté — add-on MCP à ${needsAddon ? 'installer' : 'activer'}`
+        : !status.connected ? `${name} est prêt — non activé`
+        : status.reachable ? `Activé — ${name} est ouvert et répond`
+        : blenderStarting ? 'Activé — Blender démarre…'
+        : status.running ? `Activé — Blender est ouvert mais son add-on ne répond pas (port ${status.port})`
+        : 'Activé — Blender est fermé';
+    const ready = state === 'ready';
+    $('#blender-install').hidden = state !== 'install';
+    $('#blender-connect').hidden = !(ready && !status.connected);
+    $('#blender-disconnect').hidden = !(ready && status.connected);
+    $('#blender-open').hidden = !(ready && !status.running && !status.reachable) || blenderStarting;
+    renderBlenderInstall();
+}
+async function blenderRequest(method, route, body) {
+    const response = await fetch(route, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Blender ne répond pas.');
+    return data;
+}
+async function loadBlenderStatus() {
+    try { const status = await blenderRequest('GET', '/api/blender/status'); renderBlender(status); return status; }
+    catch { renderBlender(null); return null; }
+}
+// The install window: two checks the user can act on, what will change in
+// Blender, and an explicit yes. Nothing is installed without all three.
+function renderBlenderInstall() {
+    const modal = $('#blender-install-modal');
+    if (!modal || !modal.classList.contains('active')) return;
+    const status = blenderStatus;
+    const setCheck = (id, state, text) => { const item = $('#' + id); item.dataset.state = state; item.querySelector('.blender-check-text').textContent = text; };
+    const found = !!(status && status.found);
+    const supported = found && status.state !== 'unsupported';
+    setCheck('blender-check-version', !status ? 'pending' : supported ? 'ok' : 'error',
+        !status ? 'Recherche de Blender…'
+            : !found ? 'Blender est introuvable sur ce PC.'
+            : supported ? `Blender ${status.version} détecté (version ${status.minVersion} ou plus récente requise).`
+            : `Blender ${status.version} est trop ancien : la version ${status.minVersion} ou plus récente est requise.`);
+    const closed = supported && !status.running;
+    setCheck('blender-check-closed', !supported ? 'pending' : closed ? 'ok' : 'error',
+        !supported || closed ? 'Blender est fermé.' : 'Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).');
+    const present = !!(status && status.addon && status.addon.installed);
+    $('#blender-step-addon').textContent = present
+        ? `L’add-on officiel « MCP » de Blender Lab est déjà présent (version ${status.addon.version}) : il est conservé tel quel.`
+        : `Installer l’add-on officiel « MCP » de Blender Lab (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`;
+    const busy = modal.dataset.busy === 'true';
+    $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
+    $('#blender-install-confirm').textContent = busy ? 'Installation…' : 'Installer';
+    $('#blender-install-cancel').disabled = busy;
+    $('#blender-consent').disabled = busy;
+}
+function closeBlenderInstall() {
+    clearInterval(blenderInstallPoll);
+    blenderInstallPoll = null;
+    $('#blender-install-modal').classList.remove('active');
+}
+function openBlenderInstall() {
+    const modal = $('#blender-install-modal');
+    modal.dataset.busy = 'false';
+    $('#blender-consent').checked = false;
+    showBlenderError('', $('#blender-install-error'));
+    modal.classList.add('active');
+    renderBlenderInstall();
+    loadBlenderStatus();
+    // Closing Blender is the one thing the user has to do: watch for it.
+    clearInterval(blenderInstallPoll);
+    blenderInstallPoll = setInterval(() => { if (modal.dataset.busy !== 'true') loadBlenderStatus(); }, 2500);
+    $('#blender-consent').focus();
+}
+$('#blender-install')?.addEventListener('click', openBlenderInstall);
+$('#blender-install-cancel')?.addEventListener('click', closeBlenderInstall);
+$('#blender-consent')?.addEventListener('change', renderBlenderInstall);
+$('#blender-install-modal')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && $('#blender-install-modal').dataset.busy !== 'true') { event.stopPropagation(); closeBlenderInstall(); }
+});
+$('#blender-install-confirm')?.addEventListener('click', async () => {
+    const modal = $('#blender-install-modal');
+    const errorBox = $('#blender-install-error');
+    showBlenderError('', errorBox);
+    modal.dataset.busy = 'true';
+    renderBlenderInstall();
+    try {
+        const status = await blenderRequest('POST', '/api/blender/install', { consent: true });
+        modal.dataset.busy = 'false';
+        closeBlenderInstall();
+        renderBlender(status);
+        showBlenderError('');
+        showToast('Blender', 'Blender MCP est installé et activé. Ouvrez Blender : l’assistant peut y travailler.', { icon: '✓', duration: 7000 });
+    } catch (error) {
+        modal.dataset.busy = 'false';
+        showBlenderError(error.message, errorBox);
+        await loadBlenderStatus();
+    }
+});
+$('#blender-connect')?.addEventListener('click', async () => {
+    showBlenderError('');
+    try { renderBlender(await blenderRequest('POST', '/api/blender/connect')); }
+    catch (error) { showBlenderError(error.message); loadBlenderStatus(); }
+});
+$('#blender-disconnect')?.addEventListener('click', async () => {
+    showBlenderError('');
+    try { renderBlender(await blenderRequest('DELETE', '/api/blender/connect')); }
+    catch (error) { showBlenderError(error.message); }
+});
+$('#blender-open')?.addEventListener('click', async event => {
+    showBlenderError('');
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+        await blenderRequest('POST', '/api/blender/open');
+        // Blender takes a few seconds to start and its add-on a moment more.
+        blenderStarting = true;
+        for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            const status = await loadBlenderStatus();
+            if (status && status.reachable) break;
+        }
+    } catch (error) { showBlenderError(error.message); }
+    finally { blenderStarting = false; button.disabled = false; renderBlender(blenderStatus); }
+});
+
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
     API_KEY_FIELDS.forEach(provider => {
@@ -415,23 +749,117 @@ async function refreshSecureSettings() {
 }
 
 let personalMcpServers = [];
+// Brand marks shown next to the servers we have a preset for.
+const MCP_LOGOS = { blender: 'image/blender.png' };
 function mcpId(value) {
     return String(value || 'mcp').toLowerCase().trim().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'mcp';
+}
+function mcpUniqueId(value) {
+    const base = mcpId(value);
+    let id = base;
+    for (let n = 2; personalMcpServers.some(server => server.id === id); n++) id = base.slice(0, 76) + '-' + n;
+    return id;
 }
 function mcpEscape(value) {
     return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]);
 }
+function mcpLogo(server) {
+    const program = String(server.command || '').split(/[\\/]/).pop().toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+    const key = server.id === 'blender' || program === 'blender-mcp' ? 'blender' : '';
+    return key ? `<img class="mcp-server-logo" src="${MCP_LOGOS[key]}" alt="" width="22" height="22">` : '';
+}
+// Arguments are typed on one line; quotes keep an argument with spaces whole.
+function mcpSplitArgs(text) {
+    const args = [];
+    let current = '', quote = '', started = false;
+    for (const ch of String(text || '')) {
+        if (quote) { if (ch === quote) quote = ''; else current += ch; }
+        else if (ch === '"' || ch === "'") { quote = ch; started = true; }
+        else if (/\s/.test(ch)) { if (started || current) args.push(current); current = ''; started = false; }
+        else current += ch;
+    }
+    if (started || current) args.push(current);
+    return args;
+}
+function mcpJoinArgs(args) {
+    return (Array.isArray(args) ? args : []).map(arg => (arg === '' || /[\s"']/.test(arg)) ? (arg.includes('"') ? `'${arg}'` : `"${arg}"`) : arg).join(' ');
+}
+// One NAME=value per line. A saved value is never sent back by the server: its
+// name comes alone, and leaving it empty keeps what is stored.
+function mcpEnvText(env) {
+    return Object.entries(env || {}).map(([name, value]) => `${name}=${value}`).join('\n');
+}
+function mcpParseEnv(text) {
+    const env = {};
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const at = line.indexOf('=');
+        const name = (at < 0 ? line : line.slice(0, at)).trim();
+        if (name) env[name] = at < 0 ? '' : line.slice(at + 1).trim();
+    }
+    return env;
+}
+function mcpIsStdio(seed) {
+    const declared = String(seed.transport || seed.type || '').toLowerCase();
+    return declared ? declared === 'stdio' : !!seed.command && !seed.endpoint && !seed.url;
+}
 function newPersonalMcp(seed = {}) {
+    const stdio = mcpIsStdio(seed);
     return {
-        id: seed.id || mcpId(seed.name || 'mcp-' + (personalMcpServers.length + 1)),
+        id: seed.id || mcpUniqueId(seed.name || 'mcp-' + (personalMcpServers.length + 1)),
         name: seed.name || 'Nouveau MCP',
+        transport: stdio ? 'stdio' : 'http',
         endpoint: seed.endpoint || seed.url || '',
+        command: typeof seed.command === 'string' ? seed.command : '',
+        args: Array.isArray(seed.args) ? seed.args.map(String) : [],
+        env: seed.env && typeof seed.env === 'object' && !Array.isArray(seed.env) ? Object.fromEntries(Object.entries(seed.env).map(([name, value]) => [name, String(value == null ? '' : value)])) : {},
+        envConfigured: Array.isArray(seed.envConfigured) ? seed.envConfigured : [],
         enabled: seed.enabled !== false,
         token: '',
         tokenConfigured: !!seed.tokenConfigured,
         allow: Array.isArray(seed.allow) ? seed.allow : [],
-        deny: Array.isArray(seed.deny) ? seed.deny : []
+        deny: Array.isArray(seed.deny) ? seed.deny : [],
+        test: null
     };
+}
+// What is sent to the server: the settings, without the card's display state.
+function mcpPayload(server) {
+    const common = { id: server.id, name: server.name, enabled: server.enabled, allow: server.allow, deny: server.deny };
+    return server.transport === 'stdio'
+        ? { ...common, transport: 'stdio', command: server.command, args: server.args, env: server.env }
+        : { ...common, transport: 'http', endpoint: server.endpoint, token: server.token };
+}
+function mcpShowTest(card, test) {
+    const status = card.querySelector('.mcp-test-status');
+    if (!status) return;
+    status.dataset.state = test ? test.state : '';
+    status.textContent = test ? test.text : '';
+    status.title = (test && test.detail) || '';
+}
+async function testPersonalMcp(server, card) {
+    const button = card.querySelector('.mcp-test');
+    server.test = { state: 'running', text: 'Connexion au serveur…' };
+    mcpShowTest(card, server.test);
+    if (button) button.disabled = true;
+    try {
+        const res = await fetch('/api/mcp/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server: mcpPayload(server) }) });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Le serveur MCP ne répond pas.');
+        const count = `${data.count} outil${data.count > 1 ? 's' : ''} disponible${data.count > 1 ? 's' : ''}`;
+        const target = data.target;
+        server.test = !target || target.reachable
+            ? { state: 'ok', text: `Connecté — ${count}${target ? ` · ${target.label} détecté sur le port ${target.port}` : ''}` }
+            : { state: 'warn', text: `Serveur prêt (${count}), mais ${target.label} ne répond pas sur le port ${target.port} : ouvrez ${target.label} et démarrez le serveur de son add-on MCP.` };
+        server.test.detail = [data.serverName && `${data.serverName} ${data.serverVersion || ''}`.trim(), data.executable].filter(Boolean).join('\n');
+    } catch (error) {
+        server.test = { state: 'error', text: error.message || 'Le serveur MCP ne répond pas.' };
+    }
+    // The list may have been redrawn while the request was running.
+    const current = document.querySelector(`.mcp-server-card[data-mcp-index="${personalMcpServers.indexOf(server)}"]`);
+    if (current) {
+        mcpShowTest(current, server.test);
+        const currentButton = current.querySelector('.mcp-test');
+        if (currentButton) currentButton.disabled = false;
+    }
 }
 function renderPersonalMcpServers() {
     const list = $('#mcp-personal-list');
@@ -440,80 +868,110 @@ function renderPersonalMcpServers() {
         list.innerHTML = '<div class="settings-status-row"><span>Aucun serveur personnel</span><strong>Prêt à ajouter</strong></div>';
         return;
     }
-    list.innerHTML = personalMcpServers.map((server, index) => `
+    list.innerHTML = personalMcpServers.map((server, index) => {
+        const stdio = server.transport === 'stdio';
+        const connection = stdio
+            ? `<div class="mcp-server-grid">
+                <div class="form-group"><label>Commande</label><input class="mcp-command" value="${mcpEscape(server.command)}" placeholder="blender-mcp, npx, uvx ou chemin complet du programme" spellcheck="false"></div>
+                <div class="form-group"><label>Arguments <span class="form-hint">(optionnel)</span></label><input class="mcp-args" value="${mcpEscape(mcpJoinArgs(server.args))}" placeholder="-y @exemple/serveur-mcp" spellcheck="false"></div>
+            </div>`
+            : `<div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:8000/mcp" spellcheck="false"></div>
+            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>`;
+        const environment = stdio
+            ? `<div class="form-group mcp-env-group"><label>Variables d’environnement <span class="form-hint">(une par ligne, NOM=valeur${server.envConfigured.length ? ' ; une valeur vide conserve celle déjà enregistrée' : ''})</span></label><textarea class="mcp-env" rows="3" spellcheck="false" placeholder="BLENDER_MCP_PORT=9876">${mcpEscape(mcpEnvText(server.env))}</textarea></div>`
+            : '';
+        return `
         <article class="mcp-server-card" data-mcp-index="${index}">
             <div class="form-group settings-row-group">
-                <div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>Serveur Streamable HTTP personnel</p></div>
+                <div class="mcp-server-title">${mcpLogo(server)}<div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>${stdio ? 'Programme local (stdio), lancé par zaalis IDE' : 'Serveur Streamable HTTP personnel'}</p></div></div>
                 <label class="zs-switch"><input class="mcp-enabled" type="checkbox" ${server.enabled ? 'checked' : ''}><span class="zs-slider"></span></label>
             </div>
             <div class="mcp-server-grid">
                 <div class="form-group"><label>Nom</label><input class="mcp-name" value="${mcpEscape(server.name)}" maxlength="120"></div>
-                <div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:9876/mcp" spellcheck="false"></div>
+                <div class="form-group"><label>Connexion</label><div class="mcp-transport" role="group" aria-label="Type de connexion">
+                    <button type="button" data-transport="stdio" aria-pressed="${stdio}">Programme local</button>
+                    <button type="button" data-transport="http" aria-pressed="${!stdio}">URL (HTTP)</button>
+                </div></div>
             </div>
-            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>
-            <details class="form-group"><summary>Règles avancées</summary><div class="mcp-server-grid"><div class="form-group"><label>Autoriser (noms d’outils, séparés par virgules)</label><input class="mcp-allow" value="${mcpEscape(server.allow.join(', '))}"></div><div class="form-group"><label>Refuser</label><input class="mcp-deny" value="${mcpEscape(server.deny.join(', '))}"></div></div></details>
-            <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
-        </article>`).join('');
+            ${connection}
+            <details class="form-group"><summary>Règles avancées</summary><div class="mcp-server-grid"><div class="form-group"><label>Autoriser (noms d’outils, séparés par virgules)</label><input class="mcp-allow" value="${mcpEscape(server.allow.join(', '))}"></div><div class="form-group"><label>Refuser</label><input class="mcp-deny" value="${mcpEscape(server.deny.join(', '))}"></div></div>${environment}</details>
+            <div class="mcp-server-actions">
+                <button class="btn btn-ghost mcp-action-btn mcp-test" type="button">Tester la connexion</button>
+                <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
+                <p class="mcp-test-status" role="status" aria-live="polite"></p>
+            </div>
+        </article>`;
+    }).join('');
     list.querySelectorAll('.mcp-server-card').forEach(card => {
         const index = Number(card.dataset.mcpIndex);
         const server = personalMcpServers[index];
+        const field = selector => card.querySelector(selector);
+        const names = selector => field(selector).value.split(',').map(v => v.trim()).filter(Boolean);
         const sync = () => {
-            server.name = card.querySelector('.mcp-name').value.trim() || 'MCP personnel';
-            server.endpoint = card.querySelector('.mcp-endpoint').value.trim();
-            server.enabled = card.querySelector('.mcp-enabled').checked;
-            server.token = card.querySelector('.mcp-token').value.trim();
-            server.allow = card.querySelector('.mcp-allow').value.split(',').map(v => v.trim()).filter(Boolean);
-            server.deny = card.querySelector('.mcp-deny').value.split(',').map(v => v.trim()).filter(Boolean);
-            server.id = server.id || mcpId(server.name);
+            server.name = field('.mcp-name').value.trim() || 'MCP personnel';
+            server.enabled = field('.mcp-enabled').checked;
+            server.allow = names('.mcp-allow');
+            server.deny = names('.mcp-deny');
+            if (server.transport === 'stdio') {
+                server.command = field('.mcp-command').value.trim();
+                server.args = mcpSplitArgs(field('.mcp-args').value);
+                server.env = mcpParseEnv(field('.mcp-env').value);
+            } else {
+                server.endpoint = field('.mcp-endpoint').value.trim();
+                server.token = field('.mcp-token').value.trim();
+            }
+            server.id = server.id || mcpUniqueId(server.name);
         };
-        card.querySelectorAll('input').forEach(input => input.addEventListener('change', sync));
-        card.querySelector('.mcp-remove').addEventListener('click', () => { personalMcpServers.splice(index, 1); renderPersonalMcpServers(); });
+        card.querySelectorAll('input, textarea').forEach(input => input.addEventListener('change', sync));
+        card.querySelectorAll('.mcp-transport button').forEach(button => button.addEventListener('click', () => {
+            if (button.dataset.transport === server.transport) return;
+            sync();
+            server.transport = button.dataset.transport;
+            server.test = null;
+            renderPersonalMcpServers();
+        }));
+        field('.mcp-test').addEventListener('click', () => { sync(); testPersonalMcp(server, card); });
+        field('.mcp-remove').addEventListener('click', () => { personalMcpServers.splice(index, 1); renderPersonalMcpServers(); });
+        mcpShowTest(card, server.test);
     });
 }
 function parseImportedMcpConfig(value) {
     const raw = value && typeof value === 'object' ? value : {};
     if (Array.isArray(raw)) return raw;
     if (Array.isArray(raw.servers)) return raw.servers;
-    if (raw.mcpServers && typeof raw.mcpServers === 'object') return Object.entries(raw.mcpServers).map(([name, config]) => ({ name, ...(config || {}) }));
+    const named = raw.mcpServers && typeof raw.mcpServers === 'object' ? raw.mcpServers
+        : (raw.servers && typeof raw.servers === 'object' ? raw.servers : null);
+    if (named) return Object.entries(named).map(([name, config]) => ({ name, ...(config || {}) }));
     return [];
 }
 async function loadMcpSettings() {
     try {
-        const [brainRes, mcpRes] = await Promise.all([fetch('/api/brain-mcp'), fetch('/api/mcp')]);
-        if (brainRes.ok) {
-            const brain = await brainRes.json();
-            const status = $('#brain-mcp-status');
-            if (status) status.textContent = brain.enabled ? (brain.configured ? '● Configuré' : '● À compléter') : 'Non configuré';
-            if ($('#brain-mcp-enabled')) $('#brain-mcp-enabled').checked = !!brain.enabled;
-            if ($('#brain-mcp-endpoint')) $('#brain-mcp-endpoint').value = brain.endpoint || '';
-            if ($('#brain-mcp-token')) { $('#brain-mcp-token').value = ''; $('#brain-mcp-token').placeholder = brain.configured ? 'Laisser vide pour conserver le jeton' : 'Coller le jeton à 64 caractères'; }
-        }
+        loadOpaleStatus();
+        loadBlenderStatus();
+        const mcpRes = await fetch('/api/mcp');
         if (mcpRes.ok) {
             const data = await mcpRes.json();
-            personalMcpServers = Array.isArray(data.servers) ? data.servers.map(newPersonalMcp) : [];
+            personalMcpServers = [];
+            for (const server of (Array.isArray(data.servers) ? data.servers : [])) personalMcpServers.push(newPersonalMcp(server));
             renderPersonalMcpServers();
         }
     } catch {}
 }
 
 $('#mcp-add-personal').addEventListener('click', () => { personalMcpServers.push(newPersonalMcp()); renderPersonalMcpServers(); });
-$('#mcp-add-blender').addEventListener('click', () => {
-    personalMcpServers.push(newPersonalMcp({ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp', enabled: false }));
-    renderPersonalMcpServers();
-});
 $('#mcp-import-config').addEventListener('click', () => $('#mcp-config-file').click());
 $('#mcp-config-file').addEventListener('change', async event => {
     const file = event.target.files && event.target.files[0];
     if (!file) return;
     try {
         const imported = parseImportedMcpConfig(JSON.parse(await file.text()));
-        const usable = imported.filter(item => item && (item.url || item.endpoint));
-        if (!usable.length) throw new Error('Aucun serveur HTTP importable');
-        personalMcpServers.push(...usable.map(newPersonalMcp));
+        const usable = imported.filter(item => item && typeof item === 'object' && (item.url || item.endpoint || item.command));
+        if (!usable.length) throw new Error('Aucun serveur importable');
+        for (const item of usable) personalMcpServers.push(newPersonalMcp({ ...item, id: mcpUniqueId(item.id || item.name) }));
         renderPersonalMcpServers();
-        toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}.`);
+        toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}. Vérifiez-les, puis enregistrez.`);
     } catch {
-        toast('Ce fichier ne contient pas de serveurs MCP HTTP importables. Les configurations stdio (command/args) doivent être exposées via une URL MCP.', { icon: '!' });
+        toast('Ce fichier ne contient aucun serveur MCP importable (une URL ou une commande par serveur).', { icon: '!' });
     } finally { event.target.value = ''; }
 });
 
@@ -572,10 +1030,20 @@ $('#save-btn').addEventListener('click', async () => {
     const originalText = btn.textContent;
     btn.disabled = true;
     try {
-        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers }) });
-        if (!mcpRes.ok) throw new Error('MCP');
-        const brainRes = await fetch('/api/brain-mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: !!$('#brain-mcp-enabled')?.checked, endpoint: ($('#brain-mcp-endpoint')?.value || '').trim(), token: ($('#brain-mcp-token')?.value || '').trim() }) });
-        if (!brainRes.ok) throw new Error('MCP');
+        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers.map(mcpPayload) }) });
+        if (!mcpRes.ok) {
+            const problem = await mcpRes.json().catch(() => ({}));
+            toast(problem.error || 'Les serveurs MCP n’ont pas pu être enregistrés.', { icon: '!' });
+            throw new Error('MCP');
+        }
+        // Secrets are stored now: the cards go back to showing names only.
+        const savedMcp = await mcpRes.json().catch(() => null);
+        if (savedMcp && Array.isArray(savedMcp.servers)) {
+            const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
+            personalMcpServers = [];
+            for (const server of savedMcp.servers) personalMcpServers.push({ ...newPersonalMcp(server), test: tests.get(server.id) || null });
+            renderPersonalMcpServers();
+        }
         await syncSharedHardwareConfig();
         if (Object.keys(keys).length) {
             const res = await fetch('/api/keys', {
@@ -1335,7 +1803,7 @@ async function checkForUpdates() {
                     // Sans ce message, la mise a jour se represente sans fin et
                     // semble echouer alors qu'elle a reussi.
                     if (statusText) statusText.textContent = data.tagMismatch
-                        ? `Déjà installé. Le DMG publié sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un DMG compilé en ${String(data.tag_name || '').replace(/^v/i, '')}.`
+                        ? `Deja installe. Le fichier publie sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un zaalis-setup.exe compile en ${String(data.tag_name || '').replace(/^v/i, '')}.`
                         : "Pret a telecharger";
                     if (progressBar) progressBar.style.width = '0%';
                     if (stepDownload) {
@@ -1431,13 +1899,15 @@ if (confirmUpdateBtn) {
                         progressBar.style.width = '100%';
                         // Sert de drapeau "deja telecharge" : le serveur retient
                         // le vrai chemin, l'UI n'a pas a le connaitre.
-                        downloadedUpdatePath = pData.dest || data.dest || 'zaalis-update.dmg';
+                        downloadedUpdatePath = pData.dest || data.dest || 'zaalis-update.exe';
                         if (stepDownload) {
                             stepDownload.classList.remove('active');
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. L'IDE va se fermer, installer la mise a jour et redemarrer.";
+                        statusText.textContent = "Telechargement termine. L'IDE va se fermer, s'installer et redemarrer tout seul.";
+                        // Un seul bouton orange : l'installation se fait en silence
+                        // (aucun assistant) puis l'IDE se relance sur la nouvelle version.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
                         confirmUpdateBtn.classList.remove('btn-primary');
@@ -1446,23 +1916,19 @@ if (confirmUpdateBtn) {
                         confirmUpdateBtn.onclick = async () => {
                             confirmUpdateBtn.disabled = true;
                             confirmUpdateBtn.textContent = "Installation...";
-                            statusText.textContent = "Preparation de la mise a jour... l'IDE va redemarrer automatiquement.";
-                            if (waiting) waiting.classList.remove('hidden');
+                            statusText.textContent = "Remplacement des fichiers en cours... l'IDE redemarre dans quelques secondes.";
                             try {
                                 const iRes = await fetch('/api/update/install', { method: 'POST' });
-                                if (!iRes.ok) {
-                                    const iData = await iRes.json().catch(() => ({}));
-                                    throw new Error(iData.error || 'HTTP ' + iRes.status);
-                                }
-                                statusText.textContent = "Installation en cours. L'IDE va se fermer puis redemarrer.";
+                                // Le serveur se coupe juste apres avoir repondu : une
+                                // reponse manquante n'est pas une erreur ici.
+                                if (iRes.ok) return;
+                                const iData = await iRes.json().catch(() => ({}));
+                                throw new Error(iData.error || 'HTTP ' + iRes.status);
                             } catch (err) {
-                                // Le serveur peut disparaitre juste apres avoir confie
-                                // l'installation au processus detache : ce n'est pas un echec.
-                                if (err && err.name === 'TypeError') return;
+                                if (err && err.name === 'TypeError') return; // serveur deja arrete
                                 statusText.textContent = "Erreur: " + err.message;
                                 confirmUpdateBtn.disabled = false;
                                 confirmUpdateBtn.textContent = "Installer et redemarrer";
-                                if (waiting) waiting.classList.add('hidden');
                             }
                         };
                     } else if (pData.progress < 0) {

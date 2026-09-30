@@ -7,6 +7,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const mcpRegistry = require('./mcp-registry');
 // Noms de méthodes et étiquettes d'événements générés depuis
 // rust/crates/zaalis-protocol.  Les retaper ici serait le bug silencieux
 // classique : le cœur émet un événement que personne ne rend, sans erreur.
@@ -23,10 +24,74 @@ function findAgentd(baseDir) {
     // remain convenient fallbacks.
     path.join(baseDir, exe),
     path.join(baseDir, 'native', 'dist', exe),
+    path.join(baseDir, 'native', process.platform === 'darwin' ? `dist-macos-${process.arch}-server` : 'dist-linux-server', exe),
     path.join(baseDir, 'rust', 'target', 'release', exe),
     path.join(baseDir, 'rust', 'target', 'debug', exe),
   ].filter(Boolean);
   return candidates.find((candidate) => fs.existsSync(candidate)) || '';
+}
+
+// A connected MCP server can come with a Skill: the one line that tells the
+// model the server exists, and the instructions it loads on demand. They are
+// written where the core reads user Skills. Only folders this bridge created
+// (marked below) are ever replaced or removed.
+const MANAGED_SKILL_MARKER = '.zaalis-managed';
+
+// Tool calls to a local program (a render, a long script) outlast the 15 s the
+// runtime grants by default; this is the most its configuration accepts.
+const STDIO_MCP_TIMEOUT_MS = 120000;
+
+// One `servers` entry of the runtime's mcp.json, or null when the server
+// cannot be started. Secrets never enter the file: the token and the values of
+// a stdio server's environment travel in `extensionEnv` and the file only
+// names the variable to read. The runtime rejects the whole file on a single
+// bad entry, so a program that is missing or cannot be resolved is left out.
+function runtimeMcpEntry(source, index, extensionEnv) {
+  const common = {
+    ...(source.name ? { name: String(source.name) } : {}),
+    allow: Array.isArray(source.allow) ? source.allow : [], deny: Array.isArray(source.deny) ? source.deny : [],
+  };
+  if (mcpRegistry.transportOf(source) !== 'stdio') {
+    if (!mcpRegistry.parseEndpoint(source.endpoint)) return null;
+    const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
+    if (source.token) extensionEnv[tokenName] = String(source.token);
+    // A server whose calls run long (a render) says so; the runtime grants 15 s otherwise.
+    const timeout = Number(source.timeoutMs) > 0 ? { timeout_ms: Math.min(Math.round(Number(source.timeoutMs)), 120000) } : {};
+    return { transport: 'streamable_http', endpoint: String(source.endpoint || ''), ...(source.token ? { oauth_env: tokenName } : {}), ...timeout, ...common };
+  }
+  let executable = mcpRegistry.resolveCommand(source.command);
+  try { executable = executable && fs.realpathSync.native(executable); } catch { executable = ''; }
+  const args = Array.isArray(source.args) ? source.args.map(String) : [];
+  if (!executable || args.length > 64) return null;
+  const envFrom = {};
+  for (const [position, [name, value]] of Object.entries(source.env && typeof source.env === 'object' ? source.env : {}).entries()) {
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(name) || position >= 64) continue;
+    const holder = `ZAALIS_MCP_ENV_${index}_${position}`;
+    extensionEnv[holder] = String(value == null ? '' : value);
+    envFrom[name] = holder;
+  }
+  return { transport: 'stdio', executable, args, env_from: envFrom, timeout_ms: STDIO_MCP_TIMEOUT_MS, ...common };
+}
+function syncManagedSkills(configDir, skills) {
+  const root = path.join(configDir, 'skills');
+  const wanted = new Map();
+  for (const skill of skills || []) {
+    const name = String(skill && skill.name || '');
+    if (/^[A-Za-z0-9_.-]{1,80}$/.test(name) && typeof skill.instructions === 'string') wanted.set(name, skill.instructions);
+  }
+  let existing = [];
+  try { existing = fs.readdirSync(root, { withFileTypes: true }).filter((entry) => entry.isDirectory()).map((entry) => entry.name); } catch {}
+  for (const name of existing) {
+    const dir = path.join(root, name);
+    if (!wanted.has(name) && fs.existsSync(path.join(dir, MANAGED_SKILL_MARKER))) fs.rmSync(dir, { recursive: true, force: true });
+  }
+  for (const [name, instructions] of wanted) {
+    const dir = path.join(root, name);
+    if (fs.existsSync(dir) && !fs.existsSync(path.join(dir, MANAGED_SKILL_MARKER))) continue;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, MANAGED_SKILL_MARKER), '');
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), instructions.replace(/\r\n?/g, '\n'), 'utf8');
+  }
 }
 
 class AgentdClient {
@@ -39,6 +104,8 @@ class AgentdClient {
     // Integrated browser (desktop only): endpoint of the Rust `browser` tool.
     if (runtimeConfig && runtimeConfig.browserEndpoint) env.ZAALIS_BROWSER_ENDPOINT = String(runtimeConfig.browserEndpoint);
     if (runtimeConfig && runtimeConfig.browserToken) env.ZAALIS_BROWSER_TOOL_TOKEN = String(runtimeConfig.browserToken);
+    if (runtimeConfig && runtimeConfig.workspaceEndpoint) env.ZAALIS_WORKSPACE_ENDPOINT = String(runtimeConfig.workspaceEndpoint);
+    if (runtimeConfig && runtimeConfig.workspaceToken) env.ZAALIS_WORKSPACE_TOKEN = String(runtimeConfig.workspaceToken);
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -158,20 +225,18 @@ class RustAgentBridge {
     fs.mkdirSync(configDir, { recursive: true });
     const extensionEnv = {};
     const servers = {};
+    const skills = [];
     for (const [index, source] of (mcpServers || []).filter((server) => server && server.enabled !== false).slice(0, 32).entries()) {
       const id = String(source.id || '').trim();
       if (!/^[A-Za-z0-9_.:-]{1,128}$/.test(id)) continue;
-      const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
-      if (source.token) extensionEnv[tokenName] = String(source.token);
-      servers[id] = {
-        transport: 'streamable_http', endpoint: String(source.endpoint || ''),
-        ...(source.name ? { name: String(source.name) } : {}),
-        ...(source.token ? { oauth_env: tokenName } : {}),
-        allow: Array.isArray(source.allow) ? source.allow : [], deny: Array.isArray(source.deny) ? source.deny : [],
-      };
+      const entry = runtimeMcpEntry(source, index, extensionEnv);
+      if (!entry) continue;
+      if (source.skill) skills.push(source.skill);
+      servers[id] = entry;
     }
     const target = path.join(configDir, 'mcp.json');
     fs.writeFileSync(target, JSON.stringify({ servers }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    syncManagedSkills(configDir, skills);
     const client = new AgentdClient({ executable: this.executable, dataDir: userDir, configDir, keys, extensionEnv, runtimeConfig });
     this.clients.set(userId, { fingerprint, client });
     return client;
@@ -198,6 +263,14 @@ class RustAgentBridge {
         // the conversation already owns them. The daemon still restores its
         // durable agent tree and model history from the same session id.
         made = await client.request('session.resume', { session_id: String(options.sessionId), from_seq: Number.MAX_SAFE_INTEGER });
+        // A moved project or a chat attached to a different folder must never
+        // revive a daemon session with the old filesystem sandbox.
+        const canonical = value => {
+          let resolved;
+          try { resolved = fs.realpathSync(value); } catch { resolved = path.resolve(value || ''); }
+          return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+        };
+        if (!made.workspace || canonical(made.workspace) !== canonical(options.root)) made = null;
       } catch (error) {
         if (!/introuvable|not found|fermée|closed/i.test(String(error.message || ''))) throw error;
       }
@@ -309,4 +382,4 @@ class RustAgentBridge {
   }
 }
 
-module.exports = { AgentdClient, RustAgentBridge, findAgentd };
+module.exports = { AgentdClient, RustAgentBridge, findAgentd, syncManagedSkills, runtimeMcpEntry };

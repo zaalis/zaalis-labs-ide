@@ -4352,6 +4352,7 @@ name = "zaalis-tools"
 version = "1.0.15"
 dependencies = [
  "async-trait",
+ "base64",
  "serde",
  "serde_json",
  "tempfile",

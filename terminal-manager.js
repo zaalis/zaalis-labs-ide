@@ -185,7 +185,7 @@ class TerminalManager {
       session.events.on('data', onData);
     });
     const raw = session.buffer.slice(before);
-    const match = raw.match(resultPattern);
+    const match = raw.match(new RegExp(`${marker}:(\\d+)`));
     const output = raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024);
     return { session, output: sanitize(output), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
   }

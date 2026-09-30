@@ -48,7 +48,11 @@ input,select,textarea{font-family:inherit;color:inherit;}
    pushed past the window edge as soon as the window gets narrow. */
 .topbar-left,.topbar-center,.topbar-right{display:flex;align-items:center;gap:12px;min-width:0;}
 .topbar-left,.topbar-right{flex-shrink:0;}
-.topbar-center{flex:1 1 auto;justify-content:center;overflow:hidden;}
+/* No overflow clipping here: the model loader's panel hangs below the bar and
+   would be cut off (the button then seemed to do nothing). The loader itself
+   shrinks instead, its label ending in an ellipsis. */
+.topbar-center{flex:1 1 auto;justify-content:center;}
+.topbar-center .model-loader,.topbar-center .model-loader-btn{min-width:0;}
 .logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;letter-spacing:.3px;}
 .logo svg{color:var(--accent);}
 .topbar-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius);color:var(--text-2);transition:all .15s;}
@@ -751,6 +755,13 @@ input,select,textarea{font-family:inherit;color:inherit;}
     color: var(--red) !important;
     background: rgba(239, 68, 68, 0.12) !important;
     animation: voice-pulse 1.5s infinite;
+}
+/* Recording is over: the audio is being turned into text. */
+.voice-btn.transcribing {
+    color: var(--accent) !important;
+    background: rgba(99, 102, 241, 0.14) !important;
+    animation: voice-pulse 1s infinite;
+    cursor: progress;
 }
 @keyframes voice-pulse {
     0%, 100% { opacity: 1; }

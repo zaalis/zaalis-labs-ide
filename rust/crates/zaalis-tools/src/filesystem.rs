@@ -10,6 +10,26 @@ use zaalis_fs::{
 };
 use zaalis_guard::AccessRequest;
 
+/// Image files `read` hands to the model as pictures instead of refusing them
+/// as binary: the formats every vision API accepts.
+const IMAGE_TYPES: [(&str, &str); 5] = [
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+const MAX_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_IMAGES_READ: usize = 4;
+
+fn image_type(path: &std::path::Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    IMAGE_TYPES
+        .iter()
+        .find(|(known, _)| *known == extension)
+        .map(|(_, mime)| *mime)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FilesystemKind {
     Read,
@@ -161,7 +181,7 @@ impl Tool for FilesystemTool {
     fn definition(&self) -> ToolDefinition {
         let (description, input_schema) = match self.kind {
             FilesystemKind::Read => (
-                "Lire un ou plusieurs fichiers du workspace avec numéros de ligne.",
+                "Lire un ou plusieurs fichiers du workspace avec numéros de ligne. Une image (png, jpg, gif, webp ; 8 Mo au plus) est montrée au modèle comme image.",
                 schema(
                     json!({
                         "path": {"type":"string"},
@@ -313,8 +333,31 @@ impl Tool for FilesystemTool {
             FilesystemKind::Read => {
                 let args: ReadInput = parse(&input)?;
                 let mut reads = Vec::new();
+                let mut pictures = Vec::new();
+                let mut images = Vec::new();
                 for input_path in args.paths()? {
                     let path = context.workspace.resolve(input_path)?;
+                    if let Some(mime) = image_type(path.absolute()) {
+                        let size = std::fs::metadata(path.absolute())?.len();
+                        if size > MAX_IMAGE_BYTES {
+                            return Err(ZaalisError::invalid(format!(
+                                "image trop lourde pour être montrée au modèle ({} Mo, 8 Mo au plus) : {}",
+                                size / (1024 * 1024),
+                                path.relative()
+                            )));
+                        }
+                        if images.len() >= MAX_IMAGES_READ {
+                            return Err(ZaalisError::invalid("4 images au plus par lecture"));
+                        }
+                        let data = base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            std::fs::read(path.absolute())?,
+                        );
+                        pictures
+                            .push(json!({ "path": path.relative(), "mime": mime, "bytes": size }));
+                        images.push(json!({ "mime": mime, "data": data }));
+                        continue;
+                    }
                     reads.push(read_file(
                         &path,
                         &ReadOptions {
@@ -323,10 +366,23 @@ impl Tool for FilesystemTool {
                         },
                     )?);
                 }
-                (
-                    format!("{} fichier(s) lu(s)", reads.len()),
-                    serde_json::to_value(reads)?,
-                )
+                if images.is_empty() {
+                    (
+                        format!("{} fichier(s) lu(s)", reads.len()),
+                        serde_json::to_value(reads)?,
+                    )
+                } else {
+                    // `images` is detached by the runtime and sent to the
+                    // model as pictures; the rest stays the tool's text.
+                    (
+                        format!(
+                            "{} fichier(s) lu(s), dont {} image(s)",
+                            reads.len() + pictures.len(),
+                            pictures.len()
+                        ),
+                        json!({ "files": reads, "image_files": pictures, "images": images }),
+                    )
+                }
             }
             FilesystemKind::List => {
                 let args: ListInput = parse(&input)?;

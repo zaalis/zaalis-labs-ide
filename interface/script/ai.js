@@ -158,28 +158,35 @@ syncComputerControlUI();
 
 // Approval modal
 let pendingApproval = null;
+const approvalQueue = [];
+
+function showNextApproval() {
+    if (pendingApproval || !approvalQueue.length) return;
+    pendingApproval = approvalQueue.shift();
+    $('#approval-desc').textContent = pendingApproval.description;
+    $('#approval-content').textContent = pendingApproval.content;
+    $('#approval-modal').classList.add('active');
+    $('#approve-action').focus();
+}
 
 function requestApproval(description, content) {
     return new Promise((resolve) => {
-        $('#approval-desc').textContent = description;
-        $('#approval-content').textContent = content;
-        $('#approval-modal').classList.add('active');
-        pendingApproval = resolve;
+        approvalQueue.push({ description, content, resolve });
+        showNextApproval();
     });
 }
 
-$('#approve-action').addEventListener('click', () => {
+function answerApproval(allow) {
+    const current = pendingApproval;
+    pendingApproval = null;
     $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(true); pendingApproval = null; }
-});
-$('#deny-action').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
-$('#close-approval').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
+    if (current) current.resolve(allow);
+    showNextApproval();
+}
+
+$('#approve-action').addEventListener('click', () => answerApproval(true));
+$('#deny-action').addEventListener('click', () => answerApproval(false));
+$('#close-approval').addEventListener('click', () => answerApproval(false));
 
 // ==========================================================
 //  AI PANEL TABS
@@ -469,7 +476,7 @@ function addMsg(container, type, label, text, isHTML = false) {
     const div = document.createElement('div');
     div.className = 'msg msg-' + type;
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -493,7 +500,7 @@ function addTypingMsg(container, label) {
     const div = document.createElement('div');
     div.className = 'msg msg-ai';
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -514,6 +521,7 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         body: JSON.stringify({
             model, submodel, message, systemPrompt,
             root: state.projectRoot,
+            terminalSessionId: terminalSessionId || undefined,
             config: safeConfig,
             language: state.language || 'fr',
             reasoningLevel: state.reasoningLevel,
@@ -956,6 +964,7 @@ async function sendChat(input) {
                 window.ZaalisWorkspace?.onAgentEvent(event);
             }
         });
+        if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, activeConversation);
         stopThinking(body);
         if (data.error) {
             if (liveActivity) liveActivity.fail(data.error);
@@ -1317,6 +1326,19 @@ function createLiveAgentActivity(container) {
                 toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
                 setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
                 followScroll(container);
+                return;
+            }
+            if (event.type === 'permission_required') {
+                const label = lang === 'en' ? 'Waiting for your approval' : 'En attente de votre autorisation';
+                setStatus(label);
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(label)} : ${escapeHTML(event.summary || event.target || '')}</div>`);
+                followScroll(container);
+                return;
+            }
+            if (event.type === 'rust_event' && event.event?.type === 'permission_resolved') {
+                setStatus(event.event.allowed
+                    ? (lang === 'en' ? 'Approved; running command' : 'Autorisé ; exécution en cours')
+                    : (lang === 'en' ? 'Action denied' : 'Action refusée'));
                 return;
             }
             if (event.type === 'tool_done') {
@@ -1932,6 +1954,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
             }
         }
     });
+    if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, state.agentConversations.find(conv => conv.id === state.currentAgentConvId));
     stopThinking(body);
     if (data.error) {
         if (activity) activity.fail(data.error);
@@ -2233,6 +2256,7 @@ function projectLabel() {
 const PERSISTED_MSG_CLASSES = [
     'deep-search-host',
     'has-image',
+    'live-agent-body',
     'max-reasoning-text'
 ];
 function persistedBodyClasses(body) {
@@ -2243,7 +2267,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
 }
 
 function saveConversation(kind = 'chat') {
@@ -2260,6 +2284,7 @@ function saveConversation(kind = 'chat') {
         };
         const classes = persistedBodyClasses(body);
         if (classes.length) entry.bodyClasses = classes;
+        if (body?.classList.contains('live-agent-body')) entry.activity = true;
         if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
@@ -2379,21 +2404,34 @@ function mergeConversations(local, server, curId) {
 }
 
 // Restore a saved conversation into its view (chat or agents).
-function loadConversation(kind, id) {
+async function loadConversation(kind, id) {
     const cfg = HIST[kind];
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
-    state[cfg.current] = id;
 
     // Link the chat to its project: re-open the folder it belongs to (or drop the
     // project for a classic "no project" chat) so the AI keeps the right context.
-    applyConversationProject(conv);
+    if (await applyConversationProject(conv) === false) return;
+    state[cfg.current] = id;
 
     const container = $(cfg.container);
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
         const hasRichHtml = m.html && m.type !== 'user';
         const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        if (m.activity || body.querySelector('.live-agent-activity')) {
+            body.classList.add('live-agent-body');
+            body.closest('.msg').classList.add('live-agent-msg');
+            body.querySelectorAll('details').forEach(detail => detail.removeAttribute('open'));
+        } else if (!hasRichHtml && m.type === 'ai' && !m.image) {
+            // Older histories kept only text. Restore formatting without treating
+            // user content as HTML, and fold old flattened tool transcripts.
+            if (/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')) {
+                body.innerHTML = `<details class="ghost-tool-group"><summary>${state.language === 'en' ? 'Previous tool activity' : 'Activité des outils sauvegardée'}</summary><pre class="ghost-tool-pre">${escapeHTML(m.text || '')}</pre></details>`;
+                body.classList.add('live-agent-body');
+                body.closest('.msg').classList.add('live-agent-msg');
+            } else body.innerHTML = formatAIResponse(m.text || '');
+        }
         (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
             if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
         });
@@ -2408,7 +2446,7 @@ function loadConversation(kind, id) {
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
         state.chatHistory = Array.isArray(conv.apiHistory) ? conv.apiHistory.map(item => ({ ...item })) : (conv.messages || [])
-            .filter(m => m.type === 'user' || m.type === 'ai')
+            .filter(m => m.type === 'user' || (m.type === 'ai' && !m.activity && !/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')))
             .map(m => ({
                 role: m.type === 'user' ? 'user' : 'assistant',
                 content: m.image
@@ -2448,17 +2486,33 @@ function recentPathByName(name) {
 }
 
 // Switch the open project so a loaded/continued chat matches its folder.
-function applyConversationProject(conv) {
-    if (!conv) return;
-    if (!conv.project) {                       // classic chat -> no project
+async function applyConversationProject(conv) {
+    if (!conv) return false;
+    if (!conv.project && !conv.projectPath) {   // classic chat -> no project
         if (state.projectRoot && typeof clearProject === 'function') {
             clearProject({ preserveConversation: true });
         }
-        return;
+        return true;
     }
     const target = conv.projectPath || recentPathByName(conv.project);
     if (target && target !== state.projectRoot && typeof openProject === 'function') {
-        openProject(target, false, { preserveConversation: true });
+        return await openProject(target, false, { preserveConversation: true });
+    }
+    return !!target;
+}
+
+async function applyWorkspaceSelection(selection, conv) {
+    if (!selection?.root) return;
+    const opened = await openProject(selection.root, true, { preserveConversation: true });
+    if (!opened) return;
+    if (conv) {
+        conv.projectPath = selection.root;
+        conv.project = projectLabel();
+        conv.sessionId = null; // next turn creates a sandbox for the new folder
+    }
+    if (selection.terminalId) {
+        await attachIntegratedTerminal(selection.terminalId);
+        window.ZaalisWorkspace?.setPanel('terminal');
     }
 }
 
@@ -2553,6 +2607,10 @@ function newConversation(kind = 'chat') {
 async function deleteConversation(kind, id) {
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
+    if (state[cfg.current] === id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+        toast(lang === 'en' ? 'Stop the running task before deleting this chat.' : 'Arrêtez la tâche en cours avant de supprimer ce chat.');
+        return;
+    }
     const conv = state[cfg.store].find(c => c.id === id);
     const title = conv ? conv.title : '';
     const ok = await customConfirm(`"${title}"`, {
@@ -2567,6 +2625,7 @@ async function deleteConversation(kind, id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
+        if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
     }
     persistChats(kind);
     renderHistory();
@@ -2745,6 +2804,7 @@ function isVisionCompatible(model, submodel) {
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
         default:
             // OpenAI-compatible gateways: same rule as compat-providers.js.
+            if (model === 'compat:chatgpt') return true;
             return String(model || '').startsWith('compat:')
                 && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }
@@ -3004,94 +3064,171 @@ function initReasoningSlider() {
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
+// The microphone is recorded here and transcribed on this PC by the local
+// server (/api/stt, whisper.cpp). The browser's own SpeechRecognition cannot be
+// used: the embedded WebView exposes the API but has no speech service behind
+// it, so a click on the microphone used to fail without a word.
+const DICTATION_SAMPLE_RATE = 16000;
+const DICTATION_MAX_MS = 3 * 60 * 1000;
+// The speech model is downloaded once; the user is told a single time that
+// Windows' recognizer stands in until it is there.
+let dictationModelNoticeShown = false;
+
+// Any recorded audio as the 16 kHz mono 16-bit WAV the server expects.
+async function dictationWav(blob) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const decoder = new AudioCtx();
+    let decoded;
+    try { decoded = await decoder.decodeAudioData(await blob.arrayBuffer()); }
+    finally { decoder.close().catch(() => {}); }
+    const frames = Math.max(1, Math.ceil(decoded.duration * DICTATION_SAMPLE_RATE));
+    const offline = new OfflineAudioContext(1, frames, DICTATION_SAMPLE_RATE);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const samples = (await offline.startRendering()).getChannelData(0);
+    const wav = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const ascii = (offset, text) => { for (let i = 0; i < text.length; i++) wav.setUint8(offset + i, text.charCodeAt(i)); };
+    ascii(0, 'RIFF'); wav.setUint32(4, 36 + samples.length * 2, true); ascii(8, 'WAVE');
+    ascii(12, 'fmt '); wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 1, true);
+    wav.setUint32(24, DICTATION_SAMPLE_RATE, true); wav.setUint32(28, DICTATION_SAMPLE_RATE * 2, true);
+    wav.setUint16(32, 2, true); wav.setUint16(34, 16, true);
+    ascii(36, 'data'); wav.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        wav.setInt16(44 + i * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+    }
+    return new Blob([wav.buffer], { type: 'audio/wav' });
+}
+function dictationBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(',') + 1));
+        reader.onerror = () => reject(reader.error || new Error('read'));
+        reader.readAsDataURL(blob);
+    });
+}
+
 function setupVoiceRecognition(btnId, textareaId) {
     const btn = $('#' + btnId);
     const textarea = $('#' + textareaId);
     if (!btn || !textarea) return;
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    const supported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder
+        && (window.AudioContext || window.webkitAudioContext) && window.OfflineAudioContext);
+    if (!supported) {
         btn.style.display = 'none';
         return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
+    const say = (fr, en) => (state.language === 'en' ? en : fr);
+    const notify = message => { if (typeof showToast === 'function') showToast('', message, { icon: '!', duration: 6000 }); };
 
-    // Track state: 'inactive' | 'starting' | 'active' | 'stopping'
-    let engineState = 'inactive';
-    let baseText = '';
+    // 'idle' | 'starting' | 'recording' | 'transcribing'
+    let phase = 'idle';
+    let recorder = null;
+    let stream = null;
+    let chunks = [];
+    let limit = null;
 
-    recognition.onstart = () => {
-        engineState = 'active';
-        btn.classList.add('recording');
-        textarea.classList.add('recording-text');
-        btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
-    };
-
-    recognition.onresult = (event) => {
-        let sessionTranscript = '';
-        for (let i = 0; i < event.results.length; ++i) {
-            sessionTranscript += event.results[i][0].transcript;
-        }
-        sessionTranscript = sessionTranscript.trim();
-        
-        const separator = (baseText && !baseText.endsWith(' ')) ? ' ' : '';
-        const newText = baseText ? `${baseText}${separator}${sessionTranscript}` : sessionTranscript;
-        textarea.value = newText;
-        autoGrow(textarea);
-        textarea.dispatchEvent(new Event('input'));
-    };
-
-    recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        cleanupState();
-    };
-
-    recognition.onend = () => {
-        cleanupState();
-    };
-
-    function cleanupState() {
-        engineState = 'inactive';
-        btn.classList.remove('recording');
-        textarea.classList.remove('recording-text');
-        btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
+    function setPhase(next) {
+        phase = next;
+        btn.classList.toggle('recording', next === 'recording');
+        btn.classList.toggle('transcribing', next === 'transcribing');
+        btn.setAttribute('aria-pressed', String(next === 'recording'));
+        textarea.classList.toggle('recording-text', next === 'recording' || next === 'transcribing');
+        btn.title = next === 'recording' ? say('Enregistrement… cliquer pour arrêter', 'Recording… click to stop')
+            : next === 'transcribing' ? say('Transcription en cours…', 'Transcribing…')
+            : say('Activer la dictée vocale', 'Start voice dictation');
+    }
+    function releaseMicrophone() {
+        clearTimeout(limit);
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        recorder = null;
     }
 
-    function startRecording() {
-        if (engineState !== 'inactive') return;
-        engineState = 'starting';
-        baseText = textarea.value;
-        recognition.lang = state.language === 'en' ? 'en-US' : 'fr-FR';
+    async function transcribe(blob) {
+        setPhase('transcribing');
         try {
-            recognition.start();
-        } catch (err) {
-            console.error("Failed to start speech recognition:", err);
-            cleanupState();
+            if (!blob.size) throw Object.assign(new Error('empty'), { quiet: true });
+            const audio = await dictationBase64(await dictationWav(blob));
+            const res = await fetch('/api/stt', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ audio, language: state.language === 'en' ? 'en' : 'fr' })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.hint || data.error || say('La transcription a échoué.', 'Transcription failed.'));
+            if (data.pull && !dictationModelNoticeShown) {
+                dictationModelNoticeShown = true;
+                const percent = data.pull.total ? Math.floor(data.pull.completed / data.pull.total * 100) : 0;
+                notify(say(`Le modèle de dictée se télécharge (${percent} %). En attendant, la reconnaissance vocale de Windows, moins précise, est utilisée.`,
+                    `The dictation model is downloading (${percent}%). Until then the less accurate Windows recognizer is used.`));
+            }
+            const heard = String(data.text || '').trim();
+            if (!heard) throw Object.assign(new Error('silence'), { quiet: true });
+            // Appended to what the field holds now: the user may have typed meanwhile.
+            const current = textarea.value;
+            textarea.value = current + (current && !/\s$/.test(current) ? ' ' : '') + heard;
+            autoGrow(textarea);
+            textarea.dispatchEvent(new Event('input'));
+            textarea.focus();
+        } catch (error) {
+            notify(error.quiet ? say('Aucune parole détectée.', 'No speech detected.')
+                : (error.message || say('La transcription a échoué.', 'Transcription failed.')));
+        } finally {
+            setPhase('idle');
         }
+    }
+
+    async function startRecording() {
+        setPhase('starting');
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        } catch (error) {
+            setPhase('idle');
+            const name = error && error.name;
+            notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say('Aucun microphone détecté sur ce PC.', 'No microphone found on this PC.')
+                : name === 'NotAllowedError' || name === 'SecurityError' ? say('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).', 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                : say('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).', 'The microphone cannot be used right now (in use by another app?).'));
+            return;
+        }
+        chunks = [];
+        try {
+            recorder = new MediaRecorder(stream);
+        } catch (error) {
+            releaseMicrophone();
+            setPhase('idle');
+            notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.'));
+            return;
+        }
+        recorder.addEventListener('dataavailable', event => { if (event.data && event.data.size) chunks.push(event.data); });
+        recorder.addEventListener('stop', () => {
+            const blob = new Blob(chunks, { type: (recorder && recorder.mimeType) || 'audio/webm' });
+            chunks = [];
+            releaseMicrophone();
+            transcribe(blob);
+        }, { once: true });
+        recorder.start();
+        setPhase('recording');
+        // Lets the server fetch its speech model while the user is speaking.
+        fetch('/api/voice-status').catch(() => {});
+        limit = setTimeout(stopRecording, DICTATION_MAX_MS);
     }
 
     function stopRecording() {
-        if (engineState !== 'active' && engineState !== 'starting') return;
-        engineState = 'stopping';
-        try {
-            recognition.stop();
-        } catch (err) {
-            console.error("Failed to stop speech recognition:", err);
-            cleanupState();
-        }
+        if (phase !== 'recording' || !recorder) return;
+        clearTimeout(limit);
+        try { recorder.stop(); } catch { releaseMicrophone(); setPhase('idle'); }
     }
 
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (engineState === 'active' || engineState === 'starting') {
-            stopRecording();
-        } else if (engineState === 'inactive') {
-            startRecording();
-        }
+        if (phase === 'recording') stopRecording();
+        else if (phase === 'idle') startRecording();
     });
+    setPhase('idle');
 }
 
 // Initialize Voice Recognition

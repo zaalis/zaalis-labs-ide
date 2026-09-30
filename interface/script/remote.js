@@ -20,6 +20,23 @@
     const statusText = $('#remote-status-text');
 
     let working = false;
+    const qrStage = $('#remote-qr-stage');
+    const qrImage = $('#remote-qr-img');
+    // Mist under the pointer while it moves over the code.
+    let lastMist = 0;
+    qrStage.addEventListener('pointermove', event => {
+        if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches || performance.now() - lastMist < 70) return;
+        lastMist = performance.now();
+        const bounds = qrStage.getBoundingClientRect();
+        const puff = document.createElement('span');
+        puff.className = 'remote-qr-mist';
+        puff.setAttribute('aria-hidden', 'true');
+        puff.style.left = (event.clientX - bounds.left) + 'px';
+        puff.style.top = (event.clientY - bounds.top) + 'px';
+        puff.style.setProperty('--drift-x', (Math.random() * 24 - 12).toFixed(1) + 'px');
+        qrStage.append(puff);
+        setTimeout(() => puff.remove(), 1150);
+    });
 
     function applyCopy() {
         const lang = state.language || 'fr';
@@ -60,7 +77,7 @@
         genBtn.classList.add('hidden');
         stopBtn.classList.remove('hidden');
         if (data) {
-            $('#remote-qr-img').src = data.qr || '';
+            qrImage.src = data.qr || '';
             $('#remote-url').value = data.url || '';
         }
     }

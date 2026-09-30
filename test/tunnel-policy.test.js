@@ -9,6 +9,7 @@ test('mobile policy authorizes exact method and route pairs', () => {
   assert.equal(mobileAllowed('GET', '/keys'), false);
   assert.equal(mobileAllowed('PUT', '/keys'), false);
   assert.equal(mobileAllowed('POST', '/exec'), false);
+  assert.equal(mobileAllowed('POST', '/internal/rust-workspace'), false);
   assert.equal(mobileAllowed('POST', '/recent-projects'), false);
 });
 
@@ -19,5 +20,6 @@ test('tunnel policy never exposes desktop authentication or execution', () => {
   assert.equal(tunnelRouteAllowed('POST', '/api/auth/register'), false);
   assert.equal(tunnelRouteAllowed('POST', '/api/auth/login'), false);
   assert.equal(tunnelRouteAllowed('POST', '/api/exec'), false);
+  assert.equal(tunnelRouteAllowed('POST', '/api/internal/rust-workspace'), false);
   assert.equal(tunnelRouteAllowed('PUT', '/api/keys'), false);
 });

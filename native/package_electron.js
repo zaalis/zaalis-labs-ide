@@ -93,6 +93,10 @@ async function main() {
     copyDir(path.join(sourceDist, 'image'), path.join(bundleDir, 'image'));
   }
   copyFile(path.join(root, 'package.json'), path.join(bundleDir, 'package.json'));
+  copyDir(path.join(root, 'zaalis-browser'), path.join(bundleDir, 'zaalis-browser'));
+  copyDir(path.join(root, 'native', 'blender'), path.join(bundleDir, 'native', 'blender'));
+  copyDir(path.join(root, 'native', 'whisper'), path.join(bundleDir, 'whisper'));
+  fs.chmodSync(path.join(bundleDir, 'whisper', 'whisper-cli'), 0o755);
 
   if (fs.existsSync(path.join(root, 'README_LINUX.md'))) {
     copyFile(path.join(root, 'README_LINUX.md'), path.join(bundleDir, 'README.txt'));
