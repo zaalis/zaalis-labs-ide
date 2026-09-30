@@ -57,9 +57,34 @@ The code is in `mcp-registry.js` (validation, both transports), `rust-agent-brid
 
 - the IDE detects Blender (5.1 or newer) and the state of Blender Lab's official **MCP** add-on;
 - **Installer** opens a window that checks the version, asks for Blender to be closed, lists what will change in Blender (the add-on shipped in `native/blender`, its automatic start, and Blender's "Allow Online Access" setting, which the add-on requires) and asks for consent. Nothing is changed in Blender without it;
-- the MCP server is the IDE itself (`blender-connector.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876). Tools: `scene_summary`, `list_objects`, `object_details`, `execute_python`.
+- the MCP server is the IDE itself (`blender-connector.js`, tools in `blender-tools.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876).
+
+The 18 tools:
+
+| Area | Tools |
+| --- | --- |
+| Scene | `scene_summary`, `list_objects`, `object_details`, `node_tree` |
+| Seeing | `screenshot` (3D viewport or the whole Blender window), `render` (viewport, optionally from the scene camera, or the scene's render engine) — returned as images the model looks at |
+| File | `file_info`, `missing_files`, `linked_libraries`, `datablocks`, `inspect_blend_file` (another `.blend`, read by a windowless Blender without opening it) |
+| Python API | `api_search`, `api_docs` (from Blender's own introspection, so always matching the installed version) |
+| Interface | `focus_object`, `switch_workspace`, `show_properties` |
+| Acting | `execute_python`, `undo` — each `execute_python` call is one step of Blender's undo history |
 
 Once linked, the agent can run Python in Blender without a confirmation prompt, like any MCP call. The add-on itself is GPL-3.0-or-later and redistributed unmodified (see `native/blender/README.md`).
+
+## Images for the model
+
+Tool results can carry pictures, which the Rust core sends to the model as images (never as text): desktop captures, Blender screenshots and renders, any MCP server's `image` content, image files read with `read` (PNG, JPEG, GIF, WebP) and the integrated browser's `screenshot`. Up to 4 images per call and 8 per round reach the model, in one message labelled with the tools they come from. A model without vision is told the image was not sent and works from the text of the result.
+
+## Desktop control
+
+With desktop control enabled, the agent drives Windows through the `computer` tool (`windows-computer.js` for the Windows side, `automation-manager.js` for sessions and safety):
+
+- **inspect** returns a capture, the active window's controls from UI Automation (role, label, value, frame and center) and the text read by Windows' own OCR, all in the pixels of the image the model receives; after an action it says whether the screen actually changed (visual signature plus text and controls);
+- gestures: click (left, right, middle, with modifiers), double click, drag, scroll at a point (both directions), Unicode typing that leaves the clipboard alone, key chords with repeat, wait;
+- `activate_app` takes a full `.exe` path or the name shown in the Start menu, and brings an already open window to the front instead of starting a second copy; `display_index` picks a screen;
+- the agent never types into a password field (UI Automation and the Win32 `ES_PASSWORD` style), and a click or Enter on a button whose label means deleting, sending or paying is refused;
+- MCP servers and Skills stay available in this mode, so Blender is driven through its MCP server rather than with the mouse.
 
 ## Voice dictation
 

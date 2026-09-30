@@ -64,7 +64,9 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
           sendEvent({ ev: 'committed', view: message.view, url: message.url });
           sendEvent({ ev: 'completed', view: message.view, ok: true, status: 0, url: message.url });
         } else if (message.id !== undefined) {
-          const result = message.op === 'cdp' ? { result: { type: 'undefined' } } : {};
+          const result = message.op !== 'cdp' ? {}
+            : message.method === 'Page.captureScreenshot' ? { data: 'anBlZy1kZS1sYS1wYWdl' }
+              : { result: { type: 'undefined' } };
           socket.write(JSON.stringify({ re: message.id, ok: true, result }) + '\n');
         }
       }
@@ -125,6 +127,12 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
     assert.equal(tabs.length, 2);
     assert.equal(tabs.find((tab) => tab.active).url, searched.url);
     assert.match(await host.agentTool('open', { url: 'javascript:alert(1)' }), /http/);
+    // The agent can see the page: a screenshot of the visible part, as JPEG.
+    const shot = await host.agentTool('screenshot');
+    assert.equal(shot.image, 'anBlZy1kZS1sYS1wYWdl');
+    assert.match(shot.text, /duckduckgo\.com/);
+    const capture = received.find((m) => m.op === 'cdp' && m.method === 'Page.captureScreenshot');
+    assert.deepEqual(capture.params, { format: 'jpeg', quality: 80 });
 
     // Data was copied into the IDE's own folder; the standalone one is intact.
     assert.ok(fs.existsSync(path.join(temp, 'Browser', 'settings.txt')));

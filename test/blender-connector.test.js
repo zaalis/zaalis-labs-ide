@@ -77,7 +77,9 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   assert.equal(await blender.handleRpc({ jsonrpc: '2.0', method: 'notifications/initialized' }), null);
   assert.deepEqual((await rpc('ping')).result, {});
   const tools = (await rpc('tools/list')).result.tools;
-  assert.deepEqual(tools.map((tool) => tool.name), ['scene_summary', 'list_objects', 'object_details', 'execute_python']);
+  assert.deepEqual(tools.map((tool) => tool.name), ['scene_summary', 'list_objects', 'object_details', 'screenshot', 'render', 'file_info', 'missing_files',
+    'linked_libraries', 'datablocks', 'node_tree', 'api_search', 'api_docs', 'focus_object', 'switch_workspace', 'show_properties', 'undo', 'execute_python', 'inspect_blend_file']);
+  assert.ok(tools.every((tool) => Object.keys(tool).sort().join() === 'description,inputSchema,name'));
   assert.ok(tools.every((tool) => tool.description && tool.inputSchema.type === 'object' && !('code' in tool)));
   assert.equal((await rpc('resources/list')).error.code, -32601);
   assert.equal((await blender.handleRpc('nonsense')).error.code, -32600);
@@ -86,7 +88,7 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   assert.deepEqual(JSON.parse(summary.content[0].text), { result: { scene: 'Scene' } });
   assert.equal(summary.isError, false);
   assert.deepEqual(sent[0].target, { host: 'localhost', port: 9876 });
-  assert.match(sent[0].code, /^import json\nparams = json\.loads\("\{\}"\)\nimport bpy\n/);
+  assert.match(sent[0].code, /^import json\nparams = json\.loads\("\{\}"\)\n+import bpy\n/);
 
   // Arguments travel as data: quotes and newlines of theirs cannot become code.
   const hostile = { name_contains: '"); import os; os.remove("x")\n#', type: "MESH'" };
@@ -99,13 +101,57 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   assert.equal(payload.stderr, 'attention');
 
   const failed = (await rpc('tools/call', { name: 'execute_python', arguments: { code: 'raise RuntimeError("boom")' } })).result;
-  assert.equal(sent[2].code, 'raise RuntimeError("boom")');
+  // The agent's own code runs as written, followed by one undo step for it.
+  assert.ok(sent[2].code.startsWith('raise RuntimeError("boom")\n'));
+  assert.match(sent[2].code, /undo_push\(message="IA zaalis : execute_python"\)/);
   assert.equal(failed.isError, true);
   assert.match(failed.content[0].text, /RuntimeError: boom/);
 
   assert.equal((await rpc('tools/call', { name: 'execute_python', arguments: { code: '   ' } })).result.isError, true);
   assert.equal((await rpc('tools/call', { name: 'delete_everything', arguments: {} })).result.isError, true);
   assert.equal(sent.length, 3);
+});
+
+test('images Blender writes for a tool reach the agent as MCP image content, and only those', async () => {
+  const dir = os.tmpdir();
+  const name = (hex) => path.join(dir, `zaalis_blender_${hex.repeat(32 / hex.length)}.jpg`);
+  const shot = name('ab');
+  const tooBig = name('cd');
+  fs.writeFileSync(shot, Buffer.from('fake-jpeg-bytes'));
+  fs.writeFileSync(tooBig, Buffer.alloc(8 * 1024 * 1024 + 1));
+  const outside = path.join(dir, `zaalis-not-a-capture-${process.pid}.jpg`);
+  fs.writeFileSync(outside, 'secret');
+  const sent = [];
+  const blender = connector.create({ send: async (code) => { sent.push(code); return { status: 'ok', result: { target: 'viewport', _images: [shot, outside, tooBig] } }; } });
+  try {
+    const result = await blender.callTool('screenshot', { target: 'viewport' });
+    assert.equal(result.isError, false);
+    assert.deepEqual(JSON.parse(result.content[0].text), { result: { target: 'viewport', images_attached: 1 } });
+    assert.deepEqual(result.content.slice(1), [{ type: 'image', mimeType: 'image/jpeg', data: Buffer.from('fake-jpeg-bytes').toString('base64') }]);
+    // Read captures are removed; a file that is not one is never touched.
+    assert.equal(fs.existsSync(shot), false);
+    assert.equal(fs.existsSync(tooBig), false);
+    assert.equal(fs.readFileSync(outside, 'utf8'), 'secret');
+    // Tools that need Blender's interface carry the shared helpers.
+    assert.match(sent[0], /def _zaalis_window\(\):/);
+    assert.match(sent[0], /screenshot_area/);
+
+    // A tool that does not produce images keeps `_images` as plain data.
+    const plain = await blender.callTool('scene_summary', {});
+    assert.equal(plain.content.length, 1);
+    assert.doesNotMatch(sent[1], /_zaalis_window/);
+  } finally {
+    for (const file of [shot, tooBig, outside]) { try { fs.unlinkSync(file); } catch {} }
+  }
+});
+
+test('inspect_blend_file only reads an existing .blend given by absolute path', async (t) => {
+  const blender = connector.create({ send: async () => { throw new Error('the open Blender must not be used'); } });
+  for (const path_ of ['relative.blend', path.join(os.tmpdir(), 'missing-zaalis.blend'), __filename]) {
+    const result = await blender.callTool('inspect_blend_file', { path: path_ });
+    assert.equal(result.isError, true, path_);
+    assert.match(result.content[0].text, /\.blend existant requis/);
+  }
 });
 
 test('a closed Blender is reported to the agent as something the user can fix', async () => {

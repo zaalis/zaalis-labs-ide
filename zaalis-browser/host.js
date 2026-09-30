@@ -253,8 +253,10 @@ class BrowserHost extends EventEmitter {
   }
 
   // The integrated browser's own page tools (read_page, click, fill, navigate,
-  // execute_js, read_console, read_network), plus tab management, for the IDE
-  // agent. The halo and animated cursor of the browser agent show every action.
+  // execute_js, read_console, read_network), plus tab management and a
+  // screenshot, for the IDE agent. The halo and animated cursor of the browser
+  // agent show every action. Every tool answers text, except `screenshot`:
+  // { text, image } where image is a base64 JPEG of the visible page.
   async agentTool(tool, args = {}) {
     const core = await this.ensureStarted();
     this.reveal();
@@ -292,6 +294,13 @@ class BrowserHost extends EventEmitter {
       const tab = core.activeTab();
       if (!tab) return 'Aucune page active.';
       return (await core.quickPageContext(tab)) || 'Page illisible pour le moment.';
+    }
+    if (tool === 'screenshot') {
+      const tab = core.activeTab();
+      if (!tab) return 'Aucune page active.';
+      const shot = await tab.view.webContents.cdp('Page.captureScreenshot', { format: 'jpeg', quality: 80 });
+      if (!shot || typeof shot.data !== 'string' || !shot.data) return 'Capture de la page impossible pour le moment.';
+      return { text: `Capture de la partie visible de ${tab.view.webContents.getURL()} (jointe au message suivant).`, image: shot.data };
     }
     const tab = core.activeTab();
     if (!tab) return 'Aucune page web active.';

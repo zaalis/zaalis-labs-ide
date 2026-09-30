@@ -19,7 +19,8 @@ use zaalis_store::SecretValue;
 use zaalis_tools::{Tool, ToolContext, ToolDefinition, ToolResult};
 
 const MCP_PROTOCOL: &str = "2025-03-26";
-const MAX_MCP_RESPONSE: usize = 2 * 1024 * 1024;
+/// Large enough for a few screenshots or renders returned as MCP image content.
+const MAX_MCP_RESPONSE: usize = 16 * 1024 * 1024;
 /// What a local MCP program needs to start at all: where programs and the
 /// user's folders are. Interpreters launched through a shim (`npx`, `uvx`, a
 /// Python virtual environment) fail without the profile and cache locations.

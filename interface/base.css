@@ -48,7 +48,11 @@ input,select,textarea{font-family:inherit;color:inherit;}
    pushed past the window edge as soon as the window gets narrow. */
 .topbar-left,.topbar-center,.topbar-right{display:flex;align-items:center;gap:12px;min-width:0;}
 .topbar-left,.topbar-right{flex-shrink:0;}
-.topbar-center{flex:1 1 auto;justify-content:center;overflow:hidden;}
+/* No overflow clipping here: the model loader's panel hangs below the bar and
+   would be cut off (the button then seemed to do nothing). The loader itself
+   shrinks instead, its label ending in an ellipsis. */
+.topbar-center{flex:1 1 auto;justify-content:center;}
+.topbar-center .model-loader,.topbar-center .model-loader-btn{min-width:0;}
 .logo{display:flex;align-items:center;gap:8px;font-weight:600;font-size:14px;letter-spacing:.3px;}
 .logo svg{color:var(--accent);}
 .topbar-btn{display:flex;align-items:center;justify-content:center;width:28px;height:28px;border-radius:var(--radius);color:var(--text-2);transition:all .15s;}

@@ -642,6 +642,10 @@ app.post('/api/internal/rust-browser', async (req, res) => {
     const args = { ...body };
     delete args.action;
     const result = await browserHost.agentTool(action, args);
+    // A screenshot travels as an image the agent runtime shows to the model.
+    if (result && typeof result === 'object' && result.image) {
+      return res.json({ summary: 'browser screenshot', result: String(result.text || ''), images: [{ mime: 'image/jpeg', data: String(result.image) }] });
+    }
     return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
   } catch (error) {
     return res.status(500).json({ error: error.message || String(error) });

@@ -324,12 +324,13 @@
     let lastBrowserCommand = '';
     function nativePost(message) { window.chrome?.webview?.postMessage(message); }
     // Every real overlay that can sit on top of the browser surface shares
-    // one of these two markers: a .modal-overlay.active (settings, catalog,
+    // one of these markers: a .modal-overlay.active (settings, catalog,
     // help, confirm, project, quant, remote, image lightbox...) or the
     // full-screen #auth-overlay (toggled via the .hidden utility class, so
     // its own computed display already reflects visibility).
+    // The top bar's model loader drops its panel over the page as well.
     function browserOccluded() {
-        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay')].some(node => {
+        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel')].some(node => {
             const style = getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && node.getBoundingClientRect().height > 0;
         });
     }

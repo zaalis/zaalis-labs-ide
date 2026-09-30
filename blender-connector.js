@@ -16,6 +16,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
+const { TOOLS, HELPERS, FILE_SUMMARIES } = require('./blender-tools');
 
 const SERVER_ID = 'blender';
 const MIN_VERSION = [5, 1];
@@ -123,8 +124,10 @@ function addonOnDisk(profile) {
 // Preferences live in a binary file only Blender reads: a windowless Blender
 // runs a few lines of Python and prints one JSON line. The script travels in
 // the environment, so nothing of it has to be quoted on a command line.
-async function blenderPython(exe, script, env = process.env) {
-  const output = await run(exe, ['--background', '--python-expr', "import os;exec(os.environ['ZAALIS_BLENDER_SCRIPT'])"], { env: { ...env, ZAALIS_BLENDER_SCRIPT: script } });
+// `file`, when given, is a .blend opened first (with its scripts disabled).
+async function blenderPython(exe, script, env = process.env, { file = '', extraEnv = {} } = {}) {
+  const args = ['--background', ...(file ? ['--disable-autoexec', file] : []), '--python-expr', "import os;exec(os.environ['ZAALIS_BLENDER_SCRIPT'])"];
+  const output = await run(exe, args, { env: { ...env, ...extraEnv, ZAALIS_BLENDER_SCRIPT: script } });
   const line = output.split(/\r?\n/).reverse().find((entry) => entry.startsWith(MARKER));
   if (!line) throw connectError('blender-script', 'Blender n’a pas répondu comme prévu.');
   return JSON.parse(line.slice(MARKER.length));
@@ -196,115 +199,27 @@ function send(code, { host, port, timeoutMs = TOOL_TIMEOUT_MS } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// MCP tools
+// MCP tools (their Python is in blender-tools.js)
 // ---------------------------------------------------------------------------
-// Each tool is a piece of Python run inside Blender. `params` holds the tool's
-// arguments; the value left in `result` is what the agent receives.
-const SUMMARY_CODE = [
-  'import bpy',
-  'scene = bpy.context.scene',
-  'counts = {}',
-  'for obj in scene.objects:',
-  '    counts[obj.type] = counts.get(obj.type, 0) + 1',
-  'active = bpy.context.view_layer.objects.active',
-  'result = {',
-  '    "blender": bpy.app.version_string,',
-  '    "file": bpy.data.filepath or None, "unsaved_changes": bool(bpy.data.is_dirty),',
-  '    "scene": scene.name, "scenes": [s.name for s in bpy.data.scenes],',
-  '    "frame": {"current": scene.frame_current, "start": scene.frame_start, "end": scene.frame_end, "fps": scene.render.fps},',
-  '    "render": {"engine": scene.render.engine, "resolution": [scene.render.resolution_x, scene.render.resolution_y]},',
-  '    "units": scene.unit_settings.system, "mode": bpy.context.mode,',
-  '    "objects": {"total": len(scene.objects), "by_type": counts},',
-  '    "active_object": active.name if active else None,',
-  '    "selected": [o.name for o in bpy.context.view_layer.objects if o.select_get()][:50],',
-  '    "collections": [c.name for c in bpy.data.collections][:100],',
-  '    "camera": scene.camera.name if scene.camera else None,',
-  '    "materials": len(bpy.data.materials), "images": len(bpy.data.images),',
-  '}',
+// Files Blender writes for `_images`: a random name in its temporary folder.
+// Only such names are read back, so a tool result can never make this process
+// read another file.
+const IMAGE_FILE = /^zaalis_blender_[0-9a-f]{32}\.jpg$/;
+const MAX_IMAGE_FILE = 8 * 1024 * 1024;
+// Runs the summaries of another .blend file in a windowless Blender.
+const FILE_SUMMARY_SCRIPT = [
+  'import json, os',
+  'codes = json.loads(os.environ["ZAALIS_BLENDER_CODES"])',
+  'out = {}',
+  'for name, code in codes.items():',
+  '    namespace = {"params": {}}',
+  '    try:',
+  '        exec(code, namespace)',
+  '        out[name] = namespace.get("result")',
+  '    except Exception as error:',
+  '        out[name] = {"error": str(error)}',
+  `print("${MARKER}" + json.dumps(out, default=str))`,
 ].join('\n');
-const LIST_CODE = [
-  'import bpy',
-  'kind = str(params.get("type") or "").upper()',
-  'needle = str(params.get("name_contains") or "").lower()',
-  'limit = max(1, min(int(params.get("limit") or 100), 500))',
-  'rows = []',
-  'matched = 0',
-  'for obj in bpy.context.scene.objects:',
-  '    if kind and obj.type != kind: continue',
-  '    if needle and needle not in obj.name.lower(): continue',
-  '    matched += 1',
-  '    if len(rows) >= limit: continue',
-  '    rows.append({',
-  '        "name": obj.name, "type": obj.type,',
-  '        "location": [round(v, 4) for v in obj.location],',
-  '        "dimensions": [round(v, 4) for v in obj.dimensions],',
-  '        "parent": obj.parent.name if obj.parent else None,',
-  '        "collections": [c.name for c in obj.users_collection],',
-  '        "visible": bool(obj.visible_get()),',
-  '        "materials": [s.material.name for s in obj.material_slots if s.material],',
-  '        "modifiers": [m.type for m in obj.modifiers],',
-  '    })',
-  'result = {"matched": matched, "returned": len(rows), "objects": rows}',
-].join('\n');
-const DETAILS_CODE = [
-  'import bpy',
-  'name = str(params.get("name") or "")',
-  'obj = bpy.data.objects.get(name)',
-  'if obj is None:',
-  '    result = {"error": "Aucun objet nommé " + repr(name), "objects": [o.name for o in bpy.data.objects][:100]}',
-  'else:',
-  '    info = {',
-  '        "name": obj.name, "type": obj.type,',
-  '        "location": [round(v, 5) for v in obj.location],',
-  '        "rotation_euler": [round(v, 5) for v in obj.rotation_euler],',
-  '        "scale": [round(v, 5) for v in obj.scale],',
-  '        "dimensions": [round(v, 5) for v in obj.dimensions],',
-  '        "parent": obj.parent.name if obj.parent else None,',
-  '        "children": [c.name for c in obj.children][:100],',
-  '        "collections": [c.name for c in obj.users_collection],',
-  '        "visible": bool(obj.visible_get()), "hide_render": bool(obj.hide_render),',
-  '        "materials": [s.material.name if s.material else None for s in obj.material_slots],',
-  '        "modifiers": [{"name": m.name, "type": m.type, "show_viewport": bool(m.show_viewport)} for m in obj.modifiers],',
-  '        "custom_properties": {k: str(obj[k])[:200] for k in obj.keys() if not k.startswith("_")},',
-  '        "animated": obj.animation_data is not None and obj.animation_data.action is not None,',
-  '    }',
-  '    data = obj.data',
-  '    if obj.type == "MESH" and data is not None:',
-  '        info["mesh"] = {"name": data.name, "vertices": len(data.vertices), "edges": len(data.edges), "polygons": len(data.polygons), "uv_layers": [u.name for u in data.uv_layers], "shape_keys": len(data.shape_keys.key_blocks) if data.shape_keys else 0}',
-  '    elif obj.type == "CAMERA" and data is not None:',
-  '        info["camera"] = {"type": data.type, "lens": round(data.lens, 3), "clip": [round(data.clip_start, 4), round(data.clip_end, 3)]}',
-  '    elif obj.type == "LIGHT" and data is not None:',
-  '        info["light"] = {"type": data.type, "energy": round(data.energy, 3), "color": [round(v, 4) for v in data.color]}',
-  '    result = info',
-].join('\n');
-
-const TOOLS = [
-  {
-    name: 'scene_summary',
-    description: 'Vue d’ensemble du fichier Blender ouvert : fichier, scène, images, moteur de rendu, nombre d’objets par type, objet actif, sélection, collections. À appeler en premier.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-    code: () => SUMMARY_CODE,
-  },
-  {
-    name: 'list_objects',
-    description: 'Liste les objets de la scène (nom, type, position, dimensions, parent, collections, matériaux, modificateurs). Filtres facultatifs : type Blender (MESH, LIGHT, CAMERA, EMPTY, CURVE…) et morceau de nom.',
-    inputSchema: { type: 'object', properties: { type: { type: 'string' }, name_contains: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 500 } }, additionalProperties: false },
-    code: () => LIST_CODE,
-  },
-  {
-    name: 'object_details',
-    description: 'Détail d’un objet par son nom exact : transformations, hiérarchie, matériaux, modificateurs, propriétés personnalisées, et statistiques du maillage, de la caméra ou de la lumière.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'], additionalProperties: false },
-    code: () => DETAILS_CODE,
-  },
-  {
-    name: 'execute_python',
-    description: 'Exécute du code Python dans Blender (module bpy), sur le fil principal. Pour renvoyer une valeur, l’affecter à la variable `result` (dictionnaire sérialisable en JSON). Ce qui est imprimé avec print() est renvoyé aussi. Sert à tout ce que les autres outils ne font pas : créer, modifier, animer, rendre.',
-    inputSchema: { type: 'object', properties: { code: { type: 'string' } }, required: ['code'], additionalProperties: false },
-    code: (args) => String(args.code || ''),
-    raw: true,
-  },
-];
 
 function toolText(payload, isError) {
   let text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1);
@@ -408,21 +323,63 @@ function create(options = {}) {
   // otherwise): a tool call must not wait for a windowless Blender to start.
   const target = () => ({ host: (inspected.state && inspected.state.host) || 'localhost', port: (inspected.state && inspected.state.port) || DEFAULT_PORT });
 
+  // Images a tool left in Blender's temporary folder, as MCP image content.
+  // The files are removed once read.
+  function takeImages(paths) {
+    const images = [];
+    for (const file of Array.isArray(paths) ? paths.slice(0, 4) : []) {
+      const name = path.basename(String(file || ''));
+      if (!IMAGE_FILE.test(name)) continue;
+      try {
+        const size = fs.statSync(file).size;
+        if (size > 0 && size <= MAX_IMAGE_FILE) images.push({ type: 'image', mimeType: 'image/jpeg', data: fs.readFileSync(file).toString('base64') });
+      } catch {}
+      try { fs.unlinkSync(file); } catch {}
+    }
+    return images;
+  }
+
+  // inspect_blend_file: summaries of another .blend, read by a windowless
+  // Blender so the file open in the user's Blender is left alone.
+  async function inspectFile(input) {
+    const file = String(input.path || '');
+    if (!path.isAbsolute(file) || !/\.blend\d*$/i.test(file) || !isFile(file)) return toolText('Chemin absolu d’un fichier .blend existant requis.', true);
+    const found = await blender();
+    if (!found) return toolText('Blender est introuvable sur ce PC.', true);
+    try {
+      const summaries = await blenderPython(found.exe, FILE_SUMMARY_SCRIPT, env, { file, extraEnv: { ZAALIS_BLENDER_CODES: JSON.stringify(FILE_SUMMARIES) } });
+      return toolText({ result: { path: file, ...summaries } }, false);
+    } catch (error) {
+      return toolText(`Lecture de ${path.basename(file)} impossible : ${String(error.message || error).slice(0, 300)}`, true);
+    }
+  }
+
   async function callTool(name, args) {
     const tool = TOOLS.find((entry) => entry.name === name);
     if (!tool) return toolText(`Outil Blender inconnu : ${name}`, true);
     const input = args && typeof args === 'object' ? args : {};
+    if (tool.local) return inspectFile(input);
     if (tool.raw && !String(input.code || '').trim()) return toolText('Le paramètre `code` est requis.', true);
     // Arguments reach Python as JSON text: a JSON string literal is also a
     // valid Python one, so nothing of theirs is ever spliced into the code.
-    const code = tool.raw ? tool.code(input) : `import json\nparams = json.loads(${JSON.stringify(JSON.stringify(input))})\n${tool.code(input)}`;
+    const code = tool.raw ? String(input.code) + (tool.after || '')
+      : `import json\nparams = json.loads(${JSON.stringify(JSON.stringify(input))})\n${tool.helpers ? HELPERS + '\n' : ''}${tool.code}`;
     let reply;
     try { reply = await (options.send || send)(code, target()); } catch (error) { return toolText(error.message, true); }
     if (!reply || reply.status !== 'ok') return toolText({ error: String((reply && reply.message) || 'Erreur Blender').slice(-6000), ...(reply && reply.stdout ? { stdout: String(reply.stdout).slice(-4000) } : {}) }, true);
-    const payload = { result: reply.result === undefined ? null : reply.result };
+    let result = reply.result === undefined ? null : reply.result;
+    let images = [];
+    if (tool.images && result && typeof result === 'object' && !Array.isArray(result)) {
+      const { _images: files, ...rest } = result;
+      images = takeImages(files);
+      result = { ...rest, images_attached: images.length };
+    }
+    const payload = { result };
     if (reply.stdout) payload.stdout = String(reply.stdout).slice(-20_000);
     if (reply.stderr) payload.stderr = String(reply.stderr).slice(-8000);
-    return toolText(payload, false);
+    const answer = toolText(payload, false);
+    answer.content.push(...images);
+    return answer;
   }
 
   // One JSON-RPC message of the MCP protocol; null for a notification.
@@ -454,10 +411,12 @@ function create(options = {}) {
 
 const INSTRUCTIONS = [
   'Tu pilotes le Blender ouvert sur le PC de l’utilisateur.',
-  'Regarde avant d’agir : `scene_summary`, puis `list_objects` / `object_details`. Ne suppose jamais un nom d’objet ou une valeur.',
-  'Respecte les noms et l’organisation existants. Ne supprime ni n’écrase rien sans que l’utilisateur l’ait demandé.',
+  'Regarde avant d’agir : `scene_summary`, puis `list_objects` / `object_details`, et `screenshot` pour voir la vue 3D. Ne suppose jamais un nom d’objet ou une valeur.',
+  'Avant d’écrire du code dont tu n’es pas sûr, vérifie l’API de CETTE version de Blender avec `api_search` puis `api_docs`.',
+  'Après une modification visible, contrôle le résultat avec `screenshot` ou `render` (mode viewport) plutôt que de le supposer. En cas d’erreur, `undo` revient en arrière.',
+  'Respecte les noms et l’organisation existants. Ne supprime ni n’écrase rien sans que l’utilisateur l’ait demandé, et n’enregistre le fichier que s’il le demande.',
   'Dans `execute_python` : préfère bpy.data pour des modifications précises et bpy.ops pour les actions standard ; vérifie le mode (Objet / Édition) avant un opérateur ; renvoie ce que tu as fait dans `result`.',
-  'Un rendu ou un calcul long bloque Blender pendant son exécution : préviens l’utilisateur avant de le lancer.',
+  'Un rendu final ou un calcul long bloque Blender pendant son exécution : préviens l’utilisateur avant de le lancer.',
 ].join('\n');
 
 // What the agent's prompt says about Blender, and the instructions it loads on demand.
@@ -481,4 +440,4 @@ function skill(current) {
   return { name: SERVER_ID, description: description.slice(0, 236), instructions: lines.join('\n') };
 }
 
-module.exports = { SERVER_ID, ADDON, MIN_VERSION, TOOLS, create, send, installations, addonOnDisk, profileDir, compareVersions, parseVersion, skill };
+module.exports = { SERVER_ID, ADDON, MIN_VERSION, TOOLS, create, send, installations, addonOnDisk, profileDir, compareVersions, parseVersion, skill, IMAGE_FILE };
