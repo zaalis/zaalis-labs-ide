@@ -27,18 +27,20 @@
         requestAnimationFrame(() => { if (!activeView.classList.contains('hidden')) qrStage.classList.add('revealing'); });
     }
     qrImage.addEventListener('load', revealQR);
-    let lastTrail = 0;
+    // Mist under the pointer while it moves over the code.
+    let lastMist = 0;
     qrStage.addEventListener('pointermove', event => {
-        if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches || performance.now() - lastTrail < 45) return;
-        lastTrail = performance.now();
+        if (event.pointerType === 'touch' || matchMedia('(prefers-reduced-motion: reduce)').matches || performance.now() - lastMist < 70) return;
+        lastMist = performance.now();
         const bounds = qrStage.getBoundingClientRect();
-        const particle = document.createElement('span');
-        particle.className = 'remote-qr-trail';
-        particle.setAttribute('aria-hidden', 'true');
-        particle.style.left = (event.clientX - bounds.left) + 'px';
-        particle.style.top = (event.clientY - bounds.top) + 'px';
-        qrStage.append(particle);
-        setTimeout(() => particle.remove(), 550);
+        const puff = document.createElement('span');
+        puff.className = 'remote-qr-mist';
+        puff.setAttribute('aria-hidden', 'true');
+        puff.style.left = (event.clientX - bounds.left) + 'px';
+        puff.style.top = (event.clientY - bounds.top) + 'px';
+        puff.style.setProperty('--drift-x', (Math.random() * 24 - 12).toFixed(1) + 'px');
+        qrStage.append(puff);
+        setTimeout(() => puff.remove(), 1150);
     });
 
     function applyCopy() {
