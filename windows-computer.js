@@ -16,11 +16,11 @@ const path = require('path');
 
 let overlayProcess = null;
 
-// Overlay d'activité du contrôle de bureau.  Palette, proportions, cadence de
-// respiration, dérive de la brume et barre de contrôle sont identiques aux
-// éditions macOS (Electron) et Linux (GTK/cairo) : seul le moteur de rendu
-// change.  C'est un processus WPF séparé et traversant (WS_EX_TRANSPARENT), donc
-// il ne modifie jamais le chemin d'entrée réel utilisé par le pont de contrôle.
+// Overlay d'activité du contrôle de bureau : un cadre violet animé autour de
+// chaque écran et la barre de contrôle, sans la brume des éditions macOS et
+// Linux (ses halos formaient un cercle visible en haut à gauche).  C'est un
+// processus WPF séparé et traversant (WS_EX_TRANSPARENT), donc il ne modifie
+// jamais le chemin d'entrée réel utilisé par le pont de contrôle.
 //
 // La barre du bas porte le bouton « Arrêter le travail » : elle est, elle,
 // cliquable, et appelle /api/automation/stop-bridge avec le secret tiré au
@@ -59,18 +59,9 @@ $bounds = $display.Bounds
 $w = [double]$bounds.Width
 $h = [double]$bounds.Height
 
-# Geometrie de la brume, transposee de la feuille de style macOS :
-#   .mist { inset:-25% }  -> la couche mesure 150% du bureau, decalee de -25%
-#   radial-gradient(ellipse at 15% 20%, rgba(157,89,255,.28), transparent 32%)
-#   radial-gradient(ellipse at 80% 84%, rgba(102,45,210,.28), transparent 38%)
-# Un degrade radial CSS sans taille explicite s'etend jusqu'au coin le plus
-# eloigne : ramenes en coordonnees du bureau, les deux halos se logent donc dans
-# les coins haut-gauche et bas-droit, et non au milieu de l'ecran. Ici l'ellipse
-# WPF EST la zone coloree (opaque au centre, transparente au bord), ce qui
-# reproduit exactement l'arret « transparent 32% / 38% ».
-$e1w = 0.820 * $w; $e1h = 0.768 * $h; $e1x = -0.435 * $w; $e1y = -0.334 * $h
-$e2w = 0.912 * $w; $e2h = 0.958 * $h; $e2x = 0.494 * $w; $e2y = 0.531 * $h
-$driftX = 0.03 * $w; $driftY = -0.02 * $h
+# Pas de brume : ses halos radiaux formaient un cercle visible dans le coin
+# haut-gauche. Seul le cadre violet signale que l'IA pilote le PC.
+
 # Bord interieur du cadre en plumes : chaque bande fait 80 px (le double des
 # 40 px du navigateur). $wm/$hm placent les bandes droite et basse.
 $wm = $w - 80; $hm = $h - 80
@@ -90,16 +81,6 @@ $wm = $w - 80; $hm = $h - 80
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" WindowStyle="None" AllowsTransparency="True" Background="Transparent" ShowInTaskbar="False" Topmost="True" ShowActivated="False" ResizeMode="NoResize" IsHitTestVisible="False">
   <Grid IsHitTestVisible="False" ClipToBounds="True">
-    <Canvas x:Name="Mist" RenderTransformOrigin="0.5,0.5">
-      <Canvas.RenderTransform><TransformGroup><ScaleTransform x:Name="MistScale" ScaleX="1" ScaleY="1"/><TranslateTransform x:Name="MistShift" X="0" Y="0"/></TransformGroup></Canvas.RenderTransform>
-      <Canvas.Effect><BlurEffect Radius="20"/></Canvas.Effect>
-      <Ellipse Width="$e1w" Height="$e1h" Canvas.Left="$e1x" Canvas.Top="$e1y" Opacity="0.28">
-        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#FF9D59FF" Offset="0"/><GradientStop Color="#009D59FF" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
-      </Ellipse>
-      <Ellipse Width="$e2w" Height="$e2h" Canvas.Left="$e2x" Canvas.Top="$e2y" Opacity="0.28">
-        <Ellipse.Fill><RadialGradientBrush><GradientStop Color="#FF662DD2" Offset="0"/><GradientStop Color="#00662DD2" Offset="1"/></RadialGradientBrush></Ellipse.Fill>
-      </Ellipse>
-    </Canvas>
     <Grid Opacity="0.8">
       <Grid.Effect><BlurEffect Radius="28"/></Grid.Effect>
       <Rectangle x:Name="Glow">
@@ -144,28 +125,6 @@ $wm = $w - 80; $hm = $h - 80
 "@
 $window = [Windows.Markup.XamlReader]::Load((New-Object Xml.XmlNodeReader $xaml))
 
-# Derive de la brume : 12 s aller-retour, translation de 3% / -2% et zoom 1.06,
-# exactement l'animation « drift » de la feuille de style macOS.
-$mistScale = $window.FindName('MistScale')
-$mistShift = $window.FindName('MistShift')
-$drift = New-Object Windows.Media.Animation.Storyboard
-$driftDuration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(12))
-foreach ($item in @(
-  @{ Target = $mistScale; Property = 'ScaleX'; To = 1.06 },
-  @{ Target = $mistScale; Property = 'ScaleY'; To = 1.06 },
-  @{ Target = $mistShift; Property = 'X'; To = $driftX },
-  @{ Target = $mistShift; Property = 'Y'; To = $driftY }
-)) {
-  $animation = New-Object Windows.Media.Animation.DoubleAnimation
-  $animation.To = $item.To
-  $animation.Duration = $driftDuration
-  $animation.AutoReverse = $true
-  $animation.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
-  [Windows.Media.Animation.Storyboard]::SetTarget($animation, $item.Target)
-  [Windows.Media.Animation.Storyboard]::SetTargetProperty($animation, (New-Object Windows.PropertyPath $item.Property))
-  $drift.Children.Add($animation)
-}
-
 # Defilement du degrade de la bordure : le brush est repete deux fois sur la
 # largeur (EndPoint 0.5), donc translater de 0.5 fait glisser d'une tuile
 # complete et boucle sans couture. 7 s lineaire, comme le navigateur.
@@ -176,7 +135,7 @@ $flowAnim.To = 0.5
 $flowAnim.Duration = New-Object Windows.Duration ([TimeSpan]::FromSeconds(7))
 $flowAnim.RepeatBehavior = [Windows.Media.Animation.RepeatBehavior]::Forever
 
-# GetNewClosure fige $bounds et $drift pour CETTE iteration : sans cela, les
+# GetNewClosure fige $bounds et $flowAnim pour CETTE iteration : sans cela, les
 # gestionnaires liraient la derniere valeur de la boucle et tous les cadres se
 # poseraient sur le meme ecran.
 $window.add_SourceInitialized({
@@ -189,7 +148,6 @@ $window.add_SourceInitialized({
   [void][ZaalisOverlayNative]::SetWindowPos($source.Handle, [IntPtr]::Zero, $bounds.Left, $bounds.Top, $bounds.Width, $bounds.Height, 0x14)
 }.GetNewClosure())
 $window.add_ContentRendered({
-  $drift.Begin()
   $flow.BeginAnimation([Windows.Media.TranslateTransform]::XProperty, $flowAnim)
 }.GetNewClosure())
 $overlays += $window
