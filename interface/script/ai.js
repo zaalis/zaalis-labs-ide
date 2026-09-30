@@ -10,6 +10,37 @@ const MODE_ICONS = {
     auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>`
 };
 
+function setPermissionMode(mode, persist = true) {
+    if (!['supervised', 'semi', 'auto'].includes(mode)) return;
+    state.permissionMode = mode;
+    state.config.defaultPermissionMode = mode;
+    saveState();
+    syncModeSelectorUI();
+    const setting = $('#settings-default-permission-select');
+    if (setting) setting.value = mode;
+    if (persist) {
+        fetch('/api/preferences', {
+            method: 'PUT', keepalive: true, headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ permissionMode: mode })
+        }).then(response => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        }).catch(() => showToast('Préférence', 'Le mode reste actif, mais sa sauvegarde sur le compte a échoué.', { icon: '!' }));
+    }
+}
+
+async function loadPermissionPreference() {
+    try {
+        const response = await fetch('/api/preferences');
+        if (!response.ok) return;
+        const preference = await response.json();
+        if (['supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
+            setPermissionMode(preference.permissionMode, false);
+        } else {
+            setPermissionMode('supervised', false);
+        }
+    } catch { /* Local preference still works while the account is offline. */ }
+}
+
 function setupModeSelector(btnId, menuId) {
     const btn = $('#' + btnId);
     const menu = $('#' + menuId);
@@ -26,7 +57,7 @@ function setupModeSelector(btnId, menuId) {
         item.addEventListener('click', (e) => {
             e.stopPropagation();
             const perm = item.dataset.perm;
-            state.permissionMode = perm;
+            setPermissionMode(perm);
             
             // Sync all selectors (chat + agents)
             $$('.mode-dropdown').forEach(m => {
@@ -127,28 +158,35 @@ syncComputerControlUI();
 
 // Approval modal
 let pendingApproval = null;
+const approvalQueue = [];
+
+function showNextApproval() {
+    if (pendingApproval || !approvalQueue.length) return;
+    pendingApproval = approvalQueue.shift();
+    $('#approval-desc').textContent = pendingApproval.description;
+    $('#approval-content').textContent = pendingApproval.content;
+    $('#approval-modal').classList.add('active');
+    $('#approve-action').focus();
+}
 
 function requestApproval(description, content) {
     return new Promise((resolve) => {
-        $('#approval-desc').textContent = description;
-        $('#approval-content').textContent = content;
-        $('#approval-modal').classList.add('active');
-        pendingApproval = resolve;
+        approvalQueue.push({ description, content, resolve });
+        showNextApproval();
     });
 }
 
-$('#approve-action').addEventListener('click', () => {
+function answerApproval(allow) {
+    const current = pendingApproval;
+    pendingApproval = null;
     $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(true); pendingApproval = null; }
-});
-$('#deny-action').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
-$('#close-approval').addEventListener('click', () => {
-    $('#approval-modal').classList.remove('active');
-    if (pendingApproval) { pendingApproval(false); pendingApproval = null; }
-});
+    if (current) current.resolve(allow);
+    showNextApproval();
+}
+
+$('#approve-action').addEventListener('click', () => answerApproval(true));
+$('#deny-action').addEventListener('click', () => answerApproval(false));
+$('#close-approval').addEventListener('click', () => answerApproval(false));
 
 // ==========================================================
 //  AI PANEL TABS
@@ -387,8 +425,9 @@ document.addEventListener('click', e => {
     const img = e.target.closest && e.target.closest('.generated-image');
     if (img) { e.preventDefault(); openImageLightbox(img.getAttribute('src'), img.getAttribute('alt') || ''); }
 });
-// Web links inside AI/system answers open in zaalis browser, so source links
-// from /deep-search stay in the same browsing workspace.
+// Web links inside AI/system answers open in the integrated browser (globe
+// panel), so /deep-search sources stay in the same browsing workspace. Outside
+// the native app there is no integrated browser: the link opens normally.
 document.addEventListener('click', async e => {
     const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
     if (!a || !a.closest('#chat-messages, #agents-log')) return;
@@ -429,16 +468,15 @@ function formatAIResponse(text) {
 }
 
 function isMaxReasoning() {
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
-    return state.reasoningLevel === (modes.length - 1);
+    const levels = reasoningLevels();
+    return levels.length > 1 && Number(state.reasoningLevel) === Number(levels[levels.length - 1].value);
 }
 
 function addMsg(container, type, label, text, isHTML = false) {
     const div = document.createElement('div');
     div.className = 'msg msg-' + type;
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -462,7 +500,7 @@ function addTypingMsg(container, label) {
     const div = document.createElement('div');
     div.className = 'msg msg-ai';
     let html = '';
-    if (label) html += `<span class="msg-label ${label.toLowerCase()}">${label}</span>`;
+    if (label) html += `<span class="msg-label ${String(label).toLowerCase().replace(/[^a-z0-9_-]/g, '')}">${escapeHTML(label)}</span>`;
     html += '<div class="msg-body"></div>';
     div.innerHTML = html;
     const body = div.querySelector('.msg-body');
@@ -483,6 +521,7 @@ async function callAI(model, submodel, message, systemPrompt, images = [], signa
         body: JSON.stringify({
             model, submodel, message, systemPrompt,
             root: state.projectRoot,
+            terminalSessionId: terminalSessionId || undefined,
             config: safeConfig,
             language: state.language || 'fr',
             reasoningLevel: state.reasoningLevel,
@@ -522,9 +561,8 @@ async function readAgentEventStream(res, onEvent) {
             result = event.result || {};
         } else if (event.type === 'error') {
             streamError = event.error || 'Erreur agent.';
-        } else if (typeof onEvent === 'function') {
-            onEvent(event);
         }
+        if (typeof onEvent === 'function') onEvent(event);
     };
     while (true) {
         const { done, value } = await reader.read();
@@ -565,6 +603,8 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
             reasoningLevel: state.reasoningLevel,
             images,
             history,
+            conversationId: options.conversationId,
+            sessionId: options.sessionId,
             computerControl: options.computerControl === undefined ? !!state.computerControl : !!options.computerControl,
             stream: wantsStream
         }),
@@ -839,6 +879,12 @@ function setChatBusy(on) {
 async function sendChat(input) {
     const model = modelSelect.value;
     const submodel = submodelSelect.value;
+    if (model === 'gguf' && !submodel) {
+        showToast(state.language === 'en' ? 'No GGUF model' : 'Aucun modèle GGUF',
+            state.language === 'en' ? 'Install a local model before starting this chat.' : 'Installez un modèle local avant de démarrer ce chat.', { icon: '!' });
+        $('#gguf-install-shortcut')?.focus();
+        return;
+    }
 
     const lang = state.language || 'fr';
     const draft = (input && typeof input === 'object') ? input : createChatDraft(input);
@@ -846,7 +892,7 @@ async function sendChat(input) {
     const { aiText = '', names = [], images = [] } = draft;
 
     const isLocal = model === 'local' || model === 'gguf';
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     let completed = false;
     let aborted = false;
 
@@ -873,6 +919,8 @@ async function sendChat(input) {
     // user message stays clean
     const displayMsg = message + (names.length ? `\n📎 ${names.join(', ')}` : '');
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
+    saveConversation('chat');
+    const activeConversation = state.conversations.find(conv => conv.id === state.currentConvId);
     const liveActivity = createLiveAgentActivity($('#chat-messages'));
     let liveActivityFinished = false;
     const body = addTypingMsg($('#chat-messages'), modelLabel);
@@ -909,8 +957,14 @@ async function sendChat(input) {
     setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
-            onEvent: (event) => liveActivity && liveActivity.onEvent(event)
+            conversationId: activeConversation?.id,
+            sessionId: activeConversation?.sessionId,
+            onEvent: (event) => {
+                if (liveActivity) liveActivity.onEvent(event);
+                window.ZaalisWorkspace?.onAgentEvent(event);
+            }
         });
+        if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, activeConversation);
         stopThinking(body);
         if (data.error) {
             if (liveActivity) liveActivity.fail(data.error);
@@ -1274,6 +1328,19 @@ function createLiveAgentActivity(container) {
                 followScroll(container);
                 return;
             }
+            if (event.type === 'permission_required') {
+                const label = lang === 'en' ? 'Waiting for your approval' : 'En attente de votre autorisation';
+                setStatus(label);
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(label)} : ${escapeHTML(event.summary || event.target || '')}</div>`);
+                followScroll(container);
+                return;
+            }
+            if (event.type === 'rust_event' && event.event?.type === 'permission_resolved') {
+                setStatus(event.event.allowed
+                    ? (lang === 'en' ? 'Approved; running command' : 'Autorisé ; exécution en cours')
+                    : (lang === 'en' ? 'Action denied' : 'Action refusée'));
+                return;
+            }
             if (event.type === 'tool_done') {
                 seenActivity++;
                 const result = {
@@ -1311,6 +1378,16 @@ function createLiveAgentActivity(container) {
                 : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
             const html = agentToolResultsHTML(results);
             toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
+            const usage = data && data.usage;
+            const webQueries = Number(usage && usage.webQueries || 0);
+            const webResults = Number(usage && usage.webResults || 0);
+            const webPagesRead = Number(usage && usage.webPagesRead || 0);
+            if (webQueries || webResults || webPagesRead) {
+                const researchLabel = lang === 'en'
+                    ? `Web evidence: ${webQueries} ${webQueries === 1 ? 'query' : 'queries'}, ${webResults} ${webResults === 1 ? 'result' : 'results'}, ${webPagesRead} ${webPagesRead === 1 ? 'page read' : 'pages read'}.`
+                    : `Recherche web : ${webQueries} ${pluralFr(webQueries, 'requête', 'requêtes')}, ${webResults} ${pluralFr(webResults, 'résultat', 'résultats')}, ${webPagesRead} ${pluralFr(webPagesRead, 'page lue', 'pages lues')}.`;
+                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(researchLabel)}</div>`);
+            }
             if (details) details.removeAttribute('open');
             body.classList.remove('live-agent-active');
             followScroll(container);
@@ -1564,7 +1641,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
     if (!state.projectRoot) return;
     const out = $(opts.container || '#chat-messages');
     const retryHistory = Array.isArray(opts.history) ? opts.history : state.chatHistory.slice();
-    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex]?.text || model).split(' ')[0];
+    const modelLabel = opts.modelLabel || (modelSelect.options[modelSelect.selectedIndex] ? providerShortLabel(modelSelect.options[modelSelect.selectedIndex]) : model);
     const persistToChat = opts.persistToChat !== false;
 
     // Re-send the files involved so the model can copy the exact text.
@@ -1650,7 +1727,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         ? 'Here is the content you requested. Analyze it and answer the user now (do not request these same files again).\n\n'
         : 'Voici le contenu que tu as demandé. Analyse-le et réponds maintenant à l\'utilisateur (ne redemande pas ces mêmes fichiers).\n\n') + ctx;
 
-    const modelLabel = modelSelect.options[modelSelect.selectedIndex].text.split(' ')[0];
+    const modelLabel = providerShortLabel(modelSelect.options[modelSelect.selectedIndex]);
     const body = addTypingMsg(out, modelLabel);
     const controller = new AbortController();
     chatAbort = controller;
@@ -1836,24 +1913,29 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
         }
     ];
     const { aiText = '', names = [], images = [] } = taskDraft;
+    if (!state.currentAgentConvId) state.currentAgentConvId = crypto.randomUUID();
     const response = await fetch('/api/rust-agent-team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
         body: JSON.stringify({
             team, message: task + aiText, root: state.projectRoot,
             permissionMode: state.permissionMode, language: lang,
-            reasoningLevel: state.reasoningLevel, images, stream: true
+            reasoningLevel: state.reasoningLevel, images, stream: true,
+            conversationId: state.currentAgentConvId,
+            sessionId: state.agentConversations.find(conv => conv.id === state.currentAgentConvId)?.sessionId
         })
     });
     if (response.status === 404 || response.status === 503) return false;
 
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', task + (names.length ? `\n📎 ${names.join(', ')}` : ''));
+    saveConversation('agents');
     const body = addTypingMsg($('#agents-log'), labels[lead.agent] || lead.agent);
     const activity = createLiveAgentActivity($('#agents-log'));
     const byId = new Map();
     const data = await readAgentEventStream(response, (event) => {
         handleRustInteractiveEvent(event).catch(() => {});
         if (activity) activity.onEvent(event);
+        window.ZaalisWorkspace?.onAgentEvent(event);
         if (event.type === 'rust_event' && event.event) {
             const frame = event.event;
             if (frame.type === 'agent_spawned' && frame.agent) {
@@ -1872,6 +1954,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
             }
         }
     });
+    if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, state.agentConversations.find(conv => conv.id === state.currentAgentConvId));
     stopThinking(body);
     if (data.error) {
         if (activity) activity.fail(data.error);
@@ -2173,6 +2256,7 @@ function projectLabel() {
 const PERSISTED_MSG_CLASSES = [
     'deep-search-host',
     'has-image',
+    'live-agent-body',
     'max-reasoning-text'
 ];
 function persistedBodyClasses(body) {
@@ -2183,7 +2267,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, a[href], details.file-card, .generated-image');
+        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
 }
 
 function saveConversation(kind = 'chat') {
@@ -2200,6 +2284,7 @@ function saveConversation(kind = 'chat') {
         };
         const classes = persistedBodyClasses(body);
         if (classes.length) entry.bodyClasses = classes;
+        if (body?.classList.contains('live-agent-body')) entry.activity = true;
         if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
@@ -2229,6 +2314,7 @@ function saveConversation(kind = 'chat') {
         else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     }
 
+    window.ZaalisWorkspace?.flushConversation(kind);
     persistChats(kind);
     renderHistory();
 }
@@ -2318,21 +2404,34 @@ function mergeConversations(local, server, curId) {
 }
 
 // Restore a saved conversation into its view (chat or agents).
-function loadConversation(kind, id) {
+async function loadConversation(kind, id) {
     const cfg = HIST[kind];
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
-    state[cfg.current] = id;
 
     // Link the chat to its project: re-open the folder it belongs to (or drop the
     // project for a classic "no project" chat) so the AI keeps the right context.
-    applyConversationProject(conv);
+    if (await applyConversationProject(conv) === false) return;
+    state[cfg.current] = id;
 
     const container = $(cfg.container);
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
         const hasRichHtml = m.html && m.type !== 'user';
         const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        if (m.activity || body.querySelector('.live-agent-activity')) {
+            body.classList.add('live-agent-body');
+            body.closest('.msg').classList.add('live-agent-msg');
+            body.querySelectorAll('details').forEach(detail => detail.removeAttribute('open'));
+        } else if (!hasRichHtml && m.type === 'ai' && !m.image) {
+            // Older histories kept only text. Restore formatting without treating
+            // user content as HTML, and fold old flattened tool transcripts.
+            if (/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')) {
+                body.innerHTML = `<details class="ghost-tool-group"><summary>${state.language === 'en' ? 'Previous tool activity' : 'Activité des outils sauvegardée'}</summary><pre class="ghost-tool-pre">${escapeHTML(m.text || '')}</pre></details>`;
+                body.classList.add('live-agent-body');
+                body.closest('.msg').classList.add('live-agent-msg');
+            } else body.innerHTML = formatAIResponse(m.text || '');
+        }
         (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
             if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
         });
@@ -2346,8 +2445,8 @@ function loadConversation(kind, id) {
     // Rebuild the API memory for the chat from its messages. For images we keep
     // a short text placeholder instead of the heavy base64 data URL.
     if (kind === 'chat') {
-        state.chatHistory = (conv.messages || [])
-            .filter(m => m.type === 'user' || m.type === 'ai')
+        state.chatHistory = Array.isArray(conv.apiHistory) ? conv.apiHistory.map(item => ({ ...item })) : (conv.messages || [])
+            .filter(m => m.type === 'user' || (m.type === 'ai' && !m.activity && !/^\s*(Analyse termin[eé]e en|Analysis complete in)/.test(m.text || '')))
             .map(m => ({
                 role: m.type === 'user' ? 'user' : 'assistant',
                 content: m.image
@@ -2387,17 +2486,33 @@ function recentPathByName(name) {
 }
 
 // Switch the open project so a loaded/continued chat matches its folder.
-function applyConversationProject(conv) {
-    if (!conv) return;
-    if (!conv.project) {                       // classic chat -> no project
+async function applyConversationProject(conv) {
+    if (!conv) return false;
+    if (!conv.project && !conv.projectPath) {   // classic chat -> no project
         if (state.projectRoot && typeof clearProject === 'function') {
             clearProject({ preserveConversation: true });
         }
-        return;
+        return true;
     }
     const target = conv.projectPath || recentPathByName(conv.project);
     if (target && target !== state.projectRoot && typeof openProject === 'function') {
-        openProject(target, false, { preserveConversation: true });
+        return await openProject(target, false, { preserveConversation: true });
+    }
+    return !!target;
+}
+
+async function applyWorkspaceSelection(selection, conv) {
+    if (!selection?.root) return;
+    const opened = await openProject(selection.root, true, { preserveConversation: true });
+    if (!opened) return;
+    if (conv) {
+        conv.projectPath = selection.root;
+        conv.project = projectLabel();
+        conv.sessionId = null; // next turn creates a sandbox for the new folder
+    }
+    if (selection.terminalId) {
+        await attachIntegratedTerminal(selection.terminalId);
+        window.ZaalisWorkspace?.setPanel('terminal');
     }
 }
 
@@ -2465,6 +2580,7 @@ function renderHistory() {
         renderProjectPanelHistory('chat');
         renderProjectPanelHistory('agents');
         if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+        window.ZaalisWorkspace?.refresh();
         return;
     }
     if (typeof initRecentProjects === 'function') {
@@ -2473,6 +2589,7 @@ function renderHistory() {
     renderProjectPanelHistory('chat');
     renderProjectPanelHistory('agents');
     if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
+    window.ZaalisWorkspace?.refresh();
 }
 
 // Start a brand-new conversation for the given kind (in the current context).
@@ -2490,6 +2607,10 @@ function newConversation(kind = 'chat') {
 async function deleteConversation(kind, id) {
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
+    if (state[cfg.current] === id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+        toast(lang === 'en' ? 'Stop the running task before deleting this chat.' : 'Arrêtez la tâche en cours avant de supprimer ce chat.');
+        return;
+    }
     const conv = state[cfg.store].find(c => c.id === id);
     const title = conv ? conv.title : '';
     const ok = await customConfirm(`"${title}"`, {
@@ -2504,6 +2625,7 @@ async function deleteConversation(kind, id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
+        if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
     }
     persistChats(kind);
     renderHistory();
@@ -2680,7 +2802,11 @@ function isVisionCompatible(model, submodel) {
         case 'kimi': return true;                     // K3 and current K2.x API models are multimodal
         case 'local': return /llava|vision|bakllava/.test(s); // Ollama: only vision models
         case 'gguf': return /llava|vision|bakllava/.test(s);  // GGUF: only vision-capable local models
-        default: return false;
+        default:
+            // OpenAI-compatible gateways: same rule as compat-providers.js.
+            if (model === 'compat:chatgpt') return true;
+            return String(model || '').startsWith('compat:')
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }
 }
 function chatImagesAllowed() {
@@ -2721,51 +2847,16 @@ function updateAttachAvailability() {
     }
 }
 
-const REASONING_MODES = {
-    codex: [
-        { label: 'HIGH', effort: 'high' },
-        { label: 'MED', effort: 'medium' },
-        { label: 'LOW', effort: 'low' },
-        { label: 'OFF', effort: 'none' }
-    ],
-    claude: [
-        { label: 'MAX', budget: 8192 },
-        { label: 'HIGH', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gemini: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'LOW', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    grok: [
-        { label: 'MAX', budget: 4096 },
-        { label: 'MED', budget: 2048 },
-        { label: 'OFF', budget: 0 }
-    ],
-    mistral: [
-        { label: 'ON', budget: 1 },
-        { label: 'OFF', budget: 0 }
-    ],
-    kimi: [
-        { label: 'MAX', budget: 2 },
-        { label: 'HIGH', budget: 1 },
-        { label: 'LOW', budget: 0 }
-    ],
-    local: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ],
-    gguf: [
-        { label: 'MAX', budget: 2048 },
-        { label: 'MED', budget: 1024 },
-        { label: 'OFF', budget: 0 }
-    ]
-};
+const REASONING_SHORT_LABELS = { off: 'OFF', none: 'OFF', minimal: 'MIN', low: 'LOW', medium: 'MED', high: 'HIGH', xhigh: 'XHIGH', max: 'MAX', ultra: 'ULTRA' };
+
+// Levels come from /api/model-capabilities (cached by workspace.js) on the
+// runtime's 0..4 scale. An empty list means the model reasons natively or not
+// at all: nothing is adjustable, so the slider stays locked.
+function reasoningLevels() {
+    const { model, submodel } = reasoningContext();
+    const caps = window.ZaalisWorkspace?.getCapabilities(model, submodel);
+    return caps?.reasoning?.supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
+}
 
 // Determine which agent acts as the lead (chef de projet) right now.
 function currentLeadAgent() {
@@ -2796,91 +2887,83 @@ function reasoningContext() {
     return { model: modelSelect.value, submodel: submodelSelect.value };
 }
 
-function isReasoningCompatible(model, submodel) {
-    if (model === 'codex' && (submodel.startsWith('o1') || submodel.startsWith('o3') || submodel.startsWith('o4') || submodel.startsWith('gpt-5'))) return true;
-    if (model === 'claude' && (submodel.includes('4.8') || submodel.includes('4-8') || submodel.includes('opus-4') || submodel.includes('sonnet-5') || submodel.includes('fable'))) return true;
-    // Gemini 2.5 and 3.x support native thinking via generationConfig.thinkingConfig.
-    if (model === 'gemini' && (submodel.includes('2.5') || submodel.includes('-3') || submodel.includes('3.') || submodel.includes('thinking'))) return true;
-    if ((model === 'local' || model === 'gguf') && submodel.includes('r1')) return true;
-    // Grok 4.x reasoning models reason natively and reject reasoning_effort,
-    // so there is no controllable budget to expose — keep the slider locked.
-    if (model === 'mistral' && (submodel === 'mistral-medium-3-5' || submodel === 'mistral-small-latest')) return true;
-    if (model === 'kimi') return true;
-    return false;
+function reasoningLevelIndex(levels) {
+    return Math.max(0, levels.findIndex(level => Number(level.value) === Number(state.reasoningLevel)));
 }
 
 function updateSliderVisuals() {
     const sliderBar = $('#reasoning-slider-bar');
     if (!sliderBar) return;
+    const levels = reasoningLevels();
+    const index = reasoningLevelIndex(levels);
     const handle = sliderBar.querySelector('.slider-handle');
-    const notches = sliderBar.querySelectorAll('.slider-notch');
-    const model = reasoningContext().model;
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
-
-    const totalLevels = modes.length;
-    const currentLevel = state.reasoningLevel;
-    
-    let percentage = 100;
-    if (totalLevels > 1) {
-        percentage = (1 - (currentLevel / (totalLevels - 1))) * 100;
+    if (handle) handle.style.top = (levels.length > 1 ? (1 - index / (levels.length - 1)) * 100 : 100) + '%';
+    sliderBar.querySelectorAll('.slider-notch, .slider-dot').forEach(node => {
+        node.classList.toggle('active', levels.length > 1 && Number(node.dataset.index) === index);
+    });
+    if (levels.length) {
+        sliderBar.setAttribute('aria-valuenow', String(levels[index].value));
+        sliderBar.setAttribute('aria-valuetext', levels[index].label || levels[index].id);
+    } else {
+        sliderBar.removeAttribute('aria-valuenow');
+        sliderBar.removeAttribute('aria-valuetext');
     }
-    
-    if (handle) handle.style.top = percentage + '%';
-
-    notches.forEach(n => {
-        const l = parseInt(n.dataset.level);
-        n.classList.toggle('active', l === currentLevel);
-    });
-    sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-        d.classList.toggle('active', parseInt(d.dataset.level) === currentLevel);
-    });
 }
 
-function checkReasoningCompatibility() {
-    const { model, submodel } = reasoningContext();
+// Rebuilds the notches for the selected model; called whenever its
+// capabilities arrive (workspace.js refreshCapabilities).
+function renderReasoningSlider(caps) {
     const sliderBar = $('#reasoning-slider-bar');
     if (!sliderBar) return;
-    
-    const compatible = isReasoningCompatible(model, submodel);
-    const modes = REASONING_MODES[model] || REASONING_MODES.local;
     const track = sliderBar.querySelector('.slider-track');
     const handle = sliderBar.querySelector('.slider-handle');
+    const tooltip = sliderBar.querySelector('.reasoning-tooltip');
+    const lang = state.language || 'fr';
+    const levels = caps?.reasoning?.supported && Array.isArray(caps.reasoning.levels) ? caps.reasoning.levels : [];
+    const shown = levels.length ? levels : [{ id: 'off', label: 'OFF', value: 0 }];
 
     sliderBar.querySelectorAll('.slider-notch').forEach(n => n.remove());
     track.querySelectorAll('.slider-dot').forEach(d => d.remove());
-
-    modes.forEach((m, idx) => {
-        const levelFromBottom = modes.length - 1 - idx;
-        const pct = modes.length > 1 ? (levelFromBottom / (modes.length - 1)) : 1;
-
+    shown.forEach((level, index) => {
+        const fromTop = shown.length > 1 ? 1 - index / (shown.length - 1) : 1;
         const notch = document.createElement('div');
         notch.className = 'slider-notch';
-        if (levelFromBottom === modes.length - 1) notch.classList.add('notch-max');
-        notch.dataset.level = levelFromBottom;
-        notch.textContent = m.label;
-        // Set dynamic top positioning to align perfectly with the track and handle
-        notch.style.top = `calc(28px + ${(1 - pct) * 124}px)`;
+        if (shown.length > 1 && index === shown.length - 1) notch.classList.add('notch-max');
+        notch.dataset.index = index;
+        notch.textContent = REASONING_SHORT_LABELS[level.id] || String(level.label || level.id).toUpperCase();
+        notch.title = level.label || level.id;
+        notch.style.top = `calc(28px + ${fromTop * 128}px)`;
         sliderBar.insertBefore(notch, track);
 
-        // Small dot on the track marking this tier (palier).
         const dot = document.createElement('div');
         dot.className = 'slider-dot';
-        dot.dataset.level = levelFromBottom;
-        dot.style.top = ((1 - pct) * 100) + '%';
-        track.insertBefore(dot, handle); // keep handle on top
+        dot.dataset.index = index;
+        dot.style.top = (fromTop * 100) + '%';
+        track.insertBefore(dot, handle);
     });
-    
-    if (compatible) {
-        sliderBar.classList.remove('locked');
-        if (state.reasoningLevel >= modes.length) {
-            state.reasoningLevel = modes.length - 1;
-        }
+
+    sliderBar.classList.toggle('locked', levels.length < 2);
+    sliderBar.title = caps?.provider === 'gguf'
+        ? 'Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.'
+        : '';
+    sliderBar.setAttribute('aria-disabled', String(levels.length < 2));
+    if (levels.length > 1) {
+        sliderBar.setAttribute('aria-valuemin', String(levels[0].value));
+        sliderBar.setAttribute('aria-valuemax', String(levels[levels.length - 1].value));
     } else {
-        sliderBar.classList.add('locked');
-        state.reasoningLevel = 0;
+        sliderBar.removeAttribute('aria-valuemin');
+        sliderBar.removeAttribute('aria-valuemax');
     }
-    
+    if (tooltip) {
+        tooltip.textContent = caps?.reasoning?.mode === 'native'
+            ? (lang === 'en' ? 'Native reasoning, not adjustable' : 'Raisonnement natif, non réglable')
+            : (TRANSLATIONS[lang]?.['incompatible-tooltip'] || 'Modèle incompatible');
+    }
     updateSliderVisuals();
+}
+
+function checkReasoningCompatibility() {
+    window.ZaalisWorkspace?.refreshCapabilities();
 }
 
 function initReasoningSlider() {
@@ -2888,208 +2971,264 @@ function initReasoningSlider() {
     if (!sliderBar) return;
     const handle = sliderBar.querySelector('.slider-handle');
     const track = sliderBar.querySelector('.slider-track');
-    
+    sliderBar.setAttribute('role', 'slider');
+    sliderBar.setAttribute('aria-label', state.language === 'en' ? 'Reasoning level' : 'Niveau de raisonnement');
+    sliderBar.tabIndex = 0;
+
     let tooltipTimeout = null;
     function showIncompatibleTooltip() {
         sliderBar.classList.add('show-tooltip');
         if (tooltipTimeout) clearTimeout(tooltipTimeout);
-        tooltipTimeout = setTimeout(() => {
-            sliderBar.classList.remove('show-tooltip');
-        }, 2000);
+        tooltipTimeout = setTimeout(() => sliderBar.classList.remove('show-tooltip'), 2000);
     }
 
-    let isDragging = false;
+    function indexAt(clientY, levels) {
+        const rect = track.getBoundingClientRect();
+        const fromTop = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+        return Math.round((1 - fromTop) * (levels.length - 1));
+    }
 
+    function preview(index) {
+        sliderBar.querySelectorAll('.slider-notch, .slider-dot').forEach(node => {
+            node.classList.toggle('active', Number(node.dataset.index) === index);
+        });
+    }
+
+    function commit(levels, index) {
+        state.reasoningLevel = Number(levels[index].value);
+        updateSliderVisuals();
+        window.ZaalisWorkspace?.syncReasoning();
+        saveState();
+    }
+
+    sliderBar.addEventListener('keydown', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        const current = reasoningLevelIndex(levels);
+        const target = ({ ArrowUp: current + 1, ArrowRight: current + 1,
+            ArrowDown: current - 1, ArrowLeft: current - 1,
+            Home: 0, End: levels.length - 1 })[e.key];
+        if (target === undefined) return;
+        e.preventDefault();
+        commit(levels, Math.max(0, Math.min(levels.length - 1, target)));
+    });
+    sliderBar.addEventListener('wheel', e => {
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        e.preventDefault();
+        const current = reasoningLevelIndex(levels);
+        commit(levels, Math.max(0, Math.min(levels.length - 1, current + (e.deltaY < 0 ? 1 : -1))));
+    }, { passive: false });
+
+    let dragging = false;
     sliderBar.addEventListener('mousedown', e => {
-        if (sliderBar.classList.contains('locked')) {
+        const levels = reasoningLevels();
+        if (sliderBar.classList.contains('locked') || levels.length < 2) {
             showIncompatibleTooltip();
             return;
         }
-        
         e.preventDefault();
-        isDragging = true;
-        handle.classList.add('dragging');
-        
         const notch = e.target.closest('.slider-notch');
         if (notch) {
-            const level = parseInt(notch.dataset.level);
-            const model = reasoningContext().model;
-            const modes = REASONING_MODES[model] || REASONING_MODES.local;
-            const totalLevels = modes.length;
-            const targetPercentage = (1 - (level / (totalLevels - 1))) * 100;
-            handle.style.top = targetPercentage + '%';
-            
-            sliderBar.querySelectorAll('.slider-notch').forEach(n => {
-                n.classList.toggle('active', parseInt(n.dataset.level) === level);
-            });
-            sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-                d.classList.toggle('active', parseInt(d.dataset.level) === level);
-            });
-        } else {
-            onMouseMove(e);
+            commit(levels, Number(notch.dataset.index));
+            return;
         }
-        
+        dragging = true;
+        handle.classList.add('dragging');
+        onMouseMove(e);
         document.addEventListener('mousemove', onMouseMove);
         document.addEventListener('mouseup', onMouseUp);
     });
 
     function onMouseMove(e) {
-        if (!isDragging) return;
-        const trackRect = track.getBoundingClientRect();
-        let yPercent = (e.clientY - trackRect.top) / trackRect.height;
-        yPercent = Math.max(0, Math.min(1, yPercent));
-        const percentage = yPercent * 100;
-        handle.style.top = percentage + '%';
-
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
-        const totalLevels = modes.length;
-        
-        let snapLevel = 0;
-        let minDiff = Infinity;
-        
-        for (let i = 0; i < totalLevels; i++) {
-            const targetPercentage = (1 - (i / (totalLevels - 1))) * 100;
-            const diff = Math.abs(percentage - targetPercentage);
-            if (diff < minDiff) {
-                minDiff = diff;
-                snapLevel = i;
-            }
-        }
-
-        sliderBar.querySelectorAll('.slider-notch').forEach(n => {
-            const l = parseInt(n.dataset.level);
-            n.classList.toggle('active', l === snapLevel);
-        });
-        sliderBar.querySelectorAll('.slider-dot').forEach(d => {
-            d.classList.toggle('active', parseInt(d.dataset.level) === snapLevel);
-        });
+        if (!dragging) return;
+        const levels = reasoningLevels();
+        if (levels.length < 2) return;
+        const rect = track.getBoundingClientRect();
+        handle.style.top = (Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) * 100) + '%';
+        preview(indexAt(e.clientY, levels));
     }
 
     function onMouseUp(e) {
-        if (!isDragging) return;
-        isDragging = false;
+        if (!dragging) return;
+        dragging = false;
         handle.classList.remove('dragging');
         document.removeEventListener('mousemove', onMouseMove);
         document.removeEventListener('mouseup', onMouseUp);
-
-        const trackRect = track.getBoundingClientRect();
-        let yPercent = (e.clientY - trackRect.top) / trackRect.height;
-        yPercent = Math.max(0, Math.min(1, yPercent));
-        const percentage = yPercent * 100;
-
-        const model = reasoningContext().model;
-        const modes = REASONING_MODES[model] || REASONING_MODES.local;
-        const totalLevels = modes.length;
-
-        let level = 0;
-        let minDiff = Infinity;
-        
-        for (let i = 0; i < totalLevels; i++) {
-            const targetPercentage = (1 - (i / (totalLevels - 1))) * 100;
-            const diff = Math.abs(percentage - targetPercentage);
-            if (diff < minDiff) {
-                minDiff = diff;
-                level = i;
-            }
-        }
-
-        state.reasoningLevel = level;
-        updateSliderVisuals();
+        const levels = reasoningLevels();
+        if (levels.length < 2) { updateSliderVisuals(); return; }
+        commit(levels, indexAt(e.clientY, levels));
     }
 }
 
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
+// The microphone is recorded here and transcribed on this PC by the local
+// server (/api/stt, whisper.cpp). The browser's own SpeechRecognition cannot be
+// used: the embedded WebView exposes the API but has no speech service behind
+// it, so a click on the microphone used to fail without a word.
+const DICTATION_SAMPLE_RATE = 16000;
+const DICTATION_MAX_MS = 3 * 60 * 1000;
+// The speech model is downloaded once; the user is told a single time that
+// Windows' recognizer stands in until it is there.
+let dictationModelNoticeShown = false;
+
+// Any recorded audio as the 16 kHz mono 16-bit WAV the server expects.
+async function dictationWav(blob) {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    const decoder = new AudioCtx();
+    let decoded;
+    try { decoded = await decoder.decodeAudioData(await blob.arrayBuffer()); }
+    finally { decoder.close().catch(() => {}); }
+    const frames = Math.max(1, Math.ceil(decoded.duration * DICTATION_SAMPLE_RATE));
+    const offline = new OfflineAudioContext(1, frames, DICTATION_SAMPLE_RATE);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    source.connect(offline.destination);
+    source.start();
+    const samples = (await offline.startRendering()).getChannelData(0);
+    const wav = new DataView(new ArrayBuffer(44 + samples.length * 2));
+    const ascii = (offset, text) => { for (let i = 0; i < text.length; i++) wav.setUint8(offset + i, text.charCodeAt(i)); };
+    ascii(0, 'RIFF'); wav.setUint32(4, 36 + samples.length * 2, true); ascii(8, 'WAVE');
+    ascii(12, 'fmt '); wav.setUint32(16, 16, true); wav.setUint16(20, 1, true); wav.setUint16(22, 1, true);
+    wav.setUint32(24, DICTATION_SAMPLE_RATE, true); wav.setUint32(28, DICTATION_SAMPLE_RATE * 2, true);
+    wav.setUint16(32, 2, true); wav.setUint16(34, 16, true);
+    ascii(36, 'data'); wav.setUint32(40, samples.length * 2, true);
+    for (let i = 0; i < samples.length; i++) {
+        const value = Math.max(-1, Math.min(1, samples[i]));
+        wav.setInt16(44 + i * 2, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+    }
+    return new Blob([wav.buffer], { type: 'audio/wav' });
+}
+function dictationBase64(blob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result).slice(String(reader.result).indexOf(',') + 1));
+        reader.onerror = () => reject(reader.error || new Error('read'));
+        reader.readAsDataURL(blob);
+    });
+}
+
 function setupVoiceRecognition(btnId, textareaId) {
     const btn = $('#' + btnId);
     const textarea = $('#' + textareaId);
     if (!btn || !textarea) return;
 
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
+    const supported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder
+        && (window.AudioContext || window.webkitAudioContext) && window.OfflineAudioContext);
+    if (!supported) {
         btn.style.display = 'none';
         return;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
+    const say = (fr, en) => (state.language === 'en' ? en : fr);
+    const notify = message => { if (typeof showToast === 'function') showToast('', message, { icon: '!', duration: 6000 }); };
 
-    // Track state: 'inactive' | 'starting' | 'active' | 'stopping'
-    let engineState = 'inactive';
-    let baseText = '';
+    // 'idle' | 'starting' | 'recording' | 'transcribing'
+    let phase = 'idle';
+    let recorder = null;
+    let stream = null;
+    let chunks = [];
+    let limit = null;
 
-    recognition.onstart = () => {
-        engineState = 'active';
-        btn.classList.add('recording');
-        textarea.classList.add('recording-text');
-        btn.title = state.language === 'en' ? 'Recording... click to stop' : 'Enregistrement... cliquer pour arrêter';
-    };
-
-    recognition.onresult = (event) => {
-        let sessionTranscript = '';
-        for (let i = 0; i < event.results.length; ++i) {
-            sessionTranscript += event.results[i][0].transcript;
-        }
-        sessionTranscript = sessionTranscript.trim();
-        
-        const separator = (baseText && !baseText.endsWith(' ')) ? ' ' : '';
-        const newText = baseText ? `${baseText}${separator}${sessionTranscript}` : sessionTranscript;
-        textarea.value = newText;
-        autoGrow(textarea);
-        textarea.dispatchEvent(new Event('input'));
-    };
-
-    recognition.onerror = (event) => {
-        console.error("Speech recognition error:", event.error);
-        cleanupState();
-    };
-
-    recognition.onend = () => {
-        cleanupState();
-    };
-
-    function cleanupState() {
-        engineState = 'inactive';
-        btn.classList.remove('recording');
-        textarea.classList.remove('recording-text');
-        btn.title = state.language === 'en' ? 'Start voice dictation' : 'Activer la dictée vocale';
+    function setPhase(next) {
+        phase = next;
+        btn.classList.toggle('recording', next === 'recording');
+        btn.classList.toggle('transcribing', next === 'transcribing');
+        btn.setAttribute('aria-pressed', String(next === 'recording'));
+        textarea.classList.toggle('recording-text', next === 'recording' || next === 'transcribing');
+        btn.title = next === 'recording' ? say('Enregistrement… cliquer pour arrêter', 'Recording… click to stop')
+            : next === 'transcribing' ? say('Transcription en cours…', 'Transcribing…')
+            : say('Activer la dictée vocale', 'Start voice dictation');
+    }
+    function releaseMicrophone() {
+        clearTimeout(limit);
+        if (stream) stream.getTracks().forEach(track => track.stop());
+        stream = null;
+        recorder = null;
     }
 
-    function startRecording() {
-        if (engineState !== 'inactive') return;
-        engineState = 'starting';
-        baseText = textarea.value;
-        recognition.lang = state.language === 'en' ? 'en-US' : 'fr-FR';
+    async function transcribe(blob) {
+        setPhase('transcribing');
         try {
-            recognition.start();
-        } catch (err) {
-            console.error("Failed to start speech recognition:", err);
-            cleanupState();
+            if (!blob.size) throw Object.assign(new Error('empty'), { quiet: true });
+            const audio = await dictationBase64(await dictationWav(blob));
+            const res = await fetch('/api/stt', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ audio, language: state.language === 'en' ? 'en' : 'fr' })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.hint || data.error || say('La transcription a échoué.', 'Transcription failed.'));
+            if (data.pull && !dictationModelNoticeShown) {
+                dictationModelNoticeShown = true;
+                const percent = data.pull.total ? Math.floor(data.pull.completed / data.pull.total * 100) : 0;
+                notify(say(`Le modèle de dictée se télécharge (${percent} %). En attendant, la reconnaissance vocale de Windows, moins précise, est utilisée.`,
+                    `The dictation model is downloading (${percent}%). Until then the less accurate Windows recognizer is used.`));
+            }
+            const heard = String(data.text || '').trim();
+            if (!heard) throw Object.assign(new Error('silence'), { quiet: true });
+            // Appended to what the field holds now: the user may have typed meanwhile.
+            const current = textarea.value;
+            textarea.value = current + (current && !/\s$/.test(current) ? ' ' : '') + heard;
+            autoGrow(textarea);
+            textarea.dispatchEvent(new Event('input'));
+            textarea.focus();
+        } catch (error) {
+            notify(error.quiet ? say('Aucune parole détectée.', 'No speech detected.')
+                : (error.message || say('La transcription a échoué.', 'Transcription failed.')));
+        } finally {
+            setPhase('idle');
         }
+    }
+
+    async function startRecording() {
+        setPhase('starting');
+        try {
+            stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        } catch (error) {
+            setPhase('idle');
+            const name = error && error.name;
+            notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say('Aucun microphone détecté sur ce PC.', 'No microphone found on this PC.')
+                : name === 'NotAllowedError' || name === 'SecurityError' ? say('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).', 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                : say('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).', 'The microphone cannot be used right now (in use by another app?).'));
+            return;
+        }
+        chunks = [];
+        try {
+            recorder = new MediaRecorder(stream);
+        } catch (error) {
+            releaseMicrophone();
+            setPhase('idle');
+            notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.'));
+            return;
+        }
+        recorder.addEventListener('dataavailable', event => { if (event.data && event.data.size) chunks.push(event.data); });
+        recorder.addEventListener('stop', () => {
+            const blob = new Blob(chunks, { type: (recorder && recorder.mimeType) || 'audio/webm' });
+            chunks = [];
+            releaseMicrophone();
+            transcribe(blob);
+        }, { once: true });
+        recorder.start();
+        setPhase('recording');
+        // Lets the server fetch its speech model while the user is speaking.
+        fetch('/api/voice-status').catch(() => {});
+        limit = setTimeout(stopRecording, DICTATION_MAX_MS);
     }
 
     function stopRecording() {
-        if (engineState !== 'active' && engineState !== 'starting') return;
-        engineState = 'stopping';
-        try {
-            recognition.stop();
-        } catch (err) {
-            console.error("Failed to stop speech recognition:", err);
-            cleanupState();
-        }
+        if (phase !== 'recording' || !recorder) return;
+        clearTimeout(limit);
+        try { recorder.stop(); } catch { releaseMicrophone(); setPhase('idle'); }
     }
 
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (engineState === 'active' || engineState === 'starting') {
-            stopRecording();
-        } else if (engineState === 'inactive') {
-            startRecording();
-        }
+        if (phase === 'recording') stopRecording();
+        else if (phase === 'idle') startRecording();
     });
+    setPhase('idle');
 }
 
 // Initialize Voice Recognition

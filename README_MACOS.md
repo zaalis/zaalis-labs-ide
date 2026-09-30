@@ -11,7 +11,7 @@ sh native/build_macos_dmg.sh
 
 Prerequis : Node.js 22+, Rust 1.90+ (cibles `aarch64-apple-darwin` et
 `x86_64-apple-darwin`), les outils en ligne de commande Xcode (`swiftc`,
-`codesign`, `hdiutil`).
+`codesign`, `hdiutil`), CMake et un compilateur C/C++ pour whisper.cpp.
 
 Sorties :
 

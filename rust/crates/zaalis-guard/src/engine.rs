@@ -5,7 +5,7 @@
 //! implementation on purpose: three permission systems would drift, and the
 //! loosest one would become the real policy.
 
-use crate::command::{analyse, CommandAnalysis, Finding};
+use crate::command::{analyse, canonical_prefix, CommandAnalysis, Finding};
 use globset::GlobMatcher;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -114,6 +114,8 @@ pub struct Guard {
     session_grants: HashSet<GrantKey>,
     session_denials: HashSet<GrantKey>,
     persisted: Vec<PermissionRule>,
+    /// Rules added in this session that storage has not seen yet.
+    pending_persist: Vec<PermissionRule>,
     audit: Vec<AuditEntry>,
     /// Path of the plan file, relative to the workspace. The only writable path
     /// in plan mode.
@@ -173,20 +175,57 @@ impl Guard {
             }
             GrantScope::Always => {
                 self.session_grants.insert(key.clone());
-                // A persisted network grant is stored as a `domain:` rule so it
-                // matches every URL on that host, the same way an allow rule
-                // written by hand would.
-                let pattern = if request.kind == AccessKind::Network {
-                    format!("domain:{target}")
-                } else {
-                    target
+                let pattern = match request.kind {
+                    // A persisted network grant is stored as a `domain:` rule so
+                    // it matches every URL on that host, the same way an allow
+                    // rule written by hand would.
+                    AccessKind::Network => format!("domain:{target}"),
+                    // A command is widened to its stable head when that is safe,
+                    // so "always" survives a change of arguments. See
+                    // [`crate::command::canonical_prefix`] for why it stops
+                    // where it does.
+                    AccessKind::Execute => {
+                        canonical_prefix(&analyse(&target)).unwrap_or_else(|| target.clone())
+                    }
+                    _ => target,
                 };
                 let rule = PermissionRule::new(request.kind, Some(pattern));
                 if !self.persisted.contains(&rule) {
-                    self.persisted.push(rule);
+                    self.persisted.push(rule.clone());
+                    self.pending_persist.push(rule);
                 }
             }
         }
+    }
+
+    /// Record that a reviewer approved one action.
+    ///
+    /// Deliberately *not* a grant: the approval covers this call and nothing
+    /// else, so an identical second call is reviewed again. What it does leave
+    /// behind is an audit line, because a decision taken without the user is
+    /// exactly the decision they must be able to find afterwards.
+    pub fn record_reviewed(&mut self, request: &AccessRequest, reason: &str) {
+        self.audit.push(AuditEntry {
+            ts_ms: 0,
+            agent_id: request.agent_id.clone(),
+            tool: request.tool.clone(),
+            kind: request.kind,
+            target: request.target.clone(),
+            mode: PermissionMode::default(),
+            outcome: "reviewed",
+            reason: DecisionReason::ModeAuto,
+            findings: vec![format!("relecture : {reason}")],
+        });
+    }
+
+    /// Take the rules added since the last call, for the caller to store.
+    ///
+    /// The guard deliberately owns no storage: it runs in tests, in the CLI and
+    /// in the daemon, and only one of those has a database. Handing the rules
+    /// out means "always" can mean *always* — until this existed, an approval
+    /// marked permanent lived in memory and died with the process.
+    pub fn drain_new_rules(&mut self) -> Vec<PermissionRule> {
+        std::mem::take(&mut self.pending_persist)
     }
 
     /// Decide whether one access may proceed.
@@ -206,6 +245,7 @@ impl Guard {
             CommandAnalysis {
                 segments: Vec::new(),
                 findings: Vec::new(),
+                decoded: Vec::new(),
             }
         };
 
@@ -249,16 +289,26 @@ impl Guard {
         // 1. Hard prohibitions. No mode, not even bypass, waves these through.
         let prohibitions = analysis.hard_prohibitions();
         if !prohibitions.is_empty() {
+            let reasons = prohibitions
+                .iter()
+                .map(|finding| finding.describe())
+                .collect::<Vec<_>>()
+                .join(", ");
+            // When the payload was hidden, say what it actually was. A refusal
+            // the user cannot check is a refusal they learn to click past.
+            let revealed = analysis
+                .decoded
+                .iter()
+                .map(|text| truncate(text, 200))
+                .collect::<Vec<_>>()
+                .join(" ; ");
             return Decision::Deny {
                 reason: DecisionReason::HardProhibition,
-                message: format!(
-                    "commande refusée : {}",
-                    prohibitions
-                        .iter()
-                        .map(|finding| finding.describe())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ),
+                message: if revealed.is_empty() {
+                    format!("commande refusée : {reasons}")
+                } else {
+                    format!("commande refusée : {reasons} — contenu décodé : {revealed}")
+                },
             };
         }
 
@@ -443,6 +493,16 @@ impl Guard {
             },
         }
     }
+}
+
+/// Shorten a decoded payload for a message, on a character boundary.
+fn truncate(text: &str, limit: usize) -> String {
+    let trimmed = text.trim();
+    if trimmed.chars().count() <= limit {
+        return trimmed.to_owned();
+    }
+    let cut: String = trimmed.chars().take(limit).collect();
+    format!("{cut}…")
 }
 
 fn describe(request: &AccessRequest) -> String {
@@ -771,6 +831,79 @@ mod tests {
             fresh.evaluate(&access, &PermissionSet::new(PermissionMode::Supervised), 0);
         assert!(evaluation.is_allow());
         assert_eq!(evaluation.decision.reason(), DecisionReason::PersistedGrant);
+    }
+
+    #[test]
+    fn an_always_grant_on_a_command_widens_to_its_stable_head() {
+        // The behaviour that makes "toujours" worth choosing: approving one
+        // invocation covers the same command with different arguments, without
+        // covering a different sub-command.
+        let mut guard = Guard::new();
+        let approved = request(AccessKind::Execute, "cargo test -p zaalis-guard");
+        guard.record_answer(&approved, true, GrantScope::Always);
+
+        let permissions = PermissionSet::new(PermissionMode::Supervised);
+        let variant = request(AccessKind::Execute, "cargo test -p zaalis-fs -- --nocapture");
+        assert!(
+            guard.evaluate(&variant, &permissions, 0).is_allow(),
+            "un autre argument de la même commande ne doit plus demander"
+        );
+
+        // But a different sub-command is a different decision.
+        let other = request(AccessKind::Execute, "cargo publish");
+        assert!(!guard.evaluate(&other, &permissions, 0).is_allow());
+    }
+
+    #[test]
+    fn a_risky_command_is_remembered_verbatim_and_never_widened() {
+        // `rm -rf build` must not become `rm *`. Widening a destructive command
+        // is how one approval turns into a standing permission to delete.
+        let mut guard = Guard::new();
+        let approved = request(AccessKind::Execute, "rm -rf build");
+        guard.record_answer(&approved, true, GrantScope::Always);
+        let rules = guard.persisted_rules();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern.as_deref(), Some("rm -rf build"));
+    }
+
+    #[test]
+    fn an_unknown_binary_is_remembered_verbatim() {
+        // There is no argument grammar to trust, so nothing is widened.
+        let mut guard = Guard::new();
+        let approved = request(AccessKind::Execute, "./deploy.sh --prod");
+        guard.record_answer(&approved, true, GrantScope::Always);
+        assert_eq!(
+            guard.persisted_rules()[0].pattern.as_deref(),
+            Some("./deploy.sh --prod")
+        );
+    }
+
+    #[test]
+    fn new_rules_are_handed_out_once_for_storage() {
+        let mut guard = Guard::new();
+        guard.record_answer(
+            &request(AccessKind::Execute, "npm run build"),
+            true,
+            GrantScope::Always,
+        );
+        let drained = guard.drain_new_rules();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].to_string(), "Exec(npm run build *)");
+        // Draining twice must not write the same rule to storage twice.
+        assert!(guard.drain_new_rules().is_empty());
+        // The guard still honours it in-process.
+        assert!(!guard.persisted_rules().is_empty());
+    }
+
+    #[test]
+    fn a_session_scoped_grant_is_never_offered_for_storage() {
+        let mut guard = Guard::new();
+        guard.record_answer(
+            &request(AccessKind::Execute, "npm test"),
+            true,
+            GrantScope::Session,
+        );
+        assert!(guard.drain_new_rules().is_empty());
     }
 
     #[test]

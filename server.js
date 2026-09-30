@@ -1,17 +1,27 @@
-﻿const express = require('express');
+const express = require('express');
 const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { exec, execFile, spawn } = require('child_process');
-const brainMcp = require('./brain-mcp-client');
 const mcpRegistry = require('./mcp-registry');
+const voiceStt = require('./voice-stt');
+const opale = require('./opale-connector');
+const blenderConnector = require('./blender-connector');
 const { AutomationManager } = require('./automation-manager');
+
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
 const { RustAgentBridge } = require('./rust-agent-bridge');
 const { mobileAllowed, tunnelRouteAllowed } = require('./tunnel-policy');
+const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
+const compatProviders = require('./compat-providers');
+const chatgptSubscription = require('./chatgpt-subscription');
+const workspaceContext = require('./workspace-context');
+const workspaceTokens = new Map();
+const { BrowserHost } = require('./zaalis-browser/host');
+const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -19,11 +29,10 @@ try { QRCode = require('qrcode'); } catch {}
 
 const app = express();
 const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
-// Sur macOS, le controle du bureau vit dans la coquille Electron : c'est elle
-// qui detient les autorisations Accessibilite et Enregistrement de l'ecran
-// (accordees au bundle signe), lance le binaire Swift macos-computer-bridge et
-// affiche l'overlay. Le serveur ne fait que lui parler en HTTP loopback, avec
-// l'URL et le secret qu'elle lui transmet au demarrage.
+// Le pont de contrôle du bureau tourne dans ce processus (WPF + PowerShell).
+// L'overlay affiche un bouton « Arrêter le travail » qui rappelle le serveur sur
+// /api/automation/stop-bridge : il s'authentifie avec ce secret tiré au lancement,
+// jamais avec la session de l'utilisateur.
 const COMPUTER_STOP_SECRET = process.env.ZAALIS_COMPUTER_BRIDGE_SECRET || '';
 const automationManager = new AutomationManager({
   bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '',
@@ -47,16 +56,16 @@ try {
     APP_VERSION = pkg.version || APP_VERSION;
   } catch {}
 }
+chatgptSubscription.setVersion(APP_VERSION);
 
 // ---------------------------------------------------------------------------
 // Local accounts + sessions (no external dependency)
 // ---------------------------------------------------------------------------
 // Accounts and per-user chats are stored as local files under server-data/.
 // Passwords are hashed with scrypt; sessions are signed HttpOnly cookies.
-// When packaged, the data lives in
-// ~/Library/Application Support/zaalis/server-data — a stable per-user location
-// that survives app updates and reinstalls. Writing inside the .app bundle
-// would break its code signature and lose accounts/chats at every update.
+// When packaged, the data lives in %LOCALAPPDATA%\zaalis\server-data — a
+// stable per-user location that survives app updates and reinstalls
+// (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() {
   if (process.env.ZAALIS_DATA_DIR) {
     return path.resolve(process.env.ZAALIS_DATA_DIR);
@@ -122,7 +131,10 @@ function userApiKeys(user) {
   const out = {};
   for (const p of KEY_PROVIDERS) {
     const enc = user && user.apiKeys && user.apiKeys[p];
-    if (enc) { const v = decryptSecret(enc); if (v) out[p] = v; }
+    // Toute clé déchiffrée est aussi enregistrée pour le masquage de sortie :
+    // détenir la clé et savoir la masquer deviennent le même geste, donc un
+    // fournisseur ajouté plus tard ne peut pas oublier la seconde moitié.
+    if (enc) { const v = decryptSecret(enc); if (v) { registerSecret(`clé ${p}`, v); out[p] = v; } }
   }
   return out;
 }
@@ -584,6 +596,101 @@ app.post('/api/internal/rust-computer', async (req, res) => {
   }
 });
 
+// A desktop-only capability, scoped to this user's active agent. It exposes
+// project selection without granting arbitrary filesystem or terminal access.
+app.post('/api/internal/rust-workspace', (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
+  try {
+    const projects = workspaceContext.knownProjects(context.user, context.projectRoot);
+    if (req.body.action === 'list') return res.json({ summary: 'Projets connus', projects, root: context.root, terminal: context.terminal });
+    if (req.body.action !== 'open') return res.status(400).json({ error: 'Action workspace inconnue.' });
+    const root = workspaceContext.selectProject(projects, req.body.project);
+    const terminal = req.body.terminal === false ? null : terminalManager.snapshot(terminalManager.create({ userId: context.user.id, cwd: root, profileId: sharedConfigForUser(context.user).terminalProfile, origin: 'user' }));
+    context.selected = { root, terminalId: terminal?.id || null };
+    return res.json({ summary: 'Projet ouvert : ' + path.basename(root), ...context.selected, nextTurn: 'Le projet et le terminal seront affichés à la fin de cette réponse. Confirme cette ouverture puis termine le tour. Les outils de fichiers de ce tour restent liés à l’ancien dossier.' });
+  } catch (error) { return res.status(400).json({ error: error.message }); }
+});
+
+// Blender's MCP server, served by this process for the Rust core only: the
+// agent's `mcp` calls to server "blender" arrive here and are relayed to the
+// add-on running inside Blender. The token is random, per launch, memory-only.
+app.post('/api/internal/blender-mcp', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BLENDER_MCP_TOKEN)) return res.status(401).json({ error: 'Jeton Blender invalide.' });
+  try {
+    // A notification has no reply; an empty JSON object keeps strict clients happy.
+    res.json((await blender.handleRpc(req.body)) || {});
+  } catch (error) {
+    res.status(500).json({ jsonrpc: '2.0', id: (req.body && req.body.id) || null, error: { code: -32603, message: error.message || String(error) } });
+  }
+});
+
+// Private loopback bridge used only by the Rust `browser` tool: the agent's
+// web actions happen in the integrated browser, visible to the user.
+app.post('/api/internal/rust-browser', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BROWSER_TOOL_TOKEN)) return res.status(401).json({ error: 'Jeton browser invalide.' });
+  const body = req.body || {};
+  const action = String(body.action || '');
+  try {
+    if (action === 'open_external') {
+      const ok = openInExternalBrowser(body.url);
+      return res.json({ summary: ok ? 'Ouvert dans le navigateur externe' : 'URL refusée', result: ok ? `Ouvert dans le navigateur par défaut : ${body.url}` : 'Seules les URL http(s) sont acceptées.' });
+    }
+    if (!browserHost.available()) return res.status(503).json({ error: 'Navigateur intégré indisponible (application zaalis IDE requise).' });
+    const args = { ...body };
+    delete args.action;
+    const result = await browserHost.agentTool(action, args);
+    // A screenshot travels as an image the agent runtime shows to the model.
+    if (result && typeof result === 'object' && result.image) {
+      return res.json({ summary: 'browser screenshot', result: String(result.text || ''), images: [{ mime: 'image/jpeg', data: String(result.image) }] });
+    }
+    return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Private loopback adapter used only by the Rust core: it presents the user's
+// ChatGPT subscription as one more OpenAI-compatible endpoint. The core sends
+// chat-completions with a per-launch key; the OAuth tokens never leave this
+// process and are renewed here.
+app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
+  const refuse = (status, message) => res.status(status).json({ error: { message } });
+  const user = chatgptProxyUser(req);
+  if (!user) return refuse(401, 'Jeton ChatGPT interne invalide.');
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id });
+    const upstream = await withChatgptToken(user.id, (token) =>
+      chatgptSubscription.openResponseStream(token, request, { signal: controller.signal }));
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    const reader = chatgptSubscription.createSseReader();
+    const translator = chatgptSubscription.createChunkTranslator(request.model);
+    const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+    for await (const chunk of upstream.body) {
+      for (const event of reader.push(chunk)) write(translator.push(event));
+    }
+    for (const event of reader.finish()) write(translator.push(event));
+    write(translator.finish());
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    const message = error.message || String(error);
+    if (!res.headersSent) return refuse(error.status || 502, message);
+    try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch {}
+    return res.end();
+  }
+});
+
 // Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
 // est un processus séparé, sans cookie de session : il s'authentifie avec le
 // secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
@@ -633,6 +740,23 @@ app.use('/api', (req, res, next) => {
   return res.status(401).json({ error: 'Authentification requise.' });
 });
 
+// Per-account preference survives logout and application reinstalls because
+// users.json lives in the stable user data directory.
+const UI_PERMISSION_MODES = new Set(['supervised', 'semi', 'auto']);
+app.get('/api/preferences', (req, res) => {
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
+});
+app.put('/api/preferences', (req, res) => {
+  const permissionMode = String(req.body?.permissionMode || '');
+  if (!UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === req.user.id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+  user.permissionMode = permissionMode;
+  saveUsers(users);
+  res.json({ permissionMode });
+});
+
 // Update profile
 app.post('/api/profile', (req, res) => {
   const { pseudo, photo } = req.body || {};
@@ -655,7 +779,8 @@ app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
     config: sharedConfigForUser(req.user),
-    terminalProfiles: terminalManager.profiles()
+    terminalProfiles: terminalManager.profiles(),
+    defaultTerminalProfile: DEFAULT_TERMINAL_PROFILE
   });
 });
 
@@ -667,7 +792,7 @@ app.get('/api/config', (req, res) => {
 app.post('/api/terminal/sessions', (req, res) => {
   try {
     if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
-    const cwd = resolveBase((req.body && req.body.cwd) || APP_DIR);
+    const cwd = workspaceContext.agentRoot({ root: req.body?.cwd || os.homedir() }, req.user);
     const profileId = sharedConfigForUser(req.user).terminalProfile;
     const session = terminalManager.create({ userId: req.user.id, cwd, profileId, origin: 'user' });
     res.json(terminalManager.snapshot(session));
@@ -761,22 +886,489 @@ app.put('/api/keys', (req, res) => {
   }
 });
 
-
-// MCP configuration: Zaalis Brain is distinct from personal MCP servers.
-function publicMcpServers(user) { return (user.mcpServers || []).map((s) => ({ ...s, token: undefined, tokenConfigured: !!s.token })); }
-function rustMcpServersFor(user) {
-  return [
-    ...(user.mcpServers || []).filter((server) => server && server.enabled).map((server) => ({ ...server, token: server.token ? decryptSecret(server.token) : '' })),
-    ...(user.brainMcp && user.brainMcp.enabled && user.brainMcp.endpoint && user.brainMcp.token
-      ? [{ id: 'zaalis-brain', name: 'Zaalis Brain', endpoint: user.brainMcp.endpoint, token: decryptSecret(user.brainMcp.token), enabled: true, allow: [], deny: [] }]
-      : []),
-  ];
+// OpenAI-compatible providers: keys live in the same encrypted vault as the
+// built-in ones (`compat:<id>`), URLs of self-hosted entries in compatUrls.
+function compatBaseUrl(user, provider) {
+  const saved = user && user.compatUrls && user.compatUrls[provider.id];
+  return provider.editableUrl && saved ? saved : provider.baseUrl;
 }
-app.get('/api/brain-mcp', (req, res) => { const s = req.user.brainMcp || {}; res.json({ configured: !!(s.endpoint && s.token), enabled: !!s.enabled, endpoint: s.endpoint || '', state: s.enabled ? 'disconnected' : 'not_configured' }); });
-app.put('/api/brain-mcp', (req, res) => {
-  try { const b = req.body || {}, users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = users[i].brainMcp || {}; const endpoint = String(b.endpoint === undefined ? old.endpoint || '' : b.endpoint).trim(); const token = String(b.token || '') || (old.token ? decryptSecret(old.token) : ''); if ((b.enabled || endpoint || token) && !brainMcp.validateConfig({ endpoint, token })) return res.status(400).json({ error: 'Route ou jeton Zaalis Brain invalide.' }); users[i].brainMcp = { enabled: !!b.enabled, endpoint, token: token ? encryptSecret(token) : '' }; saveUsers(users); res.json({ configured: !!(endpoint && token), enabled: !!b.enabled, endpoint, state: b.enabled ? 'disconnected' : 'not_configured' }); } catch (e) { res.status(500).json({ error: e.message }); }
+function compatKey(user, provider) {
+  const enc = user && user.apiKeys && user.apiKeys[compatProviders.vaultName(provider.id)];
+  const value = enc ? decryptSecret(enc) : '';
+  if (value) registerSecret(`clé ${provider.id}`, value);
+  return value;
+}
+function compatReady(user, provider) {
+  if (provider.oauth) return !!chatgptSession(user);
+  if (!compatBaseUrl(user, provider)) return false;
+  return provider.keyless ? true : !!compatKey(user, provider);
+}
+function compatStatus(user) {
+  return compatProviders.PROVIDERS.map((provider) => {
+    const key = compatKey(user, provider);
+    const status = {
+      id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
+      defaultUrl: provider.baseUrl, models: provider.models,
+      keyless: !!provider.keyless, editableUrl: !!provider.editableUrl, local: !!provider.local,
+      key: { set: !!key, last4: key ? key.slice(-4) : '' },
+      // Keyless local servers only count once the user saved them explicitly.
+      configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
+    };
+    if (provider.oauth) {
+      // Signed in with an account instead of a key.
+      status.oauth = provider.oauth;
+      status.configured = !!chatgptSession(user);
+    }
+    return status;
+  });
+}
+// Every configured endpoint goes to the daemon at once, so switching provider
+// does not restart it. The keys travel as separate environment variables.
+function compatEndpointsFor(user) {
+  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+    // The daemon reaches the subscription through the loopback adapter above.
+    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/chatgpt/v1`, key: chatgptProxyKey(user.id) }
+    : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
+}
+
+// ---------------------------------------------------------------------------
+// CHATGPT SUBSCRIPTION — account session kept in the same encrypted vault
+// ---------------------------------------------------------------------------
+function chatgptSession(user) {
+  if (!user || !user.chatgptAuth) return null;
+  try {
+    const session = JSON.parse(decryptSecret(user.chatgptAuth));
+    if (!session || !session.accessToken) return null;
+    registerSecret('jeton ChatGPT', session.accessToken);
+    registerSecret('jeton de renouvellement ChatGPT', session.refreshToken);
+    return session;
+  } catch { return null; }
+}
+function storeChatgptSession(userId, session) {
+  const users = loadUsers();
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur non trouve.'), { status: 404 });
+  if (session) user.chatgptAuth = encryptSecret(JSON.stringify(session));
+  else delete user.chatgptAuth;
+  saveUsers(users);
+  return user;
+}
+function chatgptStatus(user) {
+  const session = chatgptSession(user);
+  return session
+    ? { connected: true, email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
+    : { connected: false };
+}
+
+// A valid access token for this user. Refresh tokens are single-use, so one
+// renewal at most runs per user and every concurrent caller waits for it.
+// `rejected` is a token the backend just refused: it is renewed unless another
+// request already did so.
+const chatgptRefreshes = new Map();
+async function chatgptAccessToken(userId, { rejected = '' } = {}) {
+  const session = chatgptSession(loadUsers().find((u) => u.id === userId));
+  if (!session) {
+    throw Object.assign(new Error('Abonnement ChatGPT non connecté. Connectez-le dans Paramètres › Clés API.'), { status: 401 });
+  }
+  const stale = rejected ? session.accessToken === rejected : chatgptSubscription.needsRefresh(session);
+  if (!stale) return session.accessToken;
+  let pending = chatgptRefreshes.get(userId);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const renewed = await chatgptSubscription.refreshSession(session);
+        storeChatgptSession(userId, renewed);
+        return renewed.accessToken;
+      } catch (error) {
+        // A revoked session cannot come back: forget it so Settings shows the truth.
+        if (error.relogin) storeChatgptSession(userId, null);
+        throw error;
+      } finally {
+        chatgptRefreshes.delete(userId);
+      }
+    })();
+    chatgptRefreshes.set(userId, pending);
+  }
+  return pending;
+}
+async function withChatgptToken(userId, call) {
+  const token = await chatgptAccessToken(userId);
+  try {
+    return await call(token);
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    return call(await chatgptAccessToken(userId, { rejected: token }));
+  }
+}
+
+// Key the Rust core presents to the loopback adapter. Drawn at launch and
+// bound to one user: it opens nothing but that user's own subscription.
+const CHATGPT_PROXY_SECRET = crypto.randomBytes(32);
+function chatgptProxySignature(userId) {
+  return crypto.createHmac('sha256', CHATGPT_PROXY_SECRET).update(String(userId)).digest('base64url');
+}
+function chatgptProxyKey(userId) {
+  const key = `${userId}.${chatgptProxySignature(userId)}`;
+  registerSecret('clé interne ChatGPT', key);
+  return key;
+}
+function chatgptProxyUser(req) {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const at = raw.lastIndexOf('.');
+  if (at <= 0) return null;
+  const userId = raw.slice(0, at);
+  if (!safeEqual(raw.slice(at + 1), chatgptProxySignature(userId))) return null;
+  return loadUsers().find((u) => u.id === userId) || null;
+}
+
+app.get('/api/chatgpt/status', (req, res) => res.json(chatgptStatus(req.user)));
+
+// Sign-in with a code typed on auth.openai.com. The device id stays here; the
+// interface only ever holds the code to show and an opaque flow id.
+const chatgptFlows = new Map();
+app.post('/api/chatgpt/device-start', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    const flow = await chatgptSubscription.requestDeviceCode();
+    for (const [id, entry] of chatgptFlows) {
+      if (entry.userId === req.user.id || entry.expiresAt < Date.now()) chatgptFlows.delete(id);
+    }
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    chatgptFlows.set(flowId, { ...flow, userId: req.user.id, nextPollAt: 0, polling: false });
+    res.json({ flowId, userCode: flow.userCode, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
 });
+
+// POST /api/chatgpt/device-poll { flowId } -> { status: pending | connected | expired }
+app.post('/api/chatgpt/device-poll', async (req, res) => {
+  const flowId = String((req.body && req.body.flowId) || '');
+  const flow = chatgptFlows.get(flowId);
+  if (!flow || flow.userId !== req.user.id) return res.json({ status: 'expired' });
+  if (Date.now() > flow.expiresAt) { chatgptFlows.delete(flowId); return res.json({ status: 'expired' }); }
+  // OpenAI sets the polling pace; a hurried interface is simply told to wait.
+  if (flow.polling || Date.now() < flow.nextPollAt) return res.json({ status: 'pending' });
+  flow.polling = true;
+  try {
+    const session = await chatgptSubscription.pollDeviceCode(flow);
+    flow.nextPollAt = Date.now() + flow.interval * 1000 - 500;
+    if (!session) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    const user = storeChatgptSession(req.user.id, session);
+    res.json({ status: 'connected', account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    // A network blip is not a refusal: the interface keeps waiting.
+    if (!error.status) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    res.status(error.status).json({ status: 'error', error: error.message || String(error) });
+  } finally {
+    flow.polling = false;
+  }
+});
+
+app.delete('/api/chatgpt/session', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try {
+    for (const [id, entry] of chatgptFlows) if (entry.userId === req.user.id) chatgptFlows.delete(id);
+    const user = storeChatgptSession(req.user.id, null);
+    res.json({ account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
+
+// PUT /api/compat/keys { keys: { deepseek: 'sk-…' | null }, baseUrls: { lmstudio: 'http://…' | null } }
+app.put('/api/compat/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Modification des clés réservée au desktop.' });
+  try {
+    const keys = (req.body && req.body.keys) || {};
+    const urls = (req.body && req.body.baseUrls) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    user.compatUrls = user.compatUrls || {};
+    for (const provider of compatProviders.PROVIDERS) {
+      if (provider.oauth) continue;
+      if (provider.id in keys) {
+        const value = keys[provider.id];
+        if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
+        else if (typeof value === 'string' && value.trim()) user.apiKeys[compatProviders.vaultName(provider.id)] = encryptSecret(value.trim());
+      }
+      if (provider.editableUrl && provider.id in urls) {
+        if (urls[provider.id] === null || urls[provider.id] === '') { delete user.compatUrls[provider.id]; continue; }
+        const url = compatProviders.normalizeBaseUrl(urls[provider.id]);
+        if (!url) return res.status(400).json({ error: `URL invalide pour ${provider.label}.` });
+        user.compatUrls[provider.id] = url;
+      }
+    }
+    saveUsers(users);
+    res.json({ providers: compatStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/compat/models?provider=deepseek -> live /models of that provider,
+// fetched from this PC with the user's own key.
+const compatModelCache = new Map();
+app.get('/api/compat/models', async (req, res) => {
+  const provider = compatProviders.get(req.query.provider);
+  if (!provider) return res.status(404).json({ error: 'Fournisseur inconnu.' });
+  const baseUrl = compatBaseUrl(req.user, provider);
+  const key = compatKey(req.user, provider);
+  // An account has its own catalogue: signing in again must not reuse the last one.
+  const session = provider.oauth ? chatgptSession(req.user) : null;
+  const cacheKey = crypto.createHash('sha256')
+    .update(`${req.user.id}|${provider.id}|${baseUrl}|${key}|${session ? session.connectedAt : ''}`).digest('hex');
+  const cached = compatModelCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  if (provider.oauth) {
+    if (!session) return res.json({ models: provider.models, live: false });
+    try {
+      const live = await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token));
+      if (!live.length) return res.json({ models: provider.models, live: false });
+      compatModelCache.set(cacheKey, { at: Date.now(), models: live });
+      return res.json({ models: live, live: true });
+    } catch (error) {
+      return res.json({ models: provider.models, live: false, error: error.status === 401 ? 'session expirée' : 'injoignable' });
+    }
+  }
+  if (!baseUrl || (!provider.keyless && !key)) return res.json({ models: provider.models, live: false });
+  try {
+    const answer = await fetch(`${baseUrl}/models`, {
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!answer.ok) return res.json({ models: provider.models, live: false, error: `HTTP ${answer.status}` });
+    const data = await answer.json();
+    const list = Array.isArray(data && data.data) ? data.data : Array.isArray(data && data.models) ? data.models : [];
+    const live = [...new Set(list.map((item) => (typeof item === 'string' ? item : item && (item.id || item.name))).filter(Boolean).map(String))];
+    const models = [...provider.models.filter((id) => live.includes(id)), ...live.filter((id) => !provider.models.includes(id)).sort()];
+    compatModelCache.set(cacheKey, { at: Date.now(), models });
+    res.json({ models: models.length ? models : provider.models, live: models.length > 0 });
+  } catch (error) {
+    res.json({ models: provider.models, live: false, error: error.name === 'TimeoutError' ? 'délai dépassé' : 'injoignable' });
+  }
+});
+
+
+// MCP configuration: personal servers, plus Opale when it is present (below).
+// A personal server is either an HTTP endpoint (optional bearer token) or a
+// local program (stdio) with its arguments and environment. The token and the
+// environment values are secrets: encrypted at rest, never sent back to a client.
+// (Blender is built in now: the entries its old preset created are left out.)
+const storedMcpServers = (user) => ((user && user.mcpServers) || []).filter((server) => server && typeof server === 'object' && !mcpRegistry.isBlenderPreset(server));
+function publicMcpServers(user) {
+  return storedMcpServers(user).map((stored) => {
+    const { token, env, ...server } = stored;
+    if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...server, transport: 'http', tokenConfigured: !!token };
+    const names = Object.keys(env || {});
+    return { ...server, transport: 'stdio', env: Object.fromEntries(names.map((name) => [name, ''])), envConfigured: names };
+  });
+}
+// The same entry with its secrets in clear, as a connection needs it.
+function runnableMcpServer(stored) {
+  if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...stored, token: stored.token ? decryptSecret(stored.token) : '' };
+  const env = {};
+  for (const [name, value] of Object.entries(stored.env || {})) { const plain = value ? decryptSecret(value) : ''; if (plain) env[name] = plain; }
+  return { ...stored, env };
+}
+function rustMcpServersFor(user) { return storedMcpServers(user).filter((server) => server.enabled).map(runnableMcpServer); }
+// What is written to users.json for one submitted server. A secret left blank
+// keeps the value already stored under the same server id.
+function storeMcpServer(input, previous) {
+  const server = mcpRegistry.normaliseServer(input);
+  if (!server) throw new Error('Serveur MCP invalide : indiquez une URL (HTTPS, ou HTTP en local) ou une commande locale.');
+  const before = previous.get(server.id);
+  if (server.transport === 'stdio') {
+    const kept = before && mcpRegistry.transportOf(before) === 'stdio' ? before.env || {} : {};
+    const env = {};
+    for (const [name, value] of Object.entries(server.env)) { const secret = value ? encryptSecret(value) : kept[name] || ''; if (secret) env[name] = secret; }
+    return { ...server, env };
+  }
+  const token = String((input && input.token) || '') || (before && before.token && decryptSecret(before.token)) || '';
+  return { ...server, token: token ? encryptSecret(token) : '' };
+}
+
+// What each personal server announces (its tools and instructions), remembered
+// so a run does not pay a connection before it starts: a stale answer is served
+// while it is refreshed, a silent server is only retried after a short pause.
+const MCP_DESCRIBE_TTL_MS = 5 * 60_000;
+const MCP_DESCRIBE_RETRY_MS = 30_000;
+const MCP_DESCRIBE_TIMEOUT_MS = 8_000;
+const mcpDescriptions = new Map();
+function mcpDescriptionKey(server) {
+  return crypto.createHash('sha256').update(JSON.stringify([server.id, mcpRegistry.transportOf(server), server.endpoint, server.token, server.command, server.args, server.env])).digest('hex');
+}
+function rememberMcpDescription(server, info) {
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(mcpDescriptionKey(server), { at: Date.now(), info, pending: null });
+}
+function refreshMcpDescription(server) {
+  const key = mcpDescriptionKey(server);
+  const entry = mcpDescriptions.get(key) || { at: 0, info: null, pending: null };
+  if (entry.pending) return entry.pending;
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(key, entry);
+  entry.pending = mcpRegistry.describe(server, { timeoutMs: MCP_DESCRIBE_TIMEOUT_MS })
+    .then((info) => { entry.info = info; }, () => {})
+    .finally(() => { entry.at = Date.now(); entry.pending = null; });
+  return entry.pending;
+}
+async function mcpDescription(server) {
+  const entry = mcpDescriptions.get(mcpDescriptionKey(server));
+  const age = entry ? Date.now() - entry.at : Infinity;
+  if (!entry || (!entry.info && (entry.pending || age > MCP_DESCRIBE_RETRY_MS))) await refreshMcpDescription(server);
+  else if (entry.info && age > MCP_DESCRIBE_TTL_MS) refreshMcpDescription(server);
+  const known = mcpDescriptions.get(mcpDescriptionKey(server));
+  return (known && known.info) || null;
+}
+// A personal server with the Skill that tells the model it exists.
+async function withMcpSkill(server) {
+  const info = await mcpDescription(server).catch(() => null);
+  const skill = info && mcpRegistry.buildSkill(server, info);
+  return skill ? { ...server, skill } : server;
+}
+// Opale is a separate application, linked by default: when it is present and
+// running, the agent gets its vault unless the user switched the link off.
+const opaleLinked = (user) => !(user && user.opale && user.opale.connected === false);
+
+// Servers handed to the agent runtime for one run. Opale is resolved live from
+// its instance file: neither its port nor its token is stored here, so the
+// link survives Opale restarting on another port.
+async function agentMcpServersFor(user) {
+  let servers = await Promise.all(rustMcpServersFor(user).map(withMcpSkill));
+  const builtIn = await Promise.all([
+    opaleLinked(user) ? opale.mcpServer().catch(() => null) : null,
+    blenderLinked(user) ? blender.mcpServer({ endpoint: `http://127.0.0.1:${PORT}/api/internal/blender-mcp`, token: BLENDER_MCP_TOKEN }).catch(() => null) : null,
+  ]);
+  for (const entry of builtIn) if (entry) servers = [...servers.filter((server) => server.id !== entry.id), entry];
+  return servers;
+}
+
+// ---------------------------------------------------------------------------
+// BLENDER — driven through its MCP add-on (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/blender/status   Blender found? add-on installed? open right now?
+// POST   /api/blender/install  install the shipped add-on and enable what it needs
+// POST   /api/blender/connect  give the agent access to Blender
+// DELETE /api/blender/connect  take it away
+// POST   /api/blender/open     start Blender
+const blender = blenderConnector.create({ addonDirs: [path.join(APP_DIR, 'blender'), path.join(APP_DIR, 'native', 'blender')] });
+const BLENDER_MCP_TOKEN = crypto.randomBytes(32).toString('base64url');
+// Off until the user turns it on. An account that had the former "Blender MCP"
+// preset enabled keeps Blender connected without doing anything.
+function blenderLinked(user) {
+  if (user && user.blender) return user.blender.connected === true;
+  return ((user && user.mcpServers) || []).some((server) => mcpRegistry.isBlenderPreset(server) && server.enabled !== false);
+}
+function setBlenderConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.blender = { connected: !!connected };
+  saveUsers(users);
+}
+const blenderFailure = (res, error) => res.status(error.status || 500).json({ error: error.message || String(error), code: error.code || 'blender-error' });
+app.get('/api/blender/status', async (req, res) => {
+  try { res.json({ ...(await blender.status()), connected: blenderLinked(req.user) }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/install', async (req, res) => {
+  try {
+    // Installing changes Blender's own settings (it turns on "Allow Online
+    // Access"): it only happens on an explicit yes from the settings window.
+    if (!req.body || req.body.consent !== true) return res.status(400).json({ error: 'Consentement requis.', code: 'consent-required' });
+    const status = await blender.install();
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/connect', async (req, res) => {
+  try {
+    const status = await blender.status();
+    if (status.state !== 'ready') return res.status(409).json({ error: 'Blender n’est pas encore prêt : installez d’abord l’add-on MCP.', code: 'blender-not-ready' });
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.delete('/api/blender/connect', async (req, res) => {
+  try { setBlenderConnected(req.user.id, false); res.json({ ...(await blender.status()), connected: false }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/open', async (req, res) => {
+  try { await blender.open(); res.json({ ok: true }); } catch (error) { blenderFailure(res, error); }
+});
+
+// ---------------------------------------------------------------------------
+// OPALE — the notes application, a separate project (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/opale/status   is Opale installed / running / linked
+// POST   /api/opale/connect  start it if needed and (re)enable the link
+// DELETE /api/opale/connect  stop giving the agent access to the vault
+// POST   /api/opale/open     bring the Opale window up
+function setOpaleConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.opale = connected ? { connected: true, connectedAt: new Date().toISOString() } : { connected: false };
+  saveUsers(users);
+}
+const opaleReply = (user, status, extra = {}) => ({ ...status, connected: opaleLinked(user), ...extra });
+app.get('/api/opale/status', async (req, res) => {
+  try {
+    const status = await opale.status(APP_DIR);
+    // Linked by default: let the running Opale show who is there.
+    if (status.running && opaleLinked(req.user)) opale.greet().catch(() => {});
+    res.json(opaleReply(req.user, status));
+  } catch (error) { res.status(500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/opale/connect', async (req, res) => {
+  try {
+    const inst = await opale.launch(APP_DIR);
+    const greeting = await opale.hello(inst);
+    const tools = await opale.tools(inst);
+    setOpaleConnected(req.user.id, true);
+    res.json({ ...(await opale.status(APP_DIR)), connected: true, vault: greeting.vault || inst.vault, tools: tools.map((tool) => tool.name) });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
+});
+app.delete('/api/opale/connect', async (req, res) => {
+  try {
+    setOpaleConnected(req.user.id, false);
+    const inst = await opale.running();
+    if (inst) await opale.bye(inst);
+    res.json({ ...(await opale.status(APP_DIR)), connected: false });
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/opale/open', async (req, res) => {
+  try { await opale.show(APP_DIR); res.json(opaleReply(req.user, await opale.status(APP_DIR))); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || String(error) }); }
+});
+
 app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
+// POST /api/mcp/test { server } -> what that server answers right now. The
+// form is tested as typed, before it is saved.
+app.post('/api/mcp/test', async (req, res) => {
+  const started = Date.now();
+  try {
+    const previous = new Map(storedMcpServers(req.user).map((server) => [server.id, server]));
+    const server = runnableMcpServer(storeMcpServer(req.body && req.body.server, previous));
+    const [info, target] = await Promise.all([mcpRegistry.describe(server, { timeoutMs: 20_000 }), mcpRegistry.probe(server)]);
+    rememberMcpDescription(server, info);
+    const tools = info.tools.filter((tool) => tool && typeof tool.name === 'string').map((tool) => ({ name: tool.name.slice(0, 128), allowed: mcpRegistry.allowed(server, tool.name) }));
+    res.json({
+      ok: true, transport: mcpRegistry.transportOf(server), count: tools.length, tools: tools.slice(0, 200),
+      serverName: String((info.serverInfo && info.serverInfo.name) || '').slice(0, 120), serverVersion: String((info.serverInfo && info.serverInfo.version) || '').slice(0, 40),
+      executable: info.executable, target, ms: Date.now() - started,
+    });
+  } catch (error) {
+    res.json({ ok: false, error: String((error && error.message) || error).slice(0, 400), ms: Date.now() - started });
+  }
+});
 app.get('/api/automation/status', (req, res) => res.json(automationManager.snapshot()));
 app.post('/api/automation/stop', async (req, res) => res.json(await automationManager.stop()));
 app.post('/api/agent-runs/:id/cancel', async (req, res) => {
@@ -787,7 +1379,45 @@ app.post('/api/agent-runs/:id/cancel', async (req, res) => {
   }
 });
 app.put('/api/mcp', (req, res) => {
-  try { const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null; if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' }); const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id), old = new Map((users[i].mcpServers || []).map((s) => [s.id, s])); users[i].mcpServers = incoming.slice(0, 32).map((s) => { const n = mcpRegistry.normaliseServer(s); if (!n) throw new Error('Serveur MCP invalide. HTTPS requis sauf loopback HTTP.'); const token = String(s.token || '') || (old.get(n.id) && decryptSecret(old.get(n.id).token)) || ''; return { ...n, token: token ? encryptSecret(token) : '' }; }); saveUsers(users); res.json({ servers: publicMcpServers(users[i]) }); } catch (e) { res.status(400).json({ error: e.message }); }
+  try {
+    const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null;
+    if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' });
+    const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id);
+    const previous = new Map(storedMcpServers(users[i]).map((server) => [server.id, server]));
+    const servers = incoming.slice(0, 32).map((server) => storeMcpServer(server, previous));
+    if (new Set(servers.map((server) => server.id)).size !== servers.length) throw new Error('Deux serveurs MCP portent le même identifiant.');
+    users[i].mcpServers = servers;
+    saveUsers(users);
+    // Learn what the enabled servers offer now, not during the next message.
+    for (const server of rustMcpServersFor(users[i])) refreshMcpDescription(server);
+    res.json({ servers: publicMcpServers(users[i]) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// ---------------------------------------------------------------------------
+// VOICE — dictation button of the chat, voice search of the browser (protected)
+// ---------------------------------------------------------------------------
+// Transcription is local: whisper.cpp (shipped in `whisper\` beside the server)
+// with a model downloaded once into the data folder, Windows' own recognizer
+// until that model is there.
+// GET  /api/voice-status   which engine is ready; starts the model download
+// GET  /api/voice-options  speech synthesis voices (none on this edition)
+// POST /api/stt { audio: <base64 PCM WAV>, language? } -> { text, engine }
+const voice = voiceStt.create({
+  engineDirs: [path.join(APP_DIR, 'whisper'), path.join(APP_DIR, 'native', 'whisper'), path.join(DATA_DIR, 'voice')],
+  modelDir: path.join(DATA_DIR, 'voice'),
+});
+app.get('/api/voice-status', (req, res) => { voice.prepare(); res.json(voice.status()); });
+app.get('/api/voice-options', (req, res) => res.json({ voices: [] }));
+app.post('/api/stt', async (req, res) => {
+  try {
+    const encoded = String((req.body && req.body.audio) || '');
+    if (!encoded) return res.status(400).json({ error: 'audio requis' });
+    res.json(await voice.transcribe({ audio: Buffer.from(encoded, 'base64'), language: req.body.language }));
+  } catch (error) {
+    // `error` is the code the browser's voice search matches on; `hint` is the
+    // sentence shown to the user.
+    res.status(error.status || 500).json({ error: error.code || 'stt-failed', hint: String((error && error.message) || error).slice(0, 300) });
+  }
 });
 // ---------------------------------------------------------------------------
 // PER-USER CHATS API (protected)
@@ -1031,11 +1661,11 @@ app.post('/api/file', (req, res) => {
 // EXEC API
 // ---------------------------------------------------------------------------
 
-// Une application lancee par le Finder ou le Dock herite du PATH minimal de
-// launchd : ni Homebrew, ni /usr/local/bin, ni ~/.local/bin. On complete donc
-// le PATH avant tout exec, sinon git/rg/node « disparaissent » selon la facon
-// dont l'IDE a ete demarre. /opt/homebrew est le prefixe Apple Silicon,
-// /usr/local celui des Mac Intel.
+// POST /api/exec  { command, cwd }
+// Use execFile with cmd.exe instead of exec() to reliably hide the console
+// window on Windows. exec() spawns an intermediate cmd.exe shell that can
+// flash a visible window even with windowsHide:true, especially from a
+// pkg-packaged .exe. execFile + explicit cmd.exe avoids the extra shell.
 function execEnv() {
   const extra = [
     '/opt/homebrew/bin', '/opt/homebrew/sbin',
@@ -1083,66 +1713,61 @@ app.post('/api/exec', (req, res) => {
 // These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
 // are strictly read-only, bounded in output, and path-guarded to the project.
 
-// zaalis browser est un projet frere (meme auteur). Sur macOS il s'installe
-// comme n'importe quelle application, dans /Applications ou dans le dossier
-// Applications de l'utilisateur : on cherche le bundle aux deux endroits.
-const ZAALIS_BROWSER_APP = [
-  '/Applications/zaalis browser.app',
-  path.join(os.homedir(), 'Applications', 'zaalis browser.app'),
-].find((p) => { try { return fs.existsSync(p); } catch { return false; } }) || null;
-const ZAALIS_BROWSER_PING = 'http://127.0.0.1:8715/zaalis/ping';
-const SEARCH_USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+// Navigateur intégré : zaalis Browser (vendu dans zaalis-browser/) s'exécute
+// dans ce serveur et affiche ses vues WebView2 dans la fenêtre native de
+// l'IDE (bouton globe). Aucune installation séparée n'est nécessaire. Un
+// navigateur externe (celui par défaut du PC) n'est utilisé que sur demande
+// explicite (?external=1, /search --externe, outil browser open_external).
+const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+const browserHost = new BrowserHost({
+  dataDir: process.env.ZAALIS_BROWSER_DATA_DIR ||
+    path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'Browser'),
+  secretFile: BROWSER_SECRET_FILE,
+  idePort: PORT,
+  log: (line) => console.error(line),
+});
+browserHost.connect();
+// Jeton stable du processus pour l'outil Rust `browser` : il ne change pas
+// entre deux tours, donc le démon n'est pas relancé à chaque requête.
+const BROWSER_TOOL_TOKEN = crypto.randomBytes(32).toString('base64url');
 
-async function pingZaalisBrowser(timeoutMs) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+function integratedBrowserUnavailable() {
+  return {
+    ok: false, status: 503,
+    body: {
+      error: 'browser_unavailable',
+      message: 'Le navigateur intégré est disponible dans l\'application zaalis IDE (fenêtre native).',
+    },
+  };
+}
+
+function browserOffline() {
+  const core = browserHost.core;
+  return !!(core && core.settings && core.settings.offline);
+}
+
+async function openInIntegratedBrowser(targetUrl, { background = false } = {}) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
+  if (!browserHost.available()) return integratedBrowserUnavailable();
   try {
-    const r = await fetch(ZAALIS_BROWSER_PING, { signal: ctrl.signal });
-    return r.ok;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.open(url, { background });
+    return { ok: true, status: 200, body: { ok: true, target: 'integrated', ...opened } };
+  } catch (error) {
+    return { ok: false, status: 502, body: { error: error.message || 'navigateur intégré indisponible' } };
   }
 }
 
-// S'assure que zaalis browser tourne, en le lancant si besoin (chemin fixe
-// ci-dessus). L'API locale du navigateur demarre des l'ouverture du process,
-// avant meme que la fenetre/WebView2 soit prete : on patiente donc un peu
-// apres le premier ping reussi pour laisser le premier onglet s'initialiser
-// (sinon une recherche envoyee trop tot est silencieusement ignoree).
-let launchingBrowser = null;
-async function ensureZaalisBrowserRunning() {
-  if (await pingZaalisBrowser(800)) return true;
-  if (launchingBrowser) return launchingBrowser;
-
-  launchingBrowser = (async () => {
-    if (!ZAALIS_BROWSER_APP) return false;
-    try {
-      // `open -a` laisse LaunchServices demarrer le bundle : c'est ce qui
-      // preserve ses autorisations systeme et sa fenetre au premier plan.
-      const child = spawn('open', ['-a', ZAALIS_BROWSER_APP], { detached: true, stdio: 'ignore', env: execEnv() });
-      child.on('error', () => {});
-      child.unref();
-    } catch {
-      return false;
-    }
-    const deadline = Date.now() + 10000;
-    while (Date.now() < deadline) {
-      if (await pingZaalisBrowser(800)) {
-        await new Promise((r) => setTimeout(r, 700)); // laisse le premier onglet s'initialiser
-        return true;
-      }
-      await new Promise((r) => setTimeout(r, 300));
-    }
-    return false;
-  })();
-
+// Navigateur externe = celui par défaut de Windows, seulement sur demande.
+function openInExternalBrowser(targetUrl) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return false;
   try {
-    return await launchingBrowser;
-  } finally {
-    launchingBrowser = null;
-  }
+    const child = spawn('open', [url], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.on('error', () => {});
+    child.unref();
+    return true;
+  } catch { return false; }
 }
 
 function decodeHtmlEntities(value) {
@@ -1337,52 +1962,6 @@ async function fetchPageExcerpt(url) {
   }
 }
 
-async function openInZaalisBrowser(targetUrl, { background = false, timeoutMs = 4000 } = {}) {
-  const url = safeHttpUrl(targetUrl);
-  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return {
-      ok: false,
-      status: 503,
-      body: {
-        error: 'browser_unavailable',
-        message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-      },
-    };
-  }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const bg = background ? '&background=1' : '';
-    const r = await fetch(`http://127.0.0.1:8715/zaalis/newtab?url=${encodeURIComponent(url)}${bg}`, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return {
-        ok: false,
-        status: 409,
-        body: {
-          error: 'offline_mode',
-          message: body.message || 'Mode local securise actif : recherche impossible.',
-        },
-      };
-    }
-    if (!r.ok || body.error) return { ok: false, status: r.status || 502, body: { error: body.error || `browser HTTP ${r.status}` } };
-    return { ok: true, status: 200, body };
-  } catch (e) {
-    return {
-      ok: false,
-      status: 502,
-      body: {
-        error: e && e.name === 'AbortError' ? 'zaalis browser ne repond pas' : 'zaalis browser est indisponible',
-        detail: e && e.message,
-      },
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 function deepSearchQueries(query) {
   const base = String(query || '').replace(/\s+/g, ' ').trim();
   const out = [base, `${base} official source`, `${base} documentation`, `${base} analysis`];
@@ -1410,53 +1989,39 @@ app.get('/api/favicon', async (req, res) => {
 app.get('/api/browser-search', async (req, res) => {
   const q = String(req.query.q || '').trim();
   if (!q) return res.status(400).json({ error: 'q is required' });
-
   const mode = String(req.query.mode || 'newtab').toLowerCase();
-  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const visibleParam = background ? '&background=1' : '';
-  const endpoint = mode === 'active' ? 'search?q=' : 'newtab?url=';
-  const url = `http://127.0.0.1:8715/zaalis/${endpoint}${encodeURIComponent(q)}${visibleParam}`;
-
-  const running = await ensureZaalisBrowserRunning();
-  if (!running) {
-    return res.status(503).json({
-      error: 'browser_unavailable',
-      message: 'zaalis browser est introuvable ou n a pas pu demarrer.',
-    });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, query: q, target: 'external', url });
   }
-
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 4000);
+  if (!browserHost.available()) {
+    const unavailable = integratedBrowserUnavailable();
+    return res.status(unavailable.status).json(unavailable.body);
+  }
   try {
-    const r = await fetch(url, { signal: ctrl.signal });
-    const body = await r.json().catch(() => ({}));
-    if (body.error === 'offline_mode') {
-      return res.status(409).json({
-        error: 'offline_mode',
-        message: body.message || 'Mode local securise actif : recherche impossible.',
-      });
-    }
-    if (!r.ok || body.error) {
-      return res.status(r.status || 502).json({ error: body.error || `browser HTTP ${r.status}` });
-    }
-    res.json({ ok: true, query: q, mode, background, browser: body });
-  } catch (e) {
-    const msg = e && e.name === 'AbortError'
-      ? 'zaalis browser ne repond pas'
-      : 'zaalis browser est indisponible';
-    res.status(502).json({ error: msg, detail: e && e.message });
-  } finally {
-    clearTimeout(timer);
+    const opened = await browserHost.search(q, { newTab: mode !== 'active' });
+    res.json({ ok: true, query: q, mode, target: 'integrated', url: opened.url });
+  } catch (error) {
+    res.status(502).json({ error: error.message || 'navigateur intégré indisponible' });
   }
 });
 
 app.get('/api/browser-open', async (req, res) => {
   const url = safeHttpUrl(req.query.url);
   if (!url) return res.status(400).json({ error: 'url is required' });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, url, target: 'external' });
+  }
   const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
-  const r = await openInZaalisBrowser(url, { background });
+  const r = await openInIntegratedBrowser(url, { background });
   if (!r.ok) return res.status(r.status).json(r.body);
-  res.json({ ok: true, url, browser: r.body });
+  res.json({ ok: true, url, target: 'integrated', browser: r.body });
+});
+
+app.get('/api/browser/status', (req, res) => {
+  res.json({ available: browserHost.available(), started: !!browserHost.core, tabs: browserHost.tabs() });
 });
 
 app.post('/api/deep-search', async (req, res) => {
@@ -1467,10 +2032,15 @@ app.post('/api/deep-search', async (req, res) => {
   const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
   const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
 
-  // First open the search page in zaalis browser. If secure local mode blocks it,
-  // do not perform server-side web requests behind the user's back.
-  const firstOpen = await openInZaalisBrowser(searchPageUrl(query), { background: false, timeoutMs: 5000 });
-  if (!firstOpen.ok) return res.status(firstOpen.status).json(firstOpen.body);
+  // The search opens first in the integrated browser, so the user sees it
+  // happen. If its secure local mode is on, no web request is made at all.
+  if (browserOffline()) {
+    return res.status(409).json({ error: 'offline_mode', message: 'Mode local sécurisé actif : recherche impossible.' });
+  }
+  let searchTab = null;
+  if (browserHost.available()) {
+    try { searchTab = await browserHost.search(query, { newTab: true }); } catch {}
+  }
 
   const searchedQueries = deepSearchQueries(query);
   const all = [];
@@ -1497,10 +2067,12 @@ app.post('/api/deep-search', async (req, res) => {
     result.quote = usefulQuote(result.excerpt || result.description || result.snippet);
   }
 
-  const opened = [{ url: searchPageUrl(query), kind: 'search', foreground: true }];
-  for (const result of all.slice(0, openTabs)) {
-    const openedTab = await openInZaalisBrowser(result.url, { background: true, timeoutMs: 4000 });
-    if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false });
+  const opened = searchTab ? [{ url: searchTab.url, kind: 'search', foreground: true, target: 'integrated' }] : [];
+  if (searchTab) {
+    for (const result of all.slice(0, openTabs)) {
+      const openedTab = await openInIntegratedBrowser(result.url, { background: true });
+      if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false, target: 'integrated' });
+    }
   }
 
   res.json({ ok: true, query, searchedQueries, results: all, opened });
@@ -1517,7 +2089,11 @@ function detectCli(name) {
       resolve({ available: true, version: String(stdout).split(/\r?\n/)[0].trim() });
     };
     try {
-      execFile(name, ['--version'], { timeout: 5000, env: execEnv() }, done);
+      if (process.platform === 'win32') {
+        execFile('cmd.exe', ['/c', `${name} --version`], { timeout: 5000, windowsHide: true }, done);
+      } else {
+        execFile(name, ['--version'], { timeout: 5000 }, done);
+      }
     } catch { resolve({ available: false, version: '' }); }
   });
   _cliCache.set(name, p);
@@ -1661,7 +2237,7 @@ app.post('/api/grep', async (req, res) => {
       if (ic) args.push('-i');
       if (glob) args.push('-g', glob);
       args.push('--regexp', pat, rel || '.');
-      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, env: execEnv() }, (err, stdout, stderr) => {
+      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true }, (err, stdout, stderr) => {
         if (err && err.code === 1 && !stdout) return res.json({ tool: 'ripgrep', pattern: pat, results: [], count: 0, truncated: false });
         if (err && err.code !== 1 && !stdout) return res.status(500).json({ error: String(stderr || err.message || 'ripgrep error').slice(0, 300) });
         const r = parseRgOutput(stdout, maxResults);
@@ -1704,7 +2280,7 @@ app.get('/api/gitdiff', async (req, res) => {
     const git = await detectCli('git');
     if (!git.available) return res.json({ available: false, error: 'git introuvable' });
     const run = (args) => new Promise((resolve) => {
-      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, env: execEnv() },
+      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true },
         (e, so) => resolve(e && !so ? '' : String(so || '')));
     });
     const inside = (await run(['rev-parse', '--is-inside-work-tree'])).trim();
@@ -1740,11 +2316,11 @@ app.get('/api/doctor', async (req, res) => {
     let gguf = { variant: '', installed: false };
     try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), engineBinaryName()) }; } catch {}
 
-    // L'installateur macOS est un .dmg produit dans native/installer/.
-    const installerDirs = [path.join(APP_DIR, 'native', 'installer'), path.join(process.cwd(), 'native', 'installer')];
-    const installer = installerDirs.some((dir) => {
-      try { return fs.readdirSync(dir).some((f) => /\.(dmg|pkg)$/i.test(f)); } catch { return false; }
-    });
+    const installerPaths = [
+      path.join(APP_DIR, 'native', 'installer', 'zaalis-macos-arm64.dmg'),
+      path.join(process.cwd(), 'native', 'installer', 'zaalis-macos-arm64.dmg'),
+    ];
+    const installer = installerPaths.some((p) => { try { return fs.existsSync(p); } catch { return false; } });
 
     let scripts = [];
     try { const pj = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf-8')); scripts = Object.keys(pj.scripts || {}); } catch {}
@@ -1752,7 +2328,7 @@ app.get('/api/doctor', async (req, res) => {
     let projectGit = null;
     if (base && git.available) {
       projectGit = await new Promise((resolve) => {
-        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, env: execEnv() },
+        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true },
           (e, so) => resolve(e ? null : String(so || '').trim()));
       });
     }
@@ -1771,10 +2347,6 @@ app.get('/api/doctor', async (req, res) => {
 // FOLDER PICKER — opens the native OS folder dialog (local app)
 // ---------------------------------------------------------------------------
 // POST /api/pick-folder  -> { path } | { cancelled: true }
-// Dans l'application Electron empaquetee, le renderer passe par le pont natif
-// (window.zaalisNative.pickFolder) ; cette route est le repli navigateur/dev.
-// `choose folder` d'AppleScript est le vrai dialogue systeme, donc il respecte
-// les favoris, iCloud Drive et les volumes reseau de l'utilisateur.
 app.post('/api/pick-folder', (req, res) => {
   const script = 'POSIX path of (choose folder with prompt "Choisissez le dossier du projet")';
   execFile('osascript', ['-e', script], { timeout: 180000, env: execEnv() }, (err, stdout) => {
@@ -1921,27 +2493,25 @@ app.get('/api/ollama-pull', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // LOCAL GGUF ENGINE (llama.cpp) — run GGUF models directly, NO Ollama needed.
-// We download the official llama.cpp `llama-server` build for this Mac into
-// ~/Library/Application Support/zaalis/engine, spawn it as a child process, and
-// proxy chat to its OpenAI-compatible /v1/chat/completions.
+// We download the official llama.cpp `llama-server.exe` build that matches the
+// machine (CUDA / Vulkan / CPU) into %LOCALAPPDATA%\zaalis\engine, spawn it as a
+// child process, and proxy chat to its OpenAI-compatible /v1/chat/completions.
 // This is exactly how LM Studio / Jan work, but fully self-contained.
-//
-// macOS n'a qu'un seul binaire par architecture, et il embarque deja Metal :
-// il n'y a donc pas de « variante GPU » a telecharger comme sur Windows ou
-// Linux. Le choix Metal/CPU se fait au lancement, avec -ngl.
 // ---------------------------------------------------------------------------
 const MODELS_DIR = path.join(DATA_DIR, 'models');   // installed *.gguf files
 const ENGINE_DIR = path.join(DATA_DIR, 'engine');   // extracted llama.cpp builds
 const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
 const ENGINE_PORT = 8091;
+function ggufModelPath(name) {
+  const value = String(name || '');
+  if (!value || path.basename(value) !== value || !value.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF invalide.');
+  return path.join(MODELS_DIR, value);
+}
 
 function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
 ensureDir(MODELS_DIR);
 
-// Tous les Mac supportes par cette application ont un GPU pilote par Metal
-// (Apple Silicon comme Intel avec AMD/Intel graphics) : Metal est donc la
-// variante par defaut, et « cpu » reste disponible pour forcer le calcul
-// processeur, par exemple quand la memoire unifiee est deja saturee.
+// Detect the fastest engine variant available on this machine.
 let _gpuVariant = null;
 function detectEngineVariant() {
   if (_gpuVariant) return _gpuVariant;
@@ -2121,8 +2691,12 @@ function startGgufPullTask({ repo, file, url }) {
   return task;
 }
 
-// Les binaires llama.cpp pour macOS sont publies en .tar.gz ; on garde le repli
-// unzip pour une eventuelle archive .zip telechargee a la main par l'utilisateur.
+// Extract a .zip. Tricky on Windows:
+//  - the SYSTEM tar (C:\Windows\System32\tar.exe = bsdtar) reads zip, but a bare
+//    "tar" may resolve to Git's GNU tar (no zip support), so we call it by full
+//    path. bsdtar also reads "C:\path" as host:path, so we cd into the folder
+//    and pass a relative name (no colon).
+//  - if that fails, fall back to PowerShell's Expand-Archive (always present).
 function extractArchive(archivePath, destDir) {
   ensureDir(destDir);
   const { execFileSync } = require('child_process');
@@ -2173,7 +2747,7 @@ let engineProc = null, engineModelFile = null, engineVariant = null, engineStart
 function stopEngine() {
   return new Promise((resolve) => {
     if (!engineProc) return resolve();
-    const p = engineProc; engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
+    const p = engineProc; engineProc = null; engineModelFile = null;
     let done = false;
     const fin = () => { if (!done) { done = true; resolve(); } };
     try { p.once('exit', fin); p.kill(); setTimeout(fin, 2000); } catch { fin(); }
@@ -2194,56 +2768,38 @@ async function waitForHealth(port, timeoutMs) {
 
 // Track the engine options the running process was started with, so a change in
 // context size / GPU layers forces a restart even when the model is unchanged.
-// `engineRequestedVariant` retient la variante demandee : apres un repli sur
-// CPU, `engineVariant` vaut 'cpu' alors que la demande d'origine reste 'metal',
-// et sans cela chaque appel relancerait le moteur en boucle.
 let engineOpts = '';
-let engineRequestedVariant = null;
 
 // Make sure the engine is running and serving `modelFile`. Swaps model if needed.
 // `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
 async function ensureEngine(modelFile, preferredVariant, opts) {
   opts = opts || {};
-  const modelPath = path.join(MODELS_DIR, modelFile);
+  const modelPath = ggufModelPath(modelFile);
   if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
   // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
   let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
+  const desiredVariant = normalizeEngineVariant(preferredVariant || detectEngineVariant());
   const optsKey = `${ctx}|${ngl}`;
-  const requestedVariant = normalizeEngineVariant(preferredVariant || detectEngineVariant());
-  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return;
-  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineRequestedVariant === requestedVariant) return; }
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
   engineStarting = (async () => {
     await stopEngine();
-    const startVariant = async (v) => {
-      const exe = await ensureEngineBinary(v);
-      const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
-      // Le binaire macOS embarque toujours Metal : le mode CPU doit donc
-      // desactiver explicitement le deport de couches sur le GPU.
-      if (v === 'cpu') args.push('-ngl', '0');
-      else if (ngl > 0) args.push('-ngl', String(ngl));
-      engineOpts = optsKey;
-      const proc = spawn(exe, args, { stdio: 'ignore', cwd: path.dirname(exe), env: execEnv() });
-      proc.on('error', () => {});
-      engineProc = proc; engineModelFile = modelFile; engineVariant = v; engineRequestedVariant = requestedVariant;
-      proc.once('exit', () => {
-        if (engineProc === proc) {
-          engineProc = null; engineModelFile = null; engineVariant = null; engineRequestedVariant = null;
-        }
-      });
-      await waitForHealth(ENGINE_PORT, 180000);
-    };
-    // Un modele trop lourd pour la memoire unifiee fait echouer le demarrage
-    // Metal : on retombe alors sur le calcul processeur, plus lent mais sur.
-    try {
-      await startVariant(requestedVariant);
-    } catch (e) {
-      await stopEngine();
-      if (requestedVariant === 'cpu') throw e;
-      await startVariant('cpu');
-    }
+    let variant = desiredVariant;
+    let exe;
+    try { exe = await ensureEngineBinary(variant); }
+    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
+    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
+    args.push('-ngl', variant === 'cpu' ? '0' : String(ngl));
+    engineOpts = optsKey;
+    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+    proc.on('error', () => {});
+    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
+    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
+    await waitForHealth(ENGINE_PORT, 180000);
   })();
   try { await engineStarting; } finally { engineStarting = null; }
 }
@@ -2275,9 +2831,9 @@ app.get('/api/gguf-engine', (req, res) => {
 // model into memory (LM Studio style). Streams NDJSON: loading -> ready/error.
 app.post('/api/gguf-load', async (req, res) => {
   const b = req.body || {};
-  const name = path.basename(String(b.name || ''));
+  const name = String(b.name || '');
   res.setHeader('Content-Type', 'application/x-ndjson');
-  if (!name.toLowerCase().endsWith('.gguf')) {
+  try { ggufModelPath(name); } catch {
     try { res.write(JSON.stringify({ status: 'error', error: 'Nom de modèle invalide.' }) + '\n'); } catch {}
     return res.end();
   }
@@ -2305,10 +2861,11 @@ app.post('/api/gguf-unload', async (req, res) => {
 // POST /api/gguf-delete { name }
 app.post('/api/gguf-delete', async (req, res) => {
   try {
-    const name = path.basename(String((req.body && req.body.name) || ''));
-    if (!name.toLowerCase().endsWith('.gguf')) return res.status(400).json({ error: 'Nom invalide.' });
+    const name = String((req.body && req.body.name) || '');
+    let target;
+    try { target = ggufModelPath(name); } catch { return res.status(400).json({ error: 'Nom invalide.' }); }
     if (engineModelFile === name) await stopEngine();
-    fs.unlinkSync(path.join(MODELS_DIR, name));
+    fs.unlinkSync(target);
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
@@ -2383,6 +2940,60 @@ app.get('/api/gguf-engine-pull', async (req, res) => {
 
 app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
 
+async function capabilitiesForUser(user, provider, model) {
+  const id = String(provider || '').trim().toLowerCase();
+  if (compatProviders.isCompat(id)) {
+    const provider = compatProviders.get(id);
+    if (!provider) throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+    return compatProviders.capabilities(id, model, compatReady(user, provider));
+  }
+  if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
+    throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+  }
+  const name = String(model || modelCatalog.SUBMODELS[id]?.[0] || '').trim();
+  if (!name) throw Object.assign(new Error('Modèle requis.'), { status: 400 });
+  const shared = sharedConfigForUser(user);
+  const info = { ready: true };
+  if (id === 'local') {
+    info.ready = false;
+    try {
+      const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const answer = await fetch(`${url}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }), signal: AbortSignal.timeout(2500),
+      });
+      if (answer.ok) {
+        const show = await answer.json();
+        info.ready = true;
+        info.localCapabilities = show.capabilities || [];
+        const contextEntry = Object.entries(show.model_info || {}).find(([key, value]) =>
+          key.endsWith('.context_length') && Number.isFinite(Number(value)) && Number(value) >= 512);
+        if (contextEntry) info.contextWindow = Number(contextEntry[1]);
+      }
+    } catch {}
+  } else if (id === 'gguf') {
+    try { info.ready = fs.existsSync(ggufModelPath(name)); } catch { info.ready = false; }
+    info.contextWindow = shared.ggufCtx;
+  } else {
+    const providerInfo = modelCatalog.PROVIDERS.find((entry) => entry.id === id);
+    info.ready = !!userApiKeys(user)[providerInfo.keyName];
+  }
+  return modelCapabilities(id, name, info);
+}
+
+app.get('/api/model-capabilities', async (req, res) => {
+  try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
+app.post('/api/rust-core/cancel', async (req, res) => {
+  try {
+    const sessionId = String(req.body && req.body.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: 'sessionId requis.' });
+    res.json(await rustAgentBridge.cancel(req.user.id, sessionId, req.body && req.body.agentId));
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
 // ---------------------------------------------------------------------------
 // CODESTRALE BRIDGE — the two descriptors the companion app reads.
 // ---------------------------------------------------------------------------
@@ -2438,6 +3049,34 @@ app.post('/api/rust-core/decision', async (req, res) => {
   }
 });
 
+// The agent's browser tool exists only where the integrated browser does: in
+// the desktop app, never for the phone remote.
+function browserToolConfig(req) {
+  if (req.isMobile || req.isTunnel || !browserHost.available()) return {};
+  return { browserEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-browser`, browserToken: BROWSER_TOOL_TOKEN };
+}
+
+// Web searches made by the agent's server-side tools are replayed in the
+// integrated browser so the user sees them happen (desktop only).
+function mirrorWebTools(req, emit) {
+  if (req.isMobile || req.isTunnel) return emit;
+  let opened = 0;
+  return (event) => {
+    try {
+      if (event && event.type === 'tool_started' && browserHost.available()) {
+        const input = event.input || {};
+        if ((event.tool === 'web_search' || event.tool === 'deep_search') && input.query) {
+          browserHost.search(String(input.query), { newTab: true }).catch(() => {});
+        } else if (event.tool === 'web_fetch' && input.url && opened < 6) {
+          opened++;
+          openInIntegratedBrowser(String(input.url), { background: true }).catch(() => {});
+        }
+      }
+    } catch {}
+    return emit(event);
+  };
+}
+
 async function rustAgentHttp(req, res, next) {
   const status = rustAgentBridge.status();
   if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
@@ -2462,10 +3101,24 @@ async function rustAgentHttp(req, res, next) {
   const controller = new AbortController();
   let computerToken = '';
   let computerSession = null;
+  let workspaceEntry = null;
+  let workspaceRun = null;
   req.once('aborted', () => controller.abort());
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     const body = req.body || {};
+    let savedConversations = [];
+    if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
+    const conversation = savedConversations.find(item => item.id === body.conversationId);
+    const root = workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id), conversation);
+    let workspaceConfig = {};
+    if (!req.isMobile && !req.isTunnel && !req.isBrowser) {
+      workspaceEntry = workspaceTokens.get(req.user.id);
+      if (!workspaceEntry) { workspaceEntry = { token: crypto.randomBytes(32).toString('base64url'), agents: new Map() }; workspaceTokens.set(req.user.id, workspaceEntry); }
+      const terminal = terminalManager.get(String(body.terminalSessionId || ''), req.user.id);
+      workspaceRun = { user: req.user, root, projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
+      workspaceConfig = { workspaceEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-workspace`, workspaceToken: workspaceEntry.token };
+    }
     const model = String(body.model || '');
     const message = String(body.message || '');
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
@@ -2478,37 +3131,64 @@ async function rustAgentHttp(req, res, next) {
       computerToken = crypto.randomBytes(32).toString('base64url');
       computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
     }
-    // A GGUF turn needs the local engine loaded with that exact file first —
-    // the single chat already did this, the agent path did not.
-    if (model === 'gguf') {
-      if (!body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    const selectedTeam = Array.isArray(body.team) ? body.team : null;
+    const ggufNames = selectedTeam
+      ? [...new Set(selectedTeam.filter((agent) => agent.model?.provider === 'gguf').map((agent) => agent.model.model).filter(Boolean))]
+      : model === 'gguf' ? [body.submodel] : [];
+    if (ggufNames.length > 1) throw Object.assign(new Error('Une équipe ne peut charger qu’un modèle GGUF à la fois.'), { status: 400 });
+    if (model === 'gguf' && !body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    if (ggufNames.length) {
       const shared = sharedConfigForUser(req.user);
-      await ensureEngine(body.submodel, (body.config && body.config.ggufVariant) || shared.ggufVariant, {
+      await ensureEngine(ggufNames[0], (body.config && body.config.ggufVariant) || shared.ggufVariant, {
         ctx: (body.config && body.config.ggufCtx) || shared.ggufCtx,
         gpuLayers: (body.config && body.config.ggufGpuLayers) !== undefined ? body.config.ggufGpuLayers : shared.ggufGpuLayers,
       });
     }
+    const modelFacts = selectedTeam ? null : await capabilitiesForUser(req.user, model, body.submodel);
+    const team = selectedTeam ? await Promise.all(selectedTeam.map(async (agent) => ({
+      ...agent,
+      model: {
+        ...agent.model,
+        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
+        capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
+      },
+    }))) : null;
+    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
-      root: resolveBase(body.root || body.projectRoot),
-      model,
-      submodel: body.submodel,
+      root,
+      model: lead.provider,
+      submodel: lead.model,
+      modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
-      systemPrompt: body.systemPrompt,
+      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
       permissionMode: body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
       history: Array.isArray(body.history) ? body.history : [],
-      team: Array.isArray(body.team) ? body.team : null,
-      mcpServers: rustMcpServersFor(req.user),
-      runtimeConfig: computerToken ? {
+      team,
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
+      mcpServers: await agentMcpServersFor(req.user),
+      runtimeConfig: {
+        ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
+        ...workspaceConfig,
+        ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
-      } : undefined,
+        } : {}),
+      },
       signal: controller.signal,
-    }, emit);
+    }, mirrorWebTools(req, event => {
+      if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) workspaceEntry.agents.set(String(event.event.agent.id), workspaceRun);
+      emit(event);
+    }));
+    if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();
@@ -2522,6 +3202,7 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   } finally {
+    if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun) workspaceEntry.agents.delete(id);
     if (computerToken) computerRuns.delete(computerToken);
     if (computerSession) {
       try { await automationManager.complete(computerSession); } catch { try { await automationManager.stop(computerSession, 'Tache interrompue.'); } catch {} }
@@ -2549,12 +3230,17 @@ async function rustChatHttp(req, res, next) {
       if (!body.submodel) return res.status(400).json({ error: 'Aucun modèle GGUF sélectionné.' });
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
+    const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
+    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
       root: resolveBase(body.root),
-      model: String(body.model),
-      submodel: body.submodel,
+      model: target.provider,
+      submodel: target.model,
+      modelCapabilities: bindingCapabilities(modelFacts),
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
       message: String(body.message),
       systemPrompt: body.systemPrompt,
       permissionMode: 'read-only',
@@ -2562,12 +3248,14 @@ async function rustChatHttp(req, res, next) {
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
       history: Array.isArray(body.history) ? body.history : [],
-      mcpServers: rustMcpServersFor(req.user),
+      mcpServers: await agentMcpServersFor(req.user),
       runtimeConfig: {
         ollamaUrl: req.isMobile
           ? sharedConfigForUser(req.user).ollamaUrl
           : body.config && body.config.ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
       },
       signal: (() => {
         const controller = new AbortController();
@@ -2575,7 +3263,7 @@ async function rustChatHttp(req, res, next) {
         res.once('close', () => { if (!res.writableEnded) controller.abort(); });
         return controller.signal;
       })(),
-    }, () => {});
+    }, mirrorWebTools(req, () => {}));
     return res.json({
       response: result.response || '',
       thinking: result.thinking || undefined,
@@ -2936,7 +3624,7 @@ app.post('/api/remote/start', async (req, res) => {
     const url = await startTunnel();
     const token = makeMobileToken(req.user.id);
     const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;
-    const qr = await QRCode.toDataURL(pairUrl, { margin: 1, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
+    const qr = await QRCode.toDataURL(pairUrl, { margin: 4, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
     res.json({ url: pairUrl, qr, since: cfStartedAt });
   } catch (e) {
     stopTunnel();
@@ -2974,13 +3662,9 @@ app.get('/m', (req, res) => {
 // Kill the tunnel when the server exits.
 process.on('exit', () => { try { if (cfProc) cfProc.kill(); } catch {} });
 
-// Ferme totalement l'IDE : on demande a la coquille Electron de quitter, puis on
-// arrete ce serveur. Utilise par le bouton "Fermer l'IDE" du modal de mise a
-// jour, pour liberer le bundle avant que l'utilisateur remplace l'application.
-//
-// Electron lance ce serveur comme processus enfant et lui transmet son PID :
-// un SIGTERM sur ce PID declenche la fermeture propre de la fenetre. Sans PID
-// connu (lancement en dev), on se contente d'arreter le serveur.
+// Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
+// Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
+// fichiers avant que l'utilisateur lance l'installateur manuellement.
 app.post('/api/app/close', (req, res) => {
   res.json({ success: true });
   setTimeout(() => {

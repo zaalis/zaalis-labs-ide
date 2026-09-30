@@ -93,13 +93,18 @@ fn classify_transport(error: reqwest::Error, local: bool) -> ProviderError {
 
 async fn classify_response(response: reqwest::Response) -> ProviderError {
     let status = response.status();
-    let retry_after_ms = response
+    let retry_after_header_ms = response
         .headers()
         .get(RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
         .map(|seconds| seconds.saturating_mul(1_000));
     let body = response.text().await.unwrap_or_default();
+    // Some OpenAI-compatible APIs (including hosted Kimi deployments) put
+    // their cooldown only in the JSON message, e.g. "try again after 1
+    // seconds", and omit Retry-After. Preserve that signal so the shared
+    // provider pool waits instead of retrying in a tight burst.
+    let retry_after_ms = retry_after_header_ms.or_else(|| retry_after_from_body(&body));
     let parsed = serde_json::from_str::<Value>(&body).ok();
     let message = parsed
         .as_ref()
@@ -119,5 +124,61 @@ async fn classify_response(response: reqwest::Response) -> ProviderError {
         429 => ProviderError::rate_limited(message, retry_after_ms),
         500..=599 => ProviderError::transient(message),
         _ => ProviderError::invalid(message),
+    }
+}
+
+fn retry_after_from_body(body: &str) -> Option<u64> {
+    let lower = body.to_ascii_lowercase();
+    // Only explicit cooldown phrases count, and the number must follow them
+    // directly: a bare "after" would pick up any unrelated figure further in
+    // the body (an error code, a token count) as a delay.
+    for marker in ["try again after", "retry after", "try again in", "retry in"] {
+        let Some(offset) = lower.find(marker) else {
+            continue;
+        };
+        let tail = lower[offset + marker.len()..].trim_start();
+        let number_len = tail
+            .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+            .unwrap_or(tail.len());
+        let Ok(value) = tail[..number_len].parse::<f64>() else {
+            continue;
+        };
+        let unit = tail[number_len..].trim_start();
+        let factor = if unit.starts_with("ms") || unit.starts_with("millisecond") {
+            1.0
+        } else if unit.starts_with("min") || unit.starts_with("m ") || unit == "m" {
+            60_000.0
+        } else {
+            1_000.0
+        };
+        return Some((value * factor).ceil().min(u64::MAX as f64) as u64);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retry_after_from_body;
+
+    #[test]
+    fn reads_provider_cooldown_from_a_rate_limit_message() {
+        assert_eq!(
+            retry_after_from_body(
+                "request reached organization max RPM: 3, please try again after 1 seconds"
+            ),
+            Some(1_000)
+        );
+        assert_eq!(retry_after_from_body("rate limit exceeded"), None);
+        assert_eq!(
+            retry_after_from_body("Please try again in 1.5s."),
+            Some(1_500)
+        );
+        assert_eq!(retry_after_from_body("retry after 200ms"), Some(200));
+        assert_eq!(retry_after_from_body("try again after 2 minutes"), Some(120_000));
+        // An unrelated number later in the body is not a cooldown.
+        assert_eq!(
+            retry_after_from_body(r#"{"error":{"message":"quota resets after midnight","code":429}}"#),
+            None
+        );
     }
 }

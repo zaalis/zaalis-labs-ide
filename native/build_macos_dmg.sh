@@ -90,6 +90,7 @@ rustup target add aarch64-apple-darwin x86_64-apple-darwin >/dev/null 2>&1 || tr
 
 echo "[1/3] Preparing Electron icon (.icns)..."
 npm run check:mojibake
+sh "$ROOT/native/build_whisper.sh"
 node native/make_icns.js
 
 build_arch() {

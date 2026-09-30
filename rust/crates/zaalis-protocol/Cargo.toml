@@ -12,6 +12,7 @@ zaalis-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+strum = { version = "0.28.0", features = ["derive"] }
 
 [lints]
 workspace = true

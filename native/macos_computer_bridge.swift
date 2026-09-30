@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import ImageIO
+import Vision
 import ScreenCaptureKit
 import Carbon.HIToolbox
 
@@ -57,13 +58,13 @@ final class ScreenshotResult: @unchecked Sendable {
 }
 
 @available(macOS 14.0, *)
-func capturedImage() throws -> CGImage {
+func capturedImage(displayID: CGDirectDisplayID? = nil) throws -> CGImage {
     let semaphore = DispatchSemaphore(value: 0)
     let result = ScreenshotResult()
     Task {
         do {
             let content = try await SCShareableContent.current
-            guard let display = content.displays.first else { throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: "display unavailable"]) }
+            guard let display = (displayID.flatMap { wanted in content.displays.first { $0.displayID == wanted } } ?? content.displays.first) else { throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: "display unavailable"]) }
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let config = SCStreamConfiguration()
             config.width = display.width
@@ -398,6 +399,123 @@ func activeApplicationMenus() throws -> JSON {
     ]
 }
 
+// Geometry is in macOS global display points; images and AX elements are
+// returned in image pixels so the shared automation manager can map clicks.
+func axElement(_ element: AXUIElement, _ attribute: CFString) -> AXUIElement? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute, &value) == .success,
+          let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+func axRect(_ element: AXUIElement) -> CGRect? {
+    var pv: CFTypeRef?, sv: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pv) == .success,
+          AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sv) == .success,
+          let pv, let sv, CFGetTypeID(pv) == AXValueGetTypeID(), CFGetTypeID(sv) == AXValueGetTypeID() else { return nil }
+    var p = CGPoint.zero, s = CGSize.zero
+    guard AXValueGetValue(pv as! AXValue, .cgPoint, &p), AXValueGetValue(sv as! AXValue, .cgSize, &s) else { return nil }
+    return CGRect(origin: p, size: s)
+}
+func focusedElement() -> AXUIElement? {
+    return axElement(AXUIElementCreateSystemWide(), kAXFocusedUIElementAttribute as CFString)
+}
+func guardedTarget(_ request: JSON) -> String? {
+    let action = request["action"] as? String ?? ""
+    let system = AXUIElementCreateSystemWide()
+    var target = focusedElement()
+    if ["click", "double_click"].contains(action), let p = point(request) {
+        var hit: AXUIElement?
+        if AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &hit) == .success { target = hit }
+    }
+    guard let target else { return nil }
+    if action == "type", axString(target, kAXSubroleAttribute as CFString) == "AXSecureTextField" { return "password-field" }
+    if action == "key" {
+        let key = String(request["key"] as? String ?? "").lowercased()
+        if !["enter", "return", "space", " "].contains(key) { return nil }
+    }
+    guard ["click", "double_click", "key"].contains(action), let pattern = request["guard"] as? String,
+          let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
+    var element: AXUIElement? = target
+    for _ in 0..<4 {
+        guard let current = element else { break }
+        let title = [axString(current, kAXTitleAttribute as CFString), axString(current, kAXDescriptionAttribute as CFString)].compactMap { $0 }.joined(separator: " ")
+        if regex.firstMatch(in: title, range: NSRange(title.startIndex..., in: title)) != nil { return title }
+        element = axElement(current, kAXParentAttribute as CFString)
+    }
+    return nil
+}
+func pngData(_ image: CGImage) throws -> String {
+    let data = NSMutableData()
+    guard let dest = CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil) else { throw NSError(domain: "zaalis", code: 2) }
+    CGImageDestinationAddImage(dest, image, nil)
+    guard CGImageDestinationFinalize(dest) else { throw NSError(domain: "zaalis", code: 3) }
+    return data.base64EncodedString()
+}
+func inspectDesktop(_ request: JSON) throws -> JSON {
+    guard #available(macOS 14.0, *) else { throw NSError(domain: "zaalis", code: 1, userInfo: [NSLocalizedDescriptionKey: "macOS 14 required for screen capture"]) }
+    var ids = [CGDirectDisplayID](repeating: 0, count: 16), count: UInt32 = 0
+    CGGetActiveDisplayList(16, &ids, &count)
+    let displays = Array(ids.prefix(Int(count)))
+    guard !displays.isEmpty else { throw NSError(domain: "zaalis", code: 1) }
+    let target = request["target"] as? String ?? "display"
+    let system = AXUIElementCreateSystemWide()
+    let application = axElement(system, kAXFocusedApplicationAttribute as CFString)
+    let window = application.flatMap { axElement($0, kAXFocusedWindowAttribute as CFString) }
+    var area = displays.map { CGDisplayBounds($0) }.reduce(CGRect.null) { $0.union($1) }
+    if let index = request["display_index"] as? Int, displays.indices.contains(index) { area = CGDisplayBounds(displays[index]) }
+    if target == "active_window", let window, let frame = axRect(window) { area = frame }
+    if target == "region" { area = CGRect(x: request["x"] as? Double ?? 0, y: request["y"] as? Double ?? 0, width: request["width"] as? Double ?? 0, height: request["height"] as? Double ?? 0) }
+    guard area.width > 0, area.height > 0 else { throw NSError(domain: "zaalis", code: 1) }
+    let maxDimension = max(800, min(4096, request["max_dimension"] as? Int ?? 2560))
+    let scale = min(1, Double(maxDimension) / max(area.width, area.height))
+    let width = max(1, Int(area.width * scale)), height = max(1, Int(area.height * scale))
+    guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw NSError(domain: "zaalis", code: 1) }
+    for id in displays {
+        let frame = CGDisplayBounds(id), overlap = frame.intersection(area)
+        if overlap.isNull || overlap.isEmpty { continue }
+        let image = try capturedImage(displayID: id)
+        let crop = CGRect(x: (overlap.minX-frame.minX)*Double(image.width)/frame.width, y: (overlap.minY-frame.minY)*Double(image.height)/frame.height, width: overlap.width*Double(image.width)/frame.width, height: overlap.height*Double(image.height)/frame.height)
+        if let part = image.cropping(to: crop) {
+            context.draw(part, in: CGRect(x: (overlap.minX-area.minX)*scale, y: (area.maxY-overlap.maxY)*scale, width: overlap.width*scale, height: overlap.height*scale))
+        }
+    }
+    guard let image = context.makeImage() else { throw NSError(domain: "zaalis", code: 1) }
+    var result: JSON = ["ok": true, "target": target, "application": NSWorkspace.shared.frontmostApplication?.localizedName ?? "", "capture": ["x": area.minX, "y": area.minY, "width": area.width, "height": area.height], "image_width": width, "image_height": height, "displays": displays.enumerated().map { index, id -> JSON in ["index": index, "x": CGDisplayBounds(id).minX, "y": CGDisplayBounds(id).minY, "width": CGDisplayBounds(id).width, "height": CGDisplayBounds(id).height] }]
+    if request["include_image"] as? Bool != false { result["image"] = try pngData(image); result["mime"] = "image/png" }
+    func relative(_ frame: CGRect) -> [Double] { return [(frame.minX-area.minX)*scale, (frame.minY-area.minY)*scale, frame.width*scale, frame.height*scale] }
+    if request["include_ui"] as? Bool != false, let application {
+        var elements: [JSON] = []
+        let cap = max(25, min(400, request["max_elements"] as? Int ?? 220))
+        var visited = Set<CFHashCode>()
+        func walk(_ item: AXUIElement, _ depth: Int) {
+            guard depth < 18, elements.count < cap, visited.insert(CFHash(item)).inserted else { return }
+            if let frame = axRect(item), frame.intersects(area) {
+                let secure = axString(item, kAXSubroleAttribute as CFString) == "AXSecureTextField"
+                var e: JSON = ["role": axString(item, kAXRoleAttribute as CFString) ?? "", "title": axString(item, kAXTitleAttribute as CFString) ?? "", "label": axString(item, kAXDescriptionAttribute as CFString) ?? "", "frame": relative(frame), "center": [(frame.midX-area.minX)*scale, (frame.midY-area.minY)*scale], "secure": secure]
+                if !secure { e["value"] = axString(item, kAXValueAttribute as CFString) }
+                elements.append(e)
+            }
+            for child in axChildren(item) { walk(child, depth+1) }
+        }
+        walk(window ?? application, 0)
+        result["ui"] = ["source": "macOS Accessibility", "elements": elements, "truncated": elements.count >= cap]
+    }
+    if request["include_ocr"] as? Bool != false {
+        let recognition = VNRecognizeTextRequest()
+        recognition.recognitionLevel = .accurate
+        recognition.recognitionLanguages = ["fr-FR", "en-US"]
+        do {
+            try VNImageRequestHandler(cgImage: image).perform([recognition])
+            result["ocr"] = (recognition.results ?? []).prefix(200).compactMap { item -> JSON? in
+                guard let text = item.topCandidates(1).first?.string else { return nil }
+                let box = item.boundingBox
+                return ["text": text, "frame": [box.minX*Double(width), (1-box.maxY)*Double(height), box.width*Double(width), box.height*Double(height)]]
+            }
+        } catch { result["ocrError"] = error.localizedDescription }
+    }
+    return result
+}
+
 guard let line = readLine(), let data = line.data(using: .utf8),
       let request = try? JSONSerialization.jsonObject(with: data) as? JSON else {
     error("invalid request"); exit(0)
@@ -420,30 +538,54 @@ guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 12 else {
 }
 
 do {
+    if let blocked = guardedTarget(request) {
+        output(["ok": false, "error": blocked == "password-field" ? blocked : "sensitive-target", "target": blocked])
+        exit(0)
+    }
     switch action {
     case "menus":
         var result = try activeApplicationMenus()
         result["ok"] = true
         output(result)
-    case "observe":
+    case "inspect", "observe":
         // Do not gate actions on a preflight value: macOS may report a stale
         // TCC state just after an app/helper update.  The protected API itself
         // remains the authority and returns its real error if access is denied.
-        output(["ok": true, "mime": "image/png", "image": try pngBase64()])
+        output(try inspectDesktop(request))
     case "move":
         guard let p = point(request) else { error("invalid coordinates"); break }
         move(to: p, duration: request["duration"] as? Double ?? 0.35)
         output(["ok": true])
-    case "click":
+    case "drag":
+        guard let p = point(request), let tx = request["to_x"] as? Double, let ty = request["to_y"] as? Double else { error("invalid coordinates"); break }
+        move(to: p, duration: 0.2)
+        postMouse(.leftMouseDown, at: p)
+        let end = CGPoint(x: tx, y: ty)
+        let steps = max(6, Int((request["duration"] as? Double ?? 0.5) * 60))
+        for i in 1...steps {
+            let t = Double(i) / Double(steps)
+            postMouse(.leftMouseDragged, at: CGPoint(x: p.x+(end.x-p.x)*t, y: p.y+(end.y-p.y)*t))
+            usleep(16_000)
+        }
+        postMouse(.leftMouseUp, at: end); output(["ok": true])
+    case "click", "double_click":
         guard let p = point(request) else { error("invalid coordinates"); break }
         move(to: p, duration: request["duration"] as? Double ?? 0.28)
         let right = String(request["button"] as? String ?? "left") == "right"
-        let button: CGMouseButton = right ? .right : .left
-        postMouse(right ? .rightMouseDown : .leftMouseDown, at: p, button: button)
-        usleep(55_000)
-        postMouse(right ? .rightMouseUp : .leftMouseUp, at: p, button: button)
+        let middle = String(request["button"] as? String ?? "left") == "middle"
+        let button: CGMouseButton = right ? .right : middle ? .center : .left
+        let flags = modifierFlags(Set(request["modifiers"] as? [String] ?? []))
+        for count in 1...(action == "double_click" ? 2 : 1) {
+            for down in [true, false] {
+                let type: CGEventType = right ? (down ? .rightMouseDown : .rightMouseUp) : middle ? (down ? .otherMouseDown : .otherMouseUp) : (down ? .leftMouseDown : .leftMouseUp)
+                let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button)
+                event?.flags = flags; event?.setIntegerValueField(.mouseEventClickState, value: Int64(count)); event?.post(tap: .cghidEventTap)
+                usleep(55_000)
+            }
+        }
         output(["ok": true])
     case "scroll":
+        if let p = point(request) { move(to: p, duration: 0.1) }
         let dx = Int32(max(-120, min(120, request["dx"] as? Int ?? 0)))
         let dy = Int32(max(-120, min(120, request["dy"] as? Int ?? 0)))
         CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)?.post(tap: .cghidEventTap)
@@ -456,7 +598,7 @@ do {
         try activateApp("/System/Applications/Utilities/Terminal.app"); output(["ok": true])
     case "activate_app":
         let appPath = String(request["path"] as? String ?? "")
-        guard appPath.hasPrefix("/") && appPath.hasSuffix(".app") else { error("invalid app path"); break }
+        guard !appPath.isEmpty else { error("invalid app path"); break }
         try activateApp(appPath); output(["ok": true])
     default:
         error("unsupported action")

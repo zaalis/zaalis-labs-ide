@@ -3,10 +3,18 @@
 const modelSelect = $('#ai-model');
 const submodelSelect = $('#ai-submodel');
 
-// Solid colour for the closed model selector (gradients can't render there).
-const MODEL_COLORS = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', kimi: '#38bdf8', local: '#fafafa', gguf: '#34d399' };
+// Provider names are plain text in the theme colour: per-vendor colours made
+// the list hard to read.
 function applyModelColor() {
-    modelSelect.style.color = MODEL_COLORS[modelSelect.value] || 'var(--text-0)';
+    modelSelect.style.color = '';
+}
+
+// Short provider name for message labels: "Codex (OpenAI)" -> "Codex",
+// "Qwen Cloud (Alibaba)" -> "Qwen Cloud".
+function providerShortLabel(option) {
+    const text = option ? String(option.textContent || '') : '';
+    if (option && String(option.value || '').startsWith('compat:')) return text.replace(/\s*\(.*\)\s*$/, '') || text;
+    return text.split(' ')[0];
 }
 
 // Pretty short name for the dropdown (full tag stays in the option's value).
@@ -28,7 +36,44 @@ function prettyModelLabel(full) {
     return quant ? `${s} (${quant})` : s;
 }
 // Submodel list per provider. Ollama + GGUF use the user's installed models.
+// OpenAI-compatible providers: the provider's live /models list once fetched
+// (with the user's own key, from this PC), otherwise the starter list, plus
+// any model ID the user typed in the dropdown search.
+const compatLiveModels = new Map();
+const compatModelFetches = new Map();
+function compatModelsFor(id) {
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const base = compatLiveModels.get(id) || provider?.models || [];
+    const custom = (state.config.compatCustomModels || {})[id] || [];
+    return [...new Set([...base, ...custom])];
+}
+function fetchCompatModels(id) {
+    if (compatLiveModels.has(id) || compatModelFetches.has(id)) return;
+    const request = fetch(`/api/compat/models?provider=${encodeURIComponent(id)}`)
+        .then(response => response.ok ? response.json() : null)
+        .then(data => {
+            if (!data || !Array.isArray(data.models)) return;
+            compatLiveModels.set(id, data.models);
+            // Rebuild only if the provider is still selected; the current
+            // choice is kept when it still exists.
+            if (modelSelect.value === `compat:${id}`) updateSubmodelDropdown();
+        })
+        .catch(() => {})
+        .finally(() => compatModelFetches.delete(id));
+    compatModelFetches.set(id, request);
+}
+function rememberCompatModel(model, submodel) {
+    if (!model.startsWith('compat:') || !submodel) return;
+    const id = model.slice(7);
+    const provider = (window.compatProviders || []).find(p => p.id === id);
+    const known = compatLiveModels.get(id) || provider?.models || [];
+    if (known.includes(submodel)) return;
+    state.config.compatCustomModels = state.config.compatCustomModels || {};
+    const list = state.config.compatCustomModels[id] || [];
+    if (!list.includes(submodel)) state.config.compatCustomModels[id] = [...list, submodel].slice(-20);
+}
 function submodelsFor(model) {
+    if (model.startsWith('compat:')) return compatModelsFor(model.slice(7));
     if (model === 'local') return (state.config.ollamaModels && state.config.ollamaModels.length) ? state.config.ollamaModels : SUBMODELS.local;
     if (model === 'gguf') return state.config.ggufModels || [];
     return SUBMODELS[model] || [];
@@ -41,6 +86,7 @@ function submodelLabelFor(model, s) {
 function updateSubmodelDropdown() {
     const model = modelSelect.value;
     const subs = submodelsFor(model);
+    const previous = submodelSelect.value || state.config.aiSubmodel;
     submodelSelect.innerHTML = '';
     subs.forEach(s => {
         const opt = document.createElement('option');
@@ -49,7 +95,29 @@ function updateSubmodelDropdown() {
         opt.title = s;
         submodelSelect.appendChild(opt);
     });
+    if (subs.includes(previous)) submodelSelect.value = previous;
+    if (model === 'gguf' && !subs.length) {
+        const option = document.createElement('option');
+        option.value = '';
+        option.textContent = state.language === 'en' ? 'No GGUF model installed' : 'Aucun modèle GGUF installé';
+        submodelSelect.appendChild(option);
+    }
+    const compat = model.startsWith('compat:');
+    // Any model ID can be typed in the dropdown search for these providers.
+    submodelSelect.dataset.allowCustom = compat ? '1' : '';
+    if (compat) {
+        if (!subs.length) {
+            const option = document.createElement('option');
+            option.value = '';
+            option.textContent = state.language === 'en' ? 'Type a model ID…' : 'Saisir un ID de modèle…';
+            submodelSelect.appendChild(option);
+        }
+        fetchCompatModels(model.slice(7));
+    }
+    const install = $('#gguf-install-shortcut');
+    if (install) install.hidden = model !== 'gguf' || subs.length > 0;
 }
+$('#gguf-install-shortcut')?.addEventListener('click', () => $('#catalog-btn')?.click());
 
 // --- Lightweight toast notification (non-blocking, auto-dismiss) ---
 function showToast(title, msg, opts = {}) {
@@ -105,9 +173,10 @@ function maybeWarnSmallLocalModel() {
     const lang = state.language || 'fr';
     const pretty = (typeof prettyModelLabel === 'function' && /^hf\.co\//i.test(sub)) ? prettyModelLabel(sub) : sub;
     const title = TRANSLATIONS[lang]['ollama-small-title'] || 'Modèle local léger';
+    const accurateTitle = modelSelect.value === 'gguf' ? (lang === 'en' ? 'Small GGUF model' : 'Petit modèle GGUF') : title;
     const tmpl = TRANSLATIONS[lang]['ollama-small-msg'] ||
         'Le modèle « {model} » est petit. Il peut halluciner, ignorer des consignes (lecture/écriture de fichiers) ou bugger. Pour des résultats fiables, préférez un modèle ≥ 14B.';
-    showToast(title, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
+    showToast(accurateTitle, tmpl.replace('{model}', pretty), { icon: '⚠️', duration: 9000 });
 }
 
 modelSelect.addEventListener('change', () => {
@@ -134,6 +203,7 @@ modelSelect.addEventListener('change', () => {
 });
 submodelSelect.addEventListener('change', () => {
     state.config.aiSubmodel = submodelSelect.value;
+    rememberCompatModel(modelSelect.value, submodelSelect.value);
     saveState();
 
     checkReasoningCompatibility();
@@ -168,6 +238,7 @@ $('#project-btn').addEventListener('click', e => {
 document.addEventListener('click', () => {
     projectDropdown.classList.remove('open');
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
 });
 
 $('#open-project-btn').addEventListener('click', async e => {
@@ -312,6 +383,37 @@ function conversationsForProject(projectPath, folderName, kind) {
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
 }
 
+// A real menu keeps opening a chat separate from deleting it. Native details
+// supports mouse, touch and keyboard without nesting buttons inside buttons.
+function createConversationMenu(kind, conv) {
+    const english = state.language === 'en';
+    const menu = document.createElement('details');
+    menu.className = 'conversation-menu';
+    const trigger = document.createElement('summary');
+    trigger.setAttribute('aria-label', (english ? 'Actions for ' : 'Actions pour ') + (conv.title || 'Conversation'));
+    trigger.title = english ? 'Chat actions' : 'Actions du chat';
+    trigger.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>';
+    const remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'conversation-menu-delete';
+    remove.textContent = english ? 'Delete chat…' : 'Supprimer le chat…';
+    remove.addEventListener('click', async event => {
+        event.stopPropagation();
+        menu.open = false;
+        await deleteConversation(kind, conv.id);
+    });
+    menu.addEventListener('click', event => event.stopPropagation());
+    menu.addEventListener('keydown', event => { if (event.key === 'Escape') { menu.open = false; trigger.focus(); } });
+    menu.addEventListener('toggle', () => {
+        if (menu.open) document.querySelectorAll('.conversation-menu[open]').forEach(other => { if (other !== menu) other.open = false; });
+    });
+    menu.append(trigger, remove);
+    return menu;
+}
+document.addEventListener('click', event => {
+    document.querySelectorAll('.conversation-menu[open]').forEach(menu => { if (!menu.contains(event.target)) menu.open = false; });
+});
+
 function initRecentProjects() {
     const recent = getRecentProjects();
     const container = $('#recent-projects');
@@ -419,10 +521,7 @@ function initRecentProjects() {
                 if (state[currentStoreKey] === conv.id) {
                     chatRow.classList.add('active');
                 }
-                chatRow.innerHTML = `
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    <span></span>
-                `;
+                chatRow.innerHTML = '<span></span>';
                 chatRow.querySelector('span').textContent = conv.title;
                 chatRow.addEventListener('click', e => {
                     e.stopPropagation();
@@ -431,7 +530,10 @@ function initRecentProjects() {
                         if (opened && typeof loadConversation === 'function') loadConversation(kind, conv.id);
                     });
                 });
-                chatsContainer.appendChild(chatRow);
+                const wrapper = document.createElement('div');
+                wrapper.className = 'ws-conversation-row';
+                wrapper.append(chatRow, createConversationMenu(kind, conv));
+                chatsContainer.appendChild(wrapper);
             });
         }
         container.appendChild(chatsContainer);
@@ -1240,9 +1342,21 @@ function updateProfileUI() {
     if (removePhoto) removePhoto.classList.toggle('hidden', !state.profile.photo);
 }
 
-$('#sidebar-profile').addEventListener('click', e => {
+const sidebarProfileBtn = $('#sidebar-profile');
+function toggleProfilePopup() {
+    const open = $('#profile-popup').classList.toggle('open');
+    sidebarProfileBtn.setAttribute('aria-expanded', String(open));
+}
+sidebarProfileBtn.addEventListener('click', e => {
     e.stopPropagation();
-    $('#profile-popup').classList.toggle('open');
+    toggleProfilePopup();
+});
+sidebarProfileBtn.addEventListener('keydown', e => {
+    if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        e.stopPropagation();
+        toggleProfilePopup();
+    }
 });
 
 // Clicks inside the popup must not bubble to the document handler (which closes it).
@@ -1279,6 +1393,7 @@ $('#save-profile').addEventListener('click', () => {
     saveState();
     updateProfileUI();
     $('#profile-popup').classList.remove('open');
+    $('#sidebar-profile')?.setAttribute('aria-expanded', 'false');
     saveProfileToServer();
 });
 
@@ -1301,6 +1416,8 @@ function showApp(email) {
         const emailEl = $('#profile-email');
         if (emailEl) emailEl.textContent = email;
     }
+    // Opale is linked by default: let it know the IDE is there.
+    if (typeof loadOpaleStatus === 'function') loadOpaleStatus();
 }
 function showAuthOverlay() {
     $('#auth-overlay').classList.remove('hidden');
@@ -1353,6 +1470,9 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Connexion impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1381,6 +1501,9 @@ function setupAuth() {
             if (!res.ok) return showAuthError(data.error || 'Création de compte impossible.');
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
+            await loadSharedHardwareConfig();
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1403,6 +1526,8 @@ async function checkAuthAndInit() {
         if (data && data.authenticated) {
             showApp(data.email);
             applyServerProfile(data.profile);
+            await loadPermissionPreference();
+            window.ZaalisWorkspace?.refreshCapabilities(true);
             await loadUserChats();
             openSavedProject();
             syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
@@ -1419,53 +1544,32 @@ async function checkAuthAndInit() {
 //  UI: collapse sidebar / resize panels / collapse agent models / bounce
 // ==========================================================
 // One toggle (same icon, same place) collapses the sidebar to a thin rail.
+// All the visual work (width, fades, the profile row staying anchored at the
+// bottom) is driven by CSS classes in app.css; this only flips state, keeps
+// the user's chosen expanded width, and manages ARIA.
 const sbToggle = $('#sidebar-toggle');
-if (sbToggle) sbToggle.addEventListener('click', () => {
+if (sbToggle) {
     const sidebar = $('#sidebar');
     const app = $('#app');
-    const collapsed = sidebar.classList.toggle('collapsed');
-    app.classList.toggle('sidebar-collapsed', collapsed);
+    sbToggle.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
+    sbToggle.addEventListener('click', () => {
+        const collapsed = sidebar.classList.toggle('collapsed');
+        app.classList.toggle('sidebar-collapsed', collapsed);
+        sbToggle.setAttribute('aria-expanded', String(!collapsed));
 
-    if (collapsed) {
-        const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
-        if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
-        sidebar.style.width = '46px';
-        sidebar.style.minWidth = '46px';
-    } else {
-        const expandedWidth = sidebar.dataset.expandedWidth || '240px';
-        sidebar.style.width = expandedWidth;
-        sidebar.style.minWidth = '180px';
-    }
-
-    const projectBtn = $('#project-btn');
-    const stack = $('#sidebar-stack');
-    const profile = $('#sidebar-profile');
-    const profileName = $('#profile-name');
-    if (projectBtn) {
-        projectBtn.style.maxWidth = collapsed ? '0' : '';
-        projectBtn.style.paddingLeft = collapsed ? '0' : '';
-        projectBtn.style.paddingRight = collapsed ? '0' : '';
-        projectBtn.style.opacity = collapsed ? '0' : '';
-        projectBtn.style.transform = collapsed ? 'translateX(-14px)' : '';
-        projectBtn.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (stack) {
-        stack.style.opacity = collapsed ? '0' : '';
-        stack.style.transform = collapsed ? 'translateX(-18px)' : '';
-        stack.style.pointerEvents = collapsed ? 'none' : '';
-    }
-    if (profile) {
-        profile.style.justifyContent = collapsed ? 'center' : '';
-        profile.style.gap = collapsed ? '0' : '';
-        profile.style.padding = collapsed ? '8px 0' : '';
-    }
-    if (profileName) {
-        profileName.style.maxWidth = collapsed ? '0' : '';
-        profileName.style.opacity = collapsed ? '0' : '';
-        profileName.style.transform = collapsed ? 'translateX(-12px)' : '';
-        profileName.style.pointerEvents = collapsed ? 'none' : '';
-    }
-});
+        if (collapsed) {
+            // Remember the width the user had set (manual resize or default)
+            // so expanding restores it instead of snapping to a fixed value.
+            const currentWidth = Math.round(sidebar.getBoundingClientRect().width);
+            if (currentWidth > 80) sidebar.dataset.expandedWidth = currentWidth + 'px';
+            sidebar.style.width = '';
+            sidebar.style.minWidth = '';
+        } else {
+            sidebar.style.width = sidebar.dataset.expandedWidth || '';
+            sidebar.style.minWidth = '';
+        }
+    });
+}
 
 // Drag the edges to resize the sidebar and the AI panel.
 function makeResizer(id, target, side) {
@@ -1691,6 +1795,9 @@ function createCustomSelect(selectId, opts) {
 
     const trigger = document.createElement('div');
     trigger.className = 'custom-select-trigger';
+    trigger.setAttribute('role', 'button');
+    trigger.tabIndex = 0;
+    trigger.setAttribute('aria-haspopup', 'listbox');
     
     const triggerText = document.createElement('span');
     triggerText.className = 'custom-select-trigger-text';
@@ -1705,48 +1812,144 @@ function createCustomSelect(selectId, opts) {
 
     const optionsContainer = document.createElement('div');
     optionsContainer.className = 'custom-select-options';
+    optionsContainer.addEventListener('click', e => e.stopPropagation());
     wrapper.appendChild(optionsContainer);
+
+    // Long lists (live /models of a gateway can hold hundreds of entries) get a
+    // search field. It lives outside the rebuilt list so a refresh never steals
+    // the focus while the user is typing. Where the select allows it, the typed
+    // text can be used as a model ID directly.
+    const search = document.createElement('input');
+    search.type = 'search';
+    search.className = 'custom-select-search';
+    search.autocomplete = 'off';
+    search.spellcheck = false;
+    optionsContainer.appendChild(search);
+    const list = document.createElement('div');
+    list.className = 'custom-select-list';
+    list.setAttribute('role', 'listbox');
+    optionsContainer.appendChild(list);
 
     select.parentNode.insertBefore(wrapper, select.nextSibling);
 
+    const allowsCustom = () => select.dataset.allowCustom === '1';
+    const searchable = () => allowsCustom() || select.options.length > 10;
+
+    function choose(value) {
+        if (select.value !== value) {
+            select.value = value;
+            select.dispatchEvent(new Event('change'));
+        }
+        closeAllCustomSelects();
+    }
+
+    function optionRow(opt) {
+        const div = document.createElement('div');
+        div.className = 'custom-select-option';
+        if (opt.dataset.action) div.classList.add('action');
+        else if (opt.value === select.value) div.classList.add('selected');
+        div.textContent = opt.textContent;
+        div.dataset.value = opt.value;
+        div.setAttribute('role', 'option');
+        div.setAttribute('aria-selected', String(opt.value === select.value));
+        div.tabIndex = 0;
+        div.title = opt.title || opt.textContent;
+        div.addEventListener('click', (e) => {
+            e.stopPropagation();
+            if (opt.dataset.action) {
+                closeAllCustomSelects();
+                select.dispatchEvent(new CustomEvent('custom-select-action', { detail: opt.dataset.action }));
+                return;
+            }
+            if (opt.value === '' && allowsCustom()) { search.focus(); return; }
+            choose(opt.value);
+        });
+        div.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); }
+        });
+        return div;
+    }
+
+    function renderList() {
+        list.innerHTML = '';
+        const query = search.value.trim().toLowerCase();
+        const matches = (opt) => !query || opt.textContent.toLowerCase().includes(query) || opt.value.toLowerCase().includes(query);
+        // Group headers come from <optgroup>; groups left empty by the filter
+        // are skipped entirely.
+        for (const child of Array.from(select.children)) {
+            if (child.tagName === 'OPTGROUP') {
+                const rows = Array.from(child.children).filter(opt => opt.tagName === 'OPTION' && (!query || !opt.dataset.action) && matches(opt));
+                if (!rows.length) continue;
+                const header = document.createElement('div');
+                header.className = 'custom-select-group';
+                header.textContent = child.label;
+                list.appendChild(header);
+                rows.forEach(opt => list.appendChild(optionRow(opt)));
+            } else if (child.tagName === 'OPTION' && matches(child) && !(query && child.value === '')) {
+                list.appendChild(optionRow(child));
+            }
+        }
+        const typed = search.value.trim();
+        if (allowsCustom() && typed && !Array.from(select.options).some(opt => opt.value === typed)) {
+            const custom = document.createElement('div');
+            custom.className = 'custom-select-option action';
+            custom.tabIndex = 0;
+            custom.setAttribute('role', 'option');
+            custom.textContent = (state.language === 'en' ? 'Use model “{id}”' : 'Utiliser le modèle « {id} »').replace('{id}', typed);
+            custom.addEventListener('click', e => {
+                e.stopPropagation();
+                const option = document.createElement('option');
+                option.value = typed;
+                option.textContent = typed;
+                option.title = typed;
+                select.appendChild(option);
+                choose(typed);
+            });
+            list.appendChild(custom);
+        }
+        if (!list.children.length) {
+            const empty = document.createElement('div');
+            empty.className = 'custom-select-empty';
+            empty.textContent = state.language === 'en' ? 'No match' : 'Aucun résultat';
+            list.appendChild(empty);
+        }
+    }
+
     function updateOptions() {
-        optionsContainer.innerHTML = '';
-        
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
-
-        // Update color for model select trigger
-        if (selectId === 'ai-model') {
-            const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-            triggerText.style.color = colors[select.value] || 'var(--text-0)';
-        }
+        trigger.setAttribute('aria-label', `${selectId === 'ai-model' ? 'Fournisseur' : 'Modèle'} : ${triggerText.textContent}`);
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
+        search.hidden = !searchable();
+        search.placeholder = allowsCustom()
+            ? (state.language === 'en' ? 'Search or type a model ID…' : 'Rechercher ou saisir un ID…')
+            : (state.language === 'en' ? 'Search…' : 'Rechercher…');
+        renderList();
+    }
 
-        Array.from(select.options).forEach(opt => {
-            const div = document.createElement('div');
-            div.className = 'custom-select-option';
-            if (opt.value === select.value) {
-                div.classList.add('selected');
-            }
-            div.textContent = opt.textContent;
-            div.dataset.value = opt.value;
-            div.title = opt.title || opt.textContent;
+    search.addEventListener('input', renderList);
+    search.addEventListener('keydown', e => {
+        if (e.key === 'Escape') { closeAllCustomSelects(); trigger.focus(); return; }
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            list.querySelector('.custom-select-option')?.click();
+        }
+        if (e.key === 'ArrowDown') { e.preventDefault(); list.querySelector('.custom-select-option')?.focus(); }
+    });
 
-            if (selectId === 'ai-model') {
-                const colors = { codex: '#3b82f6', claude: '#f97316', gemini: '#7c6cf0', grok: '#9ca3af', mistral: '#f59e0b', local: '#fafafa', gguf: '#34d399' };
-                div.style.color = colors[opt.value] || 'inherit';
-                div.style.fontWeight = '600';
-            }
-
-            div.addEventListener('click', (e) => {
-                e.stopPropagation();
-                select.value = opt.value;
-                select.dispatchEvent(new Event('change'));
-                closeAllCustomSelects();
-            });
-
-            optionsContainer.appendChild(div);
-        });
+    // Keep the open list inside the panel that holds it: those panels clip
+    // their overflow, and a list sticking out made the whole chat view scroll
+    // sideways. Right-anchor when the right edge would overflow, then narrow.
+    function fitDropdown() {
+        const style = optionsContainer.style;
+        style.left = ''; style.right = ''; style.maxWidth = '';
+        const holder = wrapper.closest('.ai-view, .settings-pane, .modal-content') || document.documentElement;
+        const bounds = holder.getBoundingClientRect();
+        const right = Math.min(bounds.right, window.innerWidth) - 6;
+        const left = Math.max(bounds.left, 0) + 6;
+        let rect = optionsContainer.getBoundingClientRect();
+        if (rect.right > right) { style.left = 'auto'; style.right = '0'; rect = optionsContainer.getBoundingClientRect(); }
+        if (rect.left < left) style.maxWidth = `${Math.max(160, Math.floor(rect.right - left))}px`;
     }
 
     trigger.addEventListener('click', (e) => {
@@ -1755,17 +1958,33 @@ function createCustomSelect(selectId, opts) {
         closeAllCustomSelects();
         if (!isOpen) {
             wrapper.classList.add('open');
+            if (search.value) { search.value = ''; renderList(); }
+            fitDropdown();
+            if (!search.hidden) search.focus({ preventScroll: true });
+            // Scroll the list only: scrollIntoView would also scroll the
+            // clipped ancestors.
+            const selected = list.querySelector('.selected');
+            if (selected) list.scrollTop = Math.max(0, selected.offsetTop - list.clientHeight / 2 + selected.offsetHeight / 2);
         }
+        trigger.setAttribute('aria-expanded', String(!isOpen));
+    });
+    trigger.addEventListener('keydown', e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); trigger.click(); }
+        if (e.key === 'Escape') { wrapper.classList.remove('open'); trigger.setAttribute('aria-expanded', 'false'); }
     });
 
+    // Re-creating the dropdown for the same <select> must not stack observers
+    // and listeners from the previous instance.
+    if (typeof select._customSelectCleanup === 'function') select._customSelectCleanup();
     const observer = new MutationObserver(() => {
         updateOptions();
     });
     observer.observe(select, { childList: true, characterData: true, subtree: true });
-
-    select.addEventListener('change', () => {
-        updateOptions();
-    });
+    select.addEventListener('change', updateOptions);
+    select._customSelectCleanup = () => {
+        observer.disconnect();
+        select.removeEventListener('change', updateOptions);
+    };
 
     updateOptions();
 }
@@ -1773,6 +1992,7 @@ function createCustomSelect(selectId, opts) {
 function closeAllCustomSelects() {
     document.querySelectorAll('.custom-select-container').forEach(c => {
         c.classList.remove('open');
+        c.querySelector('.custom-select-trigger')?.setAttribute('aria-expanded', 'false');
     });
 }
 

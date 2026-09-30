@@ -43,3 +43,7 @@ temp/
 Thumbs.db
 .vscode/
 .idea/
+
+# Native speech build cache
+native/.whisper-build/
+native/whisper/whisper-cli

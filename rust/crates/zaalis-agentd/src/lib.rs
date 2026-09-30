@@ -41,6 +41,31 @@ struct ManagedSession {
     checkpoints: CheckpointStore,
 }
 
+/// Writes permanent approvals to the database, scoped to one workspace.
+///
+/// A failed write is logged and swallowed: the tool call the user just approved
+/// must still run. The cost is that the approval reverts to session-only, which
+/// is the safe direction to fail in.
+#[derive(Debug)]
+struct StoredRules {
+    store: Arc<Store>,
+    workspace: String,
+}
+
+impl zaalis_tools::RuleSink for StoredRules {
+    fn persist(&self, rule: &zaalis_core::PermissionRule) {
+        let Some(pattern) = rule.pattern.as_deref() else {
+            return;
+        };
+        if let Err(error) =
+            self.store
+                .save_permission_grant(&self.workspace, rule.kind.rule_prefix(), pattern)
+        {
+            eprintln!("agentd: règle « {rule} » non enregistrée — {}", error.message);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct DispatchOutput {
     pub response: RpcResponse,
@@ -280,7 +305,19 @@ impl Daemon {
                 .map_err(RpcError::from)?,
         );
         config.extensions = Some(Arc::clone(&extensions));
-        let mut tools = ToolRuntime::new(zaalis_guard::Guard::new());
+        // Approvals the user marked "toujours" in an earlier session are loaded
+        // back before the first tool call, and new ones are written out as they
+        // are granted. Without both halves, "toujours" quietly meant "jusqu'à
+        // ce que le démon redémarre".
+        let workspace_key = workspace.root().to_string_lossy().into_owned();
+        let guard = zaalis_guard::Guard::new().with_persisted(self.stored_rules(&workspace_key));
+        let mut tools = ToolRuntime::new(guard).with_rule_sink(Arc::new(StoredRules {
+            store: Arc::clone(&self.store),
+            workspace: workspace_key,
+        }));
+        if let Some(reviewer) = self.reviewer() {
+            tools = tools.with_reviewer(reviewer);
+        }
         register_filesystem_tools(&mut tools).map_err(RpcError::from)?;
         register_todo_tool(&mut tools).map_err(RpcError::from)?;
         register_git_tools(&mut tools).map_err(RpcError::from)?;
@@ -296,6 +333,50 @@ impl Daemon {
         let runtime = AgentSession::new(config, Arc::clone(&self.providers), Arc::new(tools));
         self.forward_events(runtime.subscribe());
         Ok((runtime, checkpoints))
+    }
+
+    /// The second opinion consulted for grey-zone decisions, when configured.
+    ///
+    /// Opt-in, and silently absent when the named provider is not configured:
+    /// a reviewer that cannot run must leave the prompt flow exactly as it was,
+    /// not break it.
+    fn reviewer(&self) -> Option<Arc<dyn zaalis_guard::Reviewer>> {
+        let spec = std::env::var("ZAALIS_REVIEWER").ok()?;
+        let spec = spec.trim();
+        if spec.is_empty() || spec.eq_ignore_ascii_case("off") {
+            return None;
+        }
+        let (provider, model) = spec.split_once(':').unwrap_or((spec, ""));
+        let provider = zaalis_core::ProviderId::parse(provider.trim())?;
+        if !self.providers.contains(provider) {
+            eprintln!("agentd: relecteur ignoré — {provider} non configuré");
+            return None;
+        }
+        let model = model.trim();
+        let binding = zaalis_core::ModelBinding::new(
+            provider,
+            (!model.is_empty()).then(|| model.to_owned()),
+        );
+        Some(Arc::new(zaalis_agent::ModelReviewer::new(
+            Arc::clone(&self.providers),
+            binding,
+        )))
+    }
+
+    /// Permanent approvals recorded for this workspace.
+    ///
+    /// A rule that no longer parses is dropped rather than failing the session:
+    /// a stale row from an older format must not make the workspace
+    /// unopenable.
+    fn stored_rules(&self, workspace: &str) -> Vec<zaalis_core::PermissionRule> {
+        self.store
+            .permission_grants(workspace)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(kind, pattern)| {
+                zaalis_core::PermissionRule::parse(&format!("{kind}({pattern})"))
+            })
+            .collect()
     }
 
     fn forward_events(&self, mut receiver: broadcast::Receiver<zaalis_protocol::EventFrame>) {
@@ -354,6 +435,7 @@ impl Daemon {
             Some(snapshot.system_prompt.clone()),
         )?;
         runtime.restore(snapshot).await.map_err(RpcError::from)?;
+        runtime.resume_event_sequence(self.store.last_event_sequence(id).map_err(RpcError::from)?);
         let managed = Arc::new(ManagedSession {
             runtime,
             checkpoints,
@@ -384,7 +466,7 @@ impl Daemon {
         &self,
         input: SessionResumeParams,
     ) -> std::result::Result<(Value, Vec<RpcMessage>), RpcError> {
-        self.managed_or_restore(&input.session_id).await?;
+        let managed = self.managed_or_restore(&input.session_id).await?;
         let replay = self
             .store
             .events_after(&input.session_id, input.from_seq)
@@ -392,7 +474,10 @@ impl Daemon {
             .into_iter()
             .map(|frame| RpcMessage::Notification(event_notification(frame)))
             .collect();
-        Ok((json!({"resumed":true}), replay))
+        let tree = managed.runtime.tree().await;
+        let agents: Vec<_> = tree.iter().cloned().collect();
+        Ok((json!({"resumed":true,"session_id":input.session_id,"agents":agents,"workspace":managed.runtime.snapshot().await.workspace,
+            "seq":self.store.last_event_sequence(&input.session_id).map_err(RpcError::from)?}), replay))
     }
 
     async fn prompt(
@@ -416,12 +501,24 @@ impl Daemon {
             .collect();
         let store = Arc::clone(&self.store);
         tokio::spawn(async move {
-            let result = runtime
-                .run_turn_with(input.text, images, input.agent_id)
-                .await;
+            let run = runtime.run_turn_with(input.text, images, input.agent_id);
+            tokio::pin!(run);
+            let mut checkpoint = tokio::time::interval(std::time::Duration::from_millis(500));
+            checkpoint.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let result = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    _ = checkpoint.tick() => {
+                        if let Ok(value) = serde_json::to_value(runtime.snapshot().await) {
+                            let _ = store.save_session(runtime.id(), &value, "running");
+                        }
+                    }
+                }
+            };
             let snapshot = runtime.snapshot().await;
             let status = if result.is_ok() { "idle" } else { "failed" };
             if let Ok(value) = serde_json::to_value(snapshot) {
+                if store.session(runtime.id()).ok().flatten().is_some_and(|saved| saved.status == "closed") { return; }
                 let _ = store.save_session(runtime.id(), &value, status);
             }
         });

@@ -8,6 +8,9 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const { ElectronBrowserBridge } = require('./browser-bridge');
+const browserBridge = new ElectronBrowserBridge();
+let browserEnvironment = {};
 
 // A second launch must focus the existing window instead of spawning another
 // local server.  This is deliberately acquired before `ready`, as required by
@@ -165,6 +168,7 @@ async function startServer(port, reuseExisting) {
     cwd: BUNDLE_DIR,
     env: {
       ...process.env,
+      ...browserEnvironment,
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
@@ -236,7 +240,7 @@ async function ensureComputerHelper() {
   const output = path.join(app.getPath('userData'), 'macos-computer-bridge');
   computerHelperBuild = new Promise((resolve) => {
     if (!fs.existsSync(source)) return resolve('');
-    const child = spawn('xcrun', ['swiftc', '-O', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ApplicationServices', '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'ScreenCaptureKit', source, '-o', output], { stdio: 'ignore' });
+    const child = spawn('xcrun', ['swiftc', '-O', '-framework', 'Foundation', '-framework', 'AppKit', '-framework', 'ApplicationServices', '-framework', 'CoreGraphics', '-framework', 'ImageIO', '-framework', 'ScreenCaptureKit', '-framework', 'Vision', source, '-o', output], { stdio: 'ignore' });
     child.once('error', () => resolve(''));
     child.once('close', (code) => resolve(code === 0 && fs.existsSync(output) ? output : ''));
   });
@@ -312,7 +316,7 @@ function overlayHTML() {
     .edge{position:fixed;inset:-6px;pointer-events:none;opacity:.8;filter:blur(28px);background:${flow};background-size:200% 100%;animation:zflow 7s linear infinite;-webkit-mask:${feather};mask:${feather}}
     .mist{position:fixed;inset:-25%;background:radial-gradient(ellipse at 15% 20%,rgba(157,89,255,.28),transparent 32%),radial-gradient(ellipse at 80% 84%,rgba(102,45,210,.28),transparent 38%);filter:blur(20px);animation:drift 12s ease-in-out infinite alternate}
     @keyframes zflow{from{background-position:0% 50%}to{background-position:200% 50%}}@keyframes drift{to{transform:translate3d(3%, -2%, 0) scale(1.06)}}
-  </style></head><body><div class="mist"></div><div class="edge"></div></body></html>`;
+  </style></head><body><div class="edge"></div></body></html>`;
 }
 
 function dockHTML() {
@@ -397,6 +401,7 @@ function createWindow(port) {
     },
   });
 
+  browserBridge.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
@@ -539,6 +544,7 @@ app.on('before-quit', (event) => {
   stopSpeechProcess();
   hideComputerOverlay();
   try { computerBridge && computerBridge.close(); } catch {}
+  browserBridge.close();
   stopServer();
 
   // Chromium écrit les cookies persistants (dont zaalis_session) de façon
@@ -600,6 +606,7 @@ app.whenReady().then(async () => {
   try {
     await startComputerBridge();
     const { port, reuseExisting } = await pickPort();
+    browserEnvironment = await browserBridge.start();
     await startServer(port, reuseExisting);
     createWindow(port);
   } catch (error) {

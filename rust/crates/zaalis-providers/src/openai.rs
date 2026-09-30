@@ -133,8 +133,9 @@ impl OpenAiConfig {
                     ..Capabilities::default()
                 },
             ),
-            // These two have their own dialects.
-            ProviderId::Claude | ProviderId::Gemini => return None,
+            // These two have their own dialects, and a compatible endpoint has
+            // no fixed URL: see [`OpenAiConfig::compat`].
+            ProviderId::Claude | ProviderId::Gemini | ProviderId::Compat => return None,
         };
 
         Some(Self {
@@ -148,6 +149,28 @@ impl OpenAiConfig {
         })
     }
 
+    /// A user-configured OpenAI-compatible endpoint. The key is optional because
+    /// a self-hosted server (LM Studio, vLLM…) often runs without one.
+    pub fn compat(base_url: impl Into<String>, api_key: Option<String>) -> Self {
+        Self {
+            provider: ProviderId::Compat,
+            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            api_key: api_key.filter(|key| !key.trim().is_empty()),
+            auth: AuthScheme::Bearer,
+            default_model: String::new(),
+            // The per-model facts sent by the server decide; nothing is sent
+            // by default because unknown fields make some gateways fail.
+            reasoning: ReasoningStyle::None,
+            capabilities: Capabilities {
+                reasoning: true,
+                streamed_reasoning: true,
+                max_context: 128_000,
+                max_concurrency: 4,
+                ..Capabilities::default()
+            },
+        }
+    }
+
     /// Point at a different endpoint (self-hosted gateway, proxy, custom port).
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into();
@@ -158,9 +181,10 @@ impl OpenAiConfig {
         format!("{}/chat/completions", self.base_url.trim_end_matches('/'))
     }
 
-    /// Whether a local engine needs no key at all.
+    /// Whether a local engine needs no key at all. A compatible endpoint is
+    /// registered with its key when it needs one, so the server decides.
     pub fn needs_key(&self) -> bool {
-        !self.provider.is_local()
+        !self.provider.is_local() && self.provider != ProviderId::Compat
     }
 }
 
@@ -247,38 +271,45 @@ impl ModelProvider for OpenAiProvider {
         Ok(transport::stream_response(
             response,
             cancel,
-            StreamParser::for_provider(self.config.provider),
+            StreamParser::for_provider(self.config.provider).with_fallback_tools(
+                !self.config.capabilities.for_binding(&request.binding).native_tools
+                    && !request.tools.is_empty(),
+            ),
         ))
     }
 }
 
 /// Build the request body.
 pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool) -> Value {
+    let capabilities = config.capabilities.for_binding(&request.binding);
     let model = request
         .binding
         .model
         .clone()
         .unwrap_or_else(|| config.default_model.clone());
 
-    let mut messages = Vec::new();
-    if !request.system.trim().is_empty() {
-        messages.push(json!({ "role": "system", "content": request.system }));
-    }
+    let mut system = request.system.trim().to_owned();
     // A provider without native tool calling (GGUF/llama.cpp) is given the tools
     // as a strict JSON protocol instead. The instructions and the parser in
     // `finish` are two halves of the same contract.
-    let fallback_tools = !request.tools.is_empty() && !config.capabilities.native_tools;
+    let fallback_tools = !request.tools.is_empty() && !capabilities.native_tools;
     if fallback_tools {
-        messages.push(json!({
-            "role": "system",
-            "content": fallback_tool_instructions(&request.tools),
-        }));
+        if !system.is_empty() {
+            system.push_str("\n\n");
+        }
+        system.push_str(&fallback_tool_instructions(&request.tools));
+    }
+
+    let mut messages = Vec::new();
+    if !system.is_empty() {
+        messages.push(json!({ "role": "system", "content": system }));
     }
     for message in &request.messages {
         messages.push(encode_message(
             message,
             config.provider,
-            config.capabilities.vision,
+            capabilities.vision,
+            capabilities.native_tools,
         ));
     }
 
@@ -288,7 +319,7 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
         "stream": stream,
     });
 
-    if !request.tools.is_empty() && config.capabilities.native_tools {
+    if !request.tools.is_empty() && capabilities.native_tools {
         body["tools"] = Value::Array(
             request
                 .tools
@@ -304,10 +335,21 @@ pub fn build_request(config: &OpenAiConfig, request: &TurnRequest, stream: bool)
     if let Some(temperature) = request.temperature {
         body["temperature"] = json!(temperature);
     }
-    if config.reasoning == ReasoningStyle::Effort {
-        if let Some(effort) = effort_label(request.reasoning) {
+    let reasoning_style = request.binding.capabilities.as_ref().and_then(|facts| facts.reasoning)
+        .map(|mode| match mode {
+            zaalis_core::ReasoningMode::Effort => ReasoningStyle::Effort,
+            _ => ReasoningStyle::None,
+        }).unwrap_or(config.reasoning);
+    if reasoning_style == ReasoningStyle::Effort {
+        let effort = if config.provider == ProviderId::Gguf {
+            gguf_effort_label(request.reasoning)
+        } else { effort_label(request.reasoning) };
+        if let Some(effort) = effort {
             body["reasoning_effort"] = json!(effort);
         }
+    }
+    if config.provider == ProviderId::Gguf {
+        body["chat_template_kwargs"] = json!({ "enable_thinking": request.reasoning.0 > 0 });
     }
     // Ask for usage on the final streamed chunk; providers that ignore the
     // option simply omit it, which the parser already tolerates.
@@ -323,6 +365,20 @@ fn effort_label(level: ReasoningLevel) -> Option<&'static str> {
         1 => Some("low"),
         2 => Some("medium"),
         _ => Some("high"),
+    }
+}
+
+fn gguf_effort_label(level: ReasoningLevel) -> Option<&'static str> {
+    match level.0 {
+        0 => None,
+        1 => Some("minimal"),
+        2 => Some("low"),
+        3 => Some("medium"),
+        4 => Some("high"),
+        5 => Some("xhigh"),
+        // llama.cpp/OpenAI-compatible transports do not define a distinct
+        // ultra wire value, so it is clamped to max.
+        _ => Some("max"),
     }
 }
 
@@ -457,23 +513,33 @@ fn fallback_tool_instructions(tools: &[ToolSpec]) -> String {
 
 /// Extract a tool call from a fallback model's answer, strictly.
 ///
-/// The whole answer (optionally inside one ```code fence) must be the envelope
-/// `{"tool_call":{"name":…,"arguments":{…}}}`. Anything else — extra prose, a
-/// missing name, a non-object `arguments`, malformed JSON — returns `None`, so
-/// the runtime never executes on an ambiguous output. Argument *validity* is
-/// then enforced by the tool itself when it deserialises them.
+/// A bare envelope or a single fenced envelope after a short preface is
+/// accepted. Multiple blocks, trailing prose, and malformed arguments remain
+/// ambiguous and are never executed. The tool validates its own arguments.
 fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
-    let mut trimmed = text.trim();
-    if let Some(rest) = trimmed
-        .strip_prefix("```json")
-        .or_else(|| trimmed.strip_prefix("```"))
-    {
-        trimmed = rest.trim_start();
-    }
-    if let Some(rest) = trimmed.strip_suffix("```") {
-        trimmed = rest.trim_end();
-    }
-    let value: Value = serde_json::from_str(trimmed.trim()).ok()?;
+    let trimmed = text.trim();
+    let envelope = if let Some(open) = trimmed.find("```") {
+        // Small local models often announce the action before the one JSON
+        // block. Accept that shape, but never extract a call from a response
+        // containing another fence, a second call, or trailing prose.
+        let preface = trimmed[..open].trim();
+        if preface.chars().count() > 500 || preface.contains("tool_call") {
+            return None;
+        }
+        let fenced = &trimmed[open + 3..];
+        let (language, body) = fenced.split_once('\n')?;
+        if !language.trim().is_empty() && !language.trim().eq_ignore_ascii_case("json") {
+            return None;
+        }
+        let (body, trailing) = body.split_once("```")?;
+        if !trailing.trim().is_empty() {
+            return None;
+        }
+        body.trim()
+    } else {
+        trimmed
+    };
+    let value: Value = serde_json::from_str(envelope).ok()?;
     let call = value.get("tool_call")?;
     let name = call.get("name").and_then(Value::as_str)?.trim().to_owned();
     if name.is_empty() {
@@ -490,7 +556,7 @@ fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
     })
 }
 
-fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Value {
+fn encode_message(message: &Message, provider: ProviderId, vision: bool, native_tools: bool) -> Value {
     match message {
         Message::User { text, images } if images.is_empty() || !vision => {
             json!({ "role": "user", "content": text })
@@ -503,7 +569,15 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
         Message::Assistant {
             provider_state: Some(state),
             ..
-        } if state.provider == provider => state.value.clone(),
+        } if state.provider == provider && native_tools => state.value.clone(),
+        Message::Assistant {
+            provider_state: Some(state),
+            ..
+        } if state.provider == provider => {
+            // The fallback call is withheld from the visible text stream, but
+            // the local model still needs to see its own call on the next round.
+            json!({ "role": "assistant", "content": state.value.get("content").cloned().unwrap_or(Value::Null) })
+        }
         Message::Assistant {
             text, tool_calls, ..
         } => {
@@ -511,7 +585,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             // Native `tool_calls` are only understood where native tools are on.
             // Under the GGUF fallback the call already lives in `text` as the
             // JSON envelope, so no native array is attached.
-            if !tool_calls.is_empty() && provider != ProviderId::Gguf {
+            if !tool_calls.is_empty() && native_tools {
                 value["tool_calls"] = Value::Array(
                     tool_calls
                         .iter()
@@ -538,7 +612,7 @@ fn encode_message(message: &Message, provider: ProviderId, vision: bool) -> Valu
             content,
             ..
         } => {
-            if provider == ProviderId::Gguf {
+            if !native_tools {
                 json!({
                     "role": "user",
                     "content": format!("[Résultat de l'outil {name}]\n{content}"),
@@ -575,6 +649,7 @@ pub struct StreamParser {
     text: String,
     reasoning: String,
     content_parts: Vec<Value>,
+    fallback_tools: bool,
 }
 
 impl StreamParser {
@@ -585,8 +660,14 @@ impl StreamParser {
     pub fn for_provider(provider: ProviderId) -> Self {
         Self {
             provider: Some(provider),
+            fallback_tools: provider == ProviderId::Gguf,
             ..Self::default()
         }
+    }
+
+    fn with_fallback_tools(mut self, enabled: bool) -> Self {
+        self.fallback_tools = enabled;
+        self
     }
 
     /// Feed raw bytes, returning the events they produced.
@@ -643,7 +724,7 @@ impl StreamParser {
         let Some(delta) = delta else { return };
 
         if let Some(content) = delta.get("content") {
-            emit_content(content, events);
+            emit_content(content, events, self.fallback_tools);
             collect_content(content, &mut self.text, &mut self.content_parts);
         }
         // Several providers expose reasoning under their own key; accept all the
@@ -717,10 +798,18 @@ impl StreamParser {
         // GGUF fallback: no native tool call arrived, so try to read a strict
         // JSON envelope out of the text. Anything that is not exactly the
         // envelope is left as a normal answer — fail-closed, nothing runs.
-        if calls.is_empty() && self.provider == Some(ProviderId::Gguf) {
+        if calls.is_empty() && self.fallback_tools {
             if let Some(call) = parse_fallback_tool_call(&self.text) {
                 calls.push(call);
             }
+        }
+        if self.fallback_tools && calls.is_empty() && !self.text.is_empty() {
+            let visible = if self.text.contains("\"tool_call\"") {
+                "Le modèle local a produit un appel d'outil invalide. Aucune commande n'a été exécutée ; reformulez la demande ou réessayez.".to_owned()
+            } else {
+                self.text.clone()
+            };
+            events.push(TurnEvent::TextDelta { text: visible });
         }
         let has_calls = !calls.is_empty();
         for call in &calls {
@@ -741,7 +830,7 @@ impl StreamParser {
             }
             // The GGUF fallback state carries the call in its `content` text, so
             // no native `tool_calls` array is replayed to it.
-            if !calls.is_empty() && provider != ProviderId::Gguf {
+            if !calls.is_empty() && !self.fallback_tools {
                 state["tool_calls"] = Value::Array(
                     calls
                         .iter()
@@ -789,9 +878,9 @@ impl WireParser for StreamParser {
     }
 }
 
-fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
+fn emit_content(content: &Value, events: &mut Vec<TurnEvent>, suppress_text: bool) {
     match content {
-        Value::String(text) if !text.is_empty() => {
+        Value::String(text) if !text.is_empty() && !suppress_text => {
             events.push(TurnEvent::TextDelta { text: text.clone() });
         }
         Value::Array(parts) => {
@@ -810,7 +899,7 @@ fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
                     events.push(TurnEvent::ReasoningDelta {
                         text: text.to_owned(),
                     });
-                } else {
+                } else if !suppress_text {
                     events.push(TurnEvent::TextDelta {
                         text: text.to_owned(),
                     });
@@ -824,7 +913,17 @@ fn emit_content(content: &Value, events: &mut Vec<TurnEvent>) {
 fn collect_content(content: &Value, text: &mut String, content_parts: &mut Vec<Value>) {
     match content {
         Value::String(delta) => text.push_str(delta),
-        Value::Array(parts) => content_parts.extend(parts.iter().cloned()),
+        Value::Array(parts) => {
+            for part in parts {
+                let kind = part.get("type").and_then(Value::as_str).unwrap_or_default();
+                if !kind.contains("think") && !kind.contains("reason") {
+                    if let Some(value) = part.get("text").or_else(|| part.get("content")).and_then(Value::as_str) {
+                        text.push_str(value);
+                    }
+                }
+            }
+            content_parts.extend(parts.iter().cloned());
+        }
         _ => {}
     }
 }
@@ -993,6 +1092,23 @@ mod tests {
         let openai = OpenAiConfig::for_provider(ProviderId::Codex, None).expect("config");
         let body = build_request(&openai, &request(), true);
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn gguf_thinking_toggle_and_ultra_are_sent_to_llama_cpp() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let off = build_request(&config, &request(), false);
+        assert_eq!(off["chat_template_kwargs"]["enable_thinking"], false);
+        assert!(off.get("reasoning_effort").is_none());
+        let mut active = request();
+        active.reasoning = ReasoningLevel(7);
+        active.binding.capabilities = Some(zaalis_core::ModelCapabilities {
+            reasoning: Some(zaalis_core::ReasoningMode::Effort),
+            ..Default::default()
+        });
+        let on = build_request(&config, &active, false);
+        assert_eq!(on["chat_template_kwargs"]["enable_thinking"], true);
+        assert_eq!(on["reasoning_effort"], "max");
     }
 
     #[test]
@@ -1234,10 +1350,35 @@ mod tests {
     }
 
     #[test]
+    fn gguf_merges_tool_instructions_into_the_initial_system_message() {
+        let config = OpenAiConfig::for_provider(ProviderId::Gguf, None).expect("config");
+        let request = TurnRequest::new(
+            ModelBinding::new(ProviderId::Gguf, Some("local".into())),
+            "tu es un agent",
+            vec![Message::user("lis a.js")],
+        )
+        .with_tools(vec![ToolSpec {
+            name: "read".into(),
+            description: "Lire un fichier".into(),
+            schema: json!({"type":"object"}),
+        }]);
+
+        let body = build_request(&config, &request, true);
+        let messages = body["messages"]
+            .as_array()
+            .expect("messages");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0]["content"].as_str().unwrap_or("").contains("tool_call"));
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
     fn a_gguf_tool_result_is_replayed_as_user_text() {
         let value = encode_message(
             &Message::tool_result("c1", "read", "contenu"),
             ProviderId::Gguf,
+            false,
             false,
         );
         assert_eq!(value["role"], "user");
@@ -1247,8 +1388,7 @@ mod tests {
 
     #[test]
     fn the_fallback_parser_is_strict_and_fail_closed() {
-        // Not JSON, prose around the envelope, empty name, non-object args: all
-        // refused, so nothing runs on an ambiguous answer.
+        // Not JSON, inline prose, empty name, non-object args: all refused.
         assert!(parse_fallback_tool_call("je vais lire le fichier").is_none());
         assert!(
             parse_fallback_tool_call("Voici : {\"tool_call\":{\"name\":\"read\"}} — fait")
@@ -1272,18 +1412,28 @@ mod tests {
             .expect("fenced envelope");
         assert_eq!(fenced.name, "grep");
         assert_eq!(fenced.arguments, json!({}));
+        let announced = parse_fallback_tool_call(
+            "Je vais vérifier quelle version de Blender est installée.\n```json\n{\"tool_call\":{\"name\":\"run\",\"arguments\":{\"command\":\"blender --version\"}}}\n```",
+        )
+        .expect("a short preface followed by one tool block");
+        assert_eq!(announced.name, "run");
+        assert_eq!(announced.arguments["command"], "blender --version");
+        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nEncore du texte").is_none());
+        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\n```json\n{\"tool_call\":{\"name\":\"read\"}}\n```").is_none());
     }
 
     #[test]
     fn a_gguf_stream_emitting_the_envelope_yields_one_tool_call() {
-        let envelope = "{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":\"a.js\"}}}";
+        let envelope = "Je vais lire le fichier.\n```json\n{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":\"a.js\"}}}\n```";
         let chunk = format!(
             "data: {}\n\n",
             json!({"choices":[{"delta":{"content": envelope}}]})
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
-        parser.push(&chunk);
+        let streamed = parser.push(&chunk);
+        assert!(!streamed.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         let events = parser.finish();
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         let call = events
             .iter()
             .find_map(|event| match event {
@@ -1293,6 +1443,22 @@ mod tests {
             .expect("the envelope must become a tool call");
         assert_eq!(call.name, "read");
         assert_eq!(call.arguments["path"], "a.js");
+        let state = events.iter().find_map(|event| match event {
+            TurnEvent::AssistantState { state } => Some(state.clone()),
+            _ => None,
+        }).expect("assistant state");
+        let replay = encode_message(
+            &Message::Assistant {
+                text: String::new(),
+                reasoning: None,
+                tool_calls: vec![call.clone()],
+                provider_state: Some(state),
+            },
+            ProviderId::Gguf,
+            false,
+            false,
+        );
+        assert!(replay["content"].as_str().unwrap_or("").contains("tool_call"));
         assert!(matches!(
             events.last(),
             Some(TurnEvent::Completed {
@@ -1308,8 +1474,9 @@ mod tests {
             json!({"choices":[{"delta":{"content":"Voici la réponse en texte."}}]})
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
-        parser.push(&chunk);
+        assert!(parser.push(&chunk).is_empty());
         let events = parser.finish();
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text == "Voici la réponse en texte.")));
         assert!(!events
             .iter()
             .any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
@@ -1319,5 +1486,18 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         ));
+    }
+
+    #[test]
+    fn malformed_gguf_tool_output_is_explained_without_showing_the_internal_json() {
+        let chunk = format!(
+            "data: {}\n\n",
+            json!({"choices":[{"delta":{"content":"```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nTerminé"}}]})
+        );
+        let mut parser = StreamParser::for_provider(ProviderId::Gguf);
+        assert!(parser.push(&chunk).is_empty());
+        let events = parser.finish();
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text.contains("invalide") && !text.contains("tool_call"))));
     }
 }

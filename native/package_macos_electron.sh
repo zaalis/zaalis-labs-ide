@@ -43,6 +43,8 @@ mkdir -p "$APP_RES" "$BUNDLE"
 cp "$ROOT/native/electron/package.json" "$APP_RES/package.json"
 cp "$ROOT/native/electron/main.js" "$APP_RES/main.js"
 cp "$ROOT/native/electron/preload.js" "$APP_RES/preload.js"
+cp "$ROOT/native/electron/browser-bridge.js" "$APP_RES/browser-bridge.js"
+cp "$ROOT/native/electron/browser-preload.js" "$APP_RES/browser-preload.js"
 if command -v swiftc >/dev/null 2>&1; then
   swiftc -target "$SWIFT_TARGET" -O \
     -framework Foundation -framework Speech -framework AVFoundation \
@@ -65,6 +67,11 @@ if [ ! -f "$BUNDLE/zaalis-agentd" ]; then
   exit 1
 fi
 cp "$ROOT/package.json" "$BUNDLE/package.json"
+cp -R "$ROOT/zaalis-browser" "$BUNDLE/zaalis-browser"
+mkdir -p "$BUNDLE/native"
+cp -R "$ROOT/native/blender" "$BUNDLE/native/blender"
+cp -R "$ROOT/native/whisper" "$BUNDLE/whisper"
+chmod 755 "$BUNDLE/whisper/whisper-cli"
 if [ -f "$ROOT/README_MACOS.md" ]; then
   cp "$ROOT/README_MACOS.md" "$BUNDLE/README.txt"
 fi

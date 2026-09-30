@@ -12,6 +12,13 @@ zaalis-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 globset = "0.4"
+# Decoding `-EncodedCommand`, so a hidden payload can be shown rather than only
+# refused.
+base64 = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
 
 [lints]
 workspace = true
