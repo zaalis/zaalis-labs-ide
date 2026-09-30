@@ -42,9 +42,14 @@ del /Q dist\index.html dist\script.js dist\styles.css >nul 2>&1
 REM --- Copy cloudflared (phone remote-control tunnel) next to the exe ---
 if exist cloudflared.exe copy /Y cloudflared.exe dist\cloudflared.exe >nul
 
+REM --- Copy whisper.cpp (local dictation engine) next to the exe ---
+if exist dist\whisper rmdir /S /Q dist\whisper
+xcopy "whisper\*" "dist\whisper\" /E /Y /I /Q >nul
+if errorlevel 1 goto :failed
+
 echo.
 echo Done. The ready-to-run app is in native\dist\
-echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ )
+echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ + whisper\ )
 goto :eof
 
 :novs

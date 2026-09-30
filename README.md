@@ -55,7 +55,12 @@ The code is in `mcp-registry.js` (validation, both transports, presets), `rust-a
 
 ## Voice dictation
 
-The microphone button records in the interface and the local server transcribes (`POST /api/stt`, `voice-stt.js`): with a stored OpenAI or Mistral key the recording is sent to that provider's transcription model; otherwise Windows' offline speech recognizer is used (lower accuracy, and the language must be installed in Windows). The same endpoint serves the integrated browser's voice search.
+The microphone button records in the interface and the local server transcribes (`POST /api/stt`, `voice-stt.js`). Everything stays on the PC:
+
+- **whisper.cpp** is the engine. Its Windows binaries are in `native/whisper` (see the README there for their origin and checksums) and are installed to `{app}\whisper`. The model, `ggml-small-q5_1.bin` (181 MB), is downloaded once into `%LOCALAPPDATA%\zaalis\server-data\voice` from the official `ggerganov/whisper.cpp` repository and checked against its sha256.
+- **Windows' own recognizer** stands in while the model is downloading, or if the engine cannot run. It is far less accurate and needs the language installed in Windows.
+
+The same endpoint serves the integrated browser's voice search.
 
 ## Rebuild the Windows application
 

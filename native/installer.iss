@@ -63,6 +63,9 @@ Source: "dist\cloudflared.exe";   DestDir: "{app}"; Flags: ignoreversion
 ; snapshot pkg, il doit rester sur le disque a cote de zaalis-server.exe.
 Source: "dist\node_modules\node-pty\*"; DestDir: "{app}\node_modules\node-pty"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\interface\*";       DestDir: "{app}\interface"; Flags: ignoreversion recursesubdirs createallsubdirs
+; whisper.cpp : moteur local de dictee vocale (le modele est telecharge a part,
+; dans le dossier de donnees, a la premiere utilisation).
+Source: "dist\whisper\*";         DestDir: "{app}\whisper"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; CLI Rust : depose dans {app}\bin et renomme zaalis.exe -> commande `zaalis` dans le terminal.
 ; (La GUI {app}\zaalis.exe n'est PAS sur le PATH ; seul {app}\bin l'est.)
 Source: "dist\zaalis-cli.exe";    DestDir: "{app}\bin"; DestName: "zaalis.exe"; Flags: ignoreversion

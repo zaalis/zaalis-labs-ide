@@ -3064,12 +3064,15 @@ function initReasoningSlider() {
 // ==========================================================
 //  VOICE DICTATION (SPEECH-TO-TEXT)
 // ==========================================================
-// The microphone is recorded here and transcribed by the local server
-// (/api/stt). The browser's own SpeechRecognition cannot be used: the embedded
-// WebView exposes the API but has no speech service behind it, so a click on
-// the microphone used to fail without a word.
+// The microphone is recorded here and transcribed on this PC by the local
+// server (/api/stt, whisper.cpp). The browser's own SpeechRecognition cannot be
+// used: the embedded WebView exposes the API but has no speech service behind
+// it, so a click on the microphone used to fail without a word.
 const DICTATION_SAMPLE_RATE = 16000;
 const DICTATION_MAX_MS = 3 * 60 * 1000;
+// The speech model is downloaded once; the user is told a single time that
+// Windows' recognizer stands in until it is there.
+let dictationModelNoticeShown = false;
 
 // Any recorded audio as the 16 kHz mono 16-bit WAV the server expects.
 async function dictationWav(blob) {
@@ -3157,6 +3160,12 @@ function setupVoiceRecognition(btnId, textareaId) {
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.hint || data.error || say('La transcription a échoué.', 'Transcription failed.'));
+            if (data.pull && !dictationModelNoticeShown) {
+                dictationModelNoticeShown = true;
+                const percent = data.pull.total ? Math.floor(data.pull.completed / data.pull.total * 100) : 0;
+                notify(say(`Le modèle de dictée se télécharge (${percent} %). En attendant, la reconnaissance vocale de Windows, moins précise, est utilisée.`,
+                    `The dictation model is downloading (${percent}%). Until then the less accurate Windows recognizer is used.`));
+            }
             const heard = String(data.text || '').trim();
             if (!heard) throw Object.assign(new Error('silence'), { quiet: true });
             // Appended to what the field holds now: the user may have typed meanwhile.
@@ -3203,6 +3212,8 @@ function setupVoiceRecognition(btnId, textareaId) {
         }, { once: true });
         recorder.start();
         setPhase('recording');
+        // Lets the server fetch its speech model while the user is speaking.
+        fetch('/api/voice-status').catch(() => {});
         limit = setTimeout(stopRecording, DICTATION_MAX_MS);
     }
 

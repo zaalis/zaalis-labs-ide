@@ -64,10 +64,12 @@ async function main() {
     body: JSON.stringify({ server: { name: 'missing', command: 'zaalis-no-such-program' } }) })).json();
   assert.equal(missing.ok, false);
   assert.match(missing.error, /introuvable/);
-  // Dictation: the endpoint exists, and silence costs no transcription.
+  // Dictation: the local engine is shipped beside the server, the endpoint
+  // exists, and silence costs no transcription. (/api/voice-status is left
+  // alone here: it would start the one-time download of the speech model.)
   const dictation = await (await fetch(base + '/script/ai.js')).text();
   assert.match(dictation, /\/api\/stt/);
-  assert.equal((await (await fetch(`${base}/api/voice-status`, { headers })).json()).stt.ready, true);
+  assert.ok(fs.statSync(path.join(path.dirname(exe), 'whisper', 'whisper-cli.exe')).size > 0);
   const silence = Buffer.alloc(44 + 16000 * 2);
   silence.write('RIFF', 0, 'ascii'); silence.writeUInt32LE(36 + 32000, 4); silence.write('WAVEfmt ', 8, 'ascii');
   silence.writeUInt32LE(16, 16); silence.writeUInt16LE(1, 20); silence.writeUInt16LE(1, 22); silence.writeUInt32LE(16000, 24);

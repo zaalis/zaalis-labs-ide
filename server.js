@@ -1327,20 +1327,23 @@ app.put('/api/mcp', (req, res) => {
 // ---------------------------------------------------------------------------
 // VOICE — dictation button of the chat, voice search of the browser (protected)
 // ---------------------------------------------------------------------------
-// GET  /api/voice-status   which transcription engine is ready
+// Transcription is local: whisper.cpp (shipped in `whisper\` beside the server)
+// with a model downloaded once into the data folder, Windows' own recognizer
+// until that model is there.
+// GET  /api/voice-status   which engine is ready; starts the model download
 // GET  /api/voice-options  speech synthesis voices (none on this edition)
 // POST /api/stt { audio: <base64 PCM WAV>, language? } -> { text, engine }
-app.get('/api/voice-status', (req, res) => res.json(voiceStt.status({ keys: userApiKeys(req.user) })));
+const voice = voiceStt.create({
+  engineDirs: [path.join(APP_DIR, 'whisper'), path.join(APP_DIR, 'native', 'whisper'), path.join(DATA_DIR, 'voice')],
+  modelDir: path.join(DATA_DIR, 'voice'),
+});
+app.get('/api/voice-status', (req, res) => { voice.prepare(); res.json(voice.status()); });
 app.get('/api/voice-options', (req, res) => res.json({ voices: [] }));
 app.post('/api/stt', async (req, res) => {
   try {
     const encoded = String((req.body && req.body.audio) || '');
     if (!encoded) return res.status(400).json({ error: 'audio requis' });
-    const result = await voiceStt.transcribe({
-      audio: Buffer.from(encoded, 'base64'), language: req.body.language,
-      keys: userApiKeys(req.user), tempDir: path.join(DATA_DIR, 'voice'),
-    });
-    res.json(result);
+    res.json(await voice.transcribe({ audio: Buffer.from(encoded, 'base64'), language: req.body.language }));
   } catch (error) {
     // `error` is the code the browser's voice search matches on; `hint` is the
     // sentence shown to the user.
