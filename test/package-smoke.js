@@ -52,14 +52,20 @@ async function main() {
   assert.deepEqual(await (await fetch(`${base}/api/chatgpt/status`, { headers })).json(), { connected: false });
   const providers = (await (await fetch(`${base}/api/compat/providers`, { headers })).json()).providers;
   assert.equal(providers.find((provider) => provider.id === 'chatgpt').oauth, 'chatgpt');
-  // Personal MCP servers: the Blender preset, the stdio transport and the
-  // migration of the first (HTTP) preset are all in the packaged server.
+  // Personal MCP servers (stdio transport) and the built-in Blender connection
+  // are in the packaged server; the entries of the former Blender preset are
+  // dropped, and nothing is installed into Blender without consent.
   assert.equal((await fetch(base + '/image/blender.png')).status, 200);
-  const preset = await (await fetch(`${base}/api/mcp/presets/blender`, { headers })).json();
-  assert.deepEqual([preset.server.transport, preset.server.command], ['stdio', 'blender-mcp']);
-  const migrated = await (await fetch(`${base}/api/mcp`, { method: 'PUT', headers,
-    body: JSON.stringify({ servers: [{ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp' }] }) })).json();
-  assert.deepEqual([migrated.servers[0].transport, migrated.servers[0].command], ['stdio', 'blender-mcp']);
+  assert.ok(fs.statSync(path.join(path.dirname(exe), 'blender', 'mcp-1.0.3.zip')).size > 0);
+  const legacy = await (await fetch(`${base}/api/mcp`, { method: 'PUT', headers,
+    body: JSON.stringify({ servers: [{ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp' }, { id: 'notes', name: 'Notes', command: 'npx', args: ['-y', 'x'] }] }) })).json();
+  assert.deepEqual(legacy.servers.map((server) => [server.id, server.transport]), [['notes', 'stdio']]);
+  const blenderStatus = await (await fetch(`${base}/api/blender/status`, { headers })).json();
+  assert.equal(blenderStatus.id, 'blender');
+  assert.ok(['missing', 'unsupported', 'install', 'ready'].includes(blenderStatus.state));
+  const refused = await fetch(`${base}/api/blender/install`, { method: 'POST', headers, body: '{}' });
+  assert.equal(refused.status, 400);
+  assert.equal((await fetch(`${base}/api/internal/blender-mcp`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer wrong' }, body: '{}' })).status, 401);
   const missing = await (await fetch(`${base}/api/mcp/test`, { method: 'POST', headers,
     body: JSON.stringify({ server: { name: 'missing', command: 'zaalis-no-such-program' } }) })).json();
   assert.equal(missing.ok, false);
@@ -78,7 +84,7 @@ async function main() {
   const heard = await (await fetch(`${base}/api/stt`, { method: 'POST', headers,
     body: JSON.stringify({ audio: silence.toString('base64'), language: 'fr' }) })).json();
   assert.deepEqual(heard, { text: '', engine: 'none', silent: true });
-  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in, MCP stdio, dictation OK\n');
+  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in, MCP stdio, Blender, dictation OK\n');
 }
 
 main().catch(error => { process.stderr.write(`${error.stack || error}\n`); process.exitCode = 1; })

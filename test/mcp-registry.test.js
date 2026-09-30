@@ -61,16 +61,16 @@ test('normaliseServer accepts an URL or a local command, and nothing else', () =
   assert.equal(mcpRegistry.normaliseServer({ command: 'a' }), null);
 });
 
-test('the first Blender preset (HTTP on the add-on socket) becomes the stdio preset', () => {
-  const upgraded = mcpRegistry.upgradeLegacy({ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp', enabled: true, allow: [], deny: ['execute_blender_code'], token: '' });
-  assert.deepEqual(upgraded, { id: 'blender', name: 'Blender MCP', transport: 'stdio', command: 'blender-mcp', args: [], env: {}, enabled: true, allow: [], deny: ['execute_blender_code'] });
+test('the entries of the former Blender preset are recognised, and nothing else', () => {
+  // Blender is built into the IDE: what the old preset button created is dropped.
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp', enabled: true }), true);
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'blender', transport: 'stdio', command: 'blender-mcp', args: [] }), true);
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'blender', transport: 'stdio', command: 'C:\\tools\\Blender-MCP.exe' }), process.platform === 'win32');
   // Anything the user pointed elsewhere is theirs and stays as it is.
-  const custom = { id: 'blender', name: 'Blender', endpoint: 'http://127.0.0.1:8000/', enabled: true, allow: [], deny: [] };
-  assert.equal(mcpRegistry.upgradeLegacy(custom), custom);
-  const other = { id: 'notes', endpoint: 'http://127.0.0.1:9876/mcp' };
-  assert.equal(mcpRegistry.upgradeLegacy(other), other);
-  assert.equal(mcpRegistry.preset('blender').server.command, 'blender-mcp');
-  assert.equal(mcpRegistry.preset('constructor'), null);
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'blender', endpoint: 'http://127.0.0.1:8000/' }), false);
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'blender', transport: 'stdio', command: 'uvx', args: ['blender-mcp'] }), false);
+  assert.equal(mcpRegistry.isBlenderPreset({ id: 'notes', endpoint: 'http://127.0.0.1:9876/mcp' }), false);
+  assert.equal(mcpRegistry.isBlenderPreset(null), false);
 });
 
 test('resolveCommand finds programs on PATH and refuses relative paths', (t) => {
@@ -208,5 +208,8 @@ test('the runtime entry of a stdio server names its secrets instead of carrying 
   assert.deepEqual(runtimeMcpEntry({ id: 'web', name: 'Web', endpoint: 'http://127.0.0.1:8000/mcp', token: 'abc', allow: ['read'], deny: [] }, 1, httpEnv),
     { transport: 'streamable_http', endpoint: 'http://127.0.0.1:8000/mcp', oauth_env: 'ZAALIS_MCP_TOKEN_1', name: 'Web', allow: ['read'], deny: [] });
   assert.deepEqual(httpEnv, { ZAALIS_MCP_TOKEN_1: 'abc' });
+  // A server whose calls run long asks for more than the runtime's 15 s, up to its maximum.
+  assert.equal(runtimeMcpEntry({ id: 'slow', endpoint: 'http://127.0.0.1:8000/mcp', timeoutMs: 90000 }, 0, {}).timeout_ms, 90000);
+  assert.equal(runtimeMcpEntry({ id: 'slow', endpoint: 'http://127.0.0.1:8000/mcp', timeoutMs: 900000 }, 0, {}).timeout_ms, 120000);
   assert.equal(runtimeMcpEntry({ id: 'bad', endpoint: 'ftp://example.com' }, 2, {}), null);
 });

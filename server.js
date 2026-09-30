@@ -8,6 +8,7 @@ const { exec, execFile, spawn } = require('child_process');
 const mcpRegistry = require('./mcp-registry');
 const voiceStt = require('./voice-stt');
 const opale = require('./opale-connector');
+const blenderConnector = require('./blender-connector');
 const { AutomationManager } = require('./automation-manager');
 const { createWindowsComputerAction } = require('./windows-computer');
 const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('./terminal-manager');
@@ -611,6 +612,20 @@ app.post('/api/internal/rust-workspace', (req, res) => {
   } catch (error) { return res.status(400).json({ error: error.message }); }
 });
 
+// Blender's MCP server, served by this process for the Rust core only: the
+// agent's `mcp` calls to server "blender" arrive here and are relayed to the
+// add-on running inside Blender. The token is random, per launch, memory-only.
+app.post('/api/internal/blender-mcp', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BLENDER_MCP_TOKEN)) return res.status(401).json({ error: 'Jeton Blender invalide.' });
+  try {
+    // A notification has no reply; an empty JSON object keeps strict clients happy.
+    res.json((await blender.handleRpc(req.body)) || {});
+  } catch (error) {
+    res.status(500).json({ jsonrpc: '2.0', id: (req.body && req.body.id) || null, error: { code: -32603, message: error.message || String(error) } });
+  }
+});
+
 // Private loopback bridge used only by the Rust `browser` tool: the agent's
 // web actions happen in the integrated browser, visible to the user.
 app.post('/api/internal/rust-browser', async (req, res) => {
@@ -1139,7 +1154,8 @@ app.get('/api/compat/models', async (req, res) => {
 // A personal server is either an HTTP endpoint (optional bearer token) or a
 // local program (stdio) with its arguments and environment. The token and the
 // environment values are secrets: encrypted at rest, never sent back to a client.
-const storedMcpServers = (user) => ((user && user.mcpServers) || []).filter((server) => server && typeof server === 'object').map(mcpRegistry.upgradeLegacy);
+// (Blender is built in now: the entries its old preset created are left out.)
+const storedMcpServers = (user) => ((user && user.mcpServers) || []).filter((server) => server && typeof server === 'object' && !mcpRegistry.isBlenderPreset(server));
 function publicMcpServers(user) {
   return storedMcpServers(user).map((stored) => {
     const { token, env, ...server } = stored;
@@ -1219,11 +1235,66 @@ const opaleLinked = (user) => !(user && user.opale && user.opale.connected === f
 // its instance file: neither its port nor its token is stored here, so the
 // link survives Opale restarting on another port.
 async function agentMcpServersFor(user) {
-  const servers = await Promise.all(rustMcpServersFor(user).map(withMcpSkill));
-  if (!opaleLinked(user)) return servers;
-  const entry = await opale.mcpServer().catch(() => null);
-  return entry ? [...servers.filter((server) => server.id !== opale.SERVER_ID), entry] : servers;
+  let servers = await Promise.all(rustMcpServersFor(user).map(withMcpSkill));
+  const builtIn = await Promise.all([
+    opaleLinked(user) ? opale.mcpServer().catch(() => null) : null,
+    blenderLinked(user) ? blender.mcpServer({ endpoint: `http://127.0.0.1:${PORT}/api/internal/blender-mcp`, token: BLENDER_MCP_TOKEN }).catch(() => null) : null,
+  ]);
+  for (const entry of builtIn) if (entry) servers = [...servers.filter((server) => server.id !== entry.id), entry];
+  return servers;
 }
+
+// ---------------------------------------------------------------------------
+// BLENDER — driven through its MCP add-on (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/blender/status   Blender found? add-on installed? open right now?
+// POST   /api/blender/install  install the shipped add-on and enable what it needs
+// POST   /api/blender/connect  give the agent access to Blender
+// DELETE /api/blender/connect  take it away
+// POST   /api/blender/open     start Blender
+const blender = blenderConnector.create({ addonDirs: [path.join(APP_DIR, 'blender'), path.join(APP_DIR, 'native', 'blender')] });
+const BLENDER_MCP_TOKEN = crypto.randomBytes(32).toString('base64url');
+// Off until the user turns it on. An account that had the former "Blender MCP"
+// preset enabled keeps Blender connected without doing anything.
+function blenderLinked(user) {
+  if (user && user.blender) return user.blender.connected === true;
+  return ((user && user.mcpServers) || []).some((server) => mcpRegistry.isBlenderPreset(server) && server.enabled !== false);
+}
+function setBlenderConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.blender = { connected: !!connected };
+  saveUsers(users);
+}
+const blenderFailure = (res, error) => res.status(error.status || 500).json({ error: error.message || String(error), code: error.code || 'blender-error' });
+app.get('/api/blender/status', async (req, res) => {
+  try { res.json({ ...(await blender.status()), connected: blenderLinked(req.user) }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/install', async (req, res) => {
+  try {
+    // Installing changes Blender's own settings (it turns on "Allow Online
+    // Access"): it only happens on an explicit yes from the settings window.
+    if (!req.body || req.body.consent !== true) return res.status(400).json({ error: 'Consentement requis.', code: 'consent-required' });
+    const status = await blender.install();
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/connect', async (req, res) => {
+  try {
+    const status = await blender.status();
+    if (status.state !== 'ready') return res.status(409).json({ error: 'Blender n’est pas encore prêt : installez d’abord l’add-on MCP.', code: 'blender-not-ready' });
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.delete('/api/blender/connect', async (req, res) => {
+  try { setBlenderConnected(req.user.id, false); res.json({ ...(await blender.status()), connected: false }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/open', async (req, res) => {
+  try { await blender.open(); res.json({ ok: true }); } catch (error) { blenderFailure(res, error); }
+});
 
 // ---------------------------------------------------------------------------
 // OPALE — the notes application, a separate project (protected)
@@ -1273,14 +1344,6 @@ app.post('/api/opale/open', async (req, res) => {
 });
 
 app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
-// GET /api/mcp/presets/:id -> a ready-made server entry, and whether the
-// program it starts is installed on this PC.
-app.get('/api/mcp/presets/:id', (req, res) => {
-  const found = mcpRegistry.preset(req.params.id);
-  if (!found) return res.status(404).json({ error: 'Préréglage MCP inconnu.' });
-  const executable = mcpRegistry.resolveCommand(found.server.command);
-  res.json({ server: found.server, installed: !!executable, executable, hint: executable ? '' : found.hint });
-});
 // POST /api/mcp/test { server } -> what that server answers right now. The
 // form is tested as typed, before it is saved.
 app.post('/api/mcp/test', async (req, res) => {

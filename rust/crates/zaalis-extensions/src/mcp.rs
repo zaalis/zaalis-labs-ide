@@ -625,6 +625,10 @@ impl HttpConnection {
         if !status.is_success() {
             return Err(ZaalisError::io(format!("MCP HTTP {status}")));
         }
+        // A notification is acknowledged with "202 Accepted" and no body.
+        if bytes.iter().all(u8::is_ascii_whitespace) {
+            return Ok(Value::Null);
+        }
         parse_http(&bytes, &content_type)
     }
 }

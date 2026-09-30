@@ -209,6 +209,28 @@
 .mcp-btn-logo{width:18px;height:18px;margin-right:8px;flex-shrink:0;object-fit:contain;}
 .mcp-server-card > .mcp-server-grid{margin-bottom:12px;}
 .mcp-server-title{display:flex;align-items:center;gap:12px;min-width:0;}
+.mcp-builtin-title{display:flex;align-items:center;gap:10px;}
+/* Blender MCP install window: opens over the settings window. */
+#blender-install-modal{z-index:120;}
+.modal.blender-install{width:520px;max-width:calc(100vw - 32px);}
+.blender-install .modal-header h2{display:flex;align-items:center;gap:10px;}
+.blender-install .modal-body{font-size:13.5px;line-height:1.55;color:var(--text-1);}
+.blender-install .modal-body h3{margin:16px 0 8px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:var(--text-2);}
+.blender-install ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+.blender-checks li{display:flex;align-items:flex-start;gap:10px;padding:10px 12px;background:var(--bg-3);border:1px solid var(--border-subtle);border-radius:8px;color:var(--text-0);}
+.blender-check-mark{flex-shrink:0;width:18px;height:18px;margin-top:1px;border-radius:50%;border:2px solid var(--text-3);box-sizing:border-box;position:relative;}
+.blender-checks li[data-state="ok"] .blender-check-mark{border-color:var(--green,#22c55e);background:var(--green,#22c55e);}
+.blender-checks li[data-state="ok"] .blender-check-mark::after{content:'';position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);}
+.blender-checks li[data-state="error"] .blender-check-mark{border-color:var(--red,#ef4444);background:var(--red,#ef4444);}
+.blender-checks li[data-state="error"] .blender-check-mark::after{content:'';position:absolute;left:6px;top:2px;width:2px;height:10px;background:#fff;transform:rotate(45deg);box-shadow:0 0 0 0 #fff;}
+.blender-checks li[data-state="error"] .blender-check-mark::before{content:'';position:absolute;left:6px;top:2px;width:2px;height:10px;background:#fff;transform:rotate(-45deg);}
+.blender-steps li{position:relative;padding-left:18px;}
+.blender-steps li::before{content:'';position:absolute;left:4px;top:.62em;width:5px;height:5px;border-radius:50%;background:var(--text-2);}
+.blender-install-warning{margin:16px 0 0;padding:10px 12px;border-left:3px solid var(--yellow,#e0b341);background:rgba(224,179,65,.08);border-radius:0 8px 8px 0;color:var(--text-0);}
+.blender-consent{display:flex;align-items:flex-start;gap:10px;margin:16px 0 0;color:var(--text-0);font-weight:600;cursor:pointer;}
+.blender-consent input{width:16px;height:16px;margin-top:3px;flex-shrink:0;accent-color:var(--accent);}
+.blender-install .opale-error{margin:12px 0 0;}
+.blender-install .btn:disabled{opacity:.45;cursor:not-allowed;}
 .mcp-server-logo{width:22px;height:22px;flex-shrink:0;object-fit:contain;}
 .mcp-transport{display:flex;gap:4px;padding:3px;background:var(--bg-3);border:1px solid var(--border);border-radius:8px;}
 .mcp-transport button{flex:1 1 0;min-height:32px;padding:6px 10px;border-radius:6px;font-size:13px;font-weight:600;color:var(--text-2);white-space:nowrap;transition:background .15s,color .15s;}

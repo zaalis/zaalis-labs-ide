@@ -83,26 +83,16 @@ function normaliseServer(value) {
 }
 
 // ---------------------------------------------------------------------------
-// Presets and command lookup
+// Command lookup
 // ---------------------------------------------------------------------------
-// Blender's add-on listens on a raw TCP socket (9876 by default), not on HTTP:
-// the MCP server is the `blender-mcp` program, which forwards to that socket.
-const PRESETS = {
-  blender: {
-    server: { id: 'blender', name: 'Blender MCP', transport: 'stdio', command: 'blender-mcp', args: [], env: {}, enabled: true, allow: [], deny: [] },
-    hint: 'Le programme « blender-mcp » est introuvable sur ce PC. Installez-le avec : pip install git+https://projects.blender.org/lab/blender_mcp.git — puis activez l’add-on MCP dans Blender (dépôt d’extensions https://lab.blender.org/).',
-  },
-};
-// { server, hint } for a known preset id, or null. `hint` says how to install
-// the program when it is missing.
-function preset(id) { const key = String(id || ''); return Object.prototype.hasOwnProperty.call(PRESETS, key) ? JSON.parse(JSON.stringify(PRESETS[key])) : null; }
-
-// The first "Blender MCP" preset pointed an HTTP client at the add-on socket,
-// which can never answer. Those entries become the stdio preset on read.
-function upgradeLegacy(server) {
-  if (!server || typeof server !== 'object' || server.id !== 'blender' || transportOf(server) !== 'http') return server;
-  if (!/^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):9876\/mcp\/?$/i.test(String(server.endpoint || ''))) return server;
-  return { ...preset('blender').server, name: server.name || PRESETS.blender.server.name, enabled: server.enabled !== false, allow: normaliseNames(server.allow), deny: normaliseNames(server.deny) };
+// Blender is built into the IDE now (blender-connector.js). The two "Blender
+// MCP" entries the settings used to create are recognised so they can be
+// dropped: an HTTP client pointed at the add-on's raw socket (it could never
+// answer), and the external `blender-mcp` program.
+function isBlenderPreset(server) {
+  if (!server || typeof server !== 'object' || server.id !== 'blender') return false;
+  if (transportOf(server) === 'stdio') return path.basename(String(server.command || '')).toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/, '') === 'blender-mcp';
+  return /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):9876\/mcp\/?$/i.test(String(server.endpoint || ''));
 }
 
 function isFile(target) { try { return fs.statSync(target).isFile(); } catch { return false; } }
@@ -387,6 +377,6 @@ function buildSkill(server, info) {
 }
 
 module.exports = {
-  safeId, parseEndpoint, normaliseServer, transportOf, upgradeLegacy, preset, resolveCommand, stdioEnv, spawnPlan,
+  safeId, parseEndpoint, normaliseServer, transportOf, isBlenderPreset, resolveCommand, stdioEnv, spawnPlan,
   connect, describe, tools, call, allowed, probe, buildSkill,
 };

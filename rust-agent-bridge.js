@@ -54,7 +54,9 @@ function runtimeMcpEntry(source, index, extensionEnv) {
     if (!mcpRegistry.parseEndpoint(source.endpoint)) return null;
     const tokenName = `ZAALIS_MCP_TOKEN_${index}`;
     if (source.token) extensionEnv[tokenName] = String(source.token);
-    return { transport: 'streamable_http', endpoint: String(source.endpoint || ''), ...(source.token ? { oauth_env: tokenName } : {}), ...common };
+    // A server whose calls run long (a render) says so; the runtime grants 15 s otherwise.
+    const timeout = Number(source.timeoutMs) > 0 ? { timeout_ms: Math.min(Math.round(Number(source.timeoutMs)), 120000) } : {};
+    return { transport: 'streamable_http', endpoint: String(source.endpoint || ''), ...(source.token ? { oauth_env: tokenName } : {}), ...timeout, ...common };
   }
   let executable = mcpRegistry.resolveCommand(source.command);
   try { executable = executable && fs.realpathSync.native(executable); } catch { executable = ''; }

@@ -49,9 +49,17 @@ The two are linked by default. When Opale is present on the PC and running, the 
 
 A Claude/Codex-style JSON file (`mcpServers`) can be imported, and **Tester la connexion** shows what a server answers before it is saved. Tokens and environment values are encrypted at rest and never sent back to the interface. The agent learns about each enabled server through a Skill generated from the server's own tool list; `allow` / `deny` restrict which tools it may call.
 
-The **Blender MCP** preset runs Blender Lab's `blender-mcp` program, found on `PATH` or where Codex / Claude Desktop installed it. Blender's add-on listens on a raw TCP socket (port 9876), not on HTTP: the URL `http://127.0.0.1:9876/mcp` cannot work, and entries saved with it are converted to the preset automatically. If the program is missing: `pip install git+https://projects.blender.org/lab/blender_mcp.git`, then enable the MCP add-on in Blender.
+The code is in `mcp-registry.js` (validation, both transports), `rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
 
-The code is in `mcp-registry.js` (validation, both transports, presets), `rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
+## Blender
+
+**Settings → MCP → Blender** links the agent to Blender, with nothing to install outside the IDE:
+
+- the IDE detects Blender (5.1 or newer) and the state of Blender Lab's official **MCP** add-on;
+- **Installer** opens a window that checks the version, asks for Blender to be closed, lists what will change in Blender (the add-on shipped in `native/blender`, its automatic start, and Blender's "Allow Online Access" setting, which the add-on requires) and asks for consent. Nothing is changed in Blender without it;
+- the MCP server is the IDE itself (`blender-connector.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876). Tools: `scene_summary`, `list_objects`, `object_details`, `execute_python`.
+
+Once linked, the agent can run Python in Blender without a confirmation prompt, like any MCP call. The add-on itself is GPL-3.0-or-later and redistributed unmodified (see `native/blender/README.md`).
 
 ## Voice dictation
 

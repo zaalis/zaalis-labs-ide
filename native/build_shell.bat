@@ -47,9 +47,14 @@ if exist dist\whisper rmdir /S /Q dist\whisper
 xcopy "whisper\*" "dist\whisper\" /E /Y /I /Q >nul
 if errorlevel 1 goto :failed
 
+REM --- Copy the Blender MCP add-on (installed into Blender on request) ---
+if exist dist\blender rmdir /S /Q dist\blender
+xcopy "blender\*" "dist\blender\" /E /Y /I /Q >nul
+if errorlevel 1 goto :failed
+
 echo.
 echo Done. The ready-to-run app is in native\dist\
-echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ + whisper\ )
+echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ + whisper\ + blender\ )
 goto :eof
 
 :novs

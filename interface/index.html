@@ -6,7 +6,7 @@
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
     <link rel="stylesheet" href="base.css?v=1.0.19">
-    <link rel="stylesheet" href="app.css?v=1.0.19">
+    <link rel="stylesheet" href="app.css?v=1.0.20">
     <link rel="stylesheet" href="workspace.css?v=1.1.3">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
@@ -805,15 +805,27 @@
                         <p class="opale-error" id="opale-error" role="alert" hidden></p>
                     </div>
                     <hr class="settings-separator">
+                    <h3 class="mcp-builtin-title"><img class="mcp-server-logo" src="image/blender.png" alt="" width="22" height="22">Blender</h3>
+                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit la scène ouverte et la modifie grâce à l’add-on MCP officiel de Blender. Tout se passe sur ce PC, et le nécessaire est fourni avec zaalis IDE.</p>
+                    <div class="opale-link" id="blender-link">
+                        <div class="settings-status-row"><span>État</span><strong id="blender-status">Recherche de Blender…</strong></div>
+                        <div class="opale-actions">
+                            <button class="btn btn-primary" id="blender-install" type="button" hidden>Installer</button>
+                            <button class="btn btn-primary" id="blender-connect" type="button" hidden>Activer</button>
+                            <button class="btn btn-ghost" id="blender-open" type="button" hidden>Ouvrir Blender</button>
+                            <button class="btn btn-ghost" id="blender-disconnect" type="button" hidden>Désactiver</button>
+                        </div>
+                        <p class="opale-error" id="blender-error" role="alert" hidden></p>
+                    </div>
+                    <hr class="settings-separator">
                     <div class="mcp-personal-toolbar">
                         <h3>MCP personnels</h3>
                         <div class="mcp-personal-actions">
                             <button class="btn btn-ghost mcp-action-btn" id="mcp-import-config" type="button">Importer une config</button>
-                            <button class="btn btn-ghost mcp-action-btn" id="mcp-add-blender" type="button"><img class="mcp-btn-logo" src="image/blender.png" alt="" width="18" height="18">Blender MCP</button>
                             <button class="btn btn-primary mcp-action-btn" id="mcp-add-personal" type="button">Ajouter</button>
                         </div>
                     </div>
-                    <p class="form-hint">Connectez vos serveurs MCP comme dans Codex ou Claude : un programme local (stdio — Blender, <code>npx …</code>, <code>uvx …</code>) ou une URL Streamable HTTP (HTTPS requis sauf pour un serveur local, jeton optionnel). Importez un fichier JSON compatible ou ajoutez-les à la main, puis testez la connexion.</p>
+                    <p class="form-hint">Connectez vos serveurs MCP comme dans Codex ou Claude : un programme local (stdio — <code>npx …</code>, <code>uvx …</code>) ou une URL Streamable HTTP (HTTPS requis sauf pour un serveur local, jeton optionnel). Importez un fichier JSON compatible ou ajoutez-les à la main, puis testez la connexion.</p>
                     <input id="mcp-config-file" type="file" accept="application/json,.json" hidden>
                     <div id="mcp-personal-list" class="mcp-server-list" aria-live="polite"></div>
                 </section>
@@ -1206,6 +1218,36 @@
     </div>
 </div>
 
+<!-- ========== BLENDER MCP INSTALL ========== -->
+<div class="modal-overlay" id="blender-install-modal" role="dialog" aria-modal="true" aria-labelledby="blender-install-title">
+    <div class="modal blender-install">
+        <div class="modal-header">
+            <h2 id="blender-install-title"><img src="image/blender.png" alt="" width="20" height="20">Installer Blender MCP</h2>
+        </div>
+        <div class="modal-body">
+            <p>zaalis IDE va préparer Blender pour que l’assistant puisse y travailler.</p>
+            <h3>Vérifications</h3>
+            <ul class="blender-checks">
+                <li id="blender-check-version" data-state="pending"><span class="blender-check-mark" aria-hidden="true"></span><span class="blender-check-text">Recherche de Blender…</span></li>
+                <li id="blender-check-closed" data-state="pending"><span class="blender-check-mark" aria-hidden="true"></span><span class="blender-check-text">Blender doit être fermé</span></li>
+            </ul>
+            <h3>Ce qui sera fait dans Blender</h3>
+            <ul class="blender-steps">
+                <li id="blender-step-addon">Installer l’add-on officiel « MCP » de Blender Lab, fourni avec zaalis IDE.</li>
+                <li>Activer cet add-on et son démarrage automatique à l’ouverture de Blender.</li>
+                <li>Activer le réglage « Autoriser l’accès en ligne » de Blender : sans lui, l’add-on ne démarre pas.</li>
+            </ul>
+            <p class="blender-install-warning">Une fois Blender relié, l’assistant peut y exécuter du code Python sans vous demander de confirmation. Enregistrez votre travail avant de lui confier une scène.</p>
+            <label class="blender-consent"><input type="checkbox" id="blender-consent"><span>J’ai compris et j’autorise cette installation.</span></label>
+            <p class="opale-error" id="blender-install-error" role="alert" hidden></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="blender-install-cancel" type="button">Annuler</button>
+            <button class="btn btn-primary" id="blender-install-confirm" type="button" disabled>Installer</button>
+        </div>
+    </div>
+</div>
+
 <!-- ========== IMAGE LIGHTBOX ========== -->
 <div class="modal-overlay" id="image-lightbox">
     <div class="lightbox">
@@ -1338,7 +1380,7 @@
 <script src="script/commands.js?v=1.0.17" defer></script>
 <script src="script/ai.js?v=1.0.20" defer></script>
 <script src="script/remote.js?v=1.0.15" defer></script>
-<script src="script/main.js?v=1.0.19" defer></script>
+<script src="script/main.js?v=1.0.20" defer></script>
 <script src="script/workspace.js?v=1.1.2" defer></script>
 </body>
 </html>

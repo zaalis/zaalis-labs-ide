@@ -553,6 +553,145 @@ $('#opale-open')?.addEventListener('click', async () => {
     catch (error) { showOpaleError(error.message); }
 });
 
+// ----- Blender: built-in MCP connection, with a guided install -------------
+let blenderStatus = null;
+let blenderInstallPoll = null;
+let blenderStarting = false;   // "Ouvrir Blender" was clicked and Blender is on its way up
+function showBlenderError(message, box = $('#blender-error')) {
+    if (!box) return;
+    box.textContent = message || '';
+    box.hidden = !message;
+}
+function renderBlender(status) {
+    blenderStatus = status;
+    const label = $('#blender-status');
+    if (!label) return;
+    const state = status ? status.state : '';
+    const name = status && status.version ? `Blender ${status.version}` : 'Blender';
+    const needsAddon = status && status.addon && !status.addon.installed;
+    label.textContent = !status ? 'État de Blender indisponible'
+        : state === 'missing' ? 'Blender n’est pas installé sur ce PC'
+        : state === 'unsupported' ? `${name} détecté — la version ${status.minVersion} ou plus récente est requise`
+        : state === 'install' ? `${name} détecté — add-on MCP à ${needsAddon ? 'installer' : 'activer'}`
+        : !status.connected ? `${name} est prêt — non activé`
+        : status.reachable ? `Activé — ${name} est ouvert et répond`
+        : blenderStarting ? 'Activé — Blender démarre…'
+        : status.running ? `Activé — Blender est ouvert mais son add-on ne répond pas (port ${status.port})`
+        : 'Activé — Blender est fermé';
+    const ready = state === 'ready';
+    $('#blender-install').hidden = state !== 'install';
+    $('#blender-connect').hidden = !(ready && !status.connected);
+    $('#blender-disconnect').hidden = !(ready && status.connected);
+    $('#blender-open').hidden = !(ready && !status.running && !status.reachable) || blenderStarting;
+    renderBlenderInstall();
+}
+async function blenderRequest(method, route, body) {
+    const response = await fetch(route, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || 'Blender ne répond pas.');
+    return data;
+}
+async function loadBlenderStatus() {
+    try { const status = await blenderRequest('GET', '/api/blender/status'); renderBlender(status); return status; }
+    catch { renderBlender(null); return null; }
+}
+// The install window: two checks the user can act on, what will change in
+// Blender, and an explicit yes. Nothing is installed without all three.
+function renderBlenderInstall() {
+    const modal = $('#blender-install-modal');
+    if (!modal || !modal.classList.contains('active')) return;
+    const status = blenderStatus;
+    const setCheck = (id, state, text) => { const item = $('#' + id); item.dataset.state = state; item.querySelector('.blender-check-text').textContent = text; };
+    const found = !!(status && status.found);
+    const supported = found && status.state !== 'unsupported';
+    setCheck('blender-check-version', !status ? 'pending' : supported ? 'ok' : 'error',
+        !status ? 'Recherche de Blender…'
+            : !found ? 'Blender est introuvable sur ce PC.'
+            : supported ? `Blender ${status.version} détecté (version ${status.minVersion} ou plus récente requise).`
+            : `Blender ${status.version} est trop ancien : la version ${status.minVersion} ou plus récente est requise.`);
+    const closed = supported && !status.running;
+    setCheck('blender-check-closed', !supported ? 'pending' : closed ? 'ok' : 'error',
+        !supported || closed ? 'Blender est fermé.' : 'Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).');
+    const present = !!(status && status.addon && status.addon.installed);
+    $('#blender-step-addon').textContent = present
+        ? `L’add-on officiel « MCP » de Blender Lab est déjà présent (version ${status.addon.version}) : il est conservé tel quel.`
+        : `Installer l’add-on officiel « MCP » de Blender Lab (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`;
+    const busy = modal.dataset.busy === 'true';
+    $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
+    $('#blender-install-confirm').textContent = busy ? 'Installation…' : 'Installer';
+    $('#blender-install-cancel').disabled = busy;
+    $('#blender-consent').disabled = busy;
+}
+function closeBlenderInstall() {
+    clearInterval(blenderInstallPoll);
+    blenderInstallPoll = null;
+    $('#blender-install-modal').classList.remove('active');
+}
+function openBlenderInstall() {
+    const modal = $('#blender-install-modal');
+    modal.dataset.busy = 'false';
+    $('#blender-consent').checked = false;
+    showBlenderError('', $('#blender-install-error'));
+    modal.classList.add('active');
+    renderBlenderInstall();
+    loadBlenderStatus();
+    // Closing Blender is the one thing the user has to do: watch for it.
+    clearInterval(blenderInstallPoll);
+    blenderInstallPoll = setInterval(() => { if (modal.dataset.busy !== 'true') loadBlenderStatus(); }, 2500);
+    $('#blender-consent').focus();
+}
+$('#blender-install')?.addEventListener('click', openBlenderInstall);
+$('#blender-install-cancel')?.addEventListener('click', closeBlenderInstall);
+$('#blender-consent')?.addEventListener('change', renderBlenderInstall);
+$('#blender-install-modal')?.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && $('#blender-install-modal').dataset.busy !== 'true') { event.stopPropagation(); closeBlenderInstall(); }
+});
+$('#blender-install-confirm')?.addEventListener('click', async () => {
+    const modal = $('#blender-install-modal');
+    const errorBox = $('#blender-install-error');
+    showBlenderError('', errorBox);
+    modal.dataset.busy = 'true';
+    renderBlenderInstall();
+    try {
+        const status = await blenderRequest('POST', '/api/blender/install', { consent: true });
+        modal.dataset.busy = 'false';
+        closeBlenderInstall();
+        renderBlender(status);
+        showBlenderError('');
+        showToast('Blender', 'Blender MCP est installé et activé. Ouvrez Blender : l’assistant peut y travailler.', { icon: '✓', duration: 7000 });
+    } catch (error) {
+        modal.dataset.busy = 'false';
+        showBlenderError(error.message, errorBox);
+        await loadBlenderStatus();
+    }
+});
+$('#blender-connect')?.addEventListener('click', async () => {
+    showBlenderError('');
+    try { renderBlender(await blenderRequest('POST', '/api/blender/connect')); }
+    catch (error) { showBlenderError(error.message); loadBlenderStatus(); }
+});
+$('#blender-disconnect')?.addEventListener('click', async () => {
+    showBlenderError('');
+    try { renderBlender(await blenderRequest('DELETE', '/api/blender/connect')); }
+    catch (error) { showBlenderError(error.message); }
+});
+$('#blender-open')?.addEventListener('click', async event => {
+    showBlenderError('');
+    const button = event.currentTarget;
+    button.disabled = true;
+    try {
+        await blenderRequest('POST', '/api/blender/open');
+        // Blender takes a few seconds to start and its add-on a moment more.
+        blenderStarting = true;
+        for (let attempt = 0; attempt < 20; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            const status = await loadBlenderStatus();
+            if (status && status.reachable) break;
+        }
+    } catch (error) { showBlenderError(error.message); }
+    finally { blenderStarting = false; button.disabled = false; renderBlender(blenderStatus); }
+});
+
 function updateApiKeyInputs(status) {
     const savedLabel = (state.language === 'en') ? 'Saved' : 'Enregistrée';
     API_KEY_FIELDS.forEach(provider => {
@@ -808,6 +947,7 @@ function parseImportedMcpConfig(value) {
 async function loadMcpSettings() {
     try {
         loadOpaleStatus();
+        loadBlenderStatus();
         const mcpRes = await fetch('/api/mcp');
         if (mcpRes.ok) {
             const data = await mcpRes.json();
@@ -819,32 +959,6 @@ async function loadMcpSettings() {
 }
 
 $('#mcp-add-personal').addEventListener('click', () => { personalMcpServers.push(newPersonalMcp()); renderPersonalMcpServers(); });
-// Blender is driven through its `blender-mcp` program: the server says whether
-// it is installed on this PC, and the card is tested as soon as it is added.
-$('#mcp-add-blender').addEventListener('click', async () => {
-    const existing = personalMcpServers.findIndex(server => server.id === 'blender');
-    if (existing >= 0) {
-        const card = document.querySelector(`.mcp-server-card[data-mcp-index="${existing}"]`);
-        if (card) { card.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); testPersonalMcp(personalMcpServers[existing], card); }
-        return;
-    }
-    try {
-        const res = await fetch('/api/mcp/presets/blender');
-        if (!res.ok) throw new Error('preset');
-        const data = await res.json();
-        const server = newPersonalMcp(data.server);
-        personalMcpServers.push(server);
-        renderPersonalMcpServers();
-        const card = document.querySelector(`.mcp-server-card[data-mcp-index="${personalMcpServers.length - 1}"]`);
-        if (card) card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-        if (!data.installed) {
-            server.test = { state: 'error', text: data.hint || 'Le programme blender-mcp est introuvable sur ce PC.' };
-            if (card) mcpShowTest(card, server.test);
-        } else if (card) testPersonalMcp(server, card);
-    } catch {
-        toast('Impossible de préparer le serveur Blender MCP.', { icon: '!' });
-    }
-});
 $('#mcp-import-config').addEventListener('click', () => $('#mcp-config-file').click());
 $('#mcp-config-file').addEventListener('change', async event => {
     const file = event.target.files && event.target.files[0];
