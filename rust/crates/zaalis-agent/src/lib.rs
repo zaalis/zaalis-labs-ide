@@ -4,14 +4,18 @@
 //! tool invocation, permission prompt and budget pause is emitted as a typed
 //! protocol event, and the same loop serves all eight providers.
 
+mod context;
 mod control;
 mod event_bus;
+pub mod guardian;
 mod interaction;
+mod prompt;
 mod runner;
 mod session;
 mod spawn;
 
 pub use event_bus::EventBus;
+pub use guardian::ModelReviewer;
 pub use interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
 pub use session::{AgentSession, AgentSessionSnapshot, SessionConfig, SessionRunMode};
 
@@ -27,18 +31,20 @@ mod tests {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
     use zaalis_core::{
-        now_ms, AgentNode, Budget, ModelBinding, PermissionMode, PermissionSet, ProviderId,
-        RoleSpec, ToolCallId, Usage,
+        now_ms, AccessKind, AgentNode, Budget, ModelBinding, PermissionMode, PermissionSet,
+        ProviderId, RoleSpec, ToolCallId, Usage,
     };
     use zaalis_fs::Workspace;
+    use zaalis_guard::AccessRequest;
     use zaalis_guard::Guard;
     use zaalis_protocol::{Event, ToolOutcome};
     use zaalis_providers::{
-        Capabilities, ModelProvider, PoolConfig, ProviderError, ProviderPool, ProviderStream,
-        StopReason, ToolInvocation as ProviderToolCall, TurnEvent, TurnRequest,
+        Capabilities, Message, ModelProvider, PoolConfig, ProviderError, ProviderPool,
+        ProviderStream, StopReason, ToolInvocation as ProviderToolCall, TurnEvent, TurnRequest,
     };
     use zaalis_tools::{
-        register_filesystem_tools, ToolContext, ToolDispatch, ToolInvocation, ToolRuntime,
+        register_filesystem_tools, Tool, ToolContext, ToolDefinition, ToolDispatch, ToolInvocation,
+        ToolResult, ToolRuntime,
     };
 
     #[derive(Debug)]
@@ -55,6 +61,84 @@ mod tests {
                 turns: Mutex::new(turns.into()),
                 requests: Mutex::new(Vec::new()),
             }
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakeComputerTool;
+
+    /// An MCP-shaped tool returning an image the way MCP servers do.
+    #[derive(Debug)]
+    struct FakeRenderTool;
+
+    #[async_trait]
+    impl Tool for FakeRenderTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "mcp".into(),
+                description: "Rendu simulé".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn access(
+            &self,
+            _input: &serde_json::Value,
+            context: &ToolContext,
+        ) -> zaalis_core::Result<AccessRequest> {
+            Ok(AccessRequest::new(
+                context.agent_id.clone(),
+                "mcp",
+                AccessKind::Mcp,
+            ))
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _context: ToolContext,
+            _cancel: CancellationToken,
+        ) -> zaalis_core::Result<ToolResult> {
+            Ok(ToolResult {
+                summary: "rendu".into(),
+                value: serde_json::json!({"content":[{"type":"text","text":"rendu prêt"},{"type":"image","mimeType":"image/png","data":"render-png"}]}),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Tool for FakeComputerTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "computer".into(),
+                description: "Capture simulée".into(),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn access(
+            &self,
+            _input: &serde_json::Value,
+            context: &ToolContext,
+        ) -> zaalis_core::Result<AccessRequest> {
+            Ok(AccessRequest::new(
+                context.agent_id.clone(),
+                "computer",
+                AccessKind::Computer,
+            ))
+        }
+
+        async fn execute(
+            &self,
+            input: serde_json::Value,
+            _context: ToolContext,
+            _cancel: CancellationToken,
+        ) -> zaalis_core::Result<ToolResult> {
+            let image = input["image"].as_str().unwrap_or("capture");
+            Ok(ToolResult {
+                summary: "capture".into(),
+                value: serde_json::json!({"images":[{"mime":"image/png","data":image}]}),
+            })
         }
     }
 
@@ -122,6 +206,20 @@ mod tests {
             now_ms(),
         )
         .with_objective("Tester la boucle")
+    }
+
+    /// A node whose model is declared able to read images.
+    fn seeing_node(
+        session: &AgentSession,
+        provider: ProviderId,
+        mode: PermissionMode,
+    ) -> AgentNode {
+        let mut node = node(session, provider, mode);
+        node.model.capabilities = Some(zaalis_core::ModelCapabilities {
+            vision: Some(true),
+            ..Default::default()
+        });
+        node
     }
 
     async fn next_matching(
@@ -195,6 +293,44 @@ mod tests {
         assert!(kinds.contains(&"text_delta"));
         assert!(kinds.contains(&"agent_completed"));
         assert_eq!(kinds.last(), Some(&"turn_completed"));
+    }
+
+    #[tokio::test]
+    async fn a_second_turn_reuses_the_agent_and_its_prior_answer() {
+        let answer = |text: &str| {
+            vec![
+                TurnEvent::TextDelta { text: text.into() },
+                TurnEvent::Completed {
+                    reason: StopReason::EndTurn,
+                },
+            ]
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![answer("première réponse"), answer("seconde réponse")],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        let agent = fixture
+            .session
+            .add_root(node(
+                &fixture.session,
+                ProviderId::Mistral,
+                PermissionMode::ReadOnly,
+            ))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Première demande").await.unwrap();
+        fixture.session.run_turn("Deuxième demande").await.unwrap();
+        let requests = provider.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            Message::Assistant { text, .. } if text == "première réponse")));
+        assert!(requests[1].messages.iter().any(|message| matches!(message,
+            Message::User { text, .. } if text == "Deuxième demande")));
+        assert!(matches!(
+            fixture.session.tree().await.get(&agent).unwrap().state,
+            zaalis_core::AgentState::Done
+        ));
     }
 
     #[tokio::test]
@@ -567,6 +703,220 @@ mod tests {
         let json = serde_json::to_string(history).unwrap();
         assert!(json.contains("\"is_error\":true"));
         assert!(json.contains("\"role\":\"tool\""));
+    }
+
+    #[tokio::test]
+    async fn computer_tool_results_precede_the_only_retained_capture() {
+        let call = |id: &str, image: &str| TurnEvent::ToolCallCompleted {
+            call: ProviderToolCall {
+                id: id.into(),
+                name: "computer".into(),
+                arguments: serde_json::json!({"image": image}),
+            },
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Local,
+            vec![
+                vec![
+                    call("A", "image-a"),
+                    call("B", "image-b"),
+                    TurnEvent::Completed {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                vec![
+                    call("C", "image-c"),
+                    TurnEvent::Completed {
+                        reason: StopReason::ToolUse,
+                    },
+                ],
+                vec![
+                    TurnEvent::TextDelta {
+                        text: "Terminé".into(),
+                    },
+                    TurnEvent::Completed {
+                        reason: StopReason::EndTurn,
+                    },
+                ],
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .inner
+            .tools
+            .register(FakeComputerTool)
+            .expect("computer");
+        fixture
+            .session
+            .add_root(seeing_node(
+                &fixture.session,
+                ProviderId::Local,
+                PermissionMode::Bypass,
+            ))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Observe le bureau").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3);
+        let messages = &requests[1].messages;
+        let tail = &messages[messages.len() - 4..];
+        assert!(
+            matches!(&tail[0], Message::Assistant { tool_calls, .. } if tool_calls.iter().map(|call| call.id.as_str()).collect::<Vec<_>>() == ["A", "B"])
+        );
+        assert!(matches!(&tail[1], Message::Tool { call_id, .. } if call_id == "A"));
+        assert!(matches!(&tail[2], Message::Tool { call_id, .. } if call_id == "B"));
+        assert!(
+            matches!(&tail[3], Message::User { text, images } if text.starts_with("[Capture actuelle du bureau") && images.len() == 1 && images[0].data == "image-b")
+        );
+        let captures = requests[2]
+            .messages
+            .iter()
+            .filter_map(|message| match message {
+                Message::User { text, images }
+                    if text.starts_with("[Capture actuelle du bureau") =>
+                {
+                    Some(images)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].len(), 1);
+        assert_eq!(captures[0][0].data, "image-c");
+    }
+
+    fn scripted_tool_turns(tools: &[(&str, &str)]) -> Vec<Vec<TurnEvent>> {
+        let mut first: Vec<TurnEvent> = tools
+            .iter()
+            .map(|(id, name)| TurnEvent::ToolCallCompleted {
+                call: ProviderToolCall {
+                    id: (*id).into(),
+                    name: (*name).into(),
+                    arguments: serde_json::json!({"image": format!("capture-{id}")}),
+                },
+            })
+            .collect();
+        first.push(TurnEvent::Completed {
+            reason: StopReason::ToolUse,
+        });
+        vec![
+            first,
+            vec![
+                TurnEvent::TextDelta {
+                    text: "Terminé".into(),
+                },
+                TurnEvent::Completed {
+                    reason: StopReason::EndTurn,
+                },
+            ],
+        ]
+    }
+
+    #[tokio::test]
+    async fn images_of_several_tools_reach_the_model_in_one_labelled_message() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Local,
+            scripted_tool_turns(&[("A", "computer"), ("B", "mcp")]),
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .inner
+            .tools
+            .register(FakeComputerTool)
+            .expect("computer");
+        fixture
+            .session
+            .inner
+            .tools
+            .register(FakeRenderTool)
+            .expect("mcp");
+        fixture
+            .session
+            .add_root(seeing_node(
+                &fixture.session,
+                ProviderId::Local,
+                PermissionMode::Bypass,
+            ))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Rends la scène").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        // Desktop control keeps MCP servers next to the computer tool, and
+        // says so; the rest of the IDE catalogue stays out.
+        let mut offered = requests[0]
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        offered.sort_unstable();
+        assert_eq!(offered, ["computer", "mcp"]);
+        assert!(requests[0]
+            .system
+            .contains("outils disponibles : computer, mcp."));
+        let last = requests[1].messages.last().expect("vision message");
+        assert!(matches!(last, Message::User { text, images }
+            if text.starts_with("[Images renvoyées par les outils") && text.contains("computer (1), mcp (1)")
+                && images.iter().map(|image| image.data.as_str()).collect::<Vec<_>>() == ["capture-A", "render-png"]));
+        let render = requests[1]
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool { name, content, .. } if name == "mcp" => Some(content.clone()),
+                _ => None,
+            })
+            .expect("mcp result");
+        assert!(
+            render.contains("[image 1 jointe au message suivant]")
+                && !render.contains("render-png")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_without_vision_is_told_the_image_was_not_sent() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Local,
+            scripted_tool_turns(&[("A", "mcp")]),
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .inner
+            .tools
+            .register(FakeRenderTool)
+            .expect("mcp");
+        fixture
+            .session
+            .add_root(node(
+                &fixture.session,
+                ProviderId::Local,
+                PermissionMode::Bypass,
+            ))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Rends la scène").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        assert!(requests[1]
+            .messages
+            .iter()
+            .all(|message| !matches!(message, Message::User { images, .. } if !images.is_empty())));
+        let render = requests[1]
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .expect("tool result");
+        assert!(
+            render.contains("images_not_sent")
+                && render.contains("ne lit pas les images")
+                && !render.contains("render-png")
+        );
     }
 
     #[tokio::test]

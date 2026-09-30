@@ -7,6 +7,9 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { ElectronBrowserBridge } = require('./browser-bridge');
+const browserBridge = new ElectronBrowserBridge();
+let browserEnvironment = {};
 
 function configureLinuxSandbox() {
   if (process.platform !== 'linux') return;
@@ -136,6 +139,7 @@ async function startServer(port, reuseExisting) {
     cwd: BUNDLE_DIR,
     env: {
       ...process.env,
+      ...browserEnvironment,
       ZAALIS_PORT: String(port),
       PORT: String(port),
       ZAALIS_DESKTOP: 'electron',
@@ -187,6 +191,7 @@ function createWindow(port) {
     },
   });
 
+  browserBridge.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
@@ -229,6 +234,7 @@ ipcMain.handle('pick-folder', async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  browserBridge.close();
   stopServer();
 });
 app.on('window-all-closed', () => app.quit());
@@ -239,6 +245,7 @@ app.whenReady().then(async () => {
 
   try {
     const { port, reuseExisting } = await pickPort();
+    browserEnvironment = await browserBridge.start();
     await startServer(port, reuseExisting);
     createWindow(port);
   } catch (error) {

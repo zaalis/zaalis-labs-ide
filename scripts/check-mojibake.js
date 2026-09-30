@@ -55,6 +55,9 @@ function walk(target, files) {
     for (const entry of fs.readdirSync(full)) walk(path.join(target, entry), files);
     return;
   }
+  // "._name" files are macOS AppleDouble metadata (binary resource forks) left
+  // by a copy from a Mac onto a non-HFS volume, never source.
+  if (path.basename(full).startsWith('._')) return;
   if (TEXT_EXTS.has(path.extname(full).toLowerCase())) files.push(full);
 }
 

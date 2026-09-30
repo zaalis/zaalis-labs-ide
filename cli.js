@@ -37,13 +37,13 @@ const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 // one file per working directory, like Claude Code's per-project sessions.
 const SESSIONS_DIR = path.join(CFG_DIR, 'sessions');
 
-// When packaged, this CLI lives in {app}/bin/ while the other binaries
-// (zaalis-server, zaalis) sit in {app}/ — i.e. the PARENT folder.
+// When packaged, this CLI lives in {app}\bin\ while the other binaries
+// (zaalis-server.exe, zaalis.exe) sit in {app}\ — i.e. the PARENT folder.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : __dirname;
 
 // Locate a sibling binary, looking in this folder then its parent (so the CLI
-// in {app}/bin finds zaalis-server / zaalis in {app}). Returns the first
-// existing path, or null.
+// in {app}\bin finds zaalis-server.exe / zaalis.exe in {app}). Returns the
+// first existing path, or null.
 function findBinary(name) {
   const candidates = [path.join(APP_DIR, name), path.join(APP_DIR, '..', name)];
   for (const p of candidates) {
@@ -340,7 +340,7 @@ async function ensureServer({ quiet } = {}) {
   if (await ping()) return true;
   if (!quiet) process.stderr.write(dim('Démarrage du serveur zaalis…\n'));
 
-  const serverExe = findBinary('zaalis-server');
+  const serverExe = findBinary('zaalis-server.exe');
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
@@ -598,6 +598,84 @@ function restoreConversation() {
   } catch { return null; }
 }
 
+// Toutes les sessions enregistrees, la plus recente d'abord.
+//
+// `/resume` ne voyait que le dossier courant : une session ouverte hier dans un
+// autre projet etait sur le disque mais introuvable.  La lister, c'est la
+// difference entre une fonctionnalite qui existe et une fonctionnalite qu'on
+// utilise.
+function listConversations() {
+  let files = [];
+  try { files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json')); }
+  catch { return []; }
+  const sessions = [];
+  for (const file of files) {
+    try {
+      const full = path.join(SESSIONS_DIR, file);
+      const d = JSON.parse(fs.readFileSync(full, 'utf-8'));
+      if (!Array.isArray(d.history) || !d.history.length) continue;
+      const lastUser = [...d.history].reverse().find((h) => h && h.role === 'user');
+      sessions.push({
+        file: full,
+        cwd: String(d.cwd || ''),
+        savedAt: Number(d.savedAt || 0),
+        model: d.model || null,
+        submodel: d.submodel || null,
+        history: d.history,
+        exchanges: Math.ceil(d.history.length / 2),
+        preview: String((lastUser && lastUser.content) || '').replace(/\s+/g, ' ').trim().slice(0, 90),
+      });
+    } catch {}
+  }
+  return sessions.sort((a, b) => b.savedAt - a.savedAt);
+}
+
+// Filtre sur le chemin du projet et sur le contenu echange : on cherche
+// « la session ou je parlais du proxy », pas un identifiant.
+function searchConversations(sessions, query) {
+  const needle = String(query || '').toLowerCase().trim();
+  if (!needle) return sessions;
+  return sessions.filter((s) => {
+    if (s.cwd.toLowerCase().includes(needle)) return true;
+    if (s.preview.toLowerCase().includes(needle)) return true;
+    return s.history.some((h) => String((h && h.content) || '').toLowerCase().includes(needle));
+  });
+}
+
+function relativeTime(ms) {
+  const delta = Date.now() - ms;
+  if (!ms || delta < 0) return 'date inconnue';
+  const minutes = Math.round(delta / 60000);
+  if (minutes < 1) return "a l'instant";
+  if (minutes < 60) return `il y a ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `il y a ${hours} h`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? 'hier' : `il y a ${days} jours`;
+}
+
+function printConversationList(sessions) {
+  sessions.forEach((s, index) => {
+    const here = s.cwd.toLowerCase() === projectRoot().toLowerCase();
+    const where = here ? 'ce dossier' : (s.cwd || 'dossier inconnu');
+    console.log(`${brand(String(index + 1).padStart(2))}  ${relativeTime(s.savedAt)} · ${s.exchanges} echange(s) · ${dim(where)}`);
+    if (s.preview) console.log(`    ${dim(s.preview)}`);
+  });
+}
+
+function applyConversation(chosen) {
+  history.length = 0;
+  history.push(...chosen.history);
+  if (chosen.model) { session.model = chosen.model; session.submodel = chosen.submodel; saveSession(session); }
+  const when = relativeTime(chosen.savedAt);
+  console.log(green('✓ ') + `Session restauree : ${chosen.exchanges} echange(s) (${when}). Modele : ${currentModelLabel()}`);
+  if (chosen.cwd && chosen.cwd.toLowerCase() !== projectRoot().toLowerCase()) {
+    // Le contexte repris parle d'un autre projet que celui ou l'on se trouve :
+    // le dire evite des reponses qui semblent hors sujet sans raison visible.
+    console.log(dim(`    Cette session vient de ${chosen.cwd} — le dossier courant est different.`));
+  }
+}
+
 function isLocalModel(model) {
   return model === 'local' || model === 'gguf';
 }
@@ -667,7 +745,7 @@ src/app.js
 package.json
 \`\`\`
 
-4) Executer une commande shell Linux (/bin/sh):
+4) Executer une commande Windows cmd.exe:
 \`\`\`run
 npm test
 \`\`\`
@@ -1260,7 +1338,7 @@ const SLASH = [
   { name: 'compact', category: 'general', desc: 'compacter le contexte' },
   { name: 'reset', category: 'general', desc: 'reinitialisation locale' },
   { name: 'grep', category: 'tools', desc: 'chercher un motif', usage: '<motif> [chemin]', args: true },
-  { name: 'search', category: 'tools', desc: 'ouvrir une recherche dans zaalis browser', usage: '<requete>', args: true },
+  { name: 'search', category: 'tools', desc: 'recherche dans le navigateur intégré de zaalis IDE (--externe : navigateur du PC)', usage: '[--externe] <requete>', args: true },
   { name: 'deep-search', category: 'tools', desc: 'recherche web approfondie avec sources', usage: '<requete>', args: true },
   { name: 'glob', category: 'tools', desc: 'trouver des fichiers', usage: '<**/*.js>', args: true },
   { name: 'diff', category: 'tools', desc: 'afficher le diff Git', usage: '[staged|unstaged]' },
@@ -1285,7 +1363,7 @@ const SLASH = [
   { name: 'deep', category: 'mode', desc: 'reponses approfondies' },
   { name: 'init', category: 'project', desc: 'creer ZAALIS.md' },
   { name: 'remember', category: 'project', desc: 'ajouter une note a ZAALIS.md', usage: '<note>', args: true },
-  { name: 'resume', category: 'project', desc: 'reprendre la derniere session de ce dossier' },
+  { name: 'resume', category: 'project', desc: 'lister/rechercher les sessions et en reprendre une' },
   { name: 'export', category: 'project', desc: 'exporter la session' },
   { name: 'agents', category: 'project', desc: 'agents disponibles' },
   { name: 'cwd', category: 'project', desc: 'dossier courant' },
@@ -1457,7 +1535,7 @@ async function runDeepSearchCli(query) {
     if (r.status < 200 || r.status >= 300 || payload.error) {
       stop();
       if (payload.error === 'offline_mode') console.log(brand('! ') + (payload.message || 'Mode local securise actif : recherche approfondie impossible.'));
-      else if (payload.error === 'browser_unavailable') console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+      else if (payload.error === 'browser_unavailable') console.log(brand('✗ ') + 'Navigateur integre indisponible : ouvrez l application zaalis IDE.');
       else console.log(brand('Erreur ') + (payload.message || payload.error || `HTTP ${r.status}`));
       return;
     }
@@ -1586,18 +1664,20 @@ async function runSlashCommand(ev, me) {
   }
   if (name === 'deep-search') { await runDeepSearchCli(arg); return; }
   if (name === 'search') {
-    if (!arg) { console.log(dim('Usage: /search <requete>')); return; }
+    const external = /^(--externe|--external|--ext)(\s|$)/i.test(arg || '');
+    const query = String(arg || '').replace(/^(--externe|--external|--ext)(\s|$)/i, '').trim();
+    if (!query) { console.log(dim('Usage: /search [--externe] <requete>')); return; }
     try {
-      // zaalis browser est lance automatiquement cote serveur s'il n'est pas
-      // deja ouvert (chemin d'installation fixe, independant d'un raccourci).
-      const r = await authed('GET', `/api/browser-search?q=${encodeURIComponent(arg)}&mode=newtab`);
+      // Par defaut : navigateur integre de l'application zaalis IDE ouverte.
+      // --externe : navigateur par defaut du PC, sur demande explicite.
+      const r = await authed('GET', `/api/browser-search?q=${encodeURIComponent(query)}&mode=newtab${external ? '&external=1' : ''}`);
       const body = r.json || {};
       if (r.status >= 200 && r.status < 300 && !body.error) {
-        console.log(green('OK ') + 'Recherche ouverte dans un nouvel onglet de zaalis browser : ' + arg);
+        console.log(green('OK ') + (external ? 'Recherche ouverte dans le navigateur du PC : ' : 'Recherche ouverte dans le navigateur integre de zaalis IDE : ') + query);
       } else if (body.error === 'offline_mode') {
         console.log(brand('! ') + (body.message || 'Mode local securise actif : recherche impossible.'));
       } else if (body.error === 'browser_unavailable') {
-        console.log(brand('✗ ') + 'zaalis browser est introuvable ou n a pas pu demarrer.');
+        console.log(brand('✗ ') + 'Navigateur integre indisponible : ouvrez l application zaalis IDE, ou utilisez /search --externe.');
       } else {
         console.log(brand('Erreur ') + (body.error || `HTTP ${r.status}`));
       }
@@ -1670,11 +1750,22 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'resume') {
-    const d = restoreConversation();
-    if (!d) { console.log(dim('Aucune session sauvegardee pour ce dossier.')); return; }
-    const when = new Date(d.savedAt || Date.now()).toLocaleString();
-    if (d.model) { session.model = d.model; session.submodel = d.submodel; saveSession(session); }
-    console.log(green('✓ ') + `Session restauree : ${Math.ceil(history.length / 2)} echange(s) (${when}). Modele : ${currentModelLabel()}`);
+    const all = listConversations();
+    if (!all.length) { console.log(dim('Aucune session enregistree.')); return; }
+
+    const query = String(arg || '').trim();
+    // Un numero reprend directement ; un mot filtre ; rien du tout liste.
+    const byNumber = /^\d+$/.test(query) ? all[Number(query) - 1] : null;
+    if (byNumber) { applyConversation(byNumber); return; }
+    if (/^\d+$/.test(query)) { console.log(brand('✗ ') + `Aucune session numero ${query}.`); return; }
+
+    const matches = searchConversations(all, query);
+    if (!matches.length) { console.log(dim(`Aucune session ne correspond a « ${query} ».`)); return; }
+    if (query && matches.length === 1) { applyConversation(matches[0]); return; }
+
+    console.log(query ? `${matches.length} session(s) pour « ${query} » :` : 'Sessions enregistrees :');
+    printConversationList(matches.slice(0, 20));
+    console.log(dim('  /resume <numero> pour reprendre, /resume <mot> pour filtrer.'));
     return;
   }
   if (name === 'export') {
@@ -2484,18 +2575,13 @@ async function main() {
   }
 
   if (cmd === 'ide') {
-    // The GUI is {app}/zaalis (parent of {app}/bin), or the system-wide
-    // /opt/zaalis-ide/zaalis installed by the .deb. Never relaunch the CLI
-    // itself, which is also named zaalis inside bin.
-    const self = process.execPath;
-    const exe = [
-      path.join(APP_DIR, '..', 'zaalis'),
-      path.join(APP_DIR, 'zaalis'),
-      '/opt/zaalis-ide/zaalis',
-      '/usr/bin/zaalis-ide',
-    ].find((p) => { try { return fs.existsSync(p) && p !== self; } catch { return false; } });
+    // The GUI is {app}\zaalis.exe (parent of {app}\bin). Never relaunch the CLI
+    // itself, which is also named zaalis.exe inside bin.
+    const self = process.execPath.toLowerCase();
+    const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
+      .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
     if (exe) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
-    else console.log(brand('✗ ') + 'zaalis (IDE) introuvable.');
+    else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
     return;
   }
 

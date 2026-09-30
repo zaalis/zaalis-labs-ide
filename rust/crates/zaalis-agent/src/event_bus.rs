@@ -103,4 +103,8 @@ impl EventBus {
     pub fn current_sequence(&self) -> u64 {
         self.sequence.load(Ordering::SeqCst)
     }
+
+    pub fn resume_sequence(&self, sequence: u64) {
+        self.sequence.fetch_max(sequence, Ordering::SeqCst);
+    }
 }

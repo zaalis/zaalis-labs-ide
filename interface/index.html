@@ -5,8 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.15">
-    <link rel="stylesheet" href="app.css?v=1.0.15">
+    <link rel="stylesheet" href="base.css?v=1.0.20">
+    <link rel="stylesheet" href="app.css?v=1.0.22">
+    <link rel="stylesheet" href="workspace.css?v=1.1.3">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -212,7 +213,7 @@
 
 
             <!-- User Profile -->
-            <div class="sidebar-profile" id="sidebar-profile">
+            <div class="sidebar-profile" id="sidebar-profile" role="button" tabindex="0" aria-haspopup="true" aria-expanded="false" data-i18n-title="profile-header" title="Profil">
                 <div class="profile-avatar" id="profile-avatar">U</div>
                 <span class="profile-name" id="profile-name">Utilisateur</span>
             </div>
@@ -310,18 +311,26 @@
                 <!-- Model + Sub-model selector -->
                 <div class="model-selector-bar">
                     <select id="ai-model">
-                        <option value="codex">Codex (OpenAI)</option>
-                        <option value="claude">Claude (Anthropic)</option>
-                        <option value="gemini">Gemini (Google)</option>
-                        <option value="grok">Grok (xAI)</option>
-                        <option value="mistral">Mistral (Le Chat)</option>
-                        <option value="kimi">Kimi (Moonshot AI)</option>
-                        <option value="local">Ollama (Local)</option>
-                        <option value="gguf">GGUF (Local)</option>
+                        <optgroup label="Cloud">
+                            <option value="codex">Codex (OpenAI)</option>
+                            <option value="claude">Claude (Anthropic)</option>
+                            <option value="gemini">Gemini (Google)</option>
+                            <option value="grok">Grok (xAI)</option>
+                            <option value="mistral">Mistral (Le Chat)</option>
+                            <option value="kimi">Kimi (Moonshot AI)</option>
+                        </optgroup>
+                        <optgroup label="Local">
+                            <option value="local">Ollama (Local)</option>
+                            <option value="gguf">GGUF (Local)</option>
+                        </optgroup>
+                        <optgroup label="Compatibles OpenAI" id="compat-model-group">
+                            <option value="__compat_add__" data-action="add">Ajouter un fournisseur…</option>
+                        </optgroup>
                     </select>
                     <select id="ai-submodel">
                         <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
                     </select>
+                    <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
                 </div>
 
                 <!-- Token / context meter -->
@@ -754,25 +763,69 @@
                         <div class="key-label-row"><label for="key-moonshot">Moonshot AI (Kimi)</label><span class="key-status" id="key-status-moonshot"></span></div>
                         <input type="password" id="key-moonshot" placeholder="...">
                     </div>
+                    <hr class="settings-separator">
+                    <h3 id="chatgpt-sub-title">Abonnement ChatGPT (Plus / Pro)</h3>
+                    <p class="form-hint">Utilisez les modèles GPT avec votre abonnement ChatGPT plutôt qu’une clé API facturée au token. La connexion se fait sur le site d’OpenAI avec un code : zaalis ne voit jamais votre mot de passe, et la session est chiffrée sur ce PC.</p>
+                    <div class="chatgpt-sub" id="chatgpt-sub">
+                        <div class="settings-status-row"><span>État</span><strong id="chatgpt-sub-status">Non connecté</strong></div>
+                        <div class="chatgpt-sub-actions">
+                            <button class="btn btn-primary" id="chatgpt-sub-connect" type="button">Connecter mon abonnement ChatGPT</button>
+                            <button class="btn btn-ghost" id="chatgpt-sub-disconnect" type="button" hidden>Déconnecter</button>
+                        </div>
+                        <div class="chatgpt-sub-flow" id="chatgpt-sub-flow" hidden>
+                            <p class="chatgpt-sub-step">1. Ouvrez la page de connexion OpenAI et connectez-vous à votre compte ChatGPT.</p>
+                            <p class="chatgpt-sub-step">2. Saisissez ce code :</p>
+                            <div class="chatgpt-sub-code" id="chatgpt-sub-code" aria-live="polite"></div>
+                            <div class="chatgpt-sub-actions">
+                                <button class="btn btn-primary" id="chatgpt-sub-open" type="button">Ouvrir la page OpenAI</button>
+                                <button class="btn btn-ghost" id="chatgpt-sub-copy" type="button">Copier le code</button>
+                                <button class="btn btn-ghost" id="chatgpt-sub-cancel" type="button">Annuler</button>
+                            </div>
+                            <p class="chatgpt-sub-wait"><span class="chatgpt-sub-spinner" aria-hidden="true"></span><span id="chatgpt-sub-wait-text">En attente de validation sur OpenAI…</span></p>
+                        </div>
+                        <p class="chatgpt-sub-error" id="chatgpt-sub-error" role="alert" hidden></p>
+                    </div>
+                    <hr class="settings-separator">
+                    <h3 id="compat-settings-title">Autres fournisseurs (compatibles OpenAI)</h3>
+                    <p class="form-hint">Appel direct depuis ce PC vers le fournisseur choisi. Les clés sont chiffrées localement et ne passent par aucun service tiers. Un fournisseur apparaît dans la liste des modèles dès que sa clé est enregistrée.</p>
+                    <input type="search" id="compat-filter" class="compat-filter" placeholder="Filtrer les fournisseurs…" aria-label="Filtrer les fournisseurs" autocomplete="off" spellcheck="false">
+                    <div id="compat-key-fields" class="compat-key-fields"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
-                    <h3>MCP · Zaalis Brain</h3>
-                    <p class="form-hint">Connexion dédiée au Cerveau local. Le jeton est chiffré sur ce PC et ne sera jamais réaffiché.</p>
-                    <div class="settings-status-row"><span>État</span><strong id="brain-mcp-status">Non configuré</strong></div>
-                    <div class="form-group settings-row-group"><div class="settings-row-copy"><label for="brain-mcp-enabled">Activer Zaalis Brain</label><p>Utilise le Cerveau local dans l’IDE et le CLI.</p></div><label class="zs-switch"><input id="brain-mcp-enabled" type="checkbox"><span class="zs-slider"></span></label></div>
-                    <div class="form-group"><label for="brain-mcp-endpoint">Route MCP locale</label><input id="brain-mcp-endpoint" type="url" placeholder="http://127.0.0.1:39191/mcp/..." spellcheck="false"></div>
-                    <div class="form-group"><label for="brain-mcp-token">Jeton Bearer</label><input id="brain-mcp-token" type="password" placeholder="Coller le jeton à 64 caractères"></div>
+                    <h3>Opale · coffre de notes</h3>
+                    <p class="form-hint">Opale est votre application de notes. Quand elle est présente sur ce PC, elle est reliée automatiquement : l’assistant peut lire, chercher, écrire et réorganiser les notes du coffre ouvert. La connexion est locale : rien ne quitte ce PC.</p>
+                    <div class="opale-link" id="opale-link">
+                        <div class="settings-status-row"><span>État</span><strong id="opale-status">Recherche d’Opale…</strong></div>
+                        <div class="opale-actions">
+                            <button class="btn btn-primary" id="opale-connect" type="button">Relier Opale</button>
+                            <button class="btn btn-ghost" id="opale-open" type="button" hidden>Ouvrir Opale</button>
+                            <button class="btn btn-ghost" id="opale-disconnect" type="button" hidden>Couper le lien</button>
+                        </div>
+                        <p class="opale-error" id="opale-error" role="alert" hidden></p>
+                    </div>
+                    <hr class="settings-separator">
+                    <h3 class="mcp-builtin-title"><img class="mcp-server-logo" src="image/blender.png" alt="" width="22" height="22">Blender</h3>
+                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit la scène ouverte et la modifie grâce à l’add-on MCP officiel de Blender. Tout se passe sur ce PC, et le nécessaire est fourni avec zaalis IDE.</p>
+                    <div class="opale-link" id="blender-link">
+                        <div class="settings-status-row"><span>État</span><strong id="blender-status">Recherche de Blender…</strong></div>
+                        <div class="opale-actions">
+                            <button class="btn btn-primary" id="blender-install" type="button" hidden>Installer</button>
+                            <button class="btn btn-primary" id="blender-connect" type="button" hidden>Activer</button>
+                            <button class="btn btn-ghost" id="blender-open" type="button" hidden>Ouvrir Blender</button>
+                            <button class="btn btn-ghost" id="blender-disconnect" type="button" hidden>Désactiver</button>
+                        </div>
+                        <p class="opale-error" id="blender-error" role="alert" hidden></p>
+                    </div>
                     <hr class="settings-separator">
                     <div class="mcp-personal-toolbar">
                         <h3>MCP personnels</h3>
                         <div class="mcp-personal-actions">
                             <button class="btn btn-ghost mcp-action-btn" id="mcp-import-config" type="button">Importer une config</button>
-                            <button class="btn btn-ghost mcp-action-btn" id="mcp-add-blender" type="button">Blender MCP</button>
                             <button class="btn btn-primary mcp-action-btn" id="mcp-add-personal" type="button">Ajouter</button>
                         </div>
                     </div>
-                    <p class="form-hint">Connectez des serveurs MCP Streamable HTTP comme dans Codex ou Claude. Le jeton est optionnel ; HTTPS est requis sauf pour un serveur local. Importez un fichier JSON compatible ou configurez directement l’URL.</p>
+                    <p class="form-hint">Connectez vos serveurs MCP comme dans Codex ou Claude : un programme local (stdio — <code>npx …</code>, <code>uvx …</code>) ou une URL Streamable HTTP (HTTPS requis sauf pour un serveur local, jeton optionnel). Importez un fichier JSON compatible ou ajoutez-les à la main, puis testez la connexion.</p>
                     <input id="mcp-config-file" type="file" accept="application/json,.json" hidden>
                     <div id="mcp-personal-list" class="mcp-server-list" aria-live="polite"></div>
                 </section>
@@ -880,6 +933,17 @@
                 <section class="settings-card settings-pane" data-settings-pane="models">
                     <h3 data-i18n="settings-models-title">Modèles par défaut</h3>
                     <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-default-permission-select" data-i18n="settings-default-permission-label">Mode de travail par défaut</label>
+                            <p data-i18n="settings-default-permission-hint">Le dernier mode choisi est repris au prochain démarrage et après reconnexion.</p>
+                        </div>
+                        <select id="settings-default-permission-select">
+                            <option value="supervised" data-i18n="perm-supervised">Supervisé</option>
+                            <option value="semi" data-i18n="perm-semi">Semi-auto</option>
+                            <option value="auto" data-i18n="perm-auto">Autonome</option>
+                        </select>
+                    </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-default-chat-select" data-i18n="settings-default-chat-label">Modèle chat par défaut</label>
@@ -1073,10 +1137,10 @@
 </div>
 
 <!-- ========== COMMAND APPROVAL MODAL ========== -->
-<div class="modal-overlay" id="approval-modal">
+<div class="modal-overlay" id="approval-modal" role="dialog" aria-modal="true" aria-labelledby="approval-header">
     <div class="modal modal-sm">
         <div class="modal-header">
-            <h2 data-i18n="approval-header">Validation requise</h2>
+            <h2 id="approval-header" data-i18n="approval-header">Validation requise</h2>
             <button class="modal-close" id="close-approval">&times;</button>
         </div>
         <div class="modal-body">
@@ -1150,6 +1214,36 @@
         <div class="modal-footer">
             <button class="btn btn-ghost" id="confirm-no" type="button">Annuler</button>
             <button class="btn btn-primary" id="confirm-yes" type="button">Confirmer</button>
+        </div>
+    </div>
+</div>
+
+<!-- ========== BLENDER MCP INSTALL ========== -->
+<div class="modal-overlay" id="blender-install-modal" role="dialog" aria-modal="true" aria-labelledby="blender-install-title">
+    <div class="modal blender-install">
+        <div class="modal-header">
+            <h2 id="blender-install-title"><img src="image/blender.png" alt="" width="20" height="20">Installer Blender MCP</h2>
+        </div>
+        <div class="modal-body">
+            <p>zaalis IDE va préparer Blender pour que l’assistant puisse y travailler.</p>
+            <h3>Vérifications</h3>
+            <ul class="blender-checks">
+                <li id="blender-check-version" data-state="pending"><span class="blender-check-mark" aria-hidden="true"></span><span class="blender-check-text">Recherche de Blender…</span></li>
+                <li id="blender-check-closed" data-state="pending"><span class="blender-check-mark" aria-hidden="true"></span><span class="blender-check-text">Blender doit être fermé</span></li>
+            </ul>
+            <h3>Ce qui sera fait dans Blender</h3>
+            <ul class="blender-steps">
+                <li id="blender-step-addon">Installer l’add-on officiel « MCP » de Blender Lab, fourni avec zaalis IDE.</li>
+                <li>Activer cet add-on et son démarrage automatique à l’ouverture de Blender.</li>
+                <li>Activer le réglage « Autoriser l’accès en ligne » de Blender : sans lui, l’add-on ne démarre pas.</li>
+            </ul>
+            <p class="blender-install-warning">Une fois Blender relié, l’assistant peut y exécuter du code Python sans vous demander de confirmation. Enregistrez votre travail avant de lui confier une scène.</p>
+            <label class="blender-consent"><input type="checkbox" id="blender-consent"><span>J’ai compris et j’autorise cette installation.</span></label>
+            <p class="opale-error" id="blender-install-error" role="alert" hidden></p>
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-ghost" id="blender-install-cancel" type="button">Annuler</button>
+            <button class="btn btn-primary" id="blender-install-confirm" type="button" disabled>Installer</button>
         </div>
     </div>
 </div>
@@ -1258,7 +1352,9 @@
 
             <!-- active: QR + url + stop -->
             <div id="remote-active" class="hidden">
-                <div class="remote-qr"><img id="remote-qr-img" alt="QR code de connexion"></div>
+                <div class="remote-qr"><div class="remote-qr-stage" id="remote-qr-stage">
+                    <img id="remote-qr-img" alt="QR code de connexion" width="220" height="220" draggable="false">
+                </div></div>
                 <p class="remote-scan-hint">Scannez ce QR code avec l'appareil photo de votre téléphone.</p>
                 <div class="remote-url-row">
                     <input type="text" id="remote-url" readonly>
@@ -1278,11 +1374,12 @@
 
 <script src="catalog.js?v=1.0.15"></script>
 <script src="help.js?v=1.0.15"></script>
-<script src="script/state.js?v=1.0.15" defer></script>
-<script src="script/ui.js?v=1.0.15" defer></script>
-<script src="script/commands.js?v=1.0.15" defer></script>
-<script src="script/ai.js?v=1.0.15" defer></script>
-<script src="script/remote.js?v=1.0.15" defer></script>
-<script src="script/main.js?v=1.0.15" defer></script>
+<script src="script/state.js?v=1.0.18" defer></script>
+<script src="script/ui.js?v=1.0.18" defer></script>
+<script src="script/commands.js?v=1.0.17" defer></script>
+<script src="script/ai.js?v=1.0.20" defer></script>
+<script src="script/remote.js?v=1.0.17" defer></script>
+<script src="script/main.js?v=1.0.20" defer></script>
+<script src="script/workspace.js?v=1.1.3" defer></script>
 </body>
 </html>

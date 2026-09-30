@@ -1,0 +1,264 @@
+/* Workspace surfaces deliberately share the existing theme tokens. */
+body{--ws-muted:var(--text-1);--ws-ring:var(--accent-hover)}
+body.theme-light{--ws-muted:#555561;--ws-ring:#4f46e5}
+[hidden]{display:none!important}
+.workspace-modes{display:flex;gap:3px;padding:3px;border:1px solid var(--border);border-radius:9px;background:var(--bg-0)}
+.ws-button,.ws-icon-button,.ws-rail-button,.ws-project-toggle,.ws-conversation,.ws-empty-project{font:inherit;min-height:32px;border-radius:6px;color:var(--text-1);transition:background .15s,color .15s}
+.ws-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 10px;border:1px solid var(--border);background:var(--bg-2);text-align:center}
+.workspace-modes .ws-button{border:0;background:transparent;padding:4px 9px;font-size:12px;min-height:28px;white-space:nowrap}
+.workspace-modes .ws-button[aria-pressed="true"]{background:var(--bg-hover);color:var(--text-0)}
+.ws-icon{display:inline-flex;flex:none;align-items:center;justify-content:center}
+.ws-icon-button{display:inline-flex;width:32px;min-width:32px;align-items:center;justify-content:center;padding:6px}
+.ws-icon-button>span:not(.ws-icon){display:none}
+.ws-button:hover,.ws-icon-button:hover,.ws-project-toggle:hover,.ws-conversation:hover,.ws-empty-project:hover{background:var(--bg-hover);color:var(--text-0)}
+.ws-button:disabled{opacity:.5;cursor:wait}
+.workspace-modes button:focus-visible,.workspace-navigation button:focus-visible,.workspace-rail button:focus-visible,.workspace-dock :is(button,select,input,summary):focus-visible,.ws-files-empty button:focus-visible,.ws-dock-splitter:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
+.workspace-navigation{display:flex;flex:1 1 50%;min-height:120px;max-height:62%;flex-direction:column;overflow-y:auto;padding:10px 8px;border-bottom:1px solid var(--border)}
+body:not(.project-open) .workspace-navigation{max-height:none;flex:1}
+.ws-nav-actions{display:flex;align-items:center;gap:5px;padding-bottom:10px;flex:none}
+.ws-nav-actions>.ws-button{flex:1;justify-content:flex-start}
+.ws-project-group{margin-bottom:10px;flex:none}
+.ws-project-heading{display:flex;align-items:center;gap:2px}
+.ws-project-toggle{display:flex;align-items:center;gap:7px;flex:1;min-width:0;padding:6px 5px;text-align:left;font-size:12px;font-weight:600}
+.ws-project-toggle>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws-project-toggle[aria-expanded="false"]{opacity:.8}
+.ws-project-heading>.ws-icon-button{color:var(--ws-muted)}
+.ws-conversation{width:100%;display:flex;align-items:center;gap:8px;min-height:35px;padding:7px 8px 7px 16px;text-align:left;font-size:12px}
+.ws-conversation .ws-icon svg{width:13px;height:13px}
+.ws-conversation>span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws-conversation.active{color:var(--text-0);background:var(--bg-hover)}
+.ws-conversation-row{display:flex;align-items:center;gap:4px;min-width:0;position:relative;border-radius:7px;}
+.ws-conversation-row>.ws-conversation,.ws-conversation-row>.dropdown-chat-item{flex:1;min-width:0;}
+.ws-conversation-row .ws-conversation>span:last-child{flex:1;}
+.conversation-menu{position:relative;flex:none;color:var(--text-2);}
+.conversation-menu>summary{display:flex;align-items:center;justify-content:center;list-style:none;width:28px;height:30px;border-radius:6px;cursor:pointer;}
+.conversation-menu>summary::-webkit-details-marker{display:none;}
+.conversation-menu>summary:hover,.conversation-menu[open]>summary{background:var(--bg-hover);color:var(--text-0);}
+.conversation-menu-delete{position:absolute;right:0;top:100%;z-index:10;min-width:168px;padding:11px 14px;border:1px solid var(--border);border-radius:8px;background:var(--bg-2);color:var(--red);box-shadow:0 8px 24px rgba(0,0,0,.25);text-align:left;white-space:nowrap;}
+.conversation-menu-delete:hover{background:var(--bg-hover);}
+.ws-conversation-row:last-child .conversation-menu-delete{top:auto;bottom:100%;}
+.conversation-menu :is(summary,button):focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px;}
+.ws-empty-project{display:block;padding:4px 10px 4px 17px;font-size:11px;line-height:1.6;color:var(--ws-muted);text-align:left}
+#sidebar-conversations-section,#sidebar-splitter{display:none!important}
+#sidebar-stack{min-height:120px}
+body:not(.project-open) #sidebar-stack{display:none}
+#sidebar-files-section{flex:1;min-height:0}
+/* Desktop-only, like the other rail-collapse rules below: at <=900px #sidebar
+   is the mobile drawer and always shows its full content (see the
+   "RESPONSIVE BREAKPOINTS" section further down). */
+@media (min-width:901px){#sidebar.collapsed .workspace-navigation{display:none}}
+/* The dock overlay (below) is position:absolute; anchor it to #workspace
+   itself (not the viewport) so it lands under the topbar instead of over it. */
+#workspace{position:relative}
+.workspace-rail{display:flex;flex:none;flex-direction:column;align-items:center;width:48px;padding:6px 4px;gap:6px;background:var(--bg-1);border-left:1px solid var(--border);z-index:2}
+.ws-rail-button{width:38px;min-height:40px;display:flex;align-items:center;justify-content:center;position:relative}
+.ws-rail-button>span:not(.ws-icon){display:none}
+.ws-rail-button:hover,.ws-rail-button[aria-expanded="true"]{color:var(--text-0);background:var(--bg-hover)}
+.ws-rail-button[aria-expanded="true"]::before{content:"";position:absolute;left:-4px;top:9px;bottom:9px;width:2px;background:var(--accent-hover);border-radius:3px}
+.workspace-dock{display:flex;flex:none;flex-direction:column;min-width:300px;max-width:50vw;background:var(--bg-1);overflow:hidden;border-left:1px solid var(--border)}
+.ws-dock-head{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:42px;padding:4px 12px;border-bottom:1px solid var(--border);flex:none}
+.ws-dock-head strong{font-size:12px;font-weight:600}
+.ws-pane{display:flex;flex-direction:column;flex:1;min-height:0;min-width:0;overflow:auto}
+.ws-dock-splitter{width:5px;flex:none;background:var(--bg-0);cursor:col-resize;touch-action:none}
+.ws-dock-splitter:hover,.ws-dock-splitter:focus{background:var(--accent-muted)}
+.ws-pane-files #editor-panel{width:100%;min-width:0;flex:1}
+.ws-files-heading{padding:12px 16px;margin:0;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-2);overflow-wrap:anywhere}
+.ws-dock-file-tree{padding:8px 0;overflow:auto;flex:1}
+.ws-dock-file-tree .tree-item{min-height:32px;display:flex;align-items:center;cursor:pointer}
+.ws-dock-file-tree .tree-item:hover{background:var(--bg-hover)}
+.ws-pane-terminal .integrated-terminal{position:static;width:100%;height:100%;flex:1;min-height:0;border:0;border-radius:0;box-shadow:none}
+.ws-pane-terminal .integrated-terminal header{min-height:38px;background:var(--bg-2);color:var(--text-0)}
+.ws-pane-terminal .integrated-terminal header span{color:var(--text-1)}
+.ws-empty-state{display:flex;flex-direction:column;align-items:flex-start;gap:12px;padding:28px 24px;color:var(--ws-muted);font-size:13px;line-height:1.6}
+.ws-empty-state h3{font-weight:600;font-size:16px;color:var(--text-0)}
+.ws-empty-state>.ws-icon{color:var(--accent-hover)}
+.ws-browser-host{position:relative;flex:1;min-height:0;background:var(--bg-1)}
+.ws-browser-form{display:flex;flex-direction:column;width:100%;gap:10px}
+.ws-browser-form input,.ws-select{background:var(--bg-2);color:var(--text-0);border:1px solid var(--border);border-radius:6px;padding:7px 9px;min-height:32px;font:inherit;min-width:0}
+.ws-artifact{padding:16px;margin:12px 12px 0;border:1px solid var(--border);border-radius:10px;background:var(--bg-0);overflow-wrap:anywhere}
+.ws-artifact h3{margin:7px 0;font-size:14px;font-weight:500}
+.ws-artifact .ws-button{margin-top:12px}
+.ws-path,.ws-meta{font-size:11px;color:var(--ws-muted);line-height:1.6;overflow-wrap:anywhere}
+.ws-eyebrow{color:var(--ws-muted);text-transform:uppercase;letter-spacing:.08em;font-size:10px}
+.ws-artifact-image{max-width:100%;height:auto;display:block;margin-top:10px}
+.ws-agent-run{border-bottom:1px solid var(--border);padding:12px}
+.ws-agent-run summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer;min-height:32px}
+.ws-agent-run summary strong{font-size:12px;overflow-wrap:anywhere}
+.ws-agent-status{font-size:11px;flex:none;padding:3px 6px;border-radius:5px;background:var(--bg-3);color:var(--text-1)}
+.ws-status-running{color:var(--accent-hover)}
+.ws-status-failed,.ws-error{color:var(--red)}
+.ws-agent-run>p,.ws-agent-run>.ws-button{margin-top:10px}
+.ws-agent-report{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.6 var(--font-sans);margin-top:10px;color:var(--text-1)}
+.ws-other-label{padding:16px 12px 6px;color:var(--text-1);font-size:12px}
+.ws-pane-chat>.ws-select,.ws-pane-chat>.ws-button{margin:0 12px 12px;flex:none}
+.ws-other-messages{padding:0 12px 16px;overflow:auto}
+.ws-other-message{padding:14px 0;border-bottom:1px solid var(--border);font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere}
+.ws-other-message strong{display:block;color:var(--ws-muted);font-size:11px;margin-bottom:8px}
+.ws-other-user{color:var(--text-1)}
+/* Left sidebar: project files (with the project switcher) or conversations. */
+.ws-sidebar-title{display:none;flex:1;min-width:0;padding:0 8px;font-size:12px;font-weight:600;color:var(--text-0);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+body[data-sidebar-view="chats"] #project-btn,body[data-sidebar-view="chats"] #project-dropdown,body[data-sidebar-view="chats"] #sidebar-stack{display:none!important}
+body[data-sidebar-view="chats"] .ws-sidebar-title{display:block}
+body[data-sidebar-view="chats"] .workspace-navigation{flex:1;max-height:none;border-bottom:0}
+body[data-sidebar-view="files"] .workspace-navigation{display:none}
+.ws-files-empty{display:none;flex:1;min-height:0;overflow-y:auto;flex-direction:column;align-items:stretch;gap:6px;padding:16px 10px}
+body[data-sidebar-view="files"]:not(.project-open) .ws-files-empty{display:flex}
+.ws-files-empty-title{padding:0 4px 4px;font-size:12px;color:var(--ws-muted)}
+.ws-files-empty>.ws-button{justify-content:flex-start}
+.ws-files-empty-label{margin-top:12px;padding:0 4px;font-size:10.5px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--text-3)}
+.ws-files-empty .ws-conversation{padding-left:8px}
+.ws-view-switch{display:flex;align-items:center;gap:8px;flex:none;margin:6px 8px;padding:6px 10px;min-height:30px;border:1px solid var(--border-subtle);border-radius:8px;background:transparent;color:var(--ws-muted);font:inherit;font-size:11.5px;text-align:left;transition:background .15s,color .15s,border-color .15s}
+.ws-view-switch .ws-icon svg{width:14px;height:14px}
+.ws-view-switch:hover{background:var(--bg-hover);color:var(--text-0);border-color:var(--border)}
+.ws-view-switch:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
+/* Rail-collapse styling for these only applies on desktop widths: below
+   901px #sidebar is the mobile drawer and always shows its full content,
+   even if it was left "collapsed" from an earlier desktop width. */
+@media (min-width:901px){
+    #sidebar.collapsed .ws-sidebar-title,#sidebar.collapsed .ws-files-empty{display:none!important}
+    #sidebar.collapsed .ws-view-switch{justify-content:center;margin:6px 4px;padding:6px 0;border-color:transparent}
+    #sidebar.collapsed .ws-view-switch>span:not(.ws-icon){display:none}
+}
+
+/* Reasoning: one vertical control beside the AI panel or chat composer. */
+#ai-panel{margin-left:0!important}
+#reasoning-slider-bar{display:flex;width:46px;height:184px;padding:12px 4px;border-color:var(--border-subtle);border-radius:13px;background:var(--bg-1);box-shadow:0 8px 24px rgba(0,0,0,.2)}
+#reasoning-slider-bar:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
+#reasoning-slider-bar .slider-track{top:28px;bottom:28px}
+#reasoning-slider-bar .slider-notch{font-size:9px;letter-spacing:.015em}
+#reasoning-slider-bar .slider-handle{width:13px;height:13px}
+#reasoning-slider-bar .reasoning-tooltip{right:52px;background:var(--bg-2);border:1px solid var(--border);color:var(--text-1);box-shadow:0 8px 20px rgba(0,0,0,.25)}
+#reasoning-slider-bar .reasoning-tooltip::after{border-color:transparent transparent transparent var(--bg-2)}
+body[data-workspace-mode="chat"] #reasoning-slider-bar{left:auto;right:-56px;bottom:0}
+.ws-composer-meta{display:flex;align-items:center;gap:2px;min-width:0}
+.ws-composer-meta{flex:0 1 auto}
+.ws-composer-meta .token-meter{padding:0 6px 0 2px;gap:6px;cursor:default}
+.ws-composer-meta .token-bar{flex:none;width:36px}
+.ws-composer-meta .model-selector-bar{padding:0;border:0;gap:0;z-index:auto;min-width:0}
+.ws-composer-meta .custom-select-container{flex:0 1 auto;min-width:0}
+.ws-composer-meta .custom-select-trigger{height:26px;max-width:170px;padding:3px 7px;border:0;border-radius:7px;background:transparent}
+.ws-composer-meta .custom-select-trigger:hover{background:var(--bg-hover)}
+.ws-composer-meta .custom-select-options{left:auto;right:0;bottom:32px}
+.gguf-install-shortcut{font:inherit;font-size:11px;color:var(--accent-hover);background:transparent;border:0;padding:4px 7px;border-radius:6px;white-space:nowrap;cursor:pointer}
+.gguf-install-shortcut:hover{background:var(--bg-hover)}
+.gguf-install-shortcut:focus-visible{outline:2px solid var(--ws-ring);outline-offset:2px}
+
+/* Chat IDE: one centred column shared by every message and the composer. */
+body[data-workspace-mode="chat"]{--ws-column:780px;--ws-user-bubble:color-mix(in srgb,var(--accent) 28%,var(--bg-2))}
+body[data-workspace-mode="chat"] #workspace{display:flex}
+body[data-workspace-mode="chat"] #ai-panel{flex:1;min-width:300px;width:auto!important;border-left:0;background:var(--bg-0)}
+body[data-workspace-mode="chat"] #resizer-right{display:none}
+body[data-workspace-mode="chat"] .ai-panel-header{background:var(--bg-0);min-height:44px;padding:0 18px}
+body[data-workspace-mode="chat"] :is(.chat-messages,.agents-log){padding:28px max(24px,calc((100% - var(--ws-column))/2)) 24px;gap:24px;font-size:14px;line-height:1.65}
+body[data-workspace-mode="chat"] :is(.chat-messages,.agents-log)>.msg:not(.msg-system){width:100%;max-width:100%;align-self:stretch}
+body[data-workspace-mode="chat"] :is(.chat-messages,.agents-log)>.msg-user{align-items:flex-end}
+body[data-workspace-mode="chat"] .msg-user>.msg-label{display:none}
+body[data-workspace-mode="chat"] .msg-user>.msg-body{max-width:min(78%,620px);padding:10px 16px;border:0;border-radius:18px;background:var(--ws-user-bubble);color:var(--text-0);font-size:14px;line-height:1.55}
+body[data-workspace-mode="chat"] .msg-ai>.msg-label{margin-bottom:8px}
+body[data-workspace-mode="chat"] .msg-ai>.msg-body{width:100%;padding:0;border:0;border-radius:0;background:transparent;color:var(--text-0);font-size:14px;line-height:1.7}
+body[data-workspace-mode="chat"] .msg-ai>.msg-body.error{padding:10px 14px;border:1px solid rgba(239,68,68,.25);border-radius:10px;background:rgba(239,68,68,.06)}
+body[data-workspace-mode="chat"] .msg-ai details.reasoning{margin-bottom:14px;padding:0 0 10px;border-left:0;border-bottom:1px solid var(--border-subtle)}
+body[data-workspace-mode="chat"] .msg-ai details.reasoning>summary{font-size:13px;color:var(--ws-muted)}
+body[data-workspace-mode="chat"] .msg-ai details.reasoning .reasoning-chevron{transform:rotate(-90deg)}
+body[data-workspace-mode="chat"] .msg-ai details.reasoning[open] .reasoning-chevron{transform:rotate(0)}
+body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px);max-width:var(--ws-column);margin:0 auto 18px;padding:10px 12px 8px;border-radius:16px;background:var(--bg-2);container-type:inline-size}
+body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area textarea{min-height:44px;font-size:14px}
+body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 48px);max-width:var(--ws-column);margin-left:auto;margin-right:auto}
+body[data-workspace-mode="chat"] .chat-input-bottom-right{min-width:0}
+@container (max-width:620px){.ws-composer-meta .token-text{display:none}.ws-composer-meta .custom-select-trigger{max-width:120px}}
+@container (max-width:480px){.ws-composer-meta .token-meter,.ws-composer-meta .custom-select-container:first-child{display:none}}
+body[data-workspace-mode="editor"] .chat-input-area{container-type:inline-size}
+/* Narrow composer: the controls may wrap, but only when they really do not fit.
+   Chat mode carries the model selectors in the right group, so there it takes
+   its own row; in editor mode it is just mic + send and stays on the same line
+   as the attach / permission / PC-control buttons. */
+@container (max-width:400px){.chat-input-bottom{flex-wrap:wrap;gap:6px}.chat-input-bottom-right{margin-left:auto;justify-content:flex-end}body[data-workspace-mode="chat"] .chat-input-bottom-right{flex:1 1 100%}}
+/* Editor mode, narrower still: the permission button keeps its icon and chevron, its label
+   stays available to assistive tech, and everything holds on one line. */
+@container (max-width:268px){body[data-workspace-mode="editor"] .chat-input-bottom .mode-select-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}}
+body[data-workspace-mode="chat"] .chat-history,body[data-workspace-mode="editor"] .chat-history{display:none!important}
+.ws-mobile-menu{display:none}
+
+/* ============================================================
+   RESPONSIVE BREAKPOINTS — single source of truth for the sidebar,
+   the right-hand dock and the editor/AI panel layout. Each block only
+   changes what differs from the desktop default declared above it;
+   states compound as the viewport narrows (a 500px window matches
+   every block down to and including "tiny"). Do not add a competing
+   media query elsewhere for these elements — extend the matching
+   block here instead.
+
+   ≥1201px  desktop — dock is docked inline, resizable via the splitter.
+   901–1200 medium  — the dock becomes a floating overlay drawer.
+   581–900  small   — the sidebar itself becomes a drawer too.
+   ≤580     tiny    — one main panel at a time (editor/AI panel stack).
+
+   Z-index scale (kept flat and explicit on purpose):
+     2   workspace-rail (normal flow, always visible)
+     20  workspace-dock overlay (medium and below)
+     25  sidebar mobile drawer (small and below — above the dock overlay)
+     50  dropdowns/popups (project switcher, profile, model picker)
+     90  reasoning slider / composer bars
+     100+ modals (settings, catalog, help, confirm... all .modal-overlay)
+     9999 toasts
+   The native browser surface (WebView2) is a separate OS window painted
+   above every DOM layer regardless of CSS z-index, so it cannot be put
+   "under" a modal with CSS: script/workspace.js hides it instead
+   whenever a drawer or modal would otherwise sit on top of it. */
+
+@media(max-width:1200px){
+    /* ---- medium: dock overlay ---- */
+    .workspace-dock:not([hidden]){position:absolute;right:48px;top:0;bottom:0;width:min(420px,calc(100% - 48px));min-width:280px;max-width:none;z-index:20;box-shadow:-12px 0 32px rgba(0,0,0,.3)}
+    .ws-dock-splitter{display:none!important}
+    #sidebar{width:215px;min-width:180px}
+    .topbar-label-btn span{display:none}
+    body[data-workspace-mode="editor"] #ai-panel{width:340px;min-width:280px}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,
+    body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 32px)}
+    body[data-workspace-mode="chat"] .chat-messages{padding-left:max(16px,calc((100% - var(--ws-column))/2));padding-right:max(16px,calc((100% - var(--ws-column))/2))}
+}
+@media(max-width:1100px){
+    body[data-workspace-mode="chat"] .chat-input-bottom-right{flex-wrap:wrap;justify-content:flex-end;row-gap:6px}
+    body[data-workspace-mode="chat"] .ws-composer-meta{flex:1 1 100%}
+}
+@media(max-width:900px){
+    /* ---- small: the sidebar becomes a drawer too ---- */
+    #sidebar{position:absolute;left:0;top:0;bottom:0;width:270px!important;min-width:0!important;z-index:25;box-shadow:10px 0 35px rgba(0,0,0,.25);display:none!important}
+    body.ws-mobile-navigation #sidebar{display:flex!important}
+    #resizer-left,#resizer-right{display:none!important}
+    .ws-mobile-menu{display:inline-flex}
+    .ws-mobile-menu>span:not(.ws-icon){display:none}
+    .topbar-left{gap:6px}
+    .logo>span{display:none}
+    #topbar{padding:0 8px;height:46px}
+    .topbar-center{display:none}
+    .topbar-right{gap:4px}
+    .workspace-dock:not([hidden]){right:48px;width:min(500px,calc(100% - 48px));min-width:0}
+    .workspace-rail{margin-left:auto}
+    #reasoning-slider-bar{transform:scale(.9);transform-origin:left center}
+    body[data-workspace-mode="chat"] #ai-panel{min-width:0;flex:1;width:0!important;max-height:none;height:auto}
+    body[data-workspace-mode="editor"] #editor-panel{min-width:0;flex:1}
+    body[data-workspace-mode="editor"] #ai-panel{width:42%;min-width:240px;max-height:none;height:auto}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{margin-bottom:12px}
+    .workspace-modes .ws-button{font-size:11px;padding:4px 7px}
+}
+@media(max-width:580px){
+    /* ---- tiny: one main panel at a time ---- */
+    body[data-workspace-mode="editor"] #workspace{flex-wrap:wrap!important}
+    body[data-workspace-mode="editor"] #editor-panel{height:42%;flex:1 1 calc(100% - 48px)}
+    body[data-workspace-mode="editor"] #ai-panel{height:58%;width:calc(100% - 48px);flex:1 1 calc(100% - 48px);min-width:0}
+    body[data-workspace-mode="editor"] .workspace-rail{position:absolute;right:0;top:0;bottom:0}
+    body[data-workspace-mode="editor"] .workspace-dock #editor-panel{height:100%}
+    .workspace-modes .ws-icon{display:none}
+    #catalog-btn,#help-btn,#lang-select{display:none}
+    body[data-workspace-mode="chat"] .chat-messages{padding:16px 12px}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area,
+    body[data-workspace-mode="chat"] #chat-attachments{width:calc(100% - 20px)}
+    body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{padding:8px}
+    body[data-workspace-mode="chat"] #chat-input{font-size:16px}
+    .workspace-dock .ws-dock-head{min-height:44px}
+    .ws-conversation,.ws-project-toggle,.ws-rail-button{min-height:44px}
+}
+@media(prefers-reduced-motion:reduce){.workspace-modes *, .workspace-navigation *, .workspace-dock *, .workspace-rail *{transition:none!important;animation:none!important}}
+/* Keep space for the separate reasoning rail at every viewport width. */
+body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px)}

@@ -148,7 +148,7 @@ try:
    role=node.getRoleName()
    name='' if role=='password text' else (node.name or '')
    if ext.width>0 and ext.height>0:
-    nodes.append({'role':role,'title':name[:240],'frame':{'x':ext.x,'y':ext.y,'width':ext.width,'height':ext.height},'enabled':state.contains(pyatspi.STATE_ENABLED),'offscreen':not state.contains(pyatspi.STATE_SHOWING),'secure':role=='password text'})
+    nodes.append({'role':role,'title':name[:240],'frame':{'x':ext.x,'y':ext.y,'width':ext.width,'height':ext.height},'enabled':state.contains(pyatspi.STATE_ENABLED),'offscreen':not state.contains(pyatspi.STATE_SHOWING),'secure':role=='password text','focused':state.contains(pyatspi.STATE_FOCUSED)})
   except Exception: pass
   try:
    for child in node: walk(child,depth+1)
@@ -305,7 +305,7 @@ def draw_overlay(widget, cr):
  w=widget.get_allocated_width(); h=widget.get_allocated_height()
  d=wave(12.0)
  cr.save(); cr.translate(.03*w*d, -.02*h*d); cr.translate(w/2,h/2); cr.scale(1+.06*d,1+.06*d); cr.translate(-w/2,-h/2)
- mist(cr, .95*w, 1.01*h, .456*w, .479*h, (.400,.176,.824,.28))
+ # Only the activity border is drawn; the mist halo was removed.
  cr.restore()
  # Bordure = halo « setAiControlBorder » du navigateur zaalis, en violet et
  # deux fois plus epais : un degrade horizontal qui DEFILE (repete deux fois sur
@@ -382,12 +382,49 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         return { ok: hasDesktop && hasInput && hasCapture && hasAtSpi, accessibility: hasDesktop && hasInput && hasAtSpi, screenRecording: hasDesktop && hasCapture, platform: 'linux', session: process.env.XDG_SESSION_TYPE || '' };
       }
       if (!hasInput) throw new Error('xdotool-not-installed');
+      if (['click', 'double_click', 'key', 'type'].includes(action.action)) {
+        let ui;
+        try { ui = await accessibility(400); }
+        catch { return { ok: false, error: 'accessibility-unavailable' }; }
+        const focused = (ui.elements || []).find(e => e.focused);
+        if (action.action === 'type' && focused?.secure) return { ok: false, error: 'password-field' };
+        const candidates = ['click', 'double_click'].includes(action.action)
+          ? (ui.elements || []).filter(e => !e.offscreen && action.x >= e.frame.x && action.y >= e.frame.y && action.x <= e.frame.x + e.frame.width && action.y <= e.frame.y + e.frame.height)
+          : ['enter', 'return', 'space', ' '].includes(String(action.key || '').toLowerCase()) && focused ? [focused] : [];
+        if (action.guard) {
+          const pattern = new RegExp(action.guard, 'iu');
+          const sensitive = candidates.find(e => pattern.test(e.title || ''));
+          if (sensitive) return { ok: false, error: 'sensitive-target', target: sensitive.title };
+        }
+      }
       publish(action);
       if (action.action === 'move') { await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y))]); return { ok: true }; }
-      if (action.action === 'click') { await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y)), 'click', action.button === 'right' ? '3' : '1']); return { ok: true }; }
+      if (action.action === 'click' || action.action === 'double_click') {
+        const modifiers = (action.modifiers || []).map(m => ({ command: 'super', cmd: 'super', control: 'ctrl', option: 'alt', opt: 'alt', meta: 'super', win: 'super', windows: 'super' }[m] || m));
+        try {
+          for (const mod of modifiers) await run('xdotool', ['keydown', mod]);
+          await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y)), 'click', '--repeat', action.action === 'double_click' ? '2' : '1', '--delay', '80', action.button === 'right' ? '3' : action.button === 'middle' ? '2' : '1']);
+        } finally { for (const mod of modifiers) await run('xdotool', ['keyup', mod]).catch(() => {}); }
+        return { ok: true };
+      }
+      if (action.action === 'drag') {
+        await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y)), 'mousedown', '1']);
+        try {
+          const steps = Math.max(6, Math.round((action.duration || 0.5) * 60));
+          for (let i = 1; i <= steps; i++) {
+            const t = i / steps;
+            await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x + (action.to_x - action.x) * t)), String(Math.round(action.y + (action.to_y - action.y) * t))]);
+          }
+        } finally { await run('xdotool', ['mouseup', '1']); }
+        return { ok: true };
+      }
       if (action.action === 'scroll') {
-        const button = action.dy > 0 ? '4' : '5', count = Math.max(1, Math.min(40, Math.abs(Number(action.dy) || 1)));
-        await run('xdotool', ['click', '--repeat', String(count), '--delay', '20', button]); return { ok: true };
+        if (action.x != null && action.y != null) await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y))]);
+        for (const [value, positive, negative] of [[action.dy, '4', '5'], [action.dx, '7', '6']]) {
+          if (!Number(value)) continue;
+          await run('xdotool', ['click', '--repeat', String(Math.min(40, Math.abs(Math.round(value)))), '--delay', '20', value > 0 ? positive : negative]);
+        }
+        return { ok: true };
       }
       if (action.action === 'type') {
         const xclip = await commandPath(['xclip']);
@@ -497,7 +534,16 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
           try { result.ui = await accessibility(action.max_elements || 220); result.ui.focusedWindow = win.frame; }
           catch (error) { result.uiError = error.detail || error.message; }
         }
-        if (capture) safeUnlink(capture.file);
+        if (capture) {
+          try {
+            const [width, height] = String(await run('identify', ['-format', '%w %h', capture.file])).trim().split(/\s+/).map(Number);
+            result.image_width = width; result.image_height = height;
+            result.capture ||= { x: 0, y: 0, width, height };
+            const ox = result.capture.x || 0, oy = result.capture.y || 0;
+            if (result.ui) result.ui.elements = result.ui.elements.map(e => ({ ...e, frame: [e.frame.x - ox, e.frame.y - oy, e.frame.width, e.frame.height], center: [e.frame.x - ox + e.frame.width / 2, e.frame.y - oy + e.frame.height / 2] }));
+            if (result.ocr) result.ocr = result.ocr.map(e => ({ text: e.text, frame: [e.x - ox, e.y - oy, e.width, e.height] }));
+          } finally { safeUnlink(capture.file); }
+        }
         return result;
       }
       throw new Error(`unsupported-action:${action.action}`);

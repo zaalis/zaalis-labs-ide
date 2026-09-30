@@ -36,6 +36,10 @@ where wsl >nul 2>nul
 if errorlevel 1 goto :nowsl
 for /f "delims=" %%I in ('wsl wslpath -a "%CD%"') do set "WSL_ROOT=%%I"
 
+echo Building native local speech engine...
+wsl -e sh "%WSL_ROOT%/native/build_whisper.sh"
+if errorlevel 1 goto :failed
+
 echo [4/9] Building Linux node-pty native runtime...
 wsl -e sh "%WSL_ROOT%/native/build_linux_node_pty.sh" "%WSL_ROOT%"
 if errorlevel 1 goto :failed

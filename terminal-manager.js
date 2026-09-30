@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const path = require('path');
 const fs = require('fs');
+const { sanitize } = require('./secrets-mask');
 
 // A native PTY addon must never prevent the IDE from starting.  In a packaged
 // build it is loaded only when the user opens the integrated terminal, so a
@@ -29,7 +30,12 @@ function ptyModule() {
     const packagedModule = process.pkg && path.join(path.dirname(process.execPath), 'node_modules', 'node-pty');
     pty = packagedModule ? dynamicRequire(packagedModule) : dynamicRequire('node-pty');
   }
-  catch (error) { ptyLoadError = error; }
+  catch (error) {
+    if (!process.pkg && process.platform === 'linux') {
+      try { pty = dynamicRequire(path.join(__dirname, 'native', 'dist-linux-server', 'node_modules', 'node-pty')); }
+      catch (nativeError) { ptyLoadError = nativeError; }
+    } else ptyLoadError = error;
+  }
   return pty;
 }
 
@@ -149,11 +155,22 @@ class TerminalManager {
     return this.create({ userId, cwd });
   }
 
-  snapshot(session) { return { id: session.id, cwd: session.cwd, closed: session.closed, output: session.buffer, profile: session.profile.id, origin: session.origin }; }
+  // Le masquage s'applique ici et dans `runCommand`, pas sur l'événement
+  // `data` : un chunk PTY coupe un jeton en plein milieu et découpe les
+  // séquences ANSI, donc masquer par chunk raterait la moitié des secrets tout
+  // en cassant le rendu.  Ces deux points-là voient toujours un texte complet.
+  snapshot(session) { return { id: session.id, cwd: session.cwd, closed: session.closed, output: sanitize(session.buffer), profile: session.profile.id, origin: session.origin }; }
 
   write(session, data) { if (session.closed) throw new Error('Terminal fermé.'); session.proc.write(String(data || '')); }
   resize(session, cols, rows) { if (!session.closed) session.proc.resize(Math.max(20, Math.min(320, Number(cols) || 100)), Math.max(5, Math.min(120, Number(rows) || 26))); }
-  close(session) { if (!session || session.closed) return; session.closed = true; try { session.proc.kill(); } catch {} this.sessions.delete(session.id); }
+  close(session) {
+    if (!session) return;
+    session.closed = true;
+    this.sessions.delete(session.id);
+    // onExit marks a session closed before the PTY addon has necessarily
+    // disposed its pipes. Always release the native PTY handle as well.
+    try { session.proc.kill(); } catch {}
+  }
 
   async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
     const session = this.latest(userId, cwd);
@@ -173,7 +190,8 @@ class TerminalManager {
     });
     const raw = session.buffer.slice(before);
     const match = raw.match(new RegExp(`${marker}:(\\d+)`));
-    return { session, output: raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
+    const output = raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024);
+    return { session, output: sanitize(output), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
   }
 }
 

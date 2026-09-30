@@ -28,7 +28,7 @@ Version: $VERSION
 Section: devel
 Priority: optional
 Architecture: amd64
-Depends: ca-certificates, curl, xdg-utils, procps, pkexec | policykit-1, xdotool, xclip, imagemagick, gnome-screenshot, tesseract-ocr, python3, python3-gi, python3-pyatspi, gir1.2-gtk-3.0, zenity, libgtk-3-0 | libgtk-3-0t64, libnss3, libnspr4, libxss1, libasound2 | libasound2t64, libatk-bridge2.0-0 | libatk-bridge2.0-0t64, libatspi2.0-0 | libatspi2.0-0t64, libdrm2, libgbm1, libxkbcommon0, libxcomposite1, libxdamage1, libxfixes3, libxrandr2, libxtst6, libpango-1.0-0, libcairo2, libx11-6, libx11-xcb1, libxcb1, libxcb-dri3-0, libxext6, libdbus-1-3, libexpat1, libfontconfig1, libglib2.0-0, libnotify4, libsecret-1-0, libuuid1
+Depends: libc6 (>= 2.39), libstdc++6 (>= 13.1), libgomp1, ca-certificates, curl, xdg-utils, procps, pkexec | policykit-1, xdotool, xclip, imagemagick, gnome-screenshot, tesseract-ocr, python3, python3-gi, python3-pyatspi, gir1.2-gtk-3.0, zenity, libgtk-3-0 | libgtk-3-0t64, libnss3, libnspr4, libxss1, libasound2 | libasound2t64, libatk-bridge2.0-0 | libatk-bridge2.0-0t64, libatspi2.0-0 | libatspi2.0-0t64, libdrm2, libgbm1, libxkbcommon0, libxcomposite1, libxdamage1, libxfixes3, libxrandr2, libxtst6, libpango-1.0-0, libcairo2, libx11-6, libx11-xcb1, libxcb1, libxcb-dri3-0, libxext6, libdbus-1-3, libexpat1, libfontconfig1, libglib2.0-0, libnotify4, libsecret-1-0, libuuid1
 Maintainer: zaalis
 Description: zaalis IDE
  zaalis IDE packaged as a local Electron desktop app with its local server and command line helper.
@@ -38,6 +38,7 @@ cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/usr/bin/env sh
 set -e
 chmod +x /opt/zaalis-ide/zaalis-ide /opt/zaalis-ide/chrome_crashpad_handler /opt/zaalis-ide/resources/app/bundle/zaalis-server /opt/zaalis-ide/resources/app/bundle/bin/zaalis /opt/zaalis-ide/resources/app/bundle/zaalis-agentd /usr/local/bin/zaalis 2>/dev/null || true
+chmod +x /opt/zaalis-ide/resources/app/bundle/whisper/whisper-cli 2>/dev/null || true
 chmod +x /opt/zaalis-ide/resources/app/bundle/zaalis-sandbox 2>/dev/null || true
 if [ -f /opt/zaalis-ide/chrome-sandbox ]; then
   chmod 4755 /opt/zaalis-ide/chrome-sandbox 2>/dev/null || true
@@ -80,6 +81,7 @@ chmod 755 "$PKG/DEBIAN/postinst" \
   "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-server" \
   "$PKG/opt/zaalis-ide/resources/app/bundle/bin/zaalis" \
   "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-agentd"
+chmod 755 "$PKG/opt/zaalis-ide/resources/app/bundle/whisper/whisper-cli"
 # Bac a sable strict : optionnel, absent d'une build faite sans cargo.
 if [ -f "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-sandbox" ]; then
   chmod 755 "$PKG/opt/zaalis-ide/resources/app/bundle/zaalis-sandbox"

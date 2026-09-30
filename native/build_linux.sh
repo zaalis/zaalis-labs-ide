@@ -38,6 +38,8 @@ npm install
 echo "[2/8] Verification de l'encodage des sources..."
 npm run check:mojibake
 
+sh "$ROOT/native/build_whisper.sh"
+
 echo "[3/8] Empaquetage du serveur -> $SERVERDIST/zaalis-server ..."
 npx pkg . --no-bytecode --public --public-packages "*" --targets node22-linux-x64 \
   --output "$SERVERDIST/zaalis-server"

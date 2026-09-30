@@ -44,8 +44,8 @@ window.HELP_TOPICS = [
     a: "GGUF est un format de fichier qui contient un mod?le d'IA pr?t ? tourner sur ton ordinateur. zaalis embarque son propre moteur (llama.cpp) : tu t?l?charges un seul fichier .gguf et il tourne directement, SANS avoir besoin d'installer Ollama. C'est totalement s?par? d'Ollama ? deux moteurs ind?pendants : ? Ollama ? pour les mod?les Ollama, ? GGUF ? pour les fichiers .gguf locaux. Avantage : l?ger, priv?, gratuit, et tu choisis exactement le fichier et sa quantization (Q4, Q6, Q8?)."
   },
   {
-    q: "C'est quoi Vulkan, ROCm et CPU (acc?l?ration GPU) ?",
-    a: "Ce sont les fa?ons dont le moteur GGUF peut calculer sous Linux. Vulkan utilise le GPU (NVIDIA, Intel ou AMD) pour acc?l?rer les r?ponses. ROCm est pr?f?r? sur les cartes AMD quand son runtime est install?. CPU calcule uniquement avec le processeur, ce qui marche partout mais reste plus lent. Auto d?tecte la meilleure variante, puis repasse en CPU si le moteur GPU ne d?marre pas."
+    q: "C'est quoi Metal et CPU (acc?l?ration GPU) ?",
+    a: "Ce sont les deux fa?ons dont le moteur GGUF peut calculer sur macOS. Metal utilise le GPU Apple pour acc?l?rer les r?ponses. CPU calcule uniquement avec le processeur, ce qui marche partout mais reste plus lent. Auto choisit Metal sur macOS, puis repasse en CPU si le moteur Metal ne d?marre pas."
   },
   {
     q: "Comment installer un mod?le local ?",

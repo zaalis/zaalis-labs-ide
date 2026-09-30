@@ -16,7 +16,7 @@ const state = {
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
         ggufModels: [],        // installed local GGUF files (llama.cpp engine)
         ggufVariant: '',       // '' = auto-detect (cuda / vulkan / cpu)
-        terminalProfile: 'cmd', // shell used only by the terminal opened from the UI
+        terminalProfile: '', // shell used only by the terminal opened from the UI
         catalogTarget: 'gguf',
         // ----- Appearance -----
         theme: 'dark',         // 'dark' | 'light'
@@ -25,6 +25,7 @@ const state = {
         // ----- Default models -----
         defaultAgentModel: 'codex',     // agents lead model preselected
         defaultReasoning: 0,            // 0 = MIN, 1 = MED, 2 = MAX
+        defaultPermissionMode: 'supervised', // last chosen permission mode
         // ----- Project -----
         defaultProjectFolder: '',       // starting folder for the picker
         reopenLastProject: false,       // reopen last project automatically on launch
@@ -90,6 +91,14 @@ const PROVIDER_NAMES = { codex: 'OpenAI', claude: 'Anthropic', gemini: 'Google',
 // A short, honest identity line injected into the system prompt so the model
 // can answer "which model are you?" accurately instead of dodging the question.
 function modelIdentity(model, submodel, lang) {
+    if (String(model || '').startsWith('compat:')) {
+        // Gateways (OpenRouter, NIM…) host models from many makers: name the
+        // model and the provider it goes through, nothing more.
+        const via = (window.compatProviders || []).find(p => `compat:${p.id}` === model)?.label || model.slice(7);
+        return lang === 'en'
+            ? `\n\n[IDENTITY] You are the model "${submodel}", reached through ${via} inside zaalis IDE. If the user asks which model you are, answer honestly: "${submodel}". Never claim to be a different model.`
+            : `\n\n[IDENTITÉ] Tu es le modèle « ${submodel} », utilisé via ${via} dans l'IDE zaalis. Si l'utilisateur demande quel modèle tu es, réponds honnêtement : « ${submodel} ». Ne prétends jamais être un autre modèle.`;
+    }
     const isLocal = model === 'local' || model === 'gguf';
     const label = isLocal
         ? (typeof prettyModelLabel === 'function' ? prettyModelLabel(submodel) : submodel) || submodel
@@ -356,6 +365,8 @@ const TRANSLATIONS = {
         'settings-default-agent-hint': 'Modèle chef de projet présélectionné en mode Agents.',
         'settings-default-reasoning-label': 'Effort de raisonnement par défaut',
         'settings-default-reasoning-hint': 'Niveau de réflexion appliqué au démarrage (modèles compatibles).',
+        'settings-default-permission-label': 'Mode de travail par défaut',
+        'settings-default-permission-hint': 'Le dernier mode choisi est repris au prochain démarrage et après reconnexion.',
         'settings-reasoning-min': 'Minimal',
         'settings-reasoning-med': 'Moyen',
         'settings-reasoning-max': 'Maximal',
@@ -465,7 +476,12 @@ const TRANSLATIONS = {
         'recent-project-empty': "Aucun projet recent",
         'history-no-project': 'Aucun projet',
         'history-new-here': 'Nouveau chat ici',
-        'default-username': 'Utilisateur'
+        'default-username': 'Utilisateur',
+        'ws-fork-conversation': 'Nouvelle conversation depuis celle-ci',
+        'ws-fork-title-prefix': 'Suite — ',
+        'ws-fork-system-message': 'Nouvelle conversation issue de : {title}',
+        'ws-fork-disabled-agents': 'Le fork n’est disponible que pour les conversations de chat, pas pour les sessions d’agents.',
+        'ws-fork-disabled-none': 'Sélectionnez une conversation à consulter pour pouvoir la dériver.'
     },
     en: {
         'agent-mode-label': 'Agent Mode',
@@ -566,6 +582,8 @@ const TRANSLATIONS = {
         'settings-default-agent-hint': 'Lead model preselected in Agents mode.',
         'settings-default-reasoning-label': 'Default reasoning effort',
         'settings-default-reasoning-hint': 'Thinking level applied at startup (compatible models).',
+        'settings-default-permission-label': 'Default working mode',
+        'settings-default-permission-hint': 'The last selected mode is restored at startup and after signing in.',
         'settings-reasoning-min': 'Minimal',
         'settings-reasoning-med': 'Medium',
         'settings-reasoning-max': 'Maximal',
@@ -675,7 +693,12 @@ const TRANSLATIONS = {
         'recent-project-empty': 'No recent projects',
         'history-no-project': 'No project',
         'history-new-here': 'New chat here',
-        'default-username': 'User'
+        'default-username': 'User',
+        'ws-fork-conversation': 'New conversation from this one',
+        'ws-fork-title-prefix': 'Follow-up — ',
+        'ws-fork-system-message': 'New conversation branched from: {title}',
+        'ws-fork-disabled-agents': 'Forking is only available for chat conversations, not agent sessions.',
+        'ws-fork-disabled-none': 'Select a conversation to read before branching it.'
     }
 };
 
@@ -1294,6 +1317,9 @@ function loadState() {
                 }
                 const { keys, ...safeConfig } = s.config;
                 Object.assign(state.config, safeConfig);
+                if (['supervised', 'semi', 'auto'].includes(state.config.defaultPermissionMode)) {
+                    state.permissionMode = state.config.defaultPermissionMode;
+                }
             }
             if (s.profile) Object.assign(state.profile, s.profile);
             state.config.ggufCtx = clampGgufCtx(state.config.ggufCtx);

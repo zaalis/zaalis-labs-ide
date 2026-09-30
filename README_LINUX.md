@@ -15,7 +15,7 @@ Build depuis Windows (via WSL) :
 native\build_linux.bat
 ```
 
-Prerequis : Node.js 22+, Rust 1.90+, `dpkg-deb`, `tar`.
+Prerequis : Node.js 22+, Rust 1.90+, `dpkg-deb`, `tar`, `curl`, CMake et un compilateur C/C++.
 
 Sorties :
 
@@ -80,3 +80,5 @@ Les modeles GGUF passent par llama.cpp, telecharge a la demande dans
 AMD), `cpu` en dernier recours et en repli automatique. llama.cpp ne publie pas
 de binaire CUDA pour Linux : une variante `cuda` heritee d'une configuration
 Windows retombe sur Vulkan.
+
+Le paquet du 30 septembre 2026 a ete compile sur Ubuntu 24.04 x64 et demande glibc 2.39 minimum. Le controle de bureau utilise X11/XWayland et AT-SPI ; une session Wayland stricte doit etre validee separement.

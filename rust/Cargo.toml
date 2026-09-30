@@ -4,7 +4,9 @@ members = [
     "crates/zaalis-core",
     "crates/zaalis-fs",
     "crates/zaalis-guard",
+    "crates/zaalis-hardening",
     "crates/zaalis-git",
+    "crates/zaalis-netpolicy",
     "crates/zaalis-exec",
     "crates/zaalis-checkpoint",
     "crates/zaalis-store",
@@ -15,6 +17,7 @@ members = [
     "crates/zaalis-providers",
     "crates/zaalis-protocol",
     "crates/zaalis-sandbox-helper",
+    "crates/zaalis-secrets",
     "crates/zaalis-tools",
 ]
 
@@ -32,13 +35,16 @@ zaalis-core = { path = "crates/zaalis-core" }
 zaalis-protocol = { path = "crates/zaalis-protocol" }
 zaalis-fs = { path = "crates/zaalis-fs" }
 zaalis-guard = { path = "crates/zaalis-guard" }
+zaalis-hardening = { path = "crates/zaalis-hardening" }
 zaalis-git = { path = "crates/zaalis-git" }
+zaalis-netpolicy = { path = "crates/zaalis-netpolicy" }
 zaalis-exec = { path = "crates/zaalis-exec" }
 zaalis-checkpoint = { path = "crates/zaalis-checkpoint" }
 zaalis-store = { path = "crates/zaalis-store" }
 zaalis-agent = { path = "crates/zaalis-agent" }
 zaalis-extensions = { path = "crates/zaalis-extensions" }
 zaalis-providers = { path = "crates/zaalis-providers" }
+zaalis-secrets = { path = "crates/zaalis-secrets" }
 zaalis-tools = { path = "crates/zaalis-tools" }
 
 # External. Kept deliberately small: a dependency has to earn its place.

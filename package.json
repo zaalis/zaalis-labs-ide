@@ -15,7 +15,10 @@
   },
   "pkg": {
     "assets": [
-      "interface/**/*"
+      "interface/**/*",
+      "zaalis-browser/app/interface/**/*",
+      "zaalis-browser/app/assets/**/*",
+      "zaalis-browser/app/UPSTREAM.json"
     ]
   },
   "keywords": [],

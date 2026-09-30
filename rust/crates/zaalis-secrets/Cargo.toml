@@ -1,0 +1,14 @@
+[package]
+name = "zaalis-secrets"
+description = "Secret detection and masking for every byte zaalis shows a model, a log or a user."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[lints]
+workspace = true
