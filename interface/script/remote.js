@@ -22,11 +22,6 @@
     let working = false;
     const qrStage = $('#remote-qr-stage');
     const qrImage = $('#remote-qr-img');
-    function revealQR() {
-        qrStage.classList.remove('revealing');
-        requestAnimationFrame(() => { if (!activeView.classList.contains('hidden')) qrStage.classList.add('revealing'); });
-    }
-    qrImage.addEventListener('load', revealQR);
     // Mist under the pointer while it moves over the code.
     let lastMist = 0;
     qrStage.addEventListener('pointermove', event => {
@@ -71,7 +66,6 @@
         if (dot) dot.classList.toggle('on', !!active);
     }
     function showIdle() {
-        qrStage.classList.remove('revealing');
         idleView.classList.remove('hidden');
         activeView.classList.add('hidden');
         genBtn.classList.remove('hidden');
@@ -83,9 +77,7 @@
         genBtn.classList.add('hidden');
         stopBtn.classList.remove('hidden');
         if (data) {
-            qrStage.classList.remove('revealing');
             qrImage.src = data.qr || '';
-            if (qrImage.complete && qrImage.naturalWidth) revealQR();
             $('#remote-url').value = data.url || '';
         }
     }
