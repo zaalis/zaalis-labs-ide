@@ -52,6 +52,10 @@ if exist dist\blender rmdir /S /Q dist\blender
 xcopy "blender\*" "dist\blender\" /E /Y /I /Q >nul
 if errorlevel 1 goto :failed
 
+REM --- Stage the verified offline Linux VM pack ---
+powershell -NoProfile -ExecutionPolicy Bypass -File ..\scripts\prepare-vm-assets.ps1
+if errorlevel 1 goto :failed
+
 echo.
 echo Done. The ready-to-run app is in native\dist\
 echo   ( zaalis.exe + zaalis-server.exe + pickfolder.exe + cloudflared.exe + interface\ + whisper\ + blender\ )

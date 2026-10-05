@@ -4,6 +4,7 @@ const SETTINGS_SECTION_TITLES = {
     general: 'settings-general-title',
     api: 'settings-api-keys-title',
     mcp: 'MCP',
+    vm: 'Machines virtuelles',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
     hardware: 'settings-hardware-title',
@@ -24,9 +25,10 @@ function setSettingsSection(section) {
     const title = $('#settings-active-title');
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
-        if (key === 'mcp') title.removeAttribute('data-i18n');
+        if (key === 'mcp' || key === 'vm') title.removeAttribute('data-i18n');
         else title.dataset.i18n = i18nKey;
         title.textContent = TRANSLATIONS[state.language || 'fr']?.[i18nKey] || i18nKey;
+        if (key === 'vm') window.ZaalisVM?.settings();
     }
 }
 

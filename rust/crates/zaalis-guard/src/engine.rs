@@ -377,6 +377,12 @@ impl Guard {
             };
         }
 
+        // VM commands have a separate capability, no host executable/path/UAC.
+        // This mode is always autonomous, without widening host permissions.
+        if request.kind == AccessKind::Sandbox && request.tool == "vm" {
+            return Decision::Allow { reason: DecisionReason::PolicyAllow };
+        }
+
         // 6a. Network: an outbound fetch to an external host confirms once per
         //     host in the confirming modes; a search query (no URL host) and
         //     the automatic modes go straight through. So `web_search` never
@@ -599,6 +605,18 @@ fn compile(pattern: &str) -> Option<GlobMatcher> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vm_is_autonomous_without_granting_host_execution() {
+        let mut guard = Guard::new();
+        let permissions = PermissionSet::new(PermissionMode::Supervised);
+        let vm = AccessRequest::new(agent(), "vm", AccessKind::Sandbox).with_target("VM : exec");
+        assert!(guard.evaluate(&vm, &permissions, 0).is_allow());
+        let host = AccessRequest::new(agent(), "run", AccessKind::Execute).with_target("npm test");
+        assert!(matches!(guard.evaluate(&host, &permissions, 0).decision, Decision::Ask { .. }));
+        let plan = PermissionSet::new(PermissionMode::Plan);
+        assert!(matches!(guard.evaluate(&vm, &plan, 0).decision, Decision::Deny { .. }));
+    }
 
     fn agent() -> AgentId {
         AgentId::from_raw("agt_test")

@@ -63,6 +63,8 @@ Source: "dist\cloudflared.exe";   DestDir: "{app}"; Flags: ignoreversion
 ; snapshot pkg, il doit rester sur le disque a cote de zaalis-server.exe.
 Source: "dist\node_modules\node-pty\*"; DestDir: "{app}\node_modules\node-pty"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "dist\interface\*";       DestDir: "{app}\interface"; Flags: ignoreversion recursesubdirs createallsubdirs
+; Integrated Linux guest and QEMU are ordinary files, not inside pkg's snapshot.
+Source: "dist\vm\*"; DestDir: "{app}\vm"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; whisper.cpp : moteur local de dictee vocale (le modele est telecharge a part,
 ; dans le dossier de donnees, a la premiere utilisation).
 Source: "dist\whisper\*";         DestDir: "{app}\whisper"; Flags: ignoreversion recursesubdirs createallsubdirs

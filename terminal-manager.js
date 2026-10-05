@@ -123,10 +123,17 @@ class TerminalManager {
   }
 
   create({ userId, cwd, profileId, origin = 'agent' }) {
+    const profile = this.profile(profileId);
+    return this.createExternal({ userId, cwd, shell: profile.shell, args: profile.args, label: profile.id, origin });
+  }
+
+  // Only trusted server-side backends may supply an executable. No HTTP route
+  // exposes these arguments; VM terminals use a fixed SSH client command.
+  createExternal({ userId, cwd, shell, args, label, origin = 'vm' }) {
     const ptyRuntime = ptyModule();
     if (!ptyRuntime) throw new Error(`Terminal intégré indisponible : ${ptyLoadError && ptyLoadError.message ? ptyLoadError.message : 'module natif non chargé'}`);
     const id = crypto.randomUUID();
-    const profile = this.profile(profileId);
+    const profile = { id: label, shell, args };
     const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, env: { ...process.env, TERM: 'xterm-256color' } });
     let readyResolve = null;
     const session = { id, userId, cwd, proc, profile, origin, buffer: '', events: new EventEmitter(), closed: false, ready: new Promise((resolve) => { readyResolve = resolve; }) };

@@ -14,6 +14,7 @@
         files: '<path d="M3 7h7l2 2h9v11H3zM3 7V4h7l2 3"/>',
         browser: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c5 5 5 13 0 18-5-5-5-13 0-18"/>',
         terminal: '<path d="m4 6 6 6-6 6M12 18h8"/>',
+        vm: '<rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5m-5-9 3-3-3-3m6 6h4"/>',
         artifacts: '<path d="m12 3 9 5-9 5-9-5zM3 8v9l9 5 9-5V8M12 13v9"/>',
         agents: '<circle cx="8" cy="8" r="3"/><path d="M2 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M17 15a5 5 0 0 1 5 5"/>',
         chat: '<path d="M21 15a3 3 0 0 1-3 3H8l-5 4V6a3 3 0 0 1 3-3h12a3 3 0 0 1 3 3z"/>',
@@ -40,7 +41,7 @@
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('zaalis-workspace') || '{}'); } catch {}
     let mode = saved.mode === 'chat' ? 'chat' : 'editor';
-    let panel = ['files', 'browser', 'terminal', 'artifacts', 'agents', 'chat'].includes(saved.panel) ? saved.panel : null;
+    let panel = ['files', 'browser', 'terminal', 'vm', 'artifacts', 'agents', 'chat'].includes(saved.panel) ? saved.panel : null;
     let width = Math.max(300, Math.min(760, Number(saved.width) || 420));
     // The left sidebar shows either the project files or the conversations.
     // Each layout keeps its own choice: files for the editor, chats for Chat IDE.
@@ -96,6 +97,7 @@
     rail.setAttribute('aria-label', text('Outils de travail', 'Workspace tools'));
     const panelLabels = {
         files: text('Fichiers', 'Files'), browser: 'zaalis browser', terminal: 'Terminal',
+        vm: text('Machines virtuelles', 'Virtual machines'),
         artifacts: text('Artefacts', 'Artifacts'), agents: text('Activité des agents', 'Agent activity'), chat: text('Autre chat', 'Another chat'),
     };
     for (const name of Object.keys(panelLabels)) {
@@ -198,6 +200,7 @@
             else openIntegratedTerminal().catch(showError);
         }
         if (panel === 'artifacts') renderArtifacts();
+        if (panel === 'vm') window.ZaalisVM?.open(panes.vm);
         if (panel === 'agents') renderAgents();
         if (panel === 'chat') renderOtherChat();
     }
@@ -206,6 +209,7 @@
         dock.hidden = !visiblePanel;
         splitter.hidden = !visiblePanel;
         dockTitle.textContent = panelLabels[visiblePanel] || '';
+        if (visiblePanel === 'vm' && !panes.vm.childElementCount) window.ZaalisVM?.open(panes.vm);
         Object.entries(panes).forEach(([name, pane]) => { pane.hidden = name !== visiblePanel; railButtons[name].setAttribute('aria-expanded', String(name === visiblePanel)); });
         if (visiblePanel === 'terminal') { panes.terminal.append(terminal); terminal.classList.remove('hidden'); }
         else if (terminal.parentElement === panes.terminal) { terminalAnchor.after(terminal); terminal.classList.add('hidden'); }

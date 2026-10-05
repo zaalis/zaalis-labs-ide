@@ -20,6 +20,9 @@ native/installer/
 native/packages/*.zip
 # Third-party tunnel binary (vendored locally; already bundled in the installer)
 native/cloudflared.exe
+native/vm/downloads/
+native/vm/qemu/
+native/vm/images/
 
 # Local tooling / unrelated checkouts (never ship in the product repo)
 .claude/

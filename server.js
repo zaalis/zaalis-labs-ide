@@ -74,6 +74,8 @@ function resolveDataDir() {
   return path.join(APP_DIR, 'server-data');
 }
 const DATA_DIR = resolveDataDir();
+const { VmManager } = require('./vm-manager');
+const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
@@ -612,6 +614,17 @@ app.post('/api/internal/rust-workspace', (req, res) => {
   } catch (error) { return res.status(400).json({ error: error.message }); }
 });
 
+// Same per-agent capability as workspace, with a fixed VM-only action surface.
+// No activation/UAC, host executable, or arbitrary host path is exposed to AI.
+app.post('/api/internal/rust-vm', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte VM invalide.' });
+  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.projectRoot)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+
 // Blender's MCP server, served by this process for the Rust core only: the
 // agent's `mcp` calls to server "blender" arrive here and are relayed to the
 // add-on running inside Blender. The token is random, per launch, memory-only.
@@ -787,6 +800,32 @@ app.get('/api/config', (req, res) => {
 // ---------------------------------------------------------------------------
 // Sessions are scoped to a logged-in user and bound to the project folder that
 // user selected.  Never exposed to the phone remote or the browser bridge.
+app.use('/api/vm', (req, res, next) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'VM réservées au desktop.' });
+  next();
+});
+app.get('/api/vm', async (req, res) => {
+  try { res.json({ capabilities: await vmManager.capabilities(), machines: vmManager.list(req.user.id) }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/vm/action', async (req, res) => {
+  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, req.body?.action === 'import_project' ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/vm/activate-sandbox', async (req, res) => {
+  try { res.json(await vmManager.activate()); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/vm/activate-linux', async (req,res) => {
+  try { res.json(await vmManager.activate('linux')); } catch(error){res.status(400).json({error:error.message});}
+});
+app.post('/api/vm/:id/terminal', async (req, res) => {
+  try { res.json(await vmManager.terminal(vmManager.get(req.params.id, req.user.id), terminalManager)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.get('/api/vm/:id/artifacts/:artifact', (req,res) => {
+  try { const session=vmManager.get(req.params.id,req.user.id); const artifact=session.artifacts?.find(item=>item.id===req.params.artifact); if(!artifact)return res.status(404).json({error:'Résultat inconnu.'}); res.download(artifact.path,artifact.name); }
+  catch(error){res.status(400).json({error:error.message});}
+});
 app.post('/api/terminal/sessions', (req, res) => {
   try {
     if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
@@ -3041,7 +3080,7 @@ app.post('/api/rust-core/decision', async (req, res) => {
 // The agent's browser tool exists only where the integrated browser does: in
 // the desktop app, never for the phone remote.
 function browserToolConfig(req) {
-  if (req.isMobile || req.isTunnel || !browserHost.available()) return {};
+  if (req.isMobile || req.isBrowser || req.isTunnel || !browserHost.available()) return {};
   return { browserEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-browser`, browserToken: BROWSER_TOOL_TOKEN };
 }
 
@@ -3810,8 +3849,9 @@ const server = app.listen(PORT, () => {
 // is replaced once we listen, so each one has to terminate explicitly.
 process.on('exit', unpublishCodestraleBridge);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
-  process.on(signal, () => {
+  process.on(signal, async () => {
     unpublishCodestraleBridge();
+    await vmManager.shutdown(terminalManager);
     process.exit(0);
   });
 }
