@@ -105,6 +105,7 @@ class AgentdClient {
     if (runtimeConfig && runtimeConfig.browserToken) env.ZAALIS_BROWSER_TOOL_TOKEN = String(runtimeConfig.browserToken);
     if (runtimeConfig && runtimeConfig.workspaceEndpoint) env.ZAALIS_WORKSPACE_ENDPOINT = String(runtimeConfig.workspaceEndpoint);
     if (runtimeConfig && runtimeConfig.workspaceToken) env.ZAALIS_WORKSPACE_TOKEN = String(runtimeConfig.workspaceToken);
+    env.ZAALIS_GITHUB_READ_ONLY = runtimeConfig?.githubReadOnly ? '1' : '0';
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -200,7 +201,9 @@ class AgentdClient {
 }
 
 class RustAgentBridge {
-  constructor({ baseDir, dataDir, enabled = true }) {
+  constructor({ baseDir, dataDir, enabled = true, memory, laboratory }) {
+    this.memory = memory;
+    this.laboratory = laboratory;
     this.baseDir = baseDir;
     this.dataDir = dataDir;
     this.enabled = !!enabled;
@@ -241,7 +244,39 @@ class RustAgentBridge {
     return client;
   }
 
+  async usage(userId, keys, from, to) {
+    const existing=this.clients.get(userId);
+    return (existing ? existing.client : this._client(userId, keys)).request("usage.query", { from_ms: from, to_ms: to });
+  }
+
   async run(options, onEvent) {
+    const problem = options.message;
+    let remembered = '', memoryError = '', incomplete = false;
+    try {
+      if (this.memory) {
+        if (this.laboratory) this.memory.importLaboratory(options.userId, this.laboratory);
+        remembered = this.memory.recall(options.userId, options.root, problem);
+      }
+    } catch (error) { memoryError = error.message; }
+    // Added to this turn, including resumed sessions; never to a provider key.
+    const result = await this._run({ ...options, message: remembered ? remembered + '\nDEMANDE ACTUELLE :\n' + problem : problem }, event => {
+      const frame = event.event;
+      if (event.type === 'rust_event' && (['provider_error', 'agent_failed'].includes(frame?.type) || (frame?.type === 'agent_completed' && frame.report?.partial_reason) ||
+          (frame?.type === 'agent_state_changed' && ['failed', 'cancelled', 'partial'].includes(frame.state)))) incomplete = true;
+      if (onEvent) onEvent(event);
+    });
+    try {
+      if (this.memory) {
+        if (this.laboratory) this.memory.importLaboratory(options.userId, this.laboratory);
+        const saved = this.memory.capture(options.userId, options.root, problem, incomplete ? { ...result, error: result.error || 'Tour incomplet' } : result, options.signal?.aborted);
+        if (saved) result.memorySaved = { id: saved.id, status: saved.status };
+      }
+    } catch (error) { memoryError = error.message; }
+    if (memoryError) result.memoryWarning = memoryError;
+    return result;
+  }
+
+  async _run(options, onEvent) {
     const client = this._client(options.userId, options.keys, options.mcpServers, options.runtimeConfig);
     const create = {
       root: options.root,
@@ -252,6 +287,7 @@ class RustAgentBridge {
         .map((item) => ({ role: item.role, content: String(item.content || '') })),
       ...(options.systemPrompt ? { system_prompt: String(options.systemPrompt).slice(0, 200000) } : {}),
     };
+    if (options.budget) create.budget = options.budget;
     if (options.team) create.agents = options.team;
     else create.model = { provider: options.model, model: options.submodel || undefined,
       reasoning: options.reasoningLevel || 0, ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}) };
@@ -274,6 +310,11 @@ class RustAgentBridge {
         if (!/introuvable|not found|fermée|closed/i.test(String(error.message || ''))) throw error;
       }
     }
+    // A resumed daemon keeps its previous permission set. Starting a fresh
+    // session when the selector changed prevents an old Auto grant from
+    // silently overriding a newly selected Plan or Supervised mode.
+    if (made?.resumed && !options.team &&
+        made.agents?.[0]?.permissions?.mode !== create.permission_mode) made = null;
     if (!made) made = await client.request('session.create', create);
     const sessionId = made.session_id;
     onEvent({ type: 'run_started', runId: sessionId, sessionId, conversationId: options.conversationId || null, resumed: !!made.resumed });
@@ -311,7 +352,7 @@ class RustAgentBridge {
       if (frame.type === EVENTS.TOOL_COMPLETED) {
         const original = startedTools.get(String(frame.call_id)) || {};
         const outcome = frame.outcome || {};
-        const result = { tool: original.tool || 'outil', input: original.input || {}, summary: outcome.summary || outcome.status || 'termine', text: outcome.result ? JSON.stringify(outcome.result) : (outcome.message || ''), error: outcome.status === 'error', blocked: outcome.status === 'denied' };
+        const result = { agentId: agent, tool: original.tool || 'outil', input: original.input || {}, summary: outcome.summary || outcome.status || 'termine', text: outcome.result ? JSON.stringify(outcome.result) : (outcome.message || ''), error: outcome.status === 'error', blocked: outcome.status === 'denied' };
         toolResults.push(result);
         onEvent({ type: 'tool_done', id: frame.call_id, ...result });
       }
@@ -338,6 +379,8 @@ class RustAgentBridge {
         usage: usage ? {
           input: usage.input_tokens,
           output: usage.output_tokens,
+          cached: usage.cached_tokens || 0,
+          reasoning: usage.reasoning_tokens || 0,
           toolCalls: usage.tool_calls || 0,
           rounds: usage.rounds || 0,
           webQueries: usage.web_queries || 0,

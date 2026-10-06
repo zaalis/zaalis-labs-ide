@@ -403,7 +403,9 @@ fn default_agentd_path() -> PathBuf {
             })
         })
     });
-    sibling.filter(|path| path.exists()).unwrap_or_else(|| {
+    sibling.as_ref().filter(|path| path.exists()).cloned()
+        .or_else(|| sibling.as_ref().and_then(|path| path.parent()?.parent().map(|parent| parent.join(path.file_name().unwrap()))).filter(|path| path.exists()))
+        .unwrap_or_else(|| {
         PathBuf::from(if cfg!(windows) {
             "zaalis-agentd.exe"
         } else {

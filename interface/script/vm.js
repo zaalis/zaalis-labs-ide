@@ -26,7 +26,8 @@
     resetButton=button('Repartir propre',async()=>{const r=await action({action:'reset',id:activeId});activeId=r.machine.id;await refresh();});
     const exportButton=button('Récupérer un fichier',async()=>{const path=window.prompt('Chemin complet du fichier dans la VM (32 Mo maximum)');if(path){await action({action:'export_file',id:activeId,path});await refresh();}});
     importButton.disabled=stopButton.disabled=resetButton.disabled=true;
-    actions.append(importButton,stopButton,resetButton,exportButton); consoleNode=node('div','vm-console');results=node('div','vm-results');
+    const templateButton=button('Figer cet environnement Linux',async()=>{const result=await action({action:'save_template',id:activeId});status.textContent='Environnement réutilisable : '+result.template.id;await refresh();});
+    actions.append(importButton,stopButton,resetButton,exportButton,templateButton); consoleNode=node('div','vm-console');results=node('div','vm-results');
     const details=node('details','vm-activity'); details.append(node('summary','','Activité de l’agent et démarrage')); activity=node('pre','vm-log'); details.append(activity);
     pane.append(controls,tabs,status,actions,consoleNode,results,details);
     terminal=new Terminal({fontFamily:'Consolas, monospace',fontSize:13,cursorBlink:true,convertEol:true,scrollback:5000,theme:{background:'#111216',foreground:'#eeeeef'}});
@@ -89,6 +90,9 @@
         if(name==='Linux intégré') {card.append(node('p','',`Accélération Windows : ${c.linux.accelerationEnabled?'activée':'désactivée'} · client SSH : ${c.linux.sshAvailable?'présent':'absent'}.`));if(c.linux.compatible&&(!c.linux.accelerationEnabled||!c.linux.sshAvailable))card.append(button('Activer les composants Linux',async()=>{const value=await api('/api/vm/activate-linux',{});await settings();if(value.restartNeeded)target.append(node('p','','Redémarrez Windows pour activer l’accélération Linux.'));}));}
         target.append(card);
       }
+      const templates=await api('/api/vm/action',{action:'templates'});
+      if(templates.templates.length){const card=node('article');card.append(node('h4','','Environnements Linux préparés'));for(const t of templates.templates)card.append(node('p','',`${t.name} · ${(t.bytes/1024/1024).toFixed(0)} Mo · templateId : ${t.id}`));target.append(card);}
+      await window.ZaalisLaboratory?.mount(target);
       target.append(node('p','','Les VM sont autonomes. Le projet est copié sur demande ; vos fichiers locaux restent séparés. Aucun dossier personnel ni presse-papiers n’est partagé. Windows : console PowerShell persistante, sans applications interactives en plein écran.'));
     } catch(e) {target.textContent=e.message;}
   }

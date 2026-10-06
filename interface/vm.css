@@ -14,6 +14,7 @@
 .vm-activity { border-top:1px solid var(--border-color,#34343a); }
 .vm-activity summary { padding:10px 16px; cursor:pointer; font-size:13px; }
 .vm-settings { display:grid; gap:16px; }
+.vm-settings-intro { margin:0 0 20px; line-height:1.6; }
 .vm-settings article { padding:16px; border:1px solid var(--border-color,#45454b); border-radius:12px; }
 .vm-settings h4 { margin:0 0 8px; }
 .vm-settings p { line-height:1.6; }

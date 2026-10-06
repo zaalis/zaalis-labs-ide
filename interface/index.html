@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.20">
+    <link rel="stylesheet" href="base.css?v=1.0.22">
     <link rel="stylesheet" href="app.css?v=1.0.22">
-    <link rel="stylesheet" href="workspace.css?v=1.1.3">
+    <link rel="stylesheet" href="workspace.css?v=1.1.4">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -326,6 +326,9 @@
                         <optgroup label="Compatibles OpenAI" id="compat-model-group">
                             <option value="__compat_add__" data-action="add">Ajouter un fournisseur…</option>
                         </optgroup>
+                        <optgroup label="Compatibles abonnement" id="subscription-model-group">
+                            <option value="__subscription_add__" data-action="subscription">Connecter un abonnement…</option>
+                        </optgroup>
                     </select>
                     <select id="ai-submodel">
                         <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
@@ -361,6 +364,11 @@
                                     <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
                                 </button>
                                 <div class="mode-dropdown" id="chat-mode-menu">
+                                    <button type="button" class="mode-item" data-perm="plan">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="m2 6 1 1 2-2m-3 7 1 1 2-2m-3 7 1 1 2-2"/></svg>
+                                        <span class="mode-item-title" data-i18n="perm-plan">Plan</span>
+                                        <span class="mode-item-desc" data-i18n="perm-plan-title">Préparer un plan, puis demander votre accord</span>
+                                    </button>
                                     <button type="button" class="mode-item active" data-perm="supervised">
                                         <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
@@ -587,6 +595,11 @@
                                     <svg class="chevron" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
                                 </button>
                                 <div class="mode-dropdown" id="agents-mode-menu">
+                                    <button type="button" class="mode-item" data-perm="plan">
+                                        <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="m2 6 1 1 2-2m-3 7 1 1 2-2m-3 7 1 1 2-2"/></svg>
+                                        <span class="mode-item-title" data-i18n="perm-plan">Plan</span>
+                                        <span class="mode-item-desc" data-i18n="perm-plan-title">Préparer un plan, puis demander votre accord</span>
+                                    </button>
                                     <button type="button" class="mode-item active" data-perm="supervised">
                                         <svg class="mode-item-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
                                         <span class="mode-item-title" data-i18n="perm-supervised">Supervisé</span>
@@ -680,6 +693,8 @@
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
                 <span>Machines virtuelles</span>
             </button>
+            <button class="settings-nav-item" type="button" data-settings-section="integrations"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 3v5M16 3v5M5 8h14v3a7 7 0 0 1-14 0zM12 18v4"/></svg><span>Intégrations</span></button>
+            <button class="settings-nav-item" type="button" data-settings-section="tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-8"/></svg><span>Tokens</span></button>
             <button class="settings-nav-item" type="button" data-settings-section="project">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 <span data-i18n="settings-project-title">Projet</span>
@@ -704,9 +719,11 @@
             </div>
             <div class="modal-body settings-body">
             <div class="settings-stack">
+                <section class="settings-card settings-pane" data-settings-pane="tokens"><div id="tokens-content"></div></section>
+                <section class="settings-card settings-pane" data-settings-pane="integrations"><h3>Intégrations</h3><div id="integrations-content"></div></section>
                 <section class="settings-card settings-pane" data-settings-pane="vm">
                     <h3>Machines virtuelles</h3>
-                    <p>Un terminal pour vous, une API directe pour les agents. L’exécution dans les VM est autonome.</p>
+                    <p class="vm-settings-intro">Un terminal pour vous, une API directe pour les agents. L’exécution dans les VM est autonome.</p>
                     <div id="vm-settings-content" role="status">Détection des environnements…</div>
                 </section>
                 <section class="settings-card settings-pane active" data-settings-pane="general">
@@ -799,6 +816,10 @@
                     <p class="form-hint">Appel direct depuis ce PC vers le fournisseur choisi. Les clés sont chiffrées localement et ne passent par aucun service tiers. Un fournisseur apparaît dans la liste des modèles dès que sa clé est enregistrée.</p>
                     <input type="search" id="compat-filter" class="compat-filter" placeholder="Filtrer les fournisseurs…" aria-label="Filtrer les fournisseurs" autocomplete="off" spellcheck="false">
                     <div id="compat-key-fields" class="compat-key-fields"></div>
+                    <hr class="settings-separator">
+                    <h3 id="account-subscriptions-title">Compatibles abonnement</h3>
+                    <p class="form-hint">Connectez votre compte directement sur le site du fournisseur. L’IDE garde les jetons chiffrés sur ce PC et affiche les modèles après la connexion. L’accès dépend du forfait et des droits accordés par le fournisseur.</p>
+                    <div id="account-subscriptions" class="account-subscriptions"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -948,6 +969,7 @@
                             <p data-i18n="settings-default-permission-hint">Le dernier mode choisi est repris au prochain démarrage et après reconnexion.</p>
                         </div>
                         <select id="settings-default-permission-select">
+                            <option value="plan" data-i18n="perm-plan">Plan</option>
                             <option value="supervised" data-i18n="perm-supervised">Supervisé</option>
                             <option value="semi" data-i18n="perm-semi">Semi-auto</option>
                             <option value="auto" data-i18n="perm-auto">Autonome</option>
@@ -1155,6 +1177,8 @@
         <div class="modal-body">
             <p class="form-hint" id="approval-desc" data-i18n="approval-hint">L'IA souhaite effectuer l'action suivante :</p>
             <pre class="approval-content" id="approval-content"></pre>
+            <label for="plan-feedback" id="plan-feedback-label" class="hidden">Retour pour réviser le plan</label>
+            <textarea id="plan-feedback" class="hidden" rows="3" placeholder="Ce qui doit changer dans le plan…"></textarea>
         </div>
         <div class="modal-footer">
             <button class="btn btn-ghost" id="deny-action" data-i18n="deny-btn">Refuser</button>
@@ -1382,18 +1406,26 @@
 </div>
 
 <script src="catalog.js?v=1.0.16"></script>
-<script src="help.js?v=1.0.16"></script>
+<script src="help.js?v=1.0.17"></script>
 <script src="script/state.js?v=1.0.18" defer></script>
-<script src="script/ui.js?v=1.0.18" defer></script>
+<script src="script/ui.js?v=1.0.19" defer></script>
 <script src="script/commands.js?v=1.0.17" defer></script>
-<script src="script/ai.js?v=1.0.20" defer></script>
+<script src="script/ai.js?v=1.0.23" defer></script>
 <script src="script/remote.js?v=1.0.17" defer></script>
-<script src="script/main.js?v=1.0.20" defer></script>
+<script src="script/main.js?v=1.0.23" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
 <link rel="stylesheet" href="vm.css?v=1">
+<link rel="stylesheet" href="laboratory.css?v=1">
+<script src="script/laboratory.js?v=1" defer></script>
 <script src="vendor/xterm/xterm.js" defer></script>
 <script src="vendor/xterm/addon-fit.js" defer></script>
 <script src="script/vm.js?v=1" defer></script>
-<script src="script/workspace.js?v=1.1.4" defer></script>
+<link rel="stylesheet" href="correction-memory.css?v=1">
+<script src="script/correction-memory.js?v=1" defer></script>
+<script src="script/workspace.js?v=1.1.6" defer></script>
+<link rel="stylesheet" href="profile-integrations.css?v=1">
+<script src="script/integrations.js?v=1" defer></script>
+<script src="script/token-profile.js?v=1" defer></script>
+<script src="script/welcome.js?v=1" defer></script>
 </body>
 </html>

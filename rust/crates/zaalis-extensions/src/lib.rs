@@ -10,6 +10,7 @@ mod skills;
 mod web;
 mod workspace;
 mod vm;
+mod laboratory;
 
 pub use hooks::{HookAction, HookEvent, HookInvocation, HookRegistry};
 pub use mcp::{McpRegistry, McpServer, McpTransport};
@@ -40,6 +41,7 @@ impl ExtensionRuntime {
 
     pub fn register_tools(&self, runtime: &ToolRuntime) -> Result<()> {
         if let Some(tool) = vm::VmTool::from_env()? { runtime.register(tool)?; }
+        if let Some(tool) = laboratory::LabTool::from_env()? { runtime.register(tool)?; }
         if let Some(tool) = workspace::WorkspaceTool::from_env()? {
             runtime.register(tool)?;
         }

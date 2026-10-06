@@ -1,0 +1,28 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),http=require('node:http'),assert=require('node:assert/strict');
+const {VmManager}=require('../vm-manager'),{Laboratory}=require('../laboratory'),{RustAgentBridge}=require('../rust-agent-bridge');
+const base=path.resolve(__dirname,'..'),data=path.join(base,'.tmp','lab-agent-'+Date.now()),root=path.join(data,'fixture');fs.mkdirSync(root,{recursive:true});
+fs.writeFileSync(path.join(root,'app.cs'),'public class AgentProof { public static string Run() { return "AGENT_LAB_OK"; } }');
+function configuredKey(){for(const dir of [path.join(base,'server-data'),path.join(process.env.LOCALAPPDATA,'zaalis/server-data')]){try{const user=JSON.parse(fs.readFileSync(path.join(dir,'users.json'))).find(x=>x.apiKeys?.mistral);if(!user)continue;const vault=crypto.scryptSync(fs.readFileSync(path.join(dir,'secret'),'utf8'),'zaalis-api-key-vault',32),[iv,blob,tag]=user.apiKeys.mistral.split('.').map(x=>Buffer.from(x,'base64')),d=crypto.createDecipheriv('aes-256-gcm',vault,iv);d.setAuthTag(tag);return Buffer.concat([d.update(blob),d.final()]).toString('utf8');}catch{}}throw Error('Clé Mistral configurée absente.');}
+async function main(){const fixture=process.argv.includes('--fixture'),secret=fixture?'fixture-012345678901234567890':configuredKey(),model=fixture?'custom::labfixture':'mistral-small-latest';
+ const vm=new VmManager({appDir:base,dataDir:data}),lab=new Laboratory({dataDir:data,vm}),bridge=new RustAgentBridge({baseDir:base,dataDir:data}),token=crypto.randomBytes(32).toString('hex');
+ const command="Add-Type -Path .\\app.cs; [AgentProof]::Run()",plan={action:'run',problem:'Compiler le projet C# dans Windows Sandbox',system:'windows',maxMs:300000,hypotheses:[{label:'Compilation et sortie',checks:[{command,contains:'AGENT_LAB_OK'}]}],finalChecks:[{command,contains:'AGENT_LAB_OK'}]};let count=0;
+ const server=http.createServer(async(req,res)=>{try{let body='';for await(const chunk of req)body+=chunk;const input=JSON.parse(body||'{}');
+  if(fixture&&req.url.startsWith('/v1/')){count++;const results=(input.messages||[]).filter(m=>m.role==='tool').map(m=>{try{return JSON.parse(m.content);}catch{return{};}}),exp=results.map(x=>x.result?.experiment).filter(Boolean).at(-1);
+   const action=!exp?plan:exp.status==='verified'?null:{action:'status',id:exp.id,waitMs:30000};const delta=action?{tool_calls:[{index:0,id:'lab_'+count,type:'function',function:{name:'laboratory',arguments:JSON.stringify(action)}}]}:{content:'AGENT_LAB_OK : compilation et retest confirmés dans Sandbox.'};
+   res.setHeader('content-type','text/event-stream');res.write('data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n');res.write('data: '+JSON.stringify({choices:[{index:0,delta:{},finish_reason:action?'tool_calls':'stop'}],usage:{prompt_tokens:100,completion_tokens:20}})+'\n\n');return res.end('data: [DONE]\n\n');
+  }
+  res.setHeader('content-type','application/json');if(req.headers.authorization!=='Bearer '+token){res.statusCode=401;return res.end('{}');}
+  if(req.url!=='/api/internal/rust-lab')throw Error('Only laboratory tool allowed in smoke');
+  res.end(JSON.stringify(await lab.action('smoke',input,root)));
+ }catch(e){res.statusCode=400;res.end(JSON.stringify({error:e.message}));}});
+ try{await new Promise(r=>server.listen(0,'127.0.0.1',r));const from=Date.now()-1000;
+  const result=await bridge.run({userId:'smoke',keys:fixture?{}:{mistral:secret},root,model:fixture?'compat':'mistral',submodel:model,permissionMode:'supervised',budget:{max_tokens:30000,max_rounds:12,max_wall_time_ms:300000},runtimeConfig:{workspaceEndpoint:`http://127.0.0.1:${server.address().port}/api/internal/rust-workspace`,workspaceToken:token,...(fixture?{compatEndpoints:[{id:'custom',base_url:`http://127.0.0.1:${server.address().port}/v1`,key:secret}]}:{})},message:'Utilise uniquement laboratory pour ce plan : '+JSON.stringify(plan)+'. Consulte status avec waitMs=30000 jusqu’au résultat. Termine seulement sur verified ou rapporte l’erreur réelle. Aucune modification hôte.',systemPrompt:'Test de laboratoire. Pas de computer, vm ou run : uniquement laboratory.'},event=>{if(event.type==='permission_required'){bridge.decide('smoke',{...event,kind:'permission',allow:false}).catch(()=>{});}if(event.type==='budget_required'){bridge.decide('smoke',{...event,kind:'budget',stop:true}).catch(()=>{});}});
+  const records=lab.list('smoke');const usage=await bridge.usage('smoke',{},from,Date.now()+1000);const proof={model,synthetic:fixture,usage,result:{response:result.response,error:result.error,toolCount:result.toolResults.length},experiments:records};
+  fs.writeFileSync(path.join(data,'evidence.json'),JSON.stringify(proof,null,2));console.log(JSON.stringify({model,synthetic:fixture,status:records[0]?.status,usage:usage.total,error:result.error,evidence:path.join(data,'evidence.json')}));
+  assert.equal(records[0]?.status,'verified','Agent must obtain the real guest retest');assert.ok(usage.total.calls>0);assert.equal(usage.total.unmeasured,0);
+  await bridge.close();const resumed=new RustAgentBridge({baseDir:base,dataDir:data});try{const again=await resumed.usage('smoke',{},from,Date.now()+1000);assert.deepEqual(again.total,usage.total);const other=await resumed.usage('another',{},from,Date.now()+1000);assert.equal(other.total.calls,0);}finally{await resumed.close();}
+  console.log(fixture?'FIXTURE_RUST_AGENT_REAL_LAB_LEDGER_RESTART_OK':'MISTRAL_REAL_LAB_LEDGER_RESTART_OK');
+ }finally{await bridge.close();await lab.shutdown();await vm.shutdown();server.closeAllConnections();await new Promise(r=>server.close(r));}
+}
+main().catch(e=>{console.error(e.message);process.exitCode=1;});

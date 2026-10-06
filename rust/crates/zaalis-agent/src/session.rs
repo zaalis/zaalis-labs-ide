@@ -54,6 +54,7 @@ pub struct SessionConfig {
     /// They are rendered as lower-priority project guidance by the prompt composer.
     pub project_guidance: String,
     pub max_concurrency: usize,
+    pub usage_store: Option<Arc<zaalis_store::Store>>,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
 
@@ -69,6 +70,7 @@ impl SessionConfig {
                     .into(),
             project_guidance,
             max_concurrency: 8,
+            usage_store: None,
             extensions: None,
         }
     }
@@ -89,6 +91,7 @@ pub(crate) struct SessionInner {
     pub agent_cancels: Mutex<HashMap<AgentId, CancellationToken>>,
     pub hook_agents: Mutex<HashSet<AgentId>>,
     pub plan_mode: AtomicBool,
+    pub envelope: Mutex<crate::envelope::Envelope>,
     hook_session_started: AtomicBool,
     hook_stopped: AtomicBool,
     hook_session_ended: AtomicBool,
@@ -123,6 +126,7 @@ impl AgentSession {
             agent_cancels: Mutex::new(HashMap::new()),
             hook_agents: Mutex::new(HashSet::new()),
             plan_mode: AtomicBool::new(initial_plan),
+            envelope: Mutex::new(crate::envelope::Envelope::default()),
             hook_session_started: AtomicBool::new(false),
             hook_stopped: AtomicBool::new(false),
             hook_session_ended: AtomicBool::new(false),
@@ -350,6 +354,8 @@ impl AgentSession {
             prompt: prompt.clone(),
         });
         self.prepare_turn(&prompt, images, target).await?;
+        { let spent=self.inner.tree.lock().await.total_usage().total_tokens();
+          let mut e=self.inner.envelope.lock().await;e.spent=e.spent.max(spent); }
 
         let hook_root = {
             let tree = self.inner.tree.lock().await;

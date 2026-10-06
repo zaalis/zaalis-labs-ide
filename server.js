@@ -18,6 +18,7 @@ const { registerSecret } = require('./secrets-mask');
 const modelCatalog = require('./model-catalog');
 const compatProviders = require('./compat-providers');
 const chatgptSubscription = require('./chatgpt-subscription');
+const accountSubscriptions = require('./account-subscriptions');
 const workspaceContext = require('./workspace-context');
 const workspaceTokens = new Map();
 const { BrowserHost } = require('./zaalis-browser/host');
@@ -76,6 +77,10 @@ function resolveDataDir() {
 const DATA_DIR = resolveDataDir();
 const { VmManager } = require('./vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
+const { Laboratory } = require('./laboratory');
+const laboratory = new Laboratory({ dataDir: DATA_DIR, vm: vmManager, terminals: terminalManager });
+const { CorrectionMemory } = require('./correction-memory');
+const correctionMemory = new CorrectionMemory(DATA_DIR);
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
@@ -83,6 +88,7 @@ const COOKIE_NAME = 'zaalis_session';
 const rustAgentBridge = new RustAgentBridge({
   baseDir: APP_DIR,
   dataDir: DATA_DIR,
+  memory: correctionMemory, laboratory,
   enabled: !/^(0|false|off)$/i.test(String(process.env.ZAALIS_RUST_CORE || 'on')),
 });
 
@@ -111,6 +117,8 @@ try {
 // ---------------------------------------------------------------------------
 const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
+const { GitHubIntegration } = require('./github-integration');
+const githubIntegration = new GitHubIntegration({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret });
 
 function encryptSecret(plain) {
   const iv = crypto.randomBytes(12);
@@ -598,12 +606,19 @@ app.post('/api/internal/rust-computer', async (req, res) => {
 
 // A desktop-only capability, scoped to this user's active agent. It exposes
 // project selection without granting arbitrary filesystem or terminal access.
-app.post('/api/internal/rust-workspace', (req, res) => {
+app.post('/api/internal/rust-workspace', async (req, res) => {
   const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
   try {
+    if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
+    if (req.body.action === 'create_artifact') {
+      const { createArtifact } = require('./artifact-generator');
+      const artifact = createArtifact(context.root, req.body);
+      return res.json({ summary: `Fichier ${artifact.format.toUpperCase()} créé : ${artifact.path}`, ...artifact,
+        downloadUrl: `/api/artifact?root=${encodeURIComponent(context.root)}&path=${encodeURIComponent(artifact.path)}` });
+    }
     const projects = workspaceContext.knownProjects(context.user, context.projectRoot);
     if (req.body.action === 'list') return res.json({ summary: 'Projets connus', projects, root: context.root, terminal: context.terminal });
     if (req.body.action !== 'open') return res.status(400).json({ error: 'Action workspace inconnue.' });
@@ -616,6 +631,15 @@ app.post('/api/internal/rust-workspace', (req, res) => {
 
 // Same per-agent capability as workspace, with a fixed VM-only action surface.
 // No activation/UAC, host executable, or arbitrary host path is exposed to AI.
+app.post('/api/internal/rust-lab', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte laboratoire invalide.' });
+  try { res.json(await laboratory.action(context.user.id, req.body || {}, context.projectRoot)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+
 app.post('/api/internal/rust-vm', async (req, res) => {
   const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
@@ -702,6 +726,40 @@ app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
   }
 });
 
+app.post('/api/internal/subscription/:provider/v1/chat/completions', async (req, res) => {
+  const provider = req.params.provider;
+  if (!['xai-sub', 'minimax-sub'].includes(provider)) return res.status(404).json({ error: { message: 'Abonnement inconnu.' } });
+  const user = chatgptProxyUser(req);
+  if (!user) return res.status(401).json({ error: { message: 'Jeton interne invalide.' } });
+  const kind = provider === 'xai-sub' ? 'xai' : 'minimax';
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const upstream = await withAccountToken(user.id, kind, (token) =>
+      accountSubscriptions.openStream(kind, token, req.body, { signal: controller.signal }));
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    const reader = accountSubscriptions.createSseReader();
+    const translator = kind === 'xai'
+      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''))
+      : accountSubscriptions.miniMaxTranslator(String(req.body?.model || ''));
+    const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+    for await (const chunk of upstream.body) for (const event of reader.push(chunk)) write(translator.push(event));
+    for (const event of reader.finish()) write(translator.push(event));
+    write(translator.finish());
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    const message = error.message || String(error);
+    if (!res.headersSent) return res.status(error.status || 502).json({ error: { message } });
+    try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch {}
+    return res.end();
+  }
+});
+
 // Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
 // est un processus séparé, sans cookie de session : il s'authentifie avec le
 // secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
@@ -753,7 +811,7 @@ app.use('/api', (req, res, next) => {
 
 // Per-account preference survives logout and application reinstalls because
 // users.json lives in the stable user data directory.
-const UI_PERMISSION_MODES = new Set(['supervised', 'semi', 'auto']);
+const UI_PERMISSION_MODES = new Set(['plan', 'supervised', 'semi', 'auto']);
 app.get('/api/preferences', (req, res) => {
   res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
 });
@@ -766,6 +824,29 @@ app.put('/api/preferences', (req, res) => {
   user.permissionMode = permissionMode;
   saveUsers(users);
   res.json({ permissionMode });
+});
+
+// GitHub credentials stay in the encrypted server vault, never in agent prompts.
+app.get('/api/integrations/github', (req, res) => res.json(githubIntegration.status(req.user.id)));
+app.get('/api/integrations/github/repos', async (req, res) => {
+  try { res.json(await githubIntegration.repos(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/integrations/github', async (req, res) => {
+  try {
+    const body = req.body || {};
+    let result;
+    if (body.action === 'connect') result = await githubIntegration.connect(req.user.id, body.token);
+    else if (body.action === 'disconnect') result = githubIntegration.disconnect(req.user.id);
+    else if (body.action === 'start') result = await githubIntegration.start(req.user.id);
+    else if (body.action === 'poll') result = await githubIntegration.poll(req.user.id);
+    else if (body.action === 'permission') result = await githubIntegration.permission(req.user.id, body);
+    else throw Error('Action invalide.');
+    if (['connect', 'disconnect', 'permission'].includes(body.action)) {
+      const active = rustAgentBridge.clients.get(req.user.id);
+      if (active) { await active.client.stop(); rustAgentBridge.clients.delete(req.user.id); }
+    }
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
 });
 
 // Update profile
@@ -804,6 +885,60 @@ app.use('/api/vm', (req, res, next) => {
   if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'VM réservées au desktop.' });
   next();
 });
+// Persistent correction memory: account + project scope, desktop mutations only.
+app.get('/api/memory', (req, res) => {
+  try {
+    const root = workspaceContext.agentRoot({root:req.query.root}, req.user);
+    correctionMemory.importLaboratory(req.user.id, laboratory);
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const records = correctionMemory.list(req.user.id, root, req.query.q);
+    res.json({ settings: correctionMemory.settings(req.user.id, root), total: records.length, records: records.slice(offset, offset + 50) });
+  } catch (error) { res.status(400).json({error:error.message}); }
+});
+app.post('/api/memory', (req, res) => {
+  if(req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({error:'Modification réservée au desktop.'});
+  try {
+    const root = workspaceContext.agentRoot({root:req.body.root}, req.user), input = req.body;
+    if(input.action === 'settings') return res.json({settings:correctionMemory.settings(req.user.id,root,input.settings)});
+    if(input.action === 'delete') {correctionMemory.remove(req.user.id,root,input.id);return res.json({ok:true});}
+    if(input.action !== 'save') return res.status(400).json({error:'Action mémoire inconnue.'});
+    // Manual edits cannot invent or upgrade a verification status.
+    const previous = input.id && correctionMemory.list(req.user.id,root).find(r=>r.id===input.id && r.sameProject);
+    if(input.id && !previous) return res.status(404).json({error:'Mémoire inconnue dans ce projet.'});
+    res.json({record:correctionMemory.save(req.user.id,root,{...input,status:previous?.status || 'note',source:previous?.source || 'manual',checks:previous?.checks || [],files:previous?.files || []})});
+  } catch(error) {res.status(400).json({error:error.message});}
+});
+
+app.get('/api/vm/laboratory', (req,res) => {
+  try { res.json({experiments:laboratory.list(req.user.id)}); } catch(e){res.status(400).json({error:e.message});}
+});
+app.post('/api/vm/laboratory', async (req,res) => {
+  try { const root=['run','recall','apply'].includes(req.body?.action) ? workspaceContext.agentRoot({root:req.body.root},req.user) : null;
+    res.json(await laboratory.action(req.user.id,req.body||{},root)); } catch(e){res.status(400).json({error:e.message});}
+});
+app.get('/api/vm/laboratory/:id/artifacts/:artifact', (req,res) => {
+  try {const a=laboratory.artifact(req.user.id,req.params.id,req.params.artifact);res.download(a.file,path.basename(a.artifact.path),{dotfiles:'allow'});}catch(e){res.status(404).json({error:e.message});}
+});
+app.get('/api/vm/laboratory/:id/evidence/:log', (req,res) => {
+  try {res.download(laboratory.evidence(req.user.id,req.params.id,req.params.log),req.params.log,{dotfiles:'allow'});} catch(e){res.status(404).json({error:e.message});}
+});
+app.get('/api/token-profile', (req,res) => res.json({profile:req.user.profile || {}, banner:req.user.usageBanner || ''}));
+app.post('/api/token-profile', (req,res) => {
+  const banner=req.body?.banner;
+  if(typeof banner !== 'string' || banner.length>2000000 || (banner && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(banner))) return res.status(400).json({error:'Image de bannière invalide ou trop grande.'});
+  const users=loadUsers(),user=users.find(u=>u.id===req.user.id);
+  if(!user)return res.status(404).json({error:'Compte introuvable.'});
+  user.usageBanner=banner;saveUsers(users);res.json({success:true});
+});
+app.get('/api/usage', async (req,res) => {
+  try { const from=Number(req.query.from),to=Number(req.query.to);
+    if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from<0||to<=from||to-from>367*86400000)throw new Error('Période invalide.');
+    const value=await rustAgentBridge.usage(req.user.id,userApiKeys(req.user),from,to);
+    value.comparison=require('./engine-comparison').comparisonSummary(DATA_DIR,req.user.id,from,to);
+    res.json(value);
+  } catch(e){res.status(400).json({error:e.message});}
+});
+
 app.get('/api/vm', async (req, res) => {
   try { res.json({ capabilities: await vmManager.capabilities(), machines: vmManager.list(req.user.id) }); }
   catch (error) { res.status(500).json({ error: error.message }); }
@@ -823,7 +958,7 @@ app.post('/api/vm/:id/terminal', async (req, res) => {
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 app.get('/api/vm/:id/artifacts/:artifact', (req,res) => {
-  try { const session=vmManager.get(req.params.id,req.user.id); const artifact=session.artifacts?.find(item=>item.id===req.params.artifact); if(!artifact)return res.status(404).json({error:'Résultat inconnu.'}); res.download(artifact.path,artifact.name); }
+  try { const session=vmManager.get(req.params.id,req.user.id); const artifact=session.artifacts?.find(item=>item.id===req.params.artifact); if(!artifact)return res.status(404).json({error:'Résultat inconnu.'}); res.download(artifact.path,artifact.name,{dotfiles:'allow'}); }
   catch(error){res.status(400).json({error:error.message});}
 });
 app.post('/api/terminal/sessions', (req, res) => {
@@ -936,7 +1071,7 @@ function compatKey(user, provider) {
   return value;
 }
 function compatReady(user, provider) {
-  if (provider.oauth) return !!chatgptSession(user);
+  if (provider.oauth) return provider.oauth === 'chatgpt' ? !!chatgptSession(user) : !!accountSession(user, provider.oauth);
   if (!compatBaseUrl(user, provider)) return false;
   return provider.keyless ? true : !!compatKey(user, provider);
 }
@@ -954,7 +1089,7 @@ function compatStatus(user) {
     if (provider.oauth) {
       // Signed in with an account instead of a key.
       status.oauth = provider.oauth;
-      status.configured = !!chatgptSession(user);
+      status.configured = provider.oauth === 'chatgpt' ? !!chatgptSession(user) : !!accountSession(user, provider.oauth);
     }
     return status;
   });
@@ -964,7 +1099,7 @@ function compatStatus(user) {
 function compatEndpointsFor(user) {
   return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
     // The daemon reaches the subscription through the loopback adapter above.
-    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/chatgpt/v1`, key: chatgptProxyKey(user.id) }
+    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/${entry.oauth === 'chatgpt' ? 'chatgpt' : `subscription/${entry.id}`}/v1`, key: chatgptProxyKey(user.id) }
     : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
 }
 
@@ -1115,6 +1250,127 @@ app.delete('/api/chatgpt/session', (req, res) => {
   }
 });
 
+function accountSession(user, provider) {
+  const encrypted = user?.accountAuth?.[provider];
+  if (!encrypted) return null;
+  try {
+    const session = JSON.parse(decryptSecret(encrypted));
+    if (!session?.accessToken || session.provider !== provider) return null;
+    registerSecret(`jeton ${provider}`, session.accessToken);
+    registerSecret(`renouvellement ${provider}`, session.refreshToken);
+    return session;
+  } catch { return null; }
+}
+function storeAccountSession(userId, provider, session) {
+  const users = loadUsers();
+  const user = users.find(u => u.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.accountAuth = user.accountAuth || {};
+  if (session) user.accountAuth[provider] = encryptSecret(JSON.stringify(session));
+  else delete user.accountAuth[provider];
+  saveUsers(users);
+  return user;
+}
+const accountRefreshes = new Map();
+function isCurrentAccountSession(userId, provider, expected) {
+  const current = accountSession(loadUsers().find(u => u.id === userId), provider);
+  return !!current && current.accessToken === expected.accessToken && current.refreshToken === expected.refreshToken;
+}
+async function accountAccessToken(userId, provider, rejected = '') {
+  const session = accountSession(loadUsers().find(u => u.id === userId), provider);
+  if (!session) throw Object.assign(new Error('Compte non connecté. Ouvrez Paramètres › Abonnements.'), { status: 401 });
+  if (rejected ? session.accessToken !== rejected : !accountSubscriptions.needsRefresh(session)) return session.accessToken;
+  const key = `${userId}:${provider}:${crypto.createHash('sha256').update(session.accessToken).digest('hex')}`;
+  let pending = accountRefreshes.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const renewed = await accountSubscriptions.refresh(session);
+        if (!isCurrentAccountSession(userId, provider, session)) {
+          throw Object.assign(new Error('La connexion a changé pendant le renouvellement. Réessayez avec le compte actuellement connecté.'), { status: 401 });
+        }
+        storeAccountSession(userId, provider, renewed);
+        return renewed.accessToken;
+      } catch (error) {
+        if (error.relogin && isCurrentAccountSession(userId, provider, session)) storeAccountSession(userId, provider, null);
+        throw error;
+      } finally { accountRefreshes.delete(key); }
+    })();
+    accountRefreshes.set(key, pending);
+  }
+  return pending;
+}
+async function withAccountToken(userId, provider, call) {
+  const token = await accountAccessToken(userId, provider);
+  try { return await call(token); }
+  catch (error) {
+    if (error.status !== 401) throw error;
+    return call(await accountAccessToken(userId, provider, token));
+  }
+}
+function accountStatus(user, provider) {
+  const session = accountSession(user, provider);
+  return session ? { connected: true, connectedAt: session.connectedAt } : { connected: false };
+}
+const accountFlows = new Map();
+function accountKind(id) { return id === 'xai-sub' ? 'xai' : id === 'minimax-sub' ? 'minimax' : null; }
+app.get('/api/subscriptions/:provider/status', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  res.json(accountStatus(req.user, kind));
+});
+app.post('/api/subscriptions/:provider/start', async (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    const flow = await accountSubscriptions.start(kind);
+    for (const [id, entry] of accountFlows) if (entry.userId === req.user.id && entry.provider === kind || entry.expiresAt < Date.now()) accountFlows.delete(id);
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    accountFlows.set(flowId, { ...flow, userId: req.user.id, nextPollAt: 0, polling: false });
+    res.json({ flowId, userCode: flow.userCode, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || String(error) }); }
+});
+app.post('/api/subscriptions/:provider/poll', async (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  const flow = accountFlows.get(String(req.body?.flowId || ''));
+  if (!flow || flow.userId !== req.user.id || flow.provider !== kind) return res.json({ status: 'expired' });
+  if (flow.expiresAt < Date.now()) { accountFlows.delete(req.body.flowId); return res.json({ status: 'expired' }); }
+  if (flow.polling || flow.nextPollAt > Date.now()) return res.json({ status: 'pending' });
+  flow.polling = true;
+  try {
+    const session = await accountSubscriptions.poll(flow);
+    if (accountFlows.get(String(req.body?.flowId || '')) !== flow) return res.json({ status: 'expired' });
+    flow.nextPollAt = Date.now() + flow.interval * 1000;
+    if (!session) return res.json({ status: 'pending', interval: flow.interval });
+    accountFlows.delete(req.body.flowId);
+    const user = storeAccountSession(req.user.id, kind, session);
+    return res.json({ status: 'connected', account: accountStatus(user, kind), providers: compatStatus(user) });
+  } catch (error) {
+    if (!error.status) return res.json({ status: 'pending' });
+    accountFlows.delete(req.body.flowId);
+    return res.status(error.status).json({ status: 'error', error: error.message || String(error) });
+  } finally { flow.polling = false; }
+});
+app.delete('/api/subscriptions/:provider/flows/:flowId', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  const flow = accountFlows.get(req.params.flowId);
+  if (flow && flow.userId === req.user.id && flow.provider === kind) accountFlows.delete(req.params.flowId);
+  res.json({ status: 'cancelled' });
+});
+app.delete('/api/subscriptions/:provider/session', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  for (const [id, flow] of accountFlows) if (flow.userId === req.user.id && flow.provider === kind) accountFlows.delete(id);
+  const user = storeAccountSession(req.user.id, kind, null);
+  res.json({ account: accountStatus(user, kind), providers: compatStatus(user) });
+});
+
 app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
 
 // PUT /api/compat/keys { keys: { deepseek: 'sk-…' | null }, baseUrls: { lmstudio: 'http://…' | null } }
@@ -1158,7 +1414,7 @@ app.get('/api/compat/models', async (req, res) => {
   const baseUrl = compatBaseUrl(req.user, provider);
   const key = compatKey(req.user, provider);
   // An account has its own catalogue: signing in again must not reuse the last one.
-  const session = provider.oauth ? chatgptSession(req.user) : null;
+  const session = provider.oauth === 'chatgpt' ? chatgptSession(req.user) : provider.oauth ? accountSession(req.user, provider.oauth) : null;
   const cacheKey = crypto.createHash('sha256')
     .update(`${req.user.id}|${provider.id}|${baseUrl}|${key}|${session ? session.connectedAt : ''}`).digest('hex');
   const cached = compatModelCache.get(cacheKey);
@@ -1166,7 +1422,18 @@ app.get('/api/compat/models', async (req, res) => {
   if (provider.oauth) {
     if (!session) return res.json({ models: provider.models, live: false });
     try {
-      const live = await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token));
+      if (provider.oauth === 'minimax') return res.json({ models: provider.models, live: false });
+      const live = provider.oauth === 'chatgpt'
+        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token))
+        : await withAccountToken(req.user.id, 'xai', async (token) => {
+          const answer = await fetch(`${accountSubscriptions.XAI_API}/models`, {
+            headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
+          });
+          if (answer.status === 401) throw Object.assign(new Error('session expirée'), { status: 401 });
+          if (!answer.ok) throw Object.assign(new Error(`HTTP ${answer.status}`), { status: answer.status });
+          const data = await answer.json();
+          return (data.data || []).map(item => item.id).filter(id => typeof id === 'string' && id.startsWith('grok-'));
+        });
       if (!live.length) return res.json({ models: provider.models, live: false });
       compatModelCache.set(cacheKey, { at: Date.now(), models: live });
       return res.json({ models: live, live: true });
@@ -1636,6 +1903,24 @@ app.get('/api/file', (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+// Binary exports need a download route; /api/file intentionally reads text.
+app.get('/api/artifact', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Téléchargement desktop uniquement.' });
+  try {
+    const root = fs.realpathSync(String(req.query.root || ''));
+    const file = fs.realpathSync(String(req.query.path || ''));
+    const artifacts = path.join(root, 'artifacts');
+    const chatRoot = path.join(DATA_DIR, 'chat-workspaces', req.user.id);
+    const known = (req.user.recentProjects || []).some(project => {
+      try { return fs.realpathSync(project).toLowerCase() === root.toLowerCase(); } catch { return false; }
+    });
+    if (!known && !isInsideBase(chatRoot, root)) return res.status(403).json({ error: 'Projet inconnu.' });
+    if (path.dirname(file) !== artifacts || !fs.statSync(file).isFile() || fs.statSync(file).size > 20 * 1024 * 1024)
+      return res.status(403).json({ error: 'Artefact invalide.' });
+    return res.download(file, path.basename(file));
+  } catch { return res.status(404).json({ error: 'Artefact introuvable.' }); }
 });
 
 // GET /api/tree?root=...  -> { files: [relative paths], truncated }
@@ -3139,6 +3424,7 @@ async function rustAgentHttp(req, res, next) {
     if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
     const conversation = savedConversations.find(item => item.id === body.conversationId);
     const root = workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id), conversation);
+    const githubReadOnly = await githubIntegration.readOnly(req.user.id, root);
     let workspaceConfig = {};
     if (!req.isMobile && !req.isTunnel && !req.isBrowser) {
       workspaceEntry = workspaceTokens.get(req.user.id);
@@ -3191,7 +3477,7 @@ async function rustAgentHttp(req, res, next) {
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message,
       systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
-      permissionMode: body.permissionMode || 'supervised',
+      permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
       images: Array.isArray(body.images) ? body.images : [],
@@ -3201,6 +3487,7 @@ async function rustAgentHttp(req, res, next) {
       conversationId: body.conversationId,
       mcpServers: await agentMcpServersFor(req.user),
       runtimeConfig: {
+        githubReadOnly,
         ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
         compatEndpoints: compatEndpointsFor(req.user),
@@ -3213,7 +3500,10 @@ async function rustAgentHttp(req, res, next) {
       },
       signal: controller.signal,
     }, mirrorWebTools(req, event => {
-      if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) workspaceEntry.agents.set(String(event.event.agent.id), workspaceRun);
+      if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) {
+        const agent=event.event.agent, isolated=agent.workspace?.path;
+        workspaceEntry.agents.set(String(agent.id),isolated ? {...workspaceRun,projectRoot:isolated,root:isolated,run:workspaceRun} : workspaceRun);
+      }
       emit(event);
     }));
     if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
@@ -3230,7 +3520,7 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   } finally {
-    if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun) workspaceEntry.agents.delete(id);
+    if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun || context.run === workspaceRun) workspaceEntry.agents.delete(id);
     if (computerToken) computerRuns.delete(computerToken);
     if (computerSession) {
       try { await automationManager.complete(computerSession); } catch { try { await automationManager.stop(computerSession, 'Tache interrompue.'); } catch {} }
@@ -3263,7 +3553,7 @@ async function rustChatHttp(req, res, next) {
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
-      root: resolveBase(body.root),
+      root: workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id)),
       model: target.provider,
       submodel: target.model,
       modelCapabilities: bindingCapabilities(modelFacts),
@@ -3851,6 +4141,7 @@ process.on('exit', unpublishCodestraleBridge);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   process.on(signal, async () => {
     unpublishCodestraleBridge();
+    await laboratory.shutdown();
     await vmManager.shutdown(terminalManager);
     process.exit(0);
   });

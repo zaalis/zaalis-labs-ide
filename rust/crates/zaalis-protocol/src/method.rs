@@ -30,6 +30,7 @@ pub const CHECKPOINT_RESTORE: &str = "checkpoint.restore";
 pub const TOOLS_LIST: &str = "tools.list";
 pub const MODELS_LIST: &str = "models.list";
 pub const HEALTH: &str = "health";
+pub const USAGE_QUERY: &str = "usage.query";
 
 // ── Core → client ────────────────────────────────────────────────────────
 /// Carries an [`EventFrame`]. The only notification the core emits.
@@ -55,6 +56,7 @@ pub enum ClientMethod {
     CheckpointRestore,
     ToolsList,
     ModelsList,
+    UsageQuery,
     Health,
 }
 
@@ -79,6 +81,7 @@ impl ClientMethod {
             TOOLS_LIST => ClientMethod::ToolsList,
             MODELS_LIST => ClientMethod::ModelsList,
             HEALTH => ClientMethod::Health,
+            USAGE_QUERY => ClientMethod::UsageQuery,
             _ => return None,
         })
     }
@@ -103,6 +106,7 @@ impl ClientMethod {
             ClientMethod::ToolsList => TOOLS_LIST,
             ClientMethod::ModelsList => MODELS_LIST,
             ClientMethod::Health => HEALTH,
+            ClientMethod::UsageQuery => USAGE_QUERY,
         }
     }
 }

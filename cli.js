@@ -31,7 +31,7 @@ const BASE = `http://${HOST}:${PORT}`;
 let VERSION = '0.0.0';
 try { VERSION = require('./package.json').version || VERSION; } catch {}
 
-const CFG_DIR = path.join(os.homedir(), '.zaalis');
+const CFG_DIR = process.env.ZAALIS_CLI_CONFIG_DIR || path.join(os.homedir(), '.zaalis');
 const SESSION_FILE = path.join(CFG_DIR, 'session.json');
 // Per-project conversation snapshots (for /resume and `zaalis --continue`),
 // one file per working directory, like Claude Code's per-project sessions.
@@ -344,12 +344,12 @@ async function ensureServer({ quiet } = {}) {
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
-    child = spawn(serverExe, [], { detached: true, stdio: 'ignore', cwd: path.dirname(serverExe) });
+    child = spawn(serverExe, [], { detached: true, windowsHide: true, stdio: 'ignore', cwd: path.dirname(serverExe) });
   } else {
     // Dev: run the Node source directly. (cwd must be a real folder, not the
     // pkg virtual snapshot — hence __dirname only matters when not packaged.)
     child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
-      detached: true, stdio: 'ignore', cwd: __dirname,
+      detached: true, windowsHide: true, stdio: 'ignore', cwd: __dirname,
     });
   }
   child.unref();
@@ -459,6 +459,18 @@ async function gatherModels() {
   const keys = (keysR.json && keysR.json.keys) || {};
   out.cloud = CLOUD.map((m) => ({ ...m, ready: !!keys[m.keyName] }));
   try {
+    const providers = (await authed('GET', '/api/compat/providers')).json?.providers || [];
+    for (const p of providers) {
+      let models = p.models || [];
+      if (p.configured) {
+        const catalogue = await authed('GET', '/api/compat/models?provider=' + encodeURIComponent(p.id));
+        if (catalogue.json?.models?.length) models = catalogue.json.models;
+      }
+      const id = 'compat:' + p.id; SUBMODELS[id] = models;
+      out.cloud.push({id,label:p.label,models,submodel:models[0],ready:p.configured,oauth:p.oauth});
+    }
+  } catch (error) { console.error('Catalogue compatible indisponible : ' + error.message); }
+  try {
     const o = await authed('GET', '/api/ollama-models');
     out.ollama = (o.json && o.json.models) || [];
   } catch {}
@@ -475,9 +487,9 @@ async function listModels() {
   console.log(brand('  ☁  Cloud'));
   for (const x of m.cloud) {
     const mark = x.ready ? green('●') : gray('○');
-    const note = x.ready ? '' : dim('  (pas de clé API)');
+    const note = x.ready ? '' : dim(x.oauth ? '  (connexion requise : /connect ' + x.oauth + ')' : '  (pas de clé API)');
     console.log(`     ${mark} ${x.label}  ${dim('[' + x.id + ']')}${note}`);
-    const variants = (SUBMODELS[x.id] || [])
+    const variants = (x.models || SUBMODELS[x.id] || [])
       .map((id, i) => (i === 0 ? bold(modelLabel(id)) : modelLabel(id)))
       .join(dim(', '));
     if (variants) console.log(`        ${dim('versions: ')}${variants}`);
@@ -528,7 +540,7 @@ async function chooseModel(arg) {
   const m = await gatherModels();
   const flat = [];
   m.cloud.forEach((x) => {
-    const subs = SUBMODELS[x.id] || [x.submodel];
+    const subs = x.models || SUBMODELS[x.id] || [x.submodel];
     subs.forEach((submodel, index) => flat.push({
       model: x.id,
       submodel,
@@ -1135,7 +1147,10 @@ async function sendChat(message, hooks = {}) {
     reasoningLevel: currentEffort().level,
     stream: true,
   };
-  const onEvent = typeof hooks.onEvent === 'function' ? hooks.onEvent : null;
+  const onEvent = event => {
+    if (['permission_required','plan_required','budget_required'].includes(event.type)) { decisionQueue = decisionQueue.then(() => terminalDecision(event)).catch(error => console.error('Décision : ' + error.message)); }
+    else if (typeof hooks.onEvent === 'function') hooks.onEvent(event);
+  };
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
   if (r.status === 401) return { error: 'Session expirée — relancez `zaalis login`.' };
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
@@ -1357,6 +1372,8 @@ const SLASH = [
   { name: 'plan', category: 'mode', desc: 'mode plan sans modification' },
   { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto]' },
   { name: 'model', category: 'mode', desc: 'changer de modele', usage: '[modele]', args: true },
+  { name: 'connect', category: 'mode', desc: 'connecter un abonnement : chatgpt, xai, minimax' },
+  { name: 'experiences', category: 'project', desc: 'memoire des corrections : list, on, off, delete' },
   { name: 'models', category: 'mode', desc: 'lister les modeles' },
   { name: 'effort', category: 'mode', desc: 'niveau de raisonnement' },
   { name: 'fast', category: 'mode', desc: 'reponses courtes' },
@@ -1384,6 +1401,8 @@ const SLASH = [
 
 // Last reasoning text from the model, kept folded — `/think` expands it.
 let lastThinking = '';
+let decisionActive = false;
+let decisionQueue = Promise.resolve();
 
 // Picker: choose source (provider or local model) → for a cloud provider,
 // choose the exact sub-model (Grok 4.3, Claude Opus 4.8, …) → choose the
@@ -1393,7 +1412,7 @@ async function rawPickModel() {
 
   // Step 1 — source (cloud provider, or a specific local model)
   const sources = [];
-  m.cloud.forEach((x) => sources.push({ kind: 'cloud', id: x.id, label: `${x.label} ${dim('[' + x.id + ']')}`, ready: x.ready }));
+  m.cloud.forEach((x) => sources.push({ kind: 'cloud', id: x.id, label: `${x.label} ${dim('[' + x.id + ']')}`, ready: x.ready, models: x.models }));
   m.ollama.forEach((n) => sources.push({ kind: 'set', model: 'local', submodel: n, label: `${n} ${dim('[local]')}` }));
   m.gguf.forEach((n) => { const name = typeof n === 'string' ? n : n.name; sources.push({ kind: 'set', model: 'gguf', submodel: name, label: `${name} ${dim('[gguf]')}` }); });
 
@@ -1407,7 +1426,7 @@ async function rawPickModel() {
   let model, submodel;
   if (src.kind === 'cloud') {
     // Step 2 — exact sub-model for this provider
-    const subs = SUBMODELS[src.id] || [];
+    const subs = src.models || SUBMODELS[src.id] || [];
     const sj = await rawSelect({
       title: '\n' + bold(' Version ') + src.id + dim('   ↑↓ · ⏎ valider · Échap'),
       items: subs.map((id) => ({ label: modelLabel(id), hint: id })),
@@ -1591,6 +1610,8 @@ async function runSlashCommand(ev, me) {
   if (name === 'exit' || name === 'quit') return 'exit';
   if (name === 'help') { printHelp(); return; }
   if (name === 'model') { arg ? await chooseModel(arg) : await runPicker(rawPickModel); return; }
+  if (name === 'connect') { await connectSubscription(arg); return; }
+  if (name === 'experiences') { await experienceCommand(arg); return; }
   if (name === 'models') { await listModels(); return; }
   if (name === 'effort') { await runPicker(pickEffort); return; }
   if (name === 'think') {
@@ -2296,7 +2317,7 @@ function attachAnswerInput(onAbort) {
   boxActive = true;
   repaint();
   const onKp = (str, key) => {
-    if (!key) return;
+    if (!key || decisionActive) return;
     if (handleBracketPaste(str, key)) return;
     const menu = menuMatches();
     if (key.ctrl && key.name === 'c') { onAbort(); return repaint(); }
@@ -2537,6 +2558,60 @@ async function oneShot(message) {
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
+async function connectSubscription(provider) {
+  if (!['chatgpt','xai','minimax'].includes(provider)) throw new Error('Usage : /connect chatgpt|xai|minimax');
+  const prefix = provider === 'chatgpt' ? '/api/chatgpt/device-' : '/api/subscriptions/' + provider + '/';
+  const start = await authed('POST', prefix + 'start', {});
+  if (start.status !== 200) throw new Error(start.json?.error || 'Connexion impossible');
+  const flow = start.json;
+  let cancelled = false;
+  const wasRaw = process.stdin.isRaw;
+  const cancel = (str,key) => { if (key?.ctrl && key.name === 'c' || key?.name === 'escape') cancelled = true; };
+  if(process.stdin.isTTY) { rawOn(); process.stdin.on('keypress',cancel); }
+  console.log('Ouvre ' + flow.verificationUrl + '\nCode : ' + flow.userCode);
+  try {
+    while (Date.now() < flow.expiresAt && !cancelled) {
+      await new Promise(resolve => setTimeout(resolve, Math.max(1000, (flow.interval || 5) * 1000)));
+      const poll = await authed('POST', prefix + 'poll', {flowId:flow.flowId});
+      if (poll.status !== 200) throw new Error(poll.json?.error || 'Connexion refusée');
+      if (poll.json.status === 'connected') { console.log('✓ Abonnement connecté. Choisis-le avec /model.'); return; }
+      if (poll.json.status === 'expired') break;
+    }
+    throw new Error(cancelled ? 'Connexion annulée.' : 'Connexion expirée.');
+  } finally {
+    process.stdin.removeListener('keypress',cancel); if(!wasRaw) rawOff();
+    if (provider !== 'chatgpt') await authed('DELETE', '/api/subscriptions/' + provider + '/flows/' + encodeURIComponent(flow.flowId)).catch(()=>{});
+  }
+}
+async function experienceCommand(arg = '') {
+  const [action, id] = arg.trim().split(/\s+/);
+  if (action === 'on' || action === 'off') {
+    await apiPost('/api/memory', {root:projectRoot(),action:'settings',settings:{enabled:action==='on'}});
+    console.log('Mémoire ' + (action==='on'?'activée':'désactivée')); return;
+  }
+  if (action === 'delete') { await apiPost('/api/memory',{root:projectRoot(),action:'delete',id}); console.log('Fiche supprimée.'); return; }
+  let offset = 0;
+  do {
+    const d = await apiGet('/api/memory?root='+encodeURIComponent(projectRoot())+'&offset='+offset+'&q='+encodeURIComponent(arg==='list'?'':arg));
+    if (!offset) console.log('Mémoire : '+(d.settings.enabled?'activée':'désactivée')+' · '+d.total+' fiche(s)');
+    for (const r of d.records) printBlock(r.id+' · '+r.status+' · '+r.problem,r.summary);
+    offset += 50; if (offset >= d.total) break;
+  } while(true);
+}
+async function terminalDecision(event) {
+  let allow = false;
+  const kind = event.type === 'permission_required' ? 'permission' : event.type === 'plan_required' ? 'plan' : 'budget';
+  if (process.stdin.isTTY) {
+    if (inputMode === 'answering') {
+      decisionActive = true; boxActive = false;
+      const chosen = await rawSelect({title:event.summary || event.content || 'Prolonger le budget de 10 000 tokens ?',items:[{label:'Refuser'},{label:'Autoriser une fois'}]});
+      allow = chosen === 1; decisionActive = false; boxActive = true; repaint();
+    } else allow = /^o(ui)?$/i.test((await prompt((event.summary || event.content || 'Prolonger le budget ?')+' [o/n] ')).trim());
+  }
+  const r = await authed('POST','/api/rust-core/decision',{sessionId:event.sessionId,requestId:event.requestId,kind,allow,scope:'once',additionalTokens:allow?10000:undefined,stop:!allow});
+  if(r.status!==200) throw new Error(r.json?.error || 'Décision refusée');
+}
+
 async function main() {
   // `zaalis -c` / `--continue` reprend la dernière conversation de ce dossier
   // (comme `claude --continue`). Le flag est retiré du reste des arguments.
@@ -2559,6 +2634,8 @@ async function main() {
       '  zaalis -c              reprendre la dernière session de ce dossier',
       '  zaalis models          lister les modèles',
       '  zaalis pull <modèle>   télécharger un modèle (Ollama/GGUF)',
+      '  zaalis connect <chatgpt|xai|minimax>  connecter un abonnement',
+      '  zaalis memory [on|off|delete <id>]    mémoire des corrections',
       '  zaalis login           se connecter (compte zaalis)',
       '  zaalis logout          se déconnecter',
       '  zaalis serve           démarrer uniquement le serveur',
@@ -2580,7 +2657,7 @@ async function main() {
     const self = process.execPath.toLowerCase();
     const exe = [path.join(APP_DIR, '..', 'zaalis.exe'), path.join(APP_DIR, 'zaalis.exe')]
       .find((p) => { try { return fs.existsSync(p) && p.toLowerCase() !== self; } catch { return false; } });
-    if (exe) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
+    if (exe) spawn(exe, [], { detached: true, windowsHide: true, stdio: 'ignore' }).unref();
     else console.log(brand('✗ ') + 'zaalis.exe (IDE) introuvable.');
     return;
   }
@@ -2592,7 +2669,7 @@ async function main() {
   if (cmd === 'logout') { await request('POST', '/api/auth/logout'); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
 
   // Work out whether this is a one-shot or the interactive REPL.
-  const subcommand = cmd === 'models' || cmd === 'pull';
+  const subcommand = ['models','pull','connect','memory'].includes(cmd);
   let message = '';
   if (cmd === '-p' || cmd === '--print') message = argv.slice(1).join(' ');
   else if (cmd && !cmd.startsWith('-') && !subcommand) message = argv.join(' ');
@@ -2607,6 +2684,8 @@ async function main() {
 
   if (!(await ensureAuth())) process.exit(1);
 
+  if (cmd === 'connect') { await connectSubscription(argv[1]); return; }
+  if (cmd === 'memory') { await experienceCommand(argv.slice(1).join(' ')); return; }
   if (cmd === 'models') { await listModels(); return; }
   if (cmd === 'pull') {
     const name = argv.slice(1).join(' ');

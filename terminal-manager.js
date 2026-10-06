@@ -134,7 +134,9 @@ class TerminalManager {
     if (!ptyRuntime) throw new Error(`Terminal intégré indisponible : ${ptyLoadError && ptyLoadError.message ? ptyLoadError.message : 'module natif non chargé'}`);
     const id = crypto.randomUUID();
     const profile = { id: label, shell, args };
-    const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, env: { ...process.env, TERM: 'xterm-256color' } });
+    // The bundled ConPTY closes SSH terminals without the legacy console-list
+    // helper racing a VM shutdown and logging AttachConsole failures.
+    const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, ...(process.platform==='win32'&&origin==='vm'?{useConptyDll:true}:{}), env: { ...process.env, TERM: 'xterm-256color' } });
     let readyResolve = null;
     const session = { id, userId, cwd, proc, profile, origin, buffer: '', events: new EventEmitter(), closed: false, ready: new Promise((resolve) => { readyResolve = resolve; }) };
     proc.onData((data) => {

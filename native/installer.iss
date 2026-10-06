@@ -14,6 +14,7 @@ AppPublisher=zaalis
 DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
 DisableProgramGroupPage=yes
+ChangesEnvironment=yes
 DisableDirPage=yes
 DisableWelcomePage=no
 PrivilegesRequired=lowest
@@ -34,7 +35,6 @@ WizardSmallImageBackColor=#09090b
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 ; Le CLI ajoute {app}\bin au PATH utilisateur : prevenir les processus en cours.
-ChangesEnvironment=yes
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
@@ -73,7 +73,7 @@ Source: "dist\whisper\*";         DestDir: "{app}\whisper"; Flags: ignoreversion
 Source: "dist\blender\*";         DestDir: "{app}\blender"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; CLI Rust : depose dans {app}\bin et renomme zaalis.exe -> commande `zaalis` dans le terminal.
 ; (La GUI {app}\zaalis.exe n'est PAS sur le PATH ; seul {app}\bin l'est.)
-Source: "dist\zaalis-cli.exe";    DestDir: "{app}\bin"; DestName: "zaalis.exe"; Flags: ignoreversion
+Source: "dist\zaalis-terminal.exe";    DestDir: "{app}\bin"; DestName: "zaalis.exe"; Flags: ignoreversion
 
 [Icons]
 ; Desktop shortcut — the .lnk stores the absolute path of the exe,

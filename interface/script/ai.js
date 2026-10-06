@@ -5,13 +5,14 @@
 // stay identical to the .mode-item-icon paths in index.html, otherwise the
 // button and the dropdown show two different icons for the same mode.
 const MODE_ICONS = {
+    plan: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="m2 6 1 1 2-2m-3 7 1 1 2-2m-3 7 1 1 2-2"/></svg>`,
     supervised: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>`,
     semi: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M13 8.5 10 13h4l-3 4.5"/></svg>`,
     auto: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 5 14h6l-2 8 8-12h-6z"/></svg>`
 };
 
 function setPermissionMode(mode, persist = true) {
-    if (!['supervised', 'semi', 'auto'].includes(mode)) return;
+    if (!['plan', 'supervised', 'semi', 'auto'].includes(mode)) return;
     state.permissionMode = mode;
     state.config.defaultPermissionMode = mode;
     saveState();
@@ -33,7 +34,7 @@ async function loadPermissionPreference() {
         const response = await fetch('/api/preferences');
         if (!response.ok) return;
         const preference = await response.json();
-        if (['supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
+        if (['plan', 'supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
             setPermissionMode(preference.permissionMode, false);
         } else {
             setPermissionMode('supervised', false);
@@ -165,13 +166,19 @@ function showNextApproval() {
     pendingApproval = approvalQueue.shift();
     $('#approval-desc').textContent = pendingApproval.description;
     $('#approval-content').textContent = pendingApproval.content;
+    const plan = !!pendingApproval.plan;
+    $('#plan-feedback-label').classList.toggle('hidden', !plan);
+    $('#plan-feedback').classList.toggle('hidden', !plan);
+    $('#plan-feedback').value = '';
+    $('#approve-action').textContent = plan ? (state.language === 'en' ? 'Approve and implement' : 'Approuver et réaliser') : (state.language === 'en' ? 'Allow' : 'Autoriser');
+    $('#deny-action').textContent = plan ? (state.language === 'en' ? 'Revise plan' : 'Réviser le plan') : (state.language === 'en' ? 'Deny' : 'Refuser');
     $('#approval-modal').classList.add('active');
     $('#approve-action').focus();
 }
 
-function requestApproval(description, content) {
+function requestApproval(description, content, options = {}) {
     return new Promise((resolve) => {
-        approvalQueue.push({ description, content, resolve });
+        approvalQueue.push({ description, content, resolve, plan: !!options.plan });
         showNextApproval();
     });
 }
@@ -180,7 +187,7 @@ function answerApproval(allow) {
     const current = pendingApproval;
     pendingApproval = null;
     $('#approval-modal').classList.remove('active');
-    if (current) current.resolve(allow);
+    if (current) current.resolve(current.plan ? { allow, feedback: allow ? '' : $('#plan-feedback').value.trim() } : allow);
     showNextApproval();
 }
 
@@ -305,7 +312,7 @@ function renderMarkdown(src) {
             editPath = pm ? pm[1].replace(/^\.?\//, '') : (infoTrim.split(/[\s:]+/).find(t => t.toLowerCase() !== 'edit' && (/[\/\\]/.test(t) || /\.[A-Za-z0-9]+$/.test(t))) || null);
             if (editPath && typeof parseSearchReplace === 'function') editHunks = parseSearchReplace(code);
         }
-        codeBlocks.push({ code: code.replace(/\n$/, ''), path: fenceFilePath(info), editPath, editHunks });
+        codeBlocks.push({ code: code.replace(/\n$/, ''), info: infoTrim, path: fenceFilePath(info), editPath, editHunks });
         return `${NUL}CODE${codeBlocks.length - 1}${NUL}`;
     });
 
@@ -362,7 +369,9 @@ function renderMarkdown(src) {
         if (b.editPath && b.editHunks && b.editHunks.length) {
             return diffCardHTML(b.editPath, b.editHunks);
         }
-        const pre = `<pre class="code-block"><code>${escapeHTML(b.code)}</code></pre>`;
+        const language = (b.path ? b.path.split('.').pop() : b.info.split(/\s/)[0] || '').replace(/[^a-z0-9+#-]/gi, '').slice(0, 24);
+        const highlighted = typeof highlightCode === 'function' && b.code.length <= 200000 ? highlightCode(b.code) : escapeHTML(b.code);
+        const pre = `<div class="code-snippet"><div class="code-snippet-bar"><span>${escapeHTML(language || 'code')}</span><button type="button" class="code-copy-btn" aria-label="Copier le code">Copier</button></div><pre class="code-block"><code>${highlighted}</code></pre></div>`;
         // Fold ONLY a real code file: it must name a file (path=) AND be more
         // than a couple of lines. A one/two-line snippet — or any block without
         // a path — stays inline, so only full files in the summary collapse.
@@ -372,6 +381,17 @@ function renderMarkdown(src) {
 
     return html;
 }
+
+document.addEventListener('click', async event => {
+    const button = event.target.closest?.('.code-copy-btn');
+    if (!button) return;
+    const code = button.closest('.code-snippet')?.querySelector('code')?.textContent || '';
+    try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = state.language === 'en' ? 'Copied' : 'Copié';
+        setTimeout(() => { button.textContent = state.language === 'en' ? 'Copy' : 'Copier'; }, 1800);
+    } catch { button.textContent = state.language === 'en' ? 'Copy failed' : 'Copie impossible'; }
+});
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -632,8 +652,8 @@ async function handleRustInteractiveEvent(event) {
         const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail);
         body = { kind: 'permission', allow, scope: 'once' };
     } else if (event.type === 'plan_required') {
-        const allow = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implementation ?", event.content || '');
-        body = { kind: 'plan', allow };
+        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true });
+        body = { kind: 'plan', ...decision };
     } else if (event.type === 'budget_required') {
         const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '');
         body = { kind: 'budget', stop: !allow, additionalTokens: allow ? 50000 : undefined };
@@ -980,6 +1000,7 @@ async function sendChat(input) {
             if (isMaxReasoning()) body.classList.add('max-reasoning-text');
             const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
             const responseText = data.response || '';
+            body.dataset.markdownSource = responseText;
             const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
             // `usage` from the Rust agent is the billable total of every
@@ -2270,6 +2291,21 @@ function shouldPersistRichHTML(body, entry) {
         !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
 }
 
+function safeSavedHTML(html) {
+    const template = document.createElement('template');
+    template.innerHTML = String(html || '');
+    const forbidden = 'script,iframe,object,embed,form,meta,link,base,style';
+    template.content.querySelectorAll(forbidden).forEach(node => node.remove());
+    template.content.querySelectorAll('*').forEach(node => {
+        for (const attr of [...node.attributes]) {
+            const name = attr.name.toLowerCase();
+            if (name.startsWith('on') || name === 'style' || name === 'srcdoc' ||
+                ((name === 'href' || name === 'src') && !/^(https?:\/\/|data:image\/(?:png|jpeg|gif|webp);base64,)/i.test(attr.value))) node.removeAttribute(attr.name);
+        }
+    });
+    return template.innerHTML;
+}
+
 function saveConversation(kind = 'chat') {
     const cfg = HIST[kind];
     const data = [];
@@ -2285,6 +2321,7 @@ function saveConversation(kind = 'chat') {
         const classes = persistedBodyClasses(body);
         if (classes.length) entry.bodyClasses = classes;
         if (body?.classList.contains('live-agent-body')) entry.activity = true;
+        if (body?.dataset.markdownSource) entry.markdown = body.dataset.markdownSource;
         if (shouldPersistRichHTML(body, entry)) entry.html = body.innerHTML;
         // Persist generated images so they survive a reload of the conversation.
         if (img) entry.image = { url: img.getAttribute('src'), alt: img.getAttribute('alt') || '' };
@@ -2408,6 +2445,7 @@ async function loadConversation(kind, id) {
     const cfg = HIST[kind];
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
+    window.dispatchEvent(new Event('zaalis-conversation-change'));
 
     // Link the chat to its project: re-open the folder it belongs to (or drop the
     // project for a classic "no project" chat) so the AI keeps the right context.
@@ -2418,7 +2456,8 @@ async function loadConversation(kind, id) {
     container.innerHTML = '';
     (conv.messages || []).forEach(m => {
         const hasRichHtml = m.html && m.type !== 'user';
-        const body = addMsg(container, m.type, m.label, hasRichHtml ? m.html : (m.text || ''), !!hasRichHtml);
+        const body = addMsg(container, m.type, m.label, hasRichHtml ? safeSavedHTML(m.html) : (m.text || ''), !!hasRichHtml);
+        if (m.markdown && m.type === 'ai') body.dataset.markdownSource = m.markdown;
         if (m.activity || body.querySelector('.live-agent-activity')) {
             body.classList.add('live-agent-body');
             body.closest('.msg').classList.add('live-agent-msg');
@@ -2430,7 +2469,7 @@ async function loadConversation(kind, id) {
                 body.innerHTML = `<details class="ghost-tool-group"><summary>${state.language === 'en' ? 'Previous tool activity' : 'Activité des outils sauvegardée'}</summary><pre class="ghost-tool-pre">${escapeHTML(m.text || '')}</pre></details>`;
                 body.classList.add('live-agent-body');
                 body.closest('.msg').classList.add('live-agent-msg');
-            } else body.innerHTML = formatAIResponse(m.text || '');
+            } else body.innerHTML = formatAIResponse(m.markdown || m.text || '');
         }
         (Array.isArray(m.bodyClasses) ? m.bodyClasses : []).forEach((cls) => {
             if (PERSISTED_MSG_CLASSES.includes(cls)) body.classList.add(cls);
@@ -2594,6 +2633,7 @@ function renderHistory() {
 
 // Start a brand-new conversation for the given kind (in the current context).
 function newConversation(kind = 'chat') {
+    window.dispatchEvent(new Event('zaalis-conversation-change'));
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
     state[cfg.current] = null;
@@ -2805,6 +2845,8 @@ function isVisionCompatible(model, submodel) {
         default:
             // OpenAI-compatible gateways: same rule as compat-providers.js.
             if (model === 'compat:chatgpt') return true;
+            if (model === 'compat:xai-sub') return true;
+            if (model === 'compat:minimax-sub') return /^minimax-m3/i.test(s);
             return String(model || '').startsWith('compat:')
                 && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
     }
@@ -3114,6 +3156,7 @@ function setupVoiceRecognition(btnId, textareaId) {
     const btn = $('#' + btnId);
     const textarea = $('#' + textareaId);
     if (!btn || !textarea) return;
+    const area = textarea.closest('.chat-input-area');
 
     const supported = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder
         && (window.AudioContext || window.webkitAudioContext) && window.OfflineAudioContext);
@@ -3129,11 +3172,81 @@ function setupVoiceRecognition(btnId, textareaId) {
     let phase = 'idle';
     let recorder = null;
     let stream = null;
-    let chunks = [];
     let limit = null;
+    let audioContext = null;
+    let frame = null;
+    let requestId = 0;
+    let transcriptController = null;
+    let finishAction = 'draft';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'voice-capture';
+    overlay.hidden = true;
+    overlay.setAttribute('role', 'group');
+    overlay.setAttribute('aria-label', say('Dictée vocale', 'Voice dictation'));
+    const action = (name, title, svg) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = `voice-capture-action voice-capture-${name}`;
+        button.title = title;
+        button.setAttribute('aria-label', title);
+        button.innerHTML = svg;
+        return button;
+    };
+    const cancel = action('cancel', say('Annuler la dictée', 'Cancel dictation'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>');
+    const stop = action('stop', say('Arrêter et écrire le texte', 'Stop and insert text'), '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>');
+    const send = action('send', say('Transcrire et envoyer', 'Transcribe and send'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>');
+    const waveform = document.createElement('div');
+    waveform.className = 'voice-capture-wave';
+    waveform.setAttribute('aria-hidden', 'true');
+    const bars = Array.from({ length: 88 }, () => {
+        const bar = document.createElement('i');
+        waveform.appendChild(bar);
+        return bar;
+    });
+    overlay.append(cancel, waveform, stop, send);
+    area.appendChild(overlay);
+
+    function stopVisualizer() {
+        if (frame !== null) cancelAnimationFrame(frame);
+        frame = null;
+        if (audioContext) audioContext.close().catch(() => {});
+        audioContext = null;
+    }
+    function startVisualizer(media) {
+        try {
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            audioContext = new AudioCtx();
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 1024;
+            analyser.smoothingTimeConstant = 0.7;
+            audioContext.createMediaStreamSource(media).connect(analyser);
+            const samples = new Uint8Array(analyser.fftSize);
+            let previous = 0;
+            bars.forEach(bar => { bar.style.height = '4px'; });
+            const draw = () => {
+                if (phase !== 'recording') return;
+                analyser.getByteTimeDomainData(samples);
+                let power = 0;
+                for (const sample of samples) { const value = (sample - 128) / 128; power += value * value; }
+                const level = Math.min(1, Math.sqrt(power / samples.length) * 7);
+                previous = previous * 0.62 + level * 0.38;
+                for (let i = 0; i < bars.length - 1; i++) bars[i].style.height = bars[i + 1].style.height;
+                bars[bars.length - 1].style.height = `${Math.round(4 + previous * 25)}px`;
+                frame = requestAnimationFrame(draw);
+            };
+            frame = requestAnimationFrame(draw);
+        } catch { stopVisualizer(); }
+    }
 
     function setPhase(next) {
         phase = next;
+        const active = next !== 'idle';
+        area.classList.toggle('voice-capture-active', active);
+        overlay.hidden = !active;
+        stop.disabled = next !== 'recording';
+        send.disabled = next !== 'recording';
+        waveform.classList.toggle('voice-capture-waiting', next === 'transcribing' || next === 'starting');
         btn.classList.toggle('recording', next === 'recording');
         btn.classList.toggle('transcribing', next === 'transcribing');
         btn.setAttribute('aria-pressed', String(next === 'recording'));
@@ -3144,21 +3257,26 @@ function setupVoiceRecognition(btnId, textareaId) {
     }
     function releaseMicrophone() {
         clearTimeout(limit);
+        stopVisualizer();
         if (stream) stream.getTracks().forEach(track => track.stop());
         stream = null;
         recorder = null;
     }
 
-    async function transcribe(blob) {
+    async function transcribe(blob, action, id) {
         setPhase('transcribing');
+        transcriptController = new AbortController();
         try {
             if (!blob.size) throw Object.assign(new Error('empty'), { quiet: true });
             const audio = await dictationBase64(await dictationWav(blob));
+            if (id !== requestId) return;
             const res = await fetch('/api/stt', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ audio, language: state.language === 'en' ? 'en' : 'fr' })
+                body: JSON.stringify({ audio, language: state.language === 'en' ? 'en' : 'fr' }),
+                signal: transcriptController.signal
             });
             const data = await res.json().catch(() => ({}));
+            if (id !== requestId) return;
             if (!res.ok) throw new Error(data.hint || data.error || say('La transcription a échoué.', 'Transcription failed.'));
             if (data.pull && !dictationModelNoticeShown) {
                 dictationModelNoticeShown = true;
@@ -3173,20 +3291,28 @@ function setupVoiceRecognition(btnId, textareaId) {
             textarea.value = current + (current && !/\s$/.test(current) ? ' ' : '') + heard;
             autoGrow(textarea);
             textarea.dispatchEvent(new Event('input'));
-            textarea.focus();
+            setPhase('idle');
+            if (action === 'send') {
+                if (textareaId === 'chat-input') handleChatSubmit();
+                else handleAgentsSubmit();
+            } else textarea.focus();
         } catch (error) {
-            notify(error.quiet ? say('Aucune parole détectée.', 'No speech detected.')
+            if (id === requestId && error.name !== 'AbortError') notify(error.quiet ? say('Aucune parole détectée.', 'No speech detected.')
                 : (error.message || say('La transcription a échoué.', 'Transcription failed.')));
         } finally {
-            setPhase('idle');
+            if (id === requestId) { transcriptController = null; setPhase('idle'); }
         }
     }
 
     async function startRecording() {
+        const id = ++requestId;
         setPhase('starting');
         try {
-            stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            const media = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+            if (id !== requestId) { media.getTracks().forEach(track => track.stop()); return; }
+            stream = media;
         } catch (error) {
+            if (id !== requestId) return;
             setPhase('idle');
             const name = error && error.name;
             notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say('Aucun microphone détecté sur ce PC.', 'No microphone found on this PC.')
@@ -3194,7 +3320,7 @@ function setupVoiceRecognition(btnId, textareaId) {
                 : say('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).', 'The microphone cannot be used right now (in use by another app?).'));
             return;
         }
-        chunks = [];
+        const chunks = [];
         try {
             recorder = new MediaRecorder(stream);
         } catch (error) {
@@ -3203,29 +3329,56 @@ function setupVoiceRecognition(btnId, textareaId) {
             notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.'));
             return;
         }
-        recorder.addEventListener('dataavailable', event => { if (event.data && event.data.size) chunks.push(event.data); });
-        recorder.addEventListener('stop', () => {
-            const blob = new Blob(chunks, { type: (recorder && recorder.mimeType) || 'audio/webm' });
-            chunks = [];
+        const activeRecorder = recorder;
+        activeRecorder.addEventListener('dataavailable', event => { if (id === requestId && event.data && event.data.size) chunks.push(event.data); });
+        activeRecorder.addEventListener('stop', () => {
+            // MediaRecorder dispatches stop asynchronously. An old cancelled
+            // session must not release the microphone of a newer recording.
+            if (id !== requestId) return;
+            const blob = new Blob(chunks, { type: activeRecorder.mimeType || 'audio/webm' });
             releaseMicrophone();
-            transcribe(blob);
+            if (finishAction !== 'cancel') transcribe(blob, finishAction, id);
         }, { once: true });
-        recorder.start();
+        activeRecorder.addEventListener('error', () => {
+            if (id !== requestId) return;
+            cancelRecording();
+            notify(say('L’enregistrement audio a été interrompu.', 'Audio recording was interrupted.'));
+        });
+        try { activeRecorder.start(); }
+        catch { releaseMicrophone(); setPhase('idle'); notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.')); return; }
         setPhase('recording');
+        startVisualizer(stream);
         // Lets the server fetch its speech model while the user is speaking.
         fetch('/api/voice-status').catch(() => {});
-        limit = setTimeout(stopRecording, DICTATION_MAX_MS);
+        limit = setTimeout(() => stopRecording('draft'), DICTATION_MAX_MS);
     }
 
-    function stopRecording() {
+    function stopRecording(action = 'draft') {
         if (phase !== 'recording' || !recorder) return;
+        finishAction = action;
         clearTimeout(limit);
-        try { recorder.stop(); } catch { releaseMicrophone(); setPhase('idle'); }
+        try { recorder.stop(); setPhase('transcribing'); } catch { releaseMicrophone(); setPhase('idle'); }
     }
+
+    function cancelRecording() {
+        requestId++;
+        if (transcriptController) transcriptController.abort();
+        transcriptController = null;
+        finishAction = 'cancel';
+        if (recorder && recorder.state !== 'inactive') try { recorder.stop(); } catch {}
+        releaseMicrophone();
+        setPhase('idle');
+        textarea.focus();
+    }
+
+    cancel.addEventListener('click', cancelRecording);
+    stop.addEventListener('click', () => stopRecording('draft'));
+    send.addEventListener('click', () => stopRecording('send'));
+    window.addEventListener('zaalis-conversation-change', () => { if (phase !== 'idle') cancelRecording(); });
 
     btn.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (phase === 'recording') stopRecording();
+        if (phase === 'recording') stopRecording('draft');
         else if (phase === 'idle') startRecording();
     });
     setPhase('idle');

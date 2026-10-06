@@ -484,6 +484,16 @@
 .md{max-width:100%;}
 .md table{display:block;max-width:100%;overflow-x:auto;}
 .md pre.code-block code{background:none;border:none;padding:0;font-size:12px;display:block;white-space:pre;}
+.code-snippet{margin:8px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--bg-0)}
+.code-snippet-bar{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 10px;background:var(--bg-1);color:var(--text-2);font:11px var(--font-mono)}
+.code-copy-btn{border:0;background:transparent;color:var(--text-1);font:inherit;cursor:pointer;padding:5px 8px;border-radius:5px}
+.code-copy-btn:hover,.code-copy-btn:focus-visible{background:var(--bg-hover);color:var(--text-0)}
+.code-copy-btn:focus-visible{outline:2px solid var(--accent)}
+.md .code-snippet pre.code-block{margin:0;border:0;border-radius:0}
+#plan-feedback-label{display:block;margin:12px 0 5px;color:var(--text-1);font-size:12px}
+#plan-feedback{box-sizing:border-box;width:100%;resize:vertical;border:1px solid var(--border);border-radius:6px;background:var(--bg-0);color:var(--text-0);padding:9px;font:13px/1.5 var(--font-sans)}
+#plan-feedback:focus-visible{outline:2px solid var(--accent)}
+#plan-feedback.hidden,#plan-feedback-label.hidden{display:none}
 .md blockquote{border-left:3px solid var(--border);padding-left:10px;margin:6px 0;color:var(--text-2);}
 .md hr{border:none;border-top:1px solid var(--border);margin:10px 0;}
 
@@ -717,6 +727,8 @@ body.theme-light .diff-line.del{color:#b91c1c;}
 .help-item summary::after{content:'›';font-size:18px;color:var(--text-3);transition:transform .2s ease;}
 .help-item[open] summary::after{transform:rotate(90deg);}
 .help-item summary:hover{background:var(--bg-hover);}
+.help-item summary:focus-visible{outline:2px solid var(--accent);outline-offset:-3px;border-radius:8px;}
+.help-answer-wrap{overflow:hidden;}
 .help-answer{padding:0 14px 12px;font-size:12px;line-height:1.6;color:var(--text-1);}
 
 /* Confirmation modal: red OK button when danger */
@@ -978,6 +990,12 @@ body.theme-light .diff-line.del{color:#b91c1c;}
 .chatgpt-sub-spinner{width:12px;height:12px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite;flex-shrink:0;}
 .chatgpt-sub-error{font-size:12.5px;color:var(--red,#ef4444);margin:0 0 10px;line-height:1.45;}
 #chatgpt-sub-status.connected{color:var(--green);}
+.account-subscriptions{display:grid;gap:12px;}
+.account-sub-card{border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-3);padding:16px;}
+.account-sub-card [hidden]{display:none;}
+.account-sub-label{font-size:14px;color:var(--text-0);}
+.account-sub-status.connected{color:var(--green);}
+.account-sub-note{font-size:12.5px;line-height:1.5;color:var(--text-2);margin:6px 0 14px;}
 .opale-link [hidden]{display:none;}
 .opale-actions{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;}
 .opale-actions .btn-ghost{background:var(--bg-3);border:1px solid var(--border);}

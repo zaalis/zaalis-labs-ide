@@ -120,12 +120,14 @@ pub struct Guard {
     /// Path of the plan file, relative to the workspace. The only writable path
     /// in plan mode.
     plan_file: String,
+    integration_read_only: bool,
 }
 
 impl Guard {
     pub fn new() -> Self {
         Self {
             plan_file: "plan.md".to_owned(),
+            integration_read_only: std::env::var("ZAALIS_GITHUB_READ_ONLY").as_deref() == Ok("1"),
             ..Default::default()
         }
     }
@@ -286,6 +288,12 @@ impl Guard {
     ) -> Decision {
         let target = request.target_text();
 
+        // An immutable boundary preceding autonomous modes and saved approvals.
+        if self.integration_read_only && (request.tool.starts_with("git_") || !matches!(request.kind, AccessKind::Read | AccessKind::Search | AccessKind::Session)) {
+            return Decision::Deny { reason: DecisionReason::ModeReadOnly,
+                message: "GitHub : projet en lecture seule, action refusée par l’intégration".to_owned() };
+        }
+
         // 1. Hard prohibitions. No mode, not even bypass, waves these through.
         let prohibitions = analysis.hard_prohibitions();
         if !prohibitions.is_empty() {
@@ -330,6 +338,28 @@ impl Guard {
             };
         }
 
+        // Read-only and Plan are hard session boundaries. Previously a grant
+        // saved in an earlier Auto turn was checked first and could bypass
+        // this mode, including VM and desktop actions.
+        if permissions.mode == PermissionMode::ReadOnly && request.kind.is_mutating() {
+            return Decision::Deny {
+                reason: DecisionReason::ModeReadOnly,
+                message: "mode lecture seule : aucune action modificatrice".to_owned(),
+            };
+        }
+        if permissions.mode == PermissionMode::Plan && request.kind.is_mutating() {
+            let writing_plan = matches!(request.kind, AccessKind::Write | AccessKind::Edit)
+                && target == self.plan_file;
+            return if writing_plan {
+                Decision::Allow { reason: DecisionReason::PlanModeGuard }
+            } else {
+                Decision::Deny {
+                    reason: DecisionReason::PlanModeGuard,
+                    message: format!("mode plan : seul {} est modifiable ; proposez le plan puis demandez sa validation", self.plan_file),
+                }
+            };
+        }
+
         // 3. Explicit allowances, from the policy or from an earlier answer.
         if let Some(_rule) = matching_rule(&permissions.allow, request.kind, target) {
             return Decision::Allow {
@@ -357,29 +387,9 @@ impl Guard {
             };
         }
 
-        // 5. Plan mode: read freely, write only the plan file — in every mode,
-        //    bypass included. Otherwise "plan" would silently become "go ahead".
-        if permissions.mode == PermissionMode::Plan && request.kind.is_mutating() {
-            let writing_plan = matches!(request.kind, AccessKind::Write | AccessKind::Edit)
-                && target == self.plan_file;
-            return if writing_plan {
-                Decision::Allow {
-                    reason: DecisionReason::PlanModeGuard,
-                }
-            } else {
-                Decision::Deny {
-                    reason: DecisionReason::PlanModeGuard,
-                    message: format!(
-                        "mode plan : seul {} est modifiable ; proposez le plan puis demandez sa validation",
-                        self.plan_file
-                    ),
-                }
-            };
-        }
-
         // VM commands have a separate capability, no host executable/path/UAC.
         // This mode is always autonomous, without widening host permissions.
-        if request.kind == AccessKind::Sandbox && request.tool == "vm" {
+        if request.kind == AccessKind::Sandbox && ["vm", "laboratory"].contains(&request.tool.as_str()) {
             return Decision::Allow { reason: DecisionReason::PolicyAllow };
         }
 
@@ -612,6 +622,10 @@ mod tests {
         let permissions = PermissionSet::new(PermissionMode::Supervised);
         let vm = AccessRequest::new(agent(), "vm", AccessKind::Sandbox).with_target("VM : exec");
         assert!(guard.evaluate(&vm, &permissions, 0).is_allow());
+        let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox).with_target("run");
+        assert!(guard.evaluate(&lab, &permissions, 0).is_allow());
+        let apply = AccessRequest::new(agent(), "laboratory", AccessKind::Edit).with_target("apply").sensitive(true);
+        assert!(matches!(guard.evaluate(&apply, &permissions, 0).decision, Decision::Ask { .. }));
         let host = AccessRequest::new(agent(), "run", AccessKind::Execute).with_target("npm test");
         assert!(matches!(guard.evaluate(&host, &permissions, 0).decision, Decision::Ask { .. }));
         let plan = PermissionSet::new(PermissionMode::Plan);
@@ -659,6 +673,24 @@ mod tests {
             let evaluation = evaluate(PermissionMode::ReadOnly, &request(kind, "x"));
             assert!(matches!(evaluation.decision, Decision::Deny { .. }));
             assert_eq!(evaluation.decision.reason(), DecisionReason::ModeReadOnly);
+        }
+    }
+
+    #[test]
+    fn integration_read_only_blocks_auto_bypass_and_permanent_grants() {
+        let mut guard = Guard::new();
+        guard.integration_read_only = true;
+        for mode in [PermissionMode::Auto, PermissionMode::Bypass, PermissionMode::Plan] {
+            let permissions = PermissionSet::new(mode);
+            for kind in [AccessKind::Write, AccessKind::Edit, AccessKind::Delete, AccessKind::Execute,
+                AccessKind::Mcp, AccessKind::Network, AccessKind::Computer, AccessKind::Sandbox, AccessKind::Spawn] {
+                let access = request(kind, "anything");
+                guard.record_answer(&access, true, GrantScope::Session);
+                assert!(matches!(guard.evaluate(&access, &permissions, 0).decision, Decision::Deny { .. }));
+            }
+            assert!(guard.evaluate(&request(AccessKind::Read, "README.md"), &permissions, 0).is_allow());
+            let git = AccessRequest::new(agent(), "git_diff", AccessKind::Read).with_target("git diff");
+            assert!(matches!(guard.evaluate(&git, &permissions, 0).decision, Decision::Deny { .. }));
         }
     }
 
@@ -752,6 +784,22 @@ mod tests {
     fn plan_mode_still_allows_reading() {
         let evaluation = evaluate(PermissionMode::Plan, &request(AccessKind::Read, "src/a.js"));
         assert!(evaluation.is_allow());
+    }
+
+    #[test]
+    fn restricted_modes_override_saved_and_explicit_grants() {
+        let grants = [PermissionRule::parse("Write(artifacts)").unwrap(),
+            PermissionRule::parse("Sandbox(VM : *)").unwrap(),
+            PermissionRule::parse("Computer(click)").unwrap()];
+        for mode in [PermissionMode::Plan, PermissionMode::ReadOnly] {
+            let permissions = PermissionSet::new(mode).with_allow(grants.clone());
+            let mut guard = Guard::new().with_persisted(grants.to_vec());
+            for (kind, target) in [(AccessKind::Write, "artifacts"),
+                (AccessKind::Sandbox, "VM : exec"), (AccessKind::Computer, "click")] {
+                assert!(matches!(guard.evaluate(&request(kind, target), &permissions, 0).decision,
+                    Decision::Deny { .. }), "{mode} must deny {kind:?}");
+            }
+        }
     }
 
     #[test]

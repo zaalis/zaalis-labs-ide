@@ -11,7 +11,8 @@
     "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
     "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
     "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
-    "sync:browser": "node scripts/sync-zaalis-browser.js"
+    "sync:browser": "node scripts/sync-zaalis-browser.js",
+    "build:terminal": "pkg cli.js --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-terminal.exe"
   },
   "pkg": {
     "assets": [

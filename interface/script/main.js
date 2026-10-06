@@ -5,6 +5,8 @@ const SETTINGS_SECTION_TITLES = {
     api: 'settings-api-keys-title',
     mcp: 'MCP',
     vm: 'Machines virtuelles',
+    tokens: 'Tokens',
+    integrations: 'Intégrations',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
     hardware: 'settings-hardware-title',
@@ -25,10 +27,12 @@ function setSettingsSection(section) {
     const title = $('#settings-active-title');
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
-        if (key === 'mcp' || key === 'vm') title.removeAttribute('data-i18n');
+        if (key === 'mcp' || key === 'vm' || key === 'tokens' || key === 'integrations') title.removeAttribute('data-i18n');
         else title.dataset.i18n = i18nKey;
         title.textContent = TRANSLATIONS[state.language || 'fr']?.[i18nKey] || i18nKey;
         if (key === 'vm') window.ZaalisVM?.settings();
+        if (key === 'tokens') window.ZaalisTokenProfile?.mount();
+        if (key === 'integrations') window.ZaalisIntegrations?.settings();
     }
 }
 
@@ -168,7 +172,7 @@ function populateSettingsControls() {
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
-    setVal('settings-default-permission-select', ['supervised', 'semi', 'auto'].includes(state.permissionMode) ? state.permissionMode : c.defaultPermissionMode);
+    setVal('settings-default-permission-select', ['plan', 'supervised', 'semi', 'auto'].includes(state.permissionMode) ? state.permissionMode : c.defaultPermissionMode);
     setVal('settings-channel-select', c.updateChannel || 'stable');
     const folder = $('#settings-default-folder'); if (folder) folder.value = c.defaultProjectFolder || '';
     const reopen = $('#settings-reopen-toggle'); if (reopen) reopen.checked = !!c.reopenLastProject;
@@ -179,6 +183,7 @@ $('#settings-btn').addEventListener('click', () => {
     if (typeof loadGgufModels === 'function') loadGgufModels();
     loadCompatProviders();
     loadChatgptAccount();
+    loadAccountSubscriptions();
     initSettingsCustomSelects();
     populateSettingsControls();
     // Refresh the API-key "Enregistrée ····1234" badges from the server every
@@ -211,17 +216,20 @@ async function loadCompatProviders() {
 // click away in Settings, so the list remains short and readable.
 function renderCompatModelOptions() {
     const group = $('#compat-model-group');
-    if (!group) return;
+    const subscriptions = $('#subscription-model-group');
+    if (!group || !subscriptions) return;
     const select = $('#ai-model');
     const wanted = state.config.aiModel;
     const add = group.querySelector('option[data-action="add"]');
     group.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
+    subscriptions.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
     window.compatProviders.filter(provider => provider.configured).forEach(provider => {
         const option = document.createElement('option');
         option.value = `compat:${provider.id}`;
         option.textContent = provider.label;
         option.title = `${provider.label} — ${provider.baseUrl}`;
-        group.insertBefore(option, add);
+        if (provider.oauth) subscriptions.insertBefore(option, subscriptions.querySelector('option[data-action="subscription"]'));
+        else group.insertBefore(option, add);
     });
     if (String(wanted || '').startsWith('compat:') && select.value !== wanted
         && Array.from(select.options).some(option => option.value === wanted)) {
@@ -360,8 +368,14 @@ function openCompatSettings() {
         $('#compat-filter')?.focus({ preventScroll: true });
     });
 }
+function openSubscriptionSettings() {
+    $('#settings-btn')?.click();
+    setSettingsSection('api');
+    requestAnimationFrame(() => $('#account-subscriptions-title')?.scrollIntoView({ block: 'start', behavior: 'smooth' }));
+}
 $('#ai-model')?.addEventListener('custom-select-action', event => {
     if (event.detail === 'add') openCompatSettings();
+    if (event.detail === 'subscription') openSubscriptionSettings();
 });
 
 // ----- ChatGPT subscription (Plus / Pro) -----
@@ -487,6 +501,143 @@ $('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
         showChatgptError(error.message);
     }
 });
+
+// xAI and MiniMax account sessions use the same device-code interaction as
+// ChatGPT, while each provider has its own server-side OAuth grant and route.
+const accountSubscriptions = [
+    { id: 'xai-sub', label: 'Grok / xAI', note: 'SuperGrok / X Premium+ · xAI peut refuser l’inférence OAuth selon le forfait.' },
+    { id: 'minimax-sub', label: 'MiniMax', note: 'Compte MiniMax international · modèles disponibles selon votre forfait.' },
+];
+const accountFlows = new Map();
+function accountCard(id) { return document.querySelector(`[data-account-sub="${id}"]`); }
+function accountError(id, message) {
+    const element = accountCard(id)?.querySelector('.chatgpt-sub-error');
+    if (element) { element.textContent = message || ''; element.hidden = !message; }
+}
+function accountRender(id, account) {
+    const card = accountCard(id);
+    if (!card) return;
+    const connected = !!account?.connected;
+    const status = card.querySelector('.account-sub-status');
+    status.textContent = connected ? chatgptSubText('Compte connecté', 'Account connected') : chatgptSubText('Non connecté', 'Not connected');
+    status.classList.toggle('connected', connected);
+    card.querySelector('[data-action="connect"]').hidden = connected || accountFlows.has(id);
+    card.querySelector('[data-action="disconnect"]').hidden = !connected;
+}
+function accountStop(id) {
+    const flow = accountFlows.get(id);
+    if (flow) {
+        clearTimeout(flow.timer);
+        fetch(`/api/subscriptions/${id}/flows/${encodeURIComponent(flow.flowId)}`, { method: 'DELETE' }).catch(() => {});
+    }
+    accountFlows.delete(id);
+    const card = accountCard(id);
+    if (card) card.querySelector('.chatgpt-sub-flow').hidden = true;
+}
+function accountApply(id, data) {
+    accountRender(id, data.account);
+    if (Array.isArray(data.providers)) {
+        window.compatProviders = data.providers;
+        renderCompatModelOptions();
+        renderCompatKeyFields();
+    }
+}
+async function accountPoll(id) {
+    const flow = accountFlows.get(id);
+    if (!flow) return;
+    let data = null;
+    try {
+        const response = await fetch(`/api/subscriptions/${id}/poll`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flowId: flow.flowId }),
+        });
+        data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(data?.error || 'Connexion refusée.');
+    } catch (error) {
+        if (data?.status === 'error') { accountStop(id); accountError(id, error.message); accountRender(id, { connected: false }); return; }
+    }
+    if (accountFlows.get(id) !== flow) return;
+    if (data?.status === 'connected') {
+        accountStop(id);
+        accountApply(id, data);
+        showToast('Abonnement', chatgptSubText('Compte connecté : choisissez son modèle dans la liste.', 'Account connected: choose its model in the list.'));
+        return;
+    }
+    if (data?.status === 'expired' || Date.now() > flow.expiresAt) {
+        accountStop(id);
+        accountError(id, chatgptSubText('Le code a expiré. Relancez la connexion.', 'The code expired. Start again.'));
+        accountRender(id, { connected: false });
+        return;
+    }
+    flow.timer = setTimeout(() => accountPoll(id), (data?.interval || flow.interval) * 1000);
+}
+async function accountStart(id) {
+    const card = accountCard(id);
+    const button = card?.querySelector('[data-action="connect"]');
+    if (!button) return;
+    accountError(id, '');
+    button.disabled = true;
+    try {
+        const response = await fetch(`/api/subscriptions/${id}/start`, { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || 'Connexion impossible.');
+        accountFlows.set(id, data);
+        card.querySelector('.chatgpt-sub-code').textContent = data.userCode;
+        card.querySelector('.chatgpt-sub-flow').hidden = false;
+        button.hidden = true;
+        data.timer = setTimeout(() => accountPoll(id), data.interval * 1000);
+    } catch (error) { accountError(id, error.message); }
+    finally { button.disabled = false; }
+}
+function renderAccountCards() {
+    const target = $('#account-subscriptions');
+    if (!target || target.childElementCount) return;
+    for (const provider of accountSubscriptions) {
+        const card = document.createElement('div');
+        card.className = 'chatgpt-sub account-sub-card';
+        card.dataset.accountSub = provider.id;
+        card.innerHTML = `<div class="settings-status-row"><strong class="account-sub-label"></strong><strong class="account-sub-status">Non connecté</strong></div>
+            <p class="account-sub-note"></p>
+            <div class="chatgpt-sub-actions"><button class="btn btn-primary" data-action="connect" type="button">Connecter le compte</button><button class="btn btn-ghost" data-action="disconnect" type="button" hidden>Déconnecter</button></div>
+            <div class="chatgpt-sub-flow" hidden><p class="chatgpt-sub-step">Ouvrez la page du fournisseur, connectez-vous, puis validez ce code :</p><div class="chatgpt-sub-code" aria-live="polite"></div>
+            <div class="chatgpt-sub-actions"><button class="btn btn-primary" data-action="open" type="button">Ouvrir la page</button><button class="btn btn-ghost" data-action="copy" type="button">Copier le code</button><button class="btn btn-ghost" data-action="cancel" type="button">Annuler</button></div>
+            <p class="chatgpt-sub-wait"><span class="chatgpt-sub-spinner" aria-hidden="true"></span>En attente de validation…</p></div>
+            <p class="chatgpt-sub-error" role="alert" hidden></p>`;
+        card.querySelector('.account-sub-label').textContent = provider.label;
+        card.querySelector('.account-sub-note').textContent = provider.note;
+        card.querySelector('[data-action="connect"]').addEventListener('click', () => accountStart(provider.id));
+        card.querySelector('[data-action="cancel"]').addEventListener('click', () => { accountStop(provider.id); accountRender(provider.id, { connected: false }); });
+        card.querySelector('[data-action="open"]').addEventListener('click', async () => {
+            const url = accountFlows.get(provider.id)?.verificationUrl;
+            if (!url) return;
+            try { const response = await fetch(`/api/browser-open?external=1&url=${encodeURIComponent(url)}`); if (!response.ok) throw new Error(); }
+            catch { window.open(url, '_blank', 'noopener,noreferrer'); }
+        });
+        card.querySelector('[data-action="copy"]').addEventListener('click', async () => {
+            const code = accountFlows.get(provider.id)?.userCode;
+            if (code) try { await navigator.clipboard.writeText(code); } catch {}
+        });
+        card.querySelector('[data-action="disconnect"]').addEventListener('click', async () => {
+            accountError(provider.id, '');
+            try {
+                const response = await fetch(`/api/subscriptions/${provider.id}/session`, { method: 'DELETE' });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'Déconnexion impossible.');
+                accountApply(provider.id, data);
+            } catch (error) { accountError(provider.id, error.message); }
+        });
+        target.appendChild(card);
+    }
+}
+async function loadAccountSubscriptions() {
+    renderAccountCards();
+    for (const provider of accountSubscriptions) {
+        if (accountFlows.has(provider.id)) continue;
+        try {
+            const response = await fetch(`/api/subscriptions/${provider.id}/status`);
+            if (response.ok) accountRender(provider.id, await response.json());
+        } catch {}
+    }
+}
 
 // ----- Opale (notes application) -----
 // The server detects a running or installed Opale; one click stores the
@@ -1778,6 +1929,8 @@ async function checkForUpdates() {
         const data = await res.json();
 
         const btn = document.getElementById('app-update-btn');
+        const version = document.getElementById('app-version');
+        if (version && data.currentVersion) version.textContent = `v${String(data.currentVersion).replace(/^v/i, '')}`;
         if (data.downloadUrl && data.updateAvailable) {
             pendingUpdateUrl = data.downloadUrl;
             if (btn) {
@@ -1834,14 +1987,7 @@ async function checkForUpdates() {
             }
         } else if (btn) {
             pendingUpdateUrl = null;
-            btn.classList.remove('hidden');
-            btn.classList.add('version-label');
-            btn.disabled = true;
-            const label = btn.querySelector('span');
-            if (label) {
-                label.removeAttribute('data-i18n');
-                label.textContent = data.currentVersion ? `v${String(data.currentVersion).replace(/^v/i, '')}` : 'A jour';
-            }
+            btn.classList.add('hidden');
             btn.onclick = null;
         }
     } catch (err) {
@@ -2211,11 +2357,35 @@ if (closeCatalog) closeCatalog.addEventListener('click', () => $('#catalog-modal
 // Help / docs modal.
 function renderHelp() {
     const list = $('#help-list'); if (!list) return;
-    list.innerHTML = '';
+    list.replaceChildren();
     (window.HELP_TOPICS || []).forEach(t => {
         const det = document.createElement('details');
         det.className = 'help-item';
-        det.innerHTML = `<summary>${t.q}</summary><div class="help-answer">${t.a}</div>`;
+        const summary = document.createElement('summary');
+        summary.textContent = t.q;
+        const wrap = document.createElement('div');
+        wrap.className = 'help-answer-wrap';
+        const answer = document.createElement('div');
+        answer.className = 'help-answer';
+        answer.textContent = t.a;
+        wrap.appendChild(answer);
+        det.append(summary, wrap);
+        summary.addEventListener('click', async event => {
+            event.preventDefault();
+            if (det.dataset.animating) return;
+            const opening = !det.open;
+            if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { det.open = opening; return; }
+            det.dataset.animating = '1';
+            if (opening) det.open = true;
+            const height = wrap.scrollHeight;
+            const animation = wrap.animate([
+                { height: opening ? '0px' : `${height}px`, opacity: opening ? 0 : 1 },
+                { height: opening ? `${height}px` : '0px', opacity: opening ? 1 : 0 }
+            ], { duration: 240, easing: 'cubic-bezier(.22,1,.36,1)' });
+            try { await animation.finished; } catch {}
+            if (!opening) det.open = false;
+            delete det.dataset.animating;
+        });
         list.appendChild(det);
     });
 }
@@ -2364,6 +2534,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
+    window.ZaalisWelcome?.render();
     if (typeof renderHistory === 'function') renderHistory();
 
     // Polling Ollama models in background

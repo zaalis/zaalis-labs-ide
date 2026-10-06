@@ -22,6 +22,8 @@
         close: '<path d="m6 6 12 12M18 6 6 18"/>',
         editor: '<path d="m8 6-6 6 6 6M16 6l6 6-6 6M14 3l-4 18"/>',
         menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
+        chevron: '<path d="m9 5 7 7-7 7"/>',
+        collapse: '<path d="m5 9 7-5 7 5m-14 6 7 5 7-5"/>',
     };
     function icon(name) {
         const span = el('span', 'ws-icon');
@@ -40,6 +42,9 @@
     }
     let saved = {};
     try { saved = JSON.parse(localStorage.getItem('zaalis-workspace') || '{}'); } catch {}
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
+    const expanded = new Map((Array.isArray(saved.collapsedProjects) ? saved.collapsedProjects : [])
+        .filter(key => typeof key === 'string').map(key => [key, false]));
     let mode = saved.mode === 'chat' ? 'chat' : 'editor';
     let panel = ['files', 'browser', 'terminal', 'vm', 'artifacts', 'agents', 'chat'].includes(saved.panel) ? saved.panel : null;
     let width = Math.max(300, Math.min(760, Number(saved.width) || 420));
@@ -78,7 +83,18 @@
     const editorButton = button(text('Éditeur', 'Editor'), 'editor', () => setMode('editor'));
     const chatButton = button('Chat IDE', 'chat', () => setMode('chat'));
     modeControl.append(editorButton, chatButton);
+    const memoryButton = button(text('Mémoire des corrections', 'Correction memory'), 'chat', () => window.openCorrectionMemory?.(), 'ws-icon-button');
+
     document.querySelector('.topbar-left').append(modeControl);
+    const version = el('span', 'ws-version', 'v1.0.16');
+    version.id = 'app-version';
+    modeControl.after(version);
+    version.after(memoryButton);
+    fetch('/api/version').then(response => response.ok ? response.json() : null)
+        .then(data => { if (data?.version) version.textContent = `v${String(data.version).replace(/^v/i, '')}`; })
+        .catch(() => {});
+    const updateButton = byId('app-update-btn');
+    if (updateButton) version.after(updateButton);
     const mobileMenu = button(text('Projets', 'Projects'), 'menu', () => {
         document.body.classList.toggle('ws-mobile-navigation');
         mobileMenu.setAttribute('aria-expanded', String(document.body.classList.contains('ws-mobile-navigation')));
@@ -88,11 +104,13 @@
     modeControl.before(mobileMenu);
     const dock = el('aside', 'workspace-dock');
     dock.id = 'workspace-dock';
+    const dockContent = el('div', 'ws-dock-content');
+    dock.append(dockContent);
     const dockHead = el('header', 'ws-dock-head');
     const dockTitle = el('strong');
     const dockClose = button(text('Fermer le panneau', 'Close panel'), 'close', () => setPanel(null), 'ws-icon-button');
     dockHead.append(dockTitle, dockClose);
-    dock.append(dockHead);
+    dockContent.append(dockHead);
     const rail = el('nav', 'workspace-rail');
     rail.setAttribute('aria-label', text('Outils de travail', 'Workspace tools'));
     const panelLabels = {
@@ -104,7 +122,7 @@
         const pane = el('section', `ws-pane ws-pane-${name}`);
         pane.id = `ws-pane-${name}`;
         pane.setAttribute('aria-label', panelLabels[name]);
-        dock.append(pane);
+        dockContent.append(pane);
         panes[name] = pane;
         const control = button(panelLabels[name], name, () => setPanel(panel === name ? null : name), 'ws-rail-button');
         control.setAttribute('aria-controls', pane.id);
@@ -121,7 +139,8 @@
     splitter.setAttribute('aria-valuemax', '760');
     workspace.append(splitter, dock, rail);
     function saveLayout() {
-        try { localStorage.setItem('zaalis-workspace', JSON.stringify({ mode, panel, width, sidebarView: sidebarViews })); } catch {}
+        try { localStorage.setItem('zaalis-workspace', JSON.stringify({ mode, panel, width, sidebarView: sidebarViews,
+            collapsedProjects: [...expanded].filter(([, open]) => !open).map(([key]) => key) })); } catch {}
     }
     function setSidebarView(view) {
         sidebarViews[mode] = view === 'chats' ? 'chats' : 'files';
@@ -204,16 +223,64 @@
         if (panel === 'agents') renderAgents();
         if (panel === 'chat') renderOtherChat();
     }
+    let displayedPanel;
+    let dockMotion = null;
+    let splitterMotion = null;
+    let paneMotion = null;
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
     function updatePanels() {
         const visiblePanel = panel;
-        dock.hidden = !visiblePanel;
-        splitter.hidden = !visiblePanel;
-        dockTitle.textContent = panelLabels[visiblePanel] || '';
+        const changed = visiblePanel !== displayedPanel;
+        const previousPanel = displayedPanel;
+        const fromWidth = dock.hidden ? 0 : dock.getBoundingClientRect().width;
+        const fromOpacity = dock.hidden ? 0 : Number(getComputedStyle(dock).opacity);
+        const interrupted = !!dockMotion;
+        dockMotion?.cancel(); splitterMotion?.cancel(); paneMotion?.cancel();
+        dockMotion = splitterMotion = paneMotion = null;
+        delete dock.dataset.animating;
+        dockContent.style.width = '';
+        dock.inert = !visiblePanel;
+        splitter.inert = !visiblePanel;
+        if (!visiblePanel && dock.contains(document.activeElement)) railButtons[previousPanel]?.focus({ preventScroll: true });
+        // Keep the outgoing content mounted until the closing motion finishes.
+        const contentPanel = visiblePanel || previousPanel;
+        dock.hidden = !contentPanel;
+        splitter.hidden = !contentPanel;
+        dockTitle.textContent = panelLabels[contentPanel] || '';
         if (visiblePanel === 'vm' && !panes.vm.childElementCount) window.ZaalisVM?.open(panes.vm);
-        Object.entries(panes).forEach(([name, pane]) => { pane.hidden = name !== visiblePanel; railButtons[name].setAttribute('aria-expanded', String(name === visiblePanel)); });
+        Object.entries(panes).forEach(([name, pane]) => { pane.hidden = name !== contentPanel; railButtons[name].setAttribute('aria-expanded', String(name === visiblePanel)); });
         if (visiblePanel === 'terminal') { panes.terminal.append(terminal); terminal.classList.remove('hidden'); }
-        else if (terminal.parentElement === panes.terminal) { terminalAnchor.after(terminal); terminal.classList.add('hidden'); }
         applyWidth();
+        displayedPanel = visiblePanel;
+        const finish = () => {
+            dock.hidden = !panel;
+            splitter.hidden = !panel;
+            dockContent.style.width = '';
+            delete dock.dataset.animating;
+            if (panel !== 'terminal' && terminal.parentElement === panes.terminal) { terminalAnchor.after(terminal); terminal.classList.add('hidden'); }
+            scheduleBrowserSync();
+            window.dispatchEvent(new Event('resize'));
+        };
+        if (changed && previousPanel !== undefined && !reducedMotion.matches && typeof dock.animate === 'function') {
+            const targetWidth = dock.getBoundingClientRect().width;
+            const openingOrClosing = !visiblePanel || !previousPanel || interrupted;
+            if (openingOrClosing) {
+                const overlay = getComputedStyle(dock).position === 'absolute';
+                // A fixed inner surface avoids text reflow during the reveal.
+                dockContent.style.width = `${targetWidth - 1}px`;
+                dock.dataset.animating = 'true';
+                const timing = { duration: 320, easing: 'cubic-bezier(.22, 1, .36, 1)' };
+                const frames = overlay
+                    ? [{ opacity: fromOpacity, transform: `translateX(${visiblePanel ? 24 * (1 - fromOpacity) : 0}px)` }, { opacity: visiblePanel ? 1 : 0, transform: `translateX(${visiblePanel ? 0 : 24}px)` }]
+                    : [{ width: `${fromWidth}px`, minWidth: '0px', opacity: fromOpacity }, { width: `${visiblePanel ? targetWidth : 0}px`, minWidth: '0px', opacity: visiblePanel ? 1 : 0 }];
+                const motion = dockMotion = dock.animate(frames, timing);
+                if (!overlay) splitterMotion = splitter.animate([{ width: `${visiblePanel ? (fromWidth ? 5 : 0) : 5}px` }, { width: `${visiblePanel ? 5 : 0}px` }], timing);
+                motion.onfinish = () => { if (dockMotion === motion) { dockMotion = null; splitterMotion = null; finish(); } };
+            } else {
+                paneMotion = panes[visiblePanel].animate([{ opacity: .35, transform: 'translateX(8px)' }, { opacity: 1, transform: 'translateX(0)' }], { duration: 180, easing: 'ease-out' });
+                finish();
+            }
+        } else finish();
         scheduleBrowserSync();
     }
     async function renderEditorFilesPane(force = false) {
@@ -238,7 +305,7 @@
         else renderTree(files, tree, 0);
     }
     function showError(error) { if (typeof showToast === 'function') showToast(text('Action impossible', 'Action unavailable'), error.message || String(error), { icon: '!' }); }
-    function isBusy() { return !!chatAbort || !!document.querySelector('.agent-card.working'); }
+    function isBusy() { return !!chatAbort || (typeof agentTaskRunning !== 'undefined' && agentTaskRunning) || !!document.querySelector('.agent-card.working'); }
     function safelyNavigate(action) {
         if (isBusy()) { showError(new Error(text('Arrêtez la tâche en cours avant de changer de conversation.', 'Stop the running task before switching conversations.'))); return; }
         saveConversation(activeKind());
@@ -251,9 +318,9 @@
         ...(state.agentConversations || []).map(conv => ({ conv, kind: 'agents' })),
     ];
     const currentConversation = (kind = activeKind()) => (state[kind === 'agents' ? 'agentConversations' : 'conversations'] || []).find(c => c.id === state[kind === 'agents' ? 'currentAgentConvId' : 'currentConvId']);
-    const expanded = new Map();
     function renderNavigation() {
         const focusKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
+        const scrollTop = navigation.scrollTop;
         navigation.replaceChildren();
         const actions = el('div', 'ws-nav-actions');
         actions.append(button(text('Nouveau chat', 'New chat'), 'plus', () => safelyNavigate(() => newConversation(activeKind()))));
@@ -268,23 +335,54 @@
             if (!groups.has(key)) groups.set(key, { label: item.conv.project || text('Sans projet', 'Without project'), path, items: [] });
             groups.get(key).items.push(item);
         }
+        const allCollapsed = [...groups.keys()].every(key => expanded.get(key) === false);
+        const foldAll = button(allCollapsed ? text('Déplier tous les projets', 'Expand all projects') : text('Replier tous les projets', 'Collapse all projects'),
+            'collapse', () => {
+                for (const key of groups.keys()) expanded.set(key, allCollapsed);
+                saveLayout(); renderNavigation();
+            }, 'ws-icon-button');
+        foldAll.dataset.focusKey = 'projects:fold-all';
+        actions.append(foldAll);
+        let groupIndex = 0;
         for (const [key, group] of groups) {
             const section = el('section', 'ws-project-group');
             const head = el('div', 'ws-project-heading');
-            const toggle = button(group.label, group.path ? 'files' : 'chat', () => { expanded.set(key, !(expanded.get(key) !== false)); renderNavigation(); }, 'ws-project-toggle');
+            const open = expanded.get(key) !== false;
+            const setExpanded = value => { expanded.set(key, value); saveLayout(); renderNavigation(); };
+            const toggle = button(group.label, group.path ? 'files' : 'chat', () => setExpanded(!open), 'ws-project-toggle');
+            toggle.lastElementChild.className = 'ws-project-name';
+            const chevron = icon('chevron');
+            chevron.classList.add('ws-project-chevron');
+            toggle.prepend(chevron);
+            const count = el('span', 'ws-project-count', String(group.items.length));
+            count.setAttribute('aria-hidden', 'true');
+            toggle.append(count);
             toggle.dataset.focusKey = `project:${key}`;
-            toggle.setAttribute('aria-expanded', String(expanded.get(key) !== false));
-            toggle.title = group.path || group.label;
+            toggle.setAttribute('aria-expanded', String(open));
+            toggle.setAttribute('aria-label', `${open ? text('Replier', 'Collapse') : text('Déplier', 'Expand')} ${group.label} (${group.items.length} ${text('chats', 'chats')})`);
+            toggle.title = `${group.path || group.label}\n${open ? text('Replier les chats', 'Collapse chats') : text('Déplier les chats', 'Expand chats')}`;
+            toggle.addEventListener('keydown', event => {
+                if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+                event.preventDefault();
+                setExpanded(event.key === 'ArrowRight');
+            });
             head.append(toggle, button(text('Nouveau chat dans ce projet', 'New chat in this project'), 'plus', () => safelyNavigate(async () => {
-                if (group.path) await openProject(group.path, false, { preserveConversation: true });
+                if (group.path) {
+                    const opened = await openProject(group.path, false, { preserveConversation: true });
+                    if (!opened) return;
+                }
                 else clearProject({ preserveConversation: true });
+                expanded.set(key, true); saveLayout();
                 newConversation('chat');
                 document.querySelector('.ai-tab[data-tab="chat"]').click();
                 refresh();
             }), 'ws-icon-button'));
             section.append(head);
-            if (expanded.get(key) !== false) {
+            {
                 const list = el('div', 'ws-project-chats');
+                list.id = `ws-project-chats-${groupIndex++}`;
+                list.hidden = !open;
+                toggle.setAttribute('aria-controls', list.id);
                 for (const { conv, kind } of [...group.items].reverse()) {
                     const wrapper = el('div', 'ws-conversation-row');
                     const row = button(conv.title || 'Conversation', null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
@@ -303,6 +401,7 @@
             }
             navigation.append(section);
         }
+        navigation.scrollTop = scrollTop;
         if (focusKey) [...navigation.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
     }
 
@@ -345,7 +444,7 @@
     function syncBrowser() {
         if (!nativeAvailable) return;
         const rect = browserHost.getBoundingClientRect();
-        const visible = panel === 'browser' && !dock.hidden && rect.width > 1 && rect.height > 1 && !browserOccluded();
+        const visible = panel === 'browser' && !dock.hidden && !dock.dataset.animating && rect.width > 1 && rect.height > 1 && !browserOccluded();
         const command = visible ? { type: 'browser', action: 'show', bounds: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }, devicePixelRatio: window.devicePixelRatio || 1 } : { type: 'browser', action: 'hide' };
         const signature = JSON.stringify(command);
         if (signature !== lastBrowserCommand) { nativePost(command); lastBrowserCommand = signature; }
@@ -427,7 +526,8 @@
             const card = el('article', 'ws-artifact');
             card.append(el('span', 'ws-eyebrow', item.type || 'file'), el('h3', '', item.title), el('p', 'ws-path', item.path || item.url));
             if (item.provenance?.tool) card.append(el('p', 'ws-meta', `${item.provenance.tool} · ${new Date(item.createdAt).toLocaleString()}`));
-            card.append(button(text('Ouvrir', 'Open'), item.url ? 'browser' : 'files', async () => {
+            card.append(button(item.downloadUrl ? text('Télécharger', 'Download') : text('Ouvrir', 'Open'), item.url ? 'browser' : 'files', async () => {
+                if (item.downloadUrl) { window.location.assign(item.downloadUrl); return; }
                 if (item.path) {
                     if (normalizeProjectPath(item.project) !== normalizeProjectPath(state.projectRoot)) { showError(new Error(text('Ouvrez la conversation du projet associé à ce fichier.', 'Open the conversation for this file’s project.'))); return; }
                     await openFile(item.path, item.title);
@@ -482,6 +582,12 @@
         }
         if (event.type === 'tool_done' && !event.error && !event.blocked) {
             if (Array.isArray(event.artifacts)) registerArtifacts(event.artifacts, kind);
+            if (event.tool === 'workspace' && event.input?.action === 'create_artifact') {
+                try {
+                    const result = JSON.parse(event.text || '{}');
+                    if (result.path) registerArtifacts([{ type: 'file', path: result.path, downloadUrl: result.downloadUrl, provenance: { tool: event.tool, callId: event.id, sessionId: activeRun } }], kind);
+                } catch { /* Older tool results have no structured artifact. */ }
+            }
             const path = event.input?.path || event.input?.file_path || event.input?.filePath;
             if (path && /write|edit|patch|create_file/i.test(event.tool || '')) registerArtifacts([{ type: 'file', path, provenance: { tool: event.tool, callId: event.id, sessionId: activeRun } }], kind);
             if (path && panel === 'files' && mode === 'editor') renderEditorFilesPane(true);

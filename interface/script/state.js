@@ -288,6 +288,8 @@ const TRANSLATIONS = {
         'tab-agents': 'Agents',
         'chat-default-msg': 'Selectionnez un modele et posez votre question.',
         'perm-label': 'Mode :',
+        'perm-plan': 'Plan',
+        'perm-plan-title': 'Préparer un plan, puis demander votre accord',
         'perm-supervised': 'Supervise',
         'perm-supervised-title': 'Chaque modification demande votre accord',
         'perm-semi': 'Semi-auto',
@@ -505,6 +507,8 @@ const TRANSLATIONS = {
         'tab-agents': 'Agents',
         'chat-default-msg': 'Select a model and ask your question.',
         'perm-label': 'Mode:',
+        'perm-plan': 'Plan',
+        'perm-plan-title': 'Prepare a plan, then request your approval',
         'perm-supervised': 'Supervised',
         'perm-supervised-title': 'Every modification requires your approval',
         'perm-semi': 'Semi-auto',
@@ -1317,7 +1321,7 @@ function loadState() {
                 }
                 const { keys, ...safeConfig } = s.config;
                 Object.assign(state.config, safeConfig);
-                if (['supervised', 'semi', 'auto'].includes(state.config.defaultPermissionMode)) {
+                if (['plan', 'supervised', 'semi', 'auto'].includes(state.config.defaultPermissionMode)) {
                     state.permissionMode = state.config.defaultPermissionMode;
                 }
             }

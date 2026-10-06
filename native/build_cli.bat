@@ -9,6 +9,8 @@ cd /d "%~dp0\.."
 echo Building and staging the Rust CLI/core ...
 call npm run build:cli
 if errorlevel 1 goto :error
+call npm run build:terminal
+if errorlevel 1 goto :error
 
 echo.
 echo Done. Rust CLI staged at native\dist\zaalis-cli.exe

@@ -193,17 +193,21 @@ pub(crate) async fn run_agent(
             session.update_usage(&node.id, usage).await;
         }
         session.checkpoint_history(&node.id, &history).await;
+        let estimated_input=(crate::context::estimate(&history)+overhead) as u64;
+        let output=remaining_tokens(&node,&usage).unwrap_or(output_reserve as u32).min(output_reserve as u32);
+        let (mut reservation,allowed_output)=crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await?;
         let request = TurnRequest {
             binding: node.model.clone(),
             system: runtime_system,
             messages: history.clone(),
             tools,
             reasoning: node.model.reasoning,
-            max_output_tokens: Some(remaining_tokens(&node, &usage).unwrap_or(output_reserve as u32).min(output_reserve as u32)),
+            max_output_tokens: Some(allowed_output),
             temperature: None,
         };
         usage.rounds = usage.rounds.saturating_add(1);
         session.update_usage(&node.id, usage).await;
+        let mut telemetry = crate::telemetry::ProviderCall::new(session.config.usage_store.clone(), session.config.session_id.to_string(), node.model.provider.to_string(), node.model.model.clone().unwrap_or_default());
         let mut stream = session
             .providers
             .stream_turn(request, cancel.clone())
@@ -215,6 +219,7 @@ pub(crate) async fn run_agent(
         let mut calls = Vec::new();
         let mut state: Option<ProviderState> = None;
         let mut round_usage = Usage::default();
+        let mut usage_reported = false;
         let mut stop_reason = StopReason::EndTurn;
         while let Some(event) = stream.next().await {
             match event {
@@ -239,7 +244,7 @@ pub(crate) async fn run_agent(
                 TurnEvent::ToolCallCompleted { call } => calls.push(call),
                 TurnEvent::Usage {
                     usage: provider_usage,
-                } => round_usage = provider_usage,
+                } => { round_usage = provider_usage; usage_reported=true; telemetry.observe(provider_usage); },
                 TurnEvent::AssistantState {
                     state: provider_state,
                 } => state = Some(provider_state),
@@ -257,6 +262,8 @@ pub(crate) async fn run_agent(
                 TurnEvent::ToolCallStarted { .. } | TurnEvent::ToolCallDelta { .. } => {}
             }
         }
+        reservation.settle(usage_reported.then_some(round_usage)).await;
+        telemetry.complete();
         close_stream_segments(&session, &mut timeline);
         round_usage.rounds = 0;
         usage.merge(&round_usage);

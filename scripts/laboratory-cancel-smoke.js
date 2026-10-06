@@ -1,0 +1,7 @@
+'use strict';
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');const {VmManager}=require('../vm-manager'),{Laboratory}=require('../laboratory');
+async function main(){const root=path.resolve('.tmp/laboratory-cancel-'+Date.now());fs.mkdirSync(root,{recursive:true});const project=path.join(root,'project');fs.mkdirSync(project);fs.writeFileSync(path.join(project,'app.txt'),'fixture');const vm=new VmManager({appDir:path.resolve(__dirname,'..'),dataDir:root}),lab=new Laboratory({dataDir:root,vm}),proof=[];
+ try{for(const system of ['linux','windows']){const made=await lab.create('cancel-smoke',{system,problem:'Annulation pendant le démarrage '+system,maxMs:300000,hypotheses:[{label:'Ne doit pas être exécutée',checks:[{command:'exit 99'}]}],finalChecks:[{command:'exit 99'}]},project);const stopped=await lab.cancel('cancel-smoke',made.id);assert.equal(stopped.status,'cancelled');assert.equal(lab.active.size,0);assert.equal(vm.sessions.size,0);assert.equal(fs.readdirSync(vm.root).filter(f=>/^[0-9a-f-]{36}$/.test(f)).length,0);proof.push({system,id:made.id,status:stopped.status,remainingManagedSessions:0,remainingSessionDisks:0});console.log(system.toUpperCase()+'_CANCEL_DURING_START_RECLAIM_OK');}
+ fs.writeFileSync(path.join(root,'evidence.json'),JSON.stringify(proof,null,2));console.log('EVIDENCE='+path.join(root,'evidence.json'));
+ }finally{await lab.shutdown();await vm.shutdown();}}
+main().catch(e=>{console.error(e.stack);process.exitCode=1;});

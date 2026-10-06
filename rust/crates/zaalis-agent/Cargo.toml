@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 zaalis-core = { workspace = true }
+zaalis-store = { workspace = true }
 zaalis-fs = { workspace = true }
 zaalis-protocol = { workspace = true }
 zaalis-providers = { path = "../zaalis-providers" }

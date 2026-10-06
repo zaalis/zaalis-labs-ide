@@ -20,6 +20,10 @@
 const PROVIDERS = Object.freeze([
   { id: 'chatgpt', label: 'ChatGPT (abonnement)', baseUrl: 'https://chatgpt.com/backend-api/codex', oauth: 'chatgpt',
     models: ['gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'] },
+  { id: 'xai-sub', label: 'Grok / xAI (abonnement)', baseUrl: 'https://api.x.ai/v1', oauth: 'xai',
+    models: ['grok-4.7', 'grok-4.6'] },
+  { id: 'minimax-sub', label: 'MiniMax (abonnement)', baseUrl: 'https://api.minimax.io/anthropic/v1', oauth: 'minimax',
+    models: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
   { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-pro', 'deepseek-flash'] },
   { id: 'zai', label: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/paas/v4',
@@ -112,10 +116,10 @@ function capabilities(provider, model, ready) {
     return {
       provider: `${PREFIX}${entry.id}`,
       model: String(model || ''),
-      reasoning: { mode: 'effort', supported: true, levels: SUBSCRIPTION_REASONING },
-      contextWindow: 272000,
+      reasoning: { mode: 'effort', supported: entry.oauth === 'chatgpt', levels: entry.oauth === 'chatgpt' ? SUBSCRIPTION_REASONING : [] },
+      contextWindow: entry.oauth === 'minimax' ? 200000 : 272000,
       tools: true,
-      vision: true,
+      vision: entry.oauth === 'minimax' ? /^minimax-m3/i.test(lower) : true,
       ready: !!ready,
     };
   }

@@ -154,6 +154,11 @@ impl Daemon {
             ClientMethod::CheckpointRestore => self.restore(params(request)?).await,
             ClientMethod::ToolsList => self.tools(params(request)?).await,
             ClientMethod::ModelsList => self.models().await,
+            ClientMethod::UsageQuery => {
+                let from=request.params.as_ref().and_then(|p|p.get("from_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("from_ms requis"))?;
+                let to=request.params.as_ref().and_then(|p|p.get("to_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("to_ms requis"))?;
+                Ok((self.store.usage_summary(from,to).map_err(RpcError::from)?,Vec::new()))
+            },
         }
     }
 
@@ -292,6 +297,7 @@ impl Daemon {
         system_prompt: Option<String>,
     ) -> std::result::Result<(AgentSession, CheckpointStore), RpcError> {
         let mut config = SessionConfig::new(workspace.clone(), mode);
+        config.usage_store = Some(Arc::clone(&self.store));
         config.session_id = id;
         if let Some(system_prompt) = system_prompt {
             if system_prompt.len() > 200_000 {

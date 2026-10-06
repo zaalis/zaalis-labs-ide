@@ -255,7 +255,7 @@ impl AnthropicParser {
         {
             "message_start" => {
                 if let Some(usage) = value.pointer("/message/usage") {
-                    self.usage.input_tokens = number(usage, "input_tokens");
+                    self.usage.input_tokens = number(usage, "input_tokens") + number(usage, "cache_read_input_tokens") + number(usage, "cache_creation_input_tokens");
                     self.usage.output_tokens = number(usage, "output_tokens");
                     self.usage.cached_tokens = number(usage, "cache_read_input_tokens");
                 }
@@ -452,6 +452,15 @@ fn number(value: &Value, field: &str) -> u64 {
 mod tests {
     use super::*;
     use zaalis_core::{ModelBinding, ReasoningLevel};
+
+    #[test]
+    fn cache_categories_are_normalized_into_total_input() {
+        let mut parser=AnthropicParser::default();
+        parser.handle(&json!({"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"output_tokens":3}}}),&mut Vec::new());
+        assert_eq!(parser.usage.input_tokens,130);
+        assert_eq!(parser.usage.cached_tokens,100);
+        assert_eq!(parser.usage.total_tokens(),133);
+    }
 
     fn request() -> TurnRequest {
         TurnRequest::new(

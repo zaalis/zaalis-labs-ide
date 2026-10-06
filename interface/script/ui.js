@@ -558,6 +558,7 @@ async function openProject(rootPath, isNew, options = {}) {
         }
     }
     const switchingProject = normalizeProjectPath(state.projectRoot) !== normalizeProjectPath(rootPath);
+    if (switchingProject) window.dispatchEvent(new Event('zaalis-conversation-change'));
 
     state.projectRoot = rootPath;
     if (isNew) addRecentProject(rootPath);
@@ -592,6 +593,7 @@ async function openProject(rootPath, isNew, options = {}) {
 // classic "Aucun projet" chat group so the AI answers with no project context.
 function clearProject(options = {}) {
     if (!state.projectRoot) return;
+    window.dispatchEvent(new Event('zaalis-conversation-change'));
     const lang = state.language || 'fr';
     state.projectRoot = null;
     state.openFiles = {};

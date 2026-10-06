@@ -13,6 +13,8 @@ mod prompt;
 mod runner;
 mod session;
 mod spawn;
+mod telemetry;
+mod envelope;
 
 pub use event_bus::EventBus;
 pub use guardian::ModelReviewer;
@@ -236,6 +238,21 @@ mod tests {
         })
         .await
         .expect("event timeout")
+    }
+
+    #[tokio::test]
+    async fn common_budget_reserves_concurrent_calls_and_retains_uncertain_cost() {
+        let f=fixture(SessionRunMode::Chat,vec![]);
+        let mut n=node(&f.session,ProviderId::Mistral,PermissionMode::ReadOnly);
+        n.budget.max_tokens=Some(1000);f.session.add_root(n).await.unwrap();
+        let (mut a,output)=crate::envelope::Reservation::acquire(Arc::clone(&f.session.inner),300,400).await.unwrap();
+        assert_eq!(output,400);
+        assert!(crate::envelope::Reservation::acquire(Arc::clone(&f.session.inner),400,100).await.is_err());
+        a.settle(Some(Usage{input_tokens:200,output_tokens:100,..Usage::default()})).await;
+        let (mut b,output)=crate::envelope::Reservation::acquire(Arc::clone(&f.session.inner),300,800).await.unwrap();
+        assert_eq!(output,400);b.settle(None).await;
+        assert_eq!(f.session.inner.envelope.lock().await.spent,1000);
+        assert!(crate::envelope::Reservation::acquire(Arc::clone(&f.session.inner),1,1).await.is_err());
     }
 
     #[tokio::test]
