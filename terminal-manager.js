@@ -30,7 +30,10 @@ function ptyModule() {
     const packagedModule = process.pkg && path.join(path.dirname(process.execPath), 'node_modules', 'node-pty');
     pty = packagedModule ? dynamicRequire(packagedModule) : dynamicRequire('node-pty');
   }
-  catch (error) { ptyLoadError = error; }
+  catch (error) {
+    if (!process.pkg && process.platform === 'linux') { try { pty = dynamicRequire(path.join(__dirname, 'native', 'dist-linux-server', 'node_modules', 'node-pty')); } catch (nativeError) { ptyLoadError = nativeError; } }
+    else ptyLoadError = error;
+  }
   return pty;
 }
 

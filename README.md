@@ -127,3 +127,13 @@ Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
 zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) and [NOTICE](NOTICE) files included in this repository.
 
 Accessing, cloning, using, modifying, or contributing to this repository does not transfer any ownership rights.
+
+## Une branche commune pour les trois plateformes
+
+Les sources communes et les adaptateurs Windows, Linux et macOS sont réunis sur `main`.
+
+- Windows : chaîne native C++/WebView2 décrite dans `native/README.md`.
+- Linux : `npm run build:linux` sur Linux ; voir `README_LINUX.md`.
+- macOS : `npm run build:macos` sur un Mac ; voir `README_MACOS.md`. Le workflow macOS utilise `main`.
+
+Les installateurs sont des sorties locales ignorées par Git et des artefacts de distribution ; ils ne sont pas suivis dans les sources. Les builds natifs nécessitent le système hôte et les outils correspondants.

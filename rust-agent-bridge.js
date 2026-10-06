@@ -24,6 +24,7 @@ function findAgentd(baseDir) {
     // remain convenient fallbacks.
     path.join(baseDir, exe),
     path.join(baseDir, 'native', 'dist', exe),
+    path.join(baseDir, 'native', process.platform === 'darwin' ? `dist-macos-${process.arch}-server` : 'dist-linux-server', exe),
     path.join(baseDir, 'rust', 'target', 'release', exe),
     path.join(baseDir, 'rust', 'target', 'debug', exe),
   ].filter(Boolean);

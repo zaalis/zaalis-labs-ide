@@ -20,6 +20,7 @@ const compatProviders = require('./compat-providers');
 const chatgptSubscription = require('./chatgpt-subscription');
 const accountSubscriptions = require('./account-subscriptions');
 const workspaceContext = require('./workspace-context');
+const platformRuntime = require('./platform-runtime');
 const workspaceTokens = new Map();
 const { BrowserHost } = require('./zaalis-browser/host');
 const { modelCapabilities, bindingCapabilities } = require('./model-capabilities');
@@ -34,9 +35,11 @@ const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
 // L'overlay affiche un bouton « Arrêter le travail » qui rappelle le serveur sur
 // /api/automation/stop-bridge : il s'authentifie avec ce secret tiré au lancement,
 // jamais avec la session de l'utilisateur.
-const COMPUTER_STOP_SECRET = crypto.randomBytes(32).toString('hex');
-const windowsComputer = { call: createWindowsComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) };
-const automationManager = new AutomationManager({ actionHandler: windowsComputer.call });
+const COMPUTER_STOP_SECRET = (process.platform === 'darwin' && process.env.ZAALIS_COMPUTER_BRIDGE_SECRET) || crypto.randomBytes(32).toString('hex');
+const desktopOptions = process.platform === 'darwin'
+  ? { bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '', bridgeSecret: COMPUTER_STOP_SECRET }
+  : { actionHandler: process.platform === 'linux' ? require('./linux-computer-control').createLinuxComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) : createWindowsComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) };
+const automationManager = new AutomationManager(desktopOptions);
 const computerRuns = new Map();
 const terminalManager = new TerminalManager();
 const TUNNEL_HEADER = 'x-zaalis-tunnel-origin';
@@ -65,15 +68,7 @@ chatgptSubscription.setVersion(APP_VERSION);
 // When packaged, the data lives in %LOCALAPPDATA%\zaalis\server-data — a
 // stable per-user location that survives app updates and reinstalls
 // (storing it next to the exe meant losing accounts/chats on every update).
-function resolveDataDir() {
-  if (process.env.ZAALIS_DATA_DIR) {
-    return path.resolve(process.env.ZAALIS_DATA_DIR);
-  }
-  if (process.pkg && process.platform === 'win32' && process.env.LOCALAPPDATA) {
-    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
-  }
-  return path.join(APP_DIR, 'server-data');
-}
+function resolveDataDir() { return platformRuntime.dataDir(APP_DIR, !!process.pkg); }
 const DATA_DIR = resolveDataDir();
 const { VmManager } = require('./vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
@@ -1995,11 +1990,11 @@ app.post('/api/exec', (req, res) => {
 
     const execCwd = cwd || APP_DIR;
 
-    execFile('cmd.exe', ['/c', command], {
+    execFile(process.platform === 'win32' ? 'cmd.exe' : '/bin/sh', [process.platform === 'win32' ? '/c' : '-lc', command], {
       cwd: execCwd,
       timeout: 30000,
       maxBuffer: 1024 * 1024 * 5,
-      windowsHide: true
+      windowsHide: true, env: platformRuntime.environment()
     }, (err, stdout, stderr) => {
       if (err && !stdout && !stderr) {
         return res.status(500).json({ error: err.message });
@@ -2025,7 +2020,7 @@ app.post('/api/exec', (req, res) => {
 const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
 const browserHost = new BrowserHost({
   dataDir: process.env.ZAALIS_BROWSER_DATA_DIR ||
-    path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'zaalis', 'Browser'),
+    platformRuntime.browserDir(),
   secretFile: BROWSER_SECRET_FILE,
   idePort: PORT,
   log: (line) => console.error(line),
@@ -2067,6 +2062,7 @@ function openInExternalBrowser(targetUrl) {
   const url = safeHttpUrl(targetUrl);
   if (!url) return false;
   try {
+    if (process.platform !== 'win32') return platformRuntime.openExternal(url);
     const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore', windowsHide: true });
     child.unref();
     return true;
@@ -2617,7 +2613,7 @@ app.get('/api/doctor', async (req, res) => {
     } catch {}
 
     let gguf = { variant: '', installed: false };
-    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), 'llama-server.exe') }; } catch {}
+    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), platformRuntime.engineBinary()) }; } catch {}
 
     const installerPaths = [
       path.join(APP_DIR, 'native', 'installer', 'zaalis-setup.exe'),
@@ -2652,7 +2648,7 @@ app.get('/api/doctor', async (req, res) => {
 // POST /api/pick-folder  -> { path } | { cancelled: true }
 app.post('/api/pick-folder', (req, res) => {
   if (process.platform !== 'win32') {
-    return res.status(501).json({ error: 'Folder picker only available on Windows.' });
+    return platformRuntime.pickFolder(res);
   }
 
   // Prefer the bundled modern Explorer-style picker (pickfolder.exe).
@@ -2842,7 +2838,7 @@ ensureDir(MODELS_DIR);
 let _gpuVariant = null;
 function detectEngineVariant() {
   if (_gpuVariant) return _gpuVariant;
-  if (process.platform !== 'win32') { _gpuVariant = 'cpu'; return _gpuVariant; }
+  if (process.platform !== 'win32') { _gpuVariant = platformRuntime.detectPosixEngine(); return _gpuVariant; }
   let names = '';
   try {
     names = execSyncSafe('powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name -join \';\'"');
@@ -2860,6 +2856,7 @@ function execSyncSafe(cmd) {
 }
 
 function engineAssetUrls(variant) {
+  if (process.platform !== 'win32') return platformRuntime.engineAssets(LLAMA_TAG, platformRuntime.normalizeEngine(variant));
   const base = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
   if (variant === 'cuda') return [
     base + `llama-${LLAMA_TAG}-bin-win-cuda-12.4-x64.zip`,
@@ -3012,6 +3009,7 @@ function startGgufPullTask({ repo, file, url }) {
 //  - if that fails, fall back to PowerShell's Expand-Archive (always present).
 function extractZip(zipPath, destDir) {
   ensureDir(destDir);
+  if (process.platform !== 'win32') return platformRuntime.extractPosix(zipPath, destDir);
   const { execSync } = require('child_process');
   const sysTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
   if (fs.existsSync(sysTar)) {
@@ -3031,10 +3029,11 @@ function extractZip(zipPath, destDir) {
 // Downloads + extracts on first use, reporting progress via onLog({stage, pct}).
 const engineExePaths = {};
 async function ensureEngineBinary(variant, onLog) {
-  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return engineExePaths[variant];
+  variant = platformRuntime.normalizeEngine(variant, process.platform, detectEngineVariant());
+  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return platformRuntime.executable(engineExePaths[variant]);
   const vdir = path.join(ENGINE_DIR, variant);
-  let exe = findExeRecursive(vdir, 'llama-server.exe');
-  if (exe) { engineExePaths[variant] = exe; return exe; }
+  let exe = findExeRecursive(vdir, platformRuntime.engineBinary());
+  if (exe) { engineExePaths[variant] = exe; return platformRuntime.executable(exe); }
   ensureDir(vdir);
   const urls = engineAssetUrls(variant);
   for (let i = 0; i < urls.length; i++) {
@@ -3048,10 +3047,10 @@ async function ensureEngineBinary(variant, onLog) {
     extractZip(zip, vdir);
     try { fs.unlinkSync(zip); } catch {}
   }
-  exe = findExeRecursive(vdir, 'llama-server.exe');
+  exe = findExeRecursive(vdir, platformRuntime.engineBinary());
   if (!exe) throw new Error('llama-server.exe introuvable après extraction.');
   engineExePaths[variant] = exe;
-  return exe;
+  return platformRuntime.executable(exe);
 }
 
 // --- Engine process lifecycle (one model loaded at a time, swapped on demand) ---
@@ -3094,7 +3093,7 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
-  const desiredVariant = preferredVariant || detectEngineVariant();
+  const desiredVariant = platformRuntime.normalizeEngine(preferredVariant || detectEngineVariant(), process.platform, detectEngineVariant());
   const optsKey = `${ctx}|${ngl}`;
   if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
   if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
@@ -3107,6 +3106,7 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
     const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
     // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
     if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
+    else if (process.platform !== 'win32') args.push('-ngl', '0');
     engineOpts = optsKey;
     const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
     proc.on('error', () => {});
@@ -3135,7 +3135,7 @@ app.get('/api/gguf-engine', (req, res) => {
   const variant = detectEngineVariant();
   res.json({
     variant,
-    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), 'llama-server.exe'),
+    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), platformRuntime.engineBinary()),
     running: !!engineProc, current: engineModelFile,
   });
 });
@@ -3687,7 +3687,7 @@ app.get('/api/check-update', async (req, res) => {
     });
     if (!ghRes.ok) return res.status(502).json({ error: 'GitHub API error ' + ghRes.status });
     const release = await ghRes.json();
-    const asset = (release.assets || []).find(a => a.name === 'zaalis-setup.exe');
+    const asset = (release.assets || []).find(a => platformRuntime.updateAsset(a.name));
     const latestVersion = release.tag_name || null;
     const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
     // We already installed this exact tag, yet we still report an older version:
@@ -3740,7 +3740,7 @@ app.post('/api/update/download', (req, res) => {
     pendingUpdateTag = tagFromUpdateUrl(dlUrl);
 
     const downloadsDir = path.join(os.homedir(), 'Downloads');
-    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update.exe');
+    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update' + platformRuntime.updateExtension(dlUrl));
     downloadProgress = 0;
     downloadedInstallerPath = null;
     try { fs.unlinkSync(dest); } catch {}
@@ -3792,7 +3792,11 @@ app.get('/api/update/progress', (req, res) => {
 app.post('/api/update/install', (req, res) => {
   try {
     if (process.platform !== 'win32') {
-      return res.status(400).json({ error: 'Mise a jour automatique disponible sur Windows uniquement.' });
+      const result = platformRuntime.installPosixUpdate(downloadedInstallerPath, APP_DIR);
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+      res.json(result);
+      if (result.silent) setTimeout(() => { try { if (engineProc) engineProc.kill(); } catch {} process.exit(0); }, 600);
+      return;
     }
     const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
     if (!fs.existsSync(installerPath)) {
@@ -3906,6 +3910,10 @@ let tunnelProxy = null;
 let tunnelProxyPort = 0;
 
 function cloudflaredPath() {
+  if (process.platform !== 'win32') {
+    for (const file of [path.join(APP_DIR, 'cloudflared'), path.join(APP_DIR, 'native', 'cloudflared'), '/usr/local/bin/cloudflared', '/usr/bin/cloudflared']) if (fs.existsSync(file)) return platformRuntime.executable(file);
+    return 'cloudflared';
+  }
   const candidates = [
     path.join(APP_DIR, 'cloudflared.exe'),          // next to the packaged app
     path.join(APP_DIR, 'native', 'cloudflared.exe'), // dev (repo root)
@@ -4075,7 +4083,8 @@ app.post('/api/app/close', (req, res) => {
   setTimeout(() => {
     try { if (engineProc) engineProc.kill(); } catch {}
     try {
-      spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
+      if (process.platform !== 'win32') { const pid = Number(process.env.ZAALIS_SHELL_PID); if (Number.isSafeInteger(pid) && pid > 1) process.kill(pid, 'SIGTERM'); }
+      else spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
         detached: true, stdio: 'ignore', windowsHide: true
       }).unref();
     } catch {}
@@ -4091,7 +4100,7 @@ process.on('exit', () => { try { if (engineProc) engineProc.kill(); } catch {} }
 // We never stop it on exit — if it was already up, we leave it untouched.
 // ---------------------------------------------------------------------------
 async function startOllamaIfNeeded() {
-  if (process.platform !== 'win32') return;
+  if (process.platform !== 'win32') { try { await fetch('http://127.0.0.1:11434/api/tags'); } catch { platformRuntime.startPosixOllama(); } return; }
   try {
     await fetch('http://127.0.0.1:11434/api/tags');
     return; // already running -> do nothing

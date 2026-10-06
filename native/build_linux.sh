@@ -55,6 +55,7 @@ cargo build --manifest-path rust/Cargo.toml --release \
 
 echo "[6/8] Mise en place des binaires Rust -> $SERVERDIST ..."
 sh "$ROOT/scripts/stage-rust-binaries.sh" "$SERVERDIST"
+npx pkg cli.js --no-bytecode --public --targets node22-linux-x64 --output "$SERVERDIST/bin/zaalis"
 
 echo "[7/8] Copie de l'interface et des metadonnees..."
 rm -rf "$SERVERDIST/interface"

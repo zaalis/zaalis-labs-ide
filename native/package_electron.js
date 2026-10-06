@@ -87,6 +87,20 @@ async function main() {
 
   copyFile(path.join(sourceDist, 'zaalis-server'), path.join(bundleDir, 'zaalis-server'));
   copyFile(path.join(sourceDist, 'bin', 'zaalis'), path.join(bundleDir, 'bin', 'zaalis'));
+  // Coeur Rust : zaalis-agentd est requis (server.js le lance pour Chat, Agents
+  // et le CLI), zaalis-sandbox est optionnel — son absence degrade le
+  // confinement des commandes sans empecher leur execution.
+  const agentd = path.join(sourceDist, 'zaalis-agentd');
+  if (!fs.existsSync(agentd)) {
+    throw new Error(`Coeur Rust manquant : ${agentd}\nLancez « npm run build:cli » (cargo) avant l'empaquetage.`);
+  }
+  copyFile(agentd, path.join(bundleDir, 'zaalis-agentd'));
+  const sandbox = path.join(sourceDist, 'zaalis-sandbox');
+  if (fs.existsSync(sandbox)) copyFile(sandbox, path.join(bundleDir, 'zaalis-sandbox'));
+
+  if (fs.existsSync(path.join(sourceDist, 'node_modules'))) {
+    copyDir(path.join(sourceDist, 'node_modules'), path.join(bundleDir, 'node_modules'));
+  }
   copyDir(path.join(sourceDist, 'interface'), path.join(bundleDir, 'interface'));
   if (fs.existsSync(path.join(sourceDist, 'image'))) {
     copyDir(path.join(sourceDist, 'image'), path.join(bundleDir, 'image'));
@@ -97,11 +111,8 @@ async function main() {
   copyDir(path.join(root, 'native', 'whisper'), path.join(bundleDir, 'whisper'));
   fs.chmodSync(path.join(bundleDir, 'whisper', 'whisper-cli'), 0o755);
 
-  if (fs.existsSync(path.join(root, 'README_LINUX.md'))) {
-    copyFile(path.join(root, 'README_LINUX.md'), path.join(bundleDir, 'README.txt'));
-  } else if (fs.existsSync(path.join(root, 'README_MACOS.md'))) {
-    copyFile(path.join(root, 'README_MACOS.md'), path.join(bundleDir, 'README.txt'));
-  }
+  const readme = path.join(root, platform === 'darwin' ? 'README_MACOS.md' : 'README_LINUX.md');
+  if (fs.existsSync(readme)) copyFile(readme, path.join(bundleDir, 'README.txt'));
 
   const pngIcon = path.join(root, 'native', 'image', 'logo-zaalis.png');
   const icnsIcon = path.join(root, 'native', 'image', 'logo-zaalis.icns');

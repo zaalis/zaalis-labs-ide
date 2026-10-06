@@ -42,3 +42,16 @@ temp/
 Thumbs.db
 .vscode/
 .idea/
+
+# Native Linux/macOS generated payloads
+native/dist-linux*/
+native/dist-macos*/
+native/.electron-build/
+native/.electron-cache/
+native/.whisper-build/
+native/linux-node-runtime/
+native/linux-node-pty/
+native/package-linux/
+native/whisper/whisper-cli
+native/macos-computer-bridge
+native/macos-speech-transcriber

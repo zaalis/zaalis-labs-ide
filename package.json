@@ -12,7 +12,9 @@
     "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
     "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
     "sync:browser": "node scripts/sync-zaalis-browser.js",
-    "build:terminal": "pkg cli.js --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-terminal.exe"
+    "build:terminal": "pkg cli.js --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-terminal.exe",
+    "build:linux": "sh native/build_linux.sh",
+    "build:macos": "sh native/build_macos_dmg.sh"
   },
   "pkg": {
     "assets": [
@@ -36,6 +38,9 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "@yao-pkg/pkg": "^6.22.0",
-    "node-pty": "^1.1.0"
+    "node-pty": "^1.1.0",
+    "@electron/packager": "^20.0.1",
+    "electron": "^42.5.0",
+    "png2icons": "^2.0.1"
   }
 }

@@ -340,7 +340,7 @@ async function ensureServer({ quiet } = {}) {
   if (await ping()) return true;
   if (!quiet) process.stderr.write(dim('Démarrage du serveur zaalis…\n'));
 
-  const serverExe = findBinary('zaalis-server.exe');
+  const serverExe = findBinary(process.platform === 'win32' ? 'zaalis-server.exe' : 'zaalis-server');
   let child;
   if (serverExe) {
     // Installed/packaged: launch the bundled server next to (or above) us.
@@ -2652,6 +2652,11 @@ async function main() {
   }
 
   if (cmd === 'ide') {
+    if (process.platform !== 'win32') {
+      const executable = process.platform === 'darwin' ? 'open' : (process.env.ZAALIS_SHELL_EXE || 'zaalis-ide');
+      const child = spawn(executable, process.platform === 'darwin' ? ['-a', 'zaalis IDE'] : [], { detached: true, stdio: 'ignore' });
+      child.on('error', error => console.error(error.message)); child.unref(); return;
+    }
     // The GUI is {app}\zaalis.exe (parent of {app}\bin). Never relaunch the CLI
     // itself, which is also named zaalis.exe inside bin.
     const self = process.execPath.toLowerCase();
