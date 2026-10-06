@@ -1332,6 +1332,7 @@ function updateProfileUI() {
     const name = state.profile.pseudo || TRANSLATIONS[lang]['default-username'];
     const letter = name ? name.charAt(0).toUpperCase() : 'U';
     $('#profile-name').textContent = name;
+    window.ZaalisWelcome?.render();
     const removePhoto = $('#remove-profile-photo');
 
     if (state.profile.photo) {

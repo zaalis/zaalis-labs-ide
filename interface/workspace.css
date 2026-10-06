@@ -268,3 +268,17 @@ body[data-workspace-mode="chat"] .chat-history,body[data-workspace-mode="editor"
 @media(prefers-reduced-motion:reduce){.workspace-modes *, .workspace-navigation *, .workspace-dock *, .workspace-rail *{transition:none!important;animation:none!important}}
 /* Keep space for the separate reasoning rail at every viewport width. */
 body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{width:calc(100% - 128px)}
+
+/* Keep the profile anchored while navigation contents collapse. */
+#sidebar .ws-view-switch,#sidebar.collapsed .ws-view-switch{margin-top:auto}#sidebar .sidebar-profile{flex:none;margin-top:auto}
+.ws-project-chats{display:grid;grid-template-rows:1fr;opacity:1;transition:grid-template-rows .34s cubic-bezier(.22,1,.36,1),opacity .22s ease}
+.ws-project-chats.is-collapsed{grid-template-rows:0fr;opacity:0;pointer-events:none}
+.ws-project-chats-inner{min-height:0;overflow:hidden}
+.ws-project-chats:not(.is-collapsed):not(.is-animating)>.ws-project-chats-inner{overflow:visible}
+.ws-project-chevron{transition:transform .34s cubic-bezier(.22,1,.36,1)}
+.profile-popup{display:block;opacity:0;visibility:hidden;transform:translateY(10px) scale(.98);transform-origin:bottom left;pointer-events:none;transition:opacity .22s ease,transform .3s cubic-bezier(.22,1,.36,1),visibility 0s .3s}
+.profile-popup.open{opacity:1;visibility:visible;transform:translateY(0) scale(1);pointer-events:auto;transition-delay:0s}
+.ws-discussion-context{padding:16px;border-bottom:1px solid var(--border)}.ws-discussion-context p{font-size:12px;color:var(--ws-muted);margin:8px 0 0}
+.ws-discussion-messages{flex:1;min-height:80px;overflow:auto;padding:12px}.ws-discussion-empty{color:var(--ws-muted);font-size:13px;line-height:1.6;padding:20px 8px}
+.ws-discussion-form{flex:none;display:grid;gap:8px;padding:12px;border-top:1px solid var(--border)}.ws-discussion-form textarea{resize:vertical;min-height:76px;max-height:180px;border:1px solid var(--border);border-radius:9px;background:var(--bg-0);color:var(--text-0);padding:10px;font:inherit}.ws-discussion-status{font-size:12px;color:var(--ws-muted);margin:0}.ws-discussion-form .ws-button{justify-self:end}.ws-other-message>div{white-space:pre-wrap;overflow-wrap:anywhere}
+@media(prefers-reduced-motion:reduce){.ws-project-chats,.ws-project-chevron,.profile-popup{transition:none}}

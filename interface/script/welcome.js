@@ -11,7 +11,7 @@
  const band=hour=>hour>=5&&hour<12?'morning':hour<18&&hour>=12?'afternoon':hour>=18&&hour<23?'evening':'night';
  const greeting=hour=>hour>=5&&hour<18?'Bonjour':hour>=18&&hour<23?'Bonsoir':'Bonne nuit';
  const random=new Uint32Array(1);crypto.getRandomValues(random);const choice=random[0];
- function message(date=new Date(),project){const group=project&&choice%3===0?'project':band(date.getHours());return {title:greeting(date.getHours()),text:phrases[group][choice%10].replaceAll('{project}',project||'Votre projet')};}
+ function message(date=new Date(),project){const group=project&&choice%3===0?'project':band(date.getHours());return {title:[greeting(date.getHours()),String(state.profile?.pseudo||'').trim().split(/[\s_.@-]+/)[0]].filter(Boolean).join(' '),text:phrases[group][choice%10].replaceAll('{project}',project||'Votre projet')};}
  function logo(){const svg=document.querySelector('#topbar .logo svg')?.cloneNode(true);if(svg){svg.classList.add('launch-logo');svg.setAttribute('aria-hidden','true');}return svg;}
  function render(){
   const project=(state.projectRoot||state.lastProjectRoot||getRecentProjects()?.[0]||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop();

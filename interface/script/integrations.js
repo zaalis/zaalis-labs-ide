@@ -2,9 +2,18 @@
  'use strict';
  const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
  async function api(url,body){const r=await fetch(url,{credentials:'include',...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(d.error||'Intégration indisponible');return d;}
- let revision=0;
- async function settings(){
+ let revision=0, page='overview';
+ async function settings(next=page){
+  page=next;
   const version=++revision,target=document.getElementById('integrations-content');if(!target)return;target.replaceChildren();
+  if(page==='overview'){
+   const tile=node('button',undefined,'integration-tile');tile.type='button';tile.setAttribute('aria-label','Ouvrir GitHub');
+   const mark=node('span',undefined,'integration-github-mark');mark.setAttribute('aria-hidden','true');
+   mark.innerHTML='<svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a12 12 0 0 0-3.8 23.4c.6.1.8-.3.8-.6v-2.3c-3.3.7-4-1.4-4-1.4-.5-1.4-1.3-1.8-1.3-1.8-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.5-1.3-5.5-6a4.7 4.7 0 0 1 1.2-3.2c-.1-.3-.5-1.6.1-3.3 0 0 1-.3 3.3 1.2a11.4 11.4 0 0 1 6 0C17.3 4.8 18.3 5.1 18.3 5.1c.6 1.7.2 3 .1 3.3a4.7 4.7 0 0 1 1.2 3.2c0 4.7-2.8 5.7-5.5 6 .4.4.8 1.1.8 2.2v3.5c0 .3.2.7.8.6A12 12 0 0 0 12 .5z"/></svg>';
+   const copy=node('span',undefined,'integration-tile-copy');copy.append(node('strong','GitHub'),node('span','Dépôts, fichiers et pull requests'));
+   tile.append(mark,copy,node('span','›','integration-tile-arrow'));tile.onclick=()=>settings('github');target.append(tile,node('p','D’autres intégrations arrivent bientôt.','integration-coming'));return;
+  }
+  const back=node('button','← Retour aux intégrations','integration-back');back.type='button';back.onclick=()=>settings('overview');target.append(back);
   const notice=node('p','Chargement des intégrations…','lab-note');notice.setAttribute('role','status');target.append(notice);
   try{
    let status=await api('/api/integrations/github');if(version!==revision)return;
@@ -37,8 +46,6 @@
     }
     button('Actualiser les dépôts',load);await load();
    }
-   const more=node('div',undefined,'integration-related');more.append(node('h4','Autres intégrations de l’IA'));
-   for(const [title,description,section] of [['MCP','Vos serveurs et outils personnels','mcp'],['Blender','Création et inspection de scènes 3D','mcp'],['Opale','Connexion au projet Opale','mcp'],['Machines virtuelles','Expériences isolées et preuves de tests','vm']]){const entry=node('article');entry.append(node('strong',title),node('p',description,'lab-note'));button('Configurer',async()=>setSettingsSection(section),entry);more.append(entry);}target.append(more);
    if(!status.connected)notice.textContent='Choisissez une méthode de connexion.';
   }catch(e){notice.textContent=e.message;notice.classList.add('error');}
  }

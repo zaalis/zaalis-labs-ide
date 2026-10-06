@@ -3,7 +3,18 @@
  const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text!==undefined)n.textContent=text;if(cls)n.className=cls;return n;};
  const fmt=n=>new Intl.NumberFormat(state.language==='en'?'en':'fr',{notation:'compact',maximumFractionDigits:1}).format(n||0);
  const full=n=>new Intl.NumberFormat('fr').format(n||0);
- const badges=[['Premier déclic',10000],['Petit travailleur',100000],['Bâtisseur',1000000],['Artisan du code',5000000],['Explorateur',10000000],['Maître des idées',25000000],['Architecte',50000000],['Grand créateur',100000000],['Virtuose',500000000],['Légende des tokens',1000000000]];
+ const badges=[
+  {name:'Premier déclic',icon:'spark',metric:'total',target:10000,label:'10 000 tokens'},
+  {name:'Petit travailleur',icon:'worker',metric:'activeDays',target:3,label:'3 jours actifs'},
+  {name:'Bâtisseur',icon:'builder',metric:'total',target:1000000,label:'1 million de tokens'},
+  {name:'Artisan du code',icon:'terminal',metric:'calls',target:20,label:'20 appels mesurés sur 12 mois'},
+  {name:'Explorateur',icon:'explorer',metric:'models',target:3,label:'3 modèles utilisés sur 12 mois'},
+  {name:'Maître des idées',icon:'ideas',metric:'activeDays',target:10,label:'10 jours actifs'},
+  {name:'Architecte',icon:'architect',metric:'longestStreak',target:7,label:'7 jours consécutifs'},
+  {name:'Grand créateur',icon:'creator',metric:'total',target:100000000,label:'100 millions de tokens'},
+  {name:'Virtuose',icon:'virtuoso',metric:'longestStreak',target:30,label:'30 jours consécutifs'},
+  {name:'Légende des tokens',icon:'legend',metric:'total',target:1000000000,label:'1 milliard de tokens'}
+ ];
  let revision=0;
  async function api(url,body){const r=await fetch(url,{credentials:'include',...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(d.error||'Mesures indisponibles');return d;}
  async function mount(){
@@ -33,7 +44,15 @@
    for(const [mode,text] of [['day','Par jour'],['week','Sur 7 jours'],['total','Cumulé']]){const b=el('button',text);b.type='button';b.dataset.mode=mode;b.onclick=()=>{view=mode;draw();};modes.append(b);buttons.push(b);}draw();
    const months=el('div',undefined,'token-months');for(let i=0;i<12;i++){const d=new Date(start);d.setUTCMonth(d.getUTCMonth()+i);months.append(el('span',d.toLocaleDateString('fr',{month:'short',timeZone:'UTC'})));}scroll.append(months);
    const legend=el('div',undefined,'token-legend');legend.append(el('span','Moins'));for(let i=0;i<=4;i++){const cell=el('span',undefined,'token-cell');cell.dataset.level=String(i);legend.append(cell);}legend.append(el('span','Plus'));target.append(legend);
-   target.append(el('h4','Paliers de création'));const grid=el('div',undefined,'token-badges');for(const [name,threshold] of badges){const unlocked=(p.total||0)>=threshold,card=el('article',undefined,'token-badge');card.dataset.unlocked=String(unlocked);const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('fill','none');svg.setAttribute('stroke','currentColor');svg.setAttribute('stroke-width','1.6');svg.setAttribute('aria-hidden','true');svg.innerHTML='<path d="m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1z"/>';const progress=el('progress');progress.max=threshold;progress.value=Math.min(p.total||0,threshold);progress.setAttribute('aria-label',`${name} : ${full(progress.value)} sur ${full(threshold)} tokens`);card.append(svg,el('strong',name),el('small',`${fmt(threshold)} tokens · ${unlocked?'Débloqué':'À atteindre'}`),progress);grid.append(card);}target.append(grid,el('p','Les badges marquent votre activité enregistrée. Ils n’ajoutent aucun crédit ni quota de tokens.','lab-note'));
+   target.append(el('h4','Paliers de création'));const grid=el('div',undefined,'token-badges');
+   for(const badge of badges){
+    const value=badge.metric==='models'?data.models.length:badge.metric==='calls'?Math.max(0,(data.total.calls||0)-(data.total.unmeasured||0)):(p[badge.metric]||0);
+    const unlocked=value>=badge.target,card=el('article',undefined,'token-badge');card.dataset.unlocked=String(unlocked);card.dataset.metric=badge.metric;
+    const image=el('img',undefined,'token-badge-icon');image.src=`image/badges/${badge.icon}.png`;image.alt='';image.width=image.height=64;image.loading='lazy';
+    const progress=el('progress');progress.max=badge.target;progress.value=Math.min(value,badge.target);progress.setAttribute('aria-label',`${badge.name} : ${full(value)} sur ${full(badge.target)}`);
+    card.append(image,el('strong',badge.name),el('small',`${badge.label} · ${unlocked?'Débloqué':'À atteindre'}`),progress);grid.append(card);
+   }
+   target.append(grid,el('p','Les badges célèbrent les tokens, les jours actifs, les séries et l’exploration des modèles. Ils n’ajoutent aucun crédit ni quota de tokens.','lab-note'));
    target.append(el('h4','Statistiques des douze derniers mois'));const t=data.total,c=data.comparison||{};for(const [label,value] of [['Entrée / sortie',`${fmt(t.input)} / ${fmt(t.output)}`],['Cache lu',fmt(t.cached)],['Tokens de réflexion',fmt(t.reasoning)],['Appels mesurés',`${full(t.calls-t.unmeasured)} / ${full(t.calls)}`],['Modèles utilisés',String(data.models.length)],['Économie mesurée',c.count&&c.percent!=null?`${c.percent.toFixed(1)} % · ${c.count} comparaison(s)`:'Aucune référence comparable'],['Appels incomplets',full(t.unfinished)]]){const row=el('div',undefined,'token-measure-row');row.append(el('span',label),el('strong',value));target.append(row);}
    notice.textContent='Historique mesuré depuis l’activation du registre. Activité et séries calculées en UTC. Le total et les badges couvrent tout l’historique ; le graphique couvre les douze derniers mois. Cache et réflexion sont inclus dans les catégories, sans double comptage.';
    target.append(notice);
