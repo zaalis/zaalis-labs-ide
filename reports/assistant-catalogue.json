@@ -1,0 +1,5976 @@
+{
+  "version": 1,
+  "shared": [
+    "IDE",
+    "CLI"
+  ],
+  "tools": [
+    {
+      "name": "a2a_call",
+      "family": "a2a",
+      "description": "Send messages to configured A2A agents using JSON-RPC 0.3 binding. agent/id,message,task_id; orchestrate requests array up to eight. Remote agents may perform mutations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "a2a_discover",
+      "family": "a2a",
+      "description": "Inspect owner-configured A2A agents, agent card, or history. agent/id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "a2a_history",
+      "family": "a2a",
+      "description": "Inspect owner-configured A2A agents, agent card, or history. agent/id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "a2a_list",
+      "family": "a2a",
+      "description": "Inspect owner-configured A2A agents, agent card, or history. agent/id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "a2a_orchestrate",
+      "family": "a2a",
+      "description": "Send messages to configured A2A agents using JSON-RPC 0.3 binding. agent/id,message,task_id; orchestrate requests array up to eight. Remote agents may perform mutations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "task_id": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "annotate_preview",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "alias": "desktop_annotate",
+      "status": "ready"
+    },
+    {
+      "name": "apply_layout",
+      "family": "desktop",
+      "description": "Close a terminal view without terminating its process, apply an IDE layout (preset), or show a contextual tip (text). Same request visible to the CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "apply_patch",
+      "description": "Appliquer atomiquement des hunks sur plusieurs fichiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "hunks": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "occurrence": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "replace": {
+                        "type": "string"
+                      },
+                      "search": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "search",
+                      "replace"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "hunks"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "assistant_browser",
+      "family": "browser",
+      "description": "Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [
+        "tabs",
+        "open",
+        "navigate",
+        "back",
+        "read_page",
+        "page_text",
+        "screenshot",
+        "read_console",
+        "read_network"
+      ],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_back",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_cdp",
+      "family": "browser",
+      "description": "Handle browser dialogs (accept,text) or call an allowlisted CDP method (method,params). Owner-configured loopback CDP endpoint or integrated browser.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "accept": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_click",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_close",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_console",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_dialog",
+      "family": "browser",
+      "description": "Handle browser dialogs (accept,text) or call an allowlisted CDP method (method,params). Owner-configured loopback CDP endpoint or integrated browser.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "accept": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": "string"
+          },
+          "method": {
+            "type": "string"
+          },
+          "params": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_exec",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_get_images",
+      "family": "browser",
+      "description": "Extract image metadata or return a screenshot from the integrated browser. Requires an available browser.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_navigate",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_network",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_press",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_press_key",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_screenshot",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_scroll",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ],
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_snapshot",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_tab",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_type",
+      "description": "Compatibility name for assistant_browser. Integrated or owner-connected CDP browser. action tabs/open/navigate/back/read_page/page_text/screenshot/click/fill/execute_js/press/scroll/read_console/read_network/select_tab/close_tab; tab_id/url/ref/selector/value/code/key/direction/amount.",
+      "input_schema": {
+        "additionalProperties": true,
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "amount": {
+            "type": "integer"
+          },
+          "code": {
+            "type": "string"
+          },
+          "direction": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          },
+          "tab_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "browser",
+      "status": "service_unavailable",
+      "access": "guarded"
+    },
+    {
+      "name": "browser_vault_enter_code",
+      "family": "browser",
+      "description": "Human-mediated encrypted browser vault. Unlock expires after five minutes; fill requires handle matching exact active origin; save/code use secret human fields. No automatic submit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "username_selector": {
+            "type": "string"
+          },
+          "password_selector": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_vault_fill",
+      "family": "browser",
+      "description": "Human-mediated encrypted browser vault. Unlock expires after five minutes; fill requires handle matching exact active origin; save/code use secret human fields. No automatic submit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "username_selector": {
+            "type": "string"
+          },
+          "password_selector": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_vault_list",
+      "family": "browser",
+      "description": "List opaque credential handles and their exact origins, without passwords.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_vault_save_login",
+      "family": "browser",
+      "description": "Human-mediated encrypted browser vault. Unlock expires after five minutes; fill requires handle matching exact active origin; save/code use secret human fields. No automatic submit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "username_selector": {
+            "type": "string"
+          },
+          "password_selector": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_vault_unlock",
+      "family": "browser",
+      "description": "Human-mediated encrypted browser vault. Unlock expires after five minutes; fill requires handle matching exact active origin; save/code use secret human fields. No automatic submit.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "username_selector": {
+            "type": "string"
+          },
+          "password_selector": {
+            "type": "string"
+          },
+          "selector": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "browser_vision",
+      "family": "browser",
+      "description": "Extract image metadata or return a screenshot from the integrated browser. Requires an available browser.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "service_unavailable"
+    },
+    {
+      "name": "checkpoint_create",
+      "description": "Créer hors du dépôt un snapshot vérifié des chemins nommés.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "label": {
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "checkpoint_delete",
+      "description": "Supprimer un checkpoint externe devenu inutile.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "pattern": "^ckpt_",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpoint_id"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "checkpoint_list",
+      "description": "Lister les checkpoints du workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "checkpoint_restore",
+      "description": "Restaurer atomiquement un checkpoint après vérification SHA-256.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "checkpoint_id": {
+            "pattern": "^ckpt_",
+            "type": "string"
+          }
+        },
+        "required": [
+          "checkpoint_id"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "clarify",
+      "family": "questions",
+      "description": "Ask the human a structured question. question, options (or choices), multi_select, or fields [{name,label,type}]. Secret fields are never returned to the model.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "question": {
+            "type": "string"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "multi_select": {
+            "type": "boolean"
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "secret": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "close_terminal",
+      "family": "desktop",
+      "description": "Close a terminal view without terminating its process, apply an IDE layout (preset), or show a contextual tip (text). Same request visible to the CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "code_search",
+      "description": "Rechercher du texte ou une expression régulière dans les fichiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "context": {
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "include": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "include_sensitive": {
+            "type": "boolean"
+          },
+          "max_matches": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "cronjob_manage",
+      "family": "schedule",
+      "description": "Persistent schedules while the server runs. actions create/list/status/update/pause/resume/run/remove/history; schedule ISO future date, every 5m, or five-field cron; timezone IANA. Inherits current model and permissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "schedule": {
+            "type": "string"
+          },
+          "timezone": {
+            "type": "string"
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list",
+        "status",
+        "history",
+        "runs"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "deep_search",
+      "description": "Effectuer une recherche approfondie bornee en recherchant puis lisant plusieurs sources publiques.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "maximum": 6,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "delegate_task",
+      "family": "tasks",
+      "description": "Start a bounded agent in an isolated copy with inherited model and permissions. background returns a handle; actions list/status/result/cancel/resume. goal, context, delegation_id. Parent workspace is never auto-merged.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "goal": {
+            "type": "string"
+          },
+          "context": {
+            "type": "string"
+          },
+          "background": {
+            "type": "boolean"
+          },
+          "delegation_id": {
+            "type": "string"
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "spawn",
+      "reads": [
+        "list",
+        "status",
+        "result"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "desktop_annotate",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "desktop_overview",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "desktop_preview",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "desktop_overview",
+      "status": "ready"
+    },
+    {
+      "name": "desktop_project",
+      "family": "desktop",
+      "description": "List/create/switch projects. create makes a project inside the current workspace (path/name); switch opens a known project in IDE and terminal on the next turn. Filesystem scope stays fixed for this turn.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "desktop_react",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "desktop_tour",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "discord",
+      "family": "discord",
+      "description": "Discord: list_guilds/list_channels/get_channel/messages/get_member/search_members/send/react/thread. guild_id/channel_id/message_id/user_id, content, emoji, query. Requires configured bot token and server permissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "guild_id": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "emoji": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list_guilds",
+        "list_channels",
+        "get_channel",
+        "messages",
+        "get_member",
+        "search_members",
+        "fetch_channel",
+        "fetch_messages",
+        "fetch_member",
+        "list_roles"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "discord_admin",
+      "family": "discord",
+      "description": "Discord administration: roles/create_role/update_role/delete_role/add_role/remove_role/create_channel/update_channel/delete_channel/timeout/kick/ban/unban/pin/unpin/delete_message. IDs and fields in API format; explicit permissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "guild_id": {
+            "type": "string"
+          },
+          "channel_id": {
+            "type": "string"
+          },
+          "message_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "role_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "fields": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "roles",
+        "fetch_channel",
+        "fetch_messages",
+        "fetch_member",
+        "list_roles"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "download_asset",
+      "description": "Telecharger une image dans le projet (dossier assets/ par defaut) apres verification : MIME reel image/*, taille bornee, redirections bornees et re-validees (anti-SSRF), nom de fichier sur, confinement au workspace. Conserve la provenance ; verifie la licence avant publication.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "description": "Chemin cible relatif au projet (defaut: assets/<nom>)",
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "drive_overview",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "drive_preview",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "drive_overview",
+      "status": "ready"
+    },
+    {
+      "name": "edit",
+      "description": "Appliquer des remplacements structurés et atomiques à un fichier.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "hunks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "occurrence": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "replace": {
+                  "type": "string"
+                },
+                "search": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "search",
+                "replace"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "hunks"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "enter_plan_mode",
+      "description": "Entrer en mode Plan lecture seule; le plan devra etre approuve avant toute implementation.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "execute_code",
+      "description": "Run Python with bounded output/time and scrubbed environment. tools.<name>(**arguments) calls the complete guarded registry; result is returned as JSON. Default sandbox contains the process tree, not filesystem/network. strict=true requests OS confinement and disables the tool broker; fails closed if unavailable. Dependencies must already be installed; install them only via an approved terminal command.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "strict": {
+            "type": "boolean"
+          },
+          "timeout_ms": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "family": "execution",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "exit_plan_mode",
+      "description": "Quitter explicitement le mode Plan.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "feishu_add_doc_comment",
+      "family": "feishu",
+      "description": "Add a Feishu document comment. document_id/file_token,text. Requires tenant permissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_doc_comments",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_doc_read",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "feishu_read_doc",
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_drive_add_comment",
+      "family": "feishu",
+      "description": "Add a Feishu document comment. document_id/file_token,text. Requires tenant permissions.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "alias": "feishu_add_doc_comment",
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_drive_list_comment_replies",
+      "family": "feishu",
+      "description": "List replies of a Feishu comment. file_token/token,comment_id,file_type.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_token": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "comment_id": {
+            "type": "string"
+          },
+          "file_type": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_drive_list_comments",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "feishu_doc_comments",
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_drive_reply_comment",
+      "family": "feishu",
+      "description": "Reply to a Feishu comment thread. file_token/token,comment_id,text,file_type.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "file_token": {
+            "type": "string"
+          },
+          "token": {
+            "type": "string"
+          },
+          "comment_id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "file_type": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_list_files",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_read_doc",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "feishu_search_docs",
+      "family": "feishu",
+      "description": "Read Feishu/Lark documents, comments, drive files or search documents. document_id/file_token/query/page_token; requires tenant token and document access.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "document_id": {
+            "type": "string"
+          },
+          "file_token": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "page_token": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "fetch_asset",
+      "description": "Verifier qu'une URL d'asset (image) existe reellement : statut HTTP, type MIME reel, taille. Reseaux prives et redirections refuses. Ne telecharge rien dans le projet.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "focus_pane",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "alias": "panel_focus",
+      "status": "ready"
+    },
+    {
+      "name": "git_branch",
+      "description": "Lister ou créer une branche Git sans changer la branche courante.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "name": {
+                "type": "string"
+              },
+              "start_point": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "name"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "git_diff",
+      "description": "Retourner un diff Git borné, staged ou non.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "staged": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "git_status",
+      "description": "Retourner l'état Git structuré du workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "git_worktree",
+      "description": "Lister, créer ou retirer un worktree géré et isolé pour un agent.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "create"
+              },
+              "branch": {
+                "type": "string"
+              },
+              "create_branch": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "name",
+              "branch"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "name"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "glob",
+      "description": "Trouver des chemins par motif glob.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "file",
+              "dir"
+            ]
+          },
+          "max": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "grep",
+      "description": "Rechercher du texte ou une expression régulière dans les fichiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "context": {
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "include": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "include_sensitive": {
+            "type": "boolean"
+          },
+          "max_matches": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "gui_tour",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "alias": "desktop_tour",
+      "status": "ready"
+    },
+    {
+      "name": "ha_call_service",
+      "family": "homeassistant",
+      "description": "Call a Home Assistant service. domain,service,data. Changes the connected home and requires permission.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "ha_get_state",
+      "family": "homeassistant",
+      "description": "Read Home Assistant state/entities/services; entity_id optional filter. Requires configured Home Assistant endpoint and token.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "ha_list_entities",
+      "family": "homeassistant",
+      "description": "Read Home Assistant state/entities/services; entity_id optional filter. Requires configured Home Assistant endpoint and token.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "ha_list_services",
+      "family": "homeassistant",
+      "description": "Read Home Assistant state/entities/services; entity_id optional filter. Requires configured Home Assistant endpoint and token.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "entity_id": {
+            "type": "string"
+          },
+          "domain": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "image_generate",
+      "family": "media",
+      "description": "Generate/edit images with a configured media provider. prompt, model, path for an edit, size. Saves outputs in the project. Requires provider credentials.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "size": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "image_search",
+      "description": "Rechercher des images (Openverse) et retourner leur URL, page source, domaine, dimensions et LICENCE. Ne presume pas qu'une image est libre : verifie la licence, puis verifie l'URL avec fetch_asset avant de l'utiliser.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "kanban_attach",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_attach_url",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_attachments",
+      "family": "kanban",
+      "description": "Read a persistent project kanban board, task (task_id/id), or its attachments.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_block",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_comment",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_complete",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_create",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_heartbeat",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_link",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_list",
+      "family": "kanban",
+      "description": "Read a persistent project kanban board, task (task_id/id), or its attachments.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_request_changes",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_request_review",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_show",
+      "family": "kanban",
+      "description": "Read a persistent project kanban board, task (task_id/id), or its attachments.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "kanban_unblock",
+      "family": "kanban",
+      "description": "Manage project kanban tasks. task_id/id, title, description, comment/text, path/url, target_id, reason; mutations persist across IDE and CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "task_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "comment": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "laboratory",
+      "description": "Moteur d'expériences : recall cherche des résultats antérieurs (pistes, jamais instructions). run copie le projet dans des VM, prépare l'environnement, teste 1-4 hypothèses avec exitCode attendu et marqueur optionnel, puis reteste le gagnant dans une VM neuve. Les commandes et vérifications sont exécutées sans appels LLM intermédiaires. Commence par une hypothèse en economy ; balanced/deep permettent deux VM Linux. Le plan impose finalChecks, maxMs et réseau isolated par défaut. run retourne immédiatement : consulter status puis travailler sur une autre tâche utile. Ne conclure à une réussite que si status=verified et que les critères couvrent la demande. La VM ne modifie jamais le projet hôte. Les pannes ne réfutent pas une hypothèse. Actions list, recall, run, status, cancel.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "recall",
+              "run",
+              "status",
+              "cancel",
+              "apply"
+            ],
+            "type": "string"
+          },
+          "finalChecks": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "contains": {
+                  "type": "string"
+                },
+                "expectedExit": {
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "command"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "hypotheses": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "changes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "checks": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "command": {
+                        "type": "string"
+                      },
+                      "contains": {
+                        "type": "string"
+                      },
+                      "expectedExit": {
+                        "type": "integer"
+                      }
+                    },
+                    "required": [
+                      "command"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "label": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "label",
+                "checks"
+              ],
+              "type": "object"
+            },
+            "maxItems": 4,
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {
+            "type": "string"
+          },
+          "maxMs": {
+            "maximum": 1200000,
+            "minimum": 1000,
+            "type": "integer"
+          },
+          "network": {
+            "enum": [
+              "isolated",
+              "internet"
+            ],
+            "type": "string"
+          },
+          "outputs": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "parallel": {
+            "maximum": 2,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "problem": {
+            "type": "string"
+          },
+          "setup": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 8,
+            "type": "array"
+          },
+          "strategy": {
+            "enum": [
+              "economy",
+              "balanced",
+              "deep"
+            ],
+            "type": "string"
+          },
+          "system": {
+            "enum": [
+              "linux",
+              "windows"
+            ],
+            "type": "string"
+          },
+          "templateId": {
+            "type": "string"
+          },
+          "waitMs": {
+            "maximum": 30000,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "list",
+      "description": "Lister un dossier du workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "manage_catalog",
+      "family": "connections",
+      "description": "Catalogue and connection status. actions list/catalog/status/test/authorize/enable/disable/disconnect; service/id. Credentials configured by the human in the tools panel or CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list",
+        "catalog",
+        "status",
+        "test"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "manage_connections",
+      "family": "connections",
+      "description": "Catalogue and connection status. actions list/catalog/status/test/authorize/enable/disable/disconnect; service/id. Credentials configured by the human in the tools panel or CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "service": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list",
+        "catalog",
+        "status",
+        "test"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "mcp",
+      "description": "Appeler un outil d'un serveur MCP Zaalis autorisé.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "type": "object"
+          },
+          "server": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "server",
+          "tool"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "mcp_discover",
+      "family": "mcp",
+      "description": "Discover current user-connected MCP tools, including connections installed during this turn. server optional.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "network",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "mcp_dynamic",
+      "family": "mcp",
+      "description": "Call a current user-connected MCP tool. server,tool,arguments. Uses owner configuration and allow/deny policy; potential mutations require the same guard as other tools.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "server": {
+            "type": "string"
+          },
+          "tool": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "memory",
+      "family": "memory",
+      "description": "Persistent personal/profile/project notes. action list/read/search/add/update/replace/delete/settings; notes are historical, revalidate before relying on them.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list",
+        "read",
+        "search"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "merge_agent",
+      "description": "Intégrer atomiquement dans le workspace parent les fichiers validés d'un sous-agent isolé.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "agent_id": {
+            "pattern": "^agt_",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent_id"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "panel_focus",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "patch",
+      "description": "Compatibility name for apply_patch. Appliquer atomiquement des hunks sur plusieurs fichiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "hunks": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "occurrence": {
+                        "minimum": 1,
+                        "type": "integer"
+                      },
+                      "replace": {
+                        "type": "string"
+                      },
+                      "search": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "search",
+                      "replace"
+                    ],
+                    "type": "object"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "hunks"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "process",
+      "description": "Démarrer, interroger, alimenter ou arrêter un processus persistant.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start"
+              },
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "command"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "poll"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "log"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "wait"
+              },
+              "process_id": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "write"
+              },
+              "input": {
+                "type": "string"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "kill"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "process_manage",
+      "description": "Compatibility name for process. Démarrer, interroger, alimenter ou arrêter un processus persistant.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start"
+              },
+              "command": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "command"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "poll"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "log"
+              },
+              "limit": {
+                "type": "integer"
+              },
+              "offset": {
+                "type": "integer"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "wait"
+              },
+              "process_id": {
+                "type": "string"
+              },
+              "timeout_ms": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "write"
+              },
+              "input": {
+                "type": "string"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "kill"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove"
+              },
+              "process_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "process_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "pty",
+      "description": "Piloter une vraie pseudo-console interactive avec redimensionnement.",
+      "input_schema": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "start"
+              },
+              "cols": {
+                "maximum": 1000,
+                "minimum": 10,
+                "type": "integer"
+              },
+              "command": {
+                "type": "string"
+              },
+              "rows": {
+                "maximum": 500,
+                "minimum": 2,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "poll"
+              },
+              "pty_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pty_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "write"
+              },
+              "input": {
+                "type": "string"
+              },
+              "pty_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pty_id",
+              "input"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "resize"
+              },
+              "cols": {
+                "type": "integer"
+              },
+              "pty_id": {
+                "type": "string"
+              },
+              "rows": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "action",
+              "pty_id",
+              "rows",
+              "cols"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "kill"
+              },
+              "pty_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pty_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "action"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "action": {
+                "const": "remove"
+              },
+              "pty_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "action",
+              "pty_id"
+            ],
+            "type": "object"
+          }
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "react_to_message",
+      "family": "desktop",
+      "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "panel": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "emoji": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "alias": "desktop_react",
+      "status": "ready"
+    },
+    {
+      "name": "read",
+      "description": "Lire un ou plusieurs fichiers du workspace avec numéros de ligne. Une image (png, jpg, gif, webp ; 8 Mo au plus) est montrée au modèle comme image.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "read_file",
+      "description": "Compatibility name for read. Lire un ou plusieurs fichiers du workspace avec numéros de ligne. Une image (png, jpg, gif, webp ; 8 Mo au plus) est montrée au modèle comme image.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "read_terminal",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "terminal_read",
+      "status": "ready"
+    },
+    {
+      "name": "read_window_below",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "alias": "window_read",
+      "status": "requires_computer_control"
+    },
+    {
+      "name": "remote_process",
+      "family": "execution",
+      "description": "Manage scoped remote command handles. action list/poll/log/wait/kill,process_id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "process_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "execute",
+      "reads": [
+        "list",
+        "poll",
+        "log",
+        "wait"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "remote_terminal",
+      "family": "execution",
+      "description": "Run a command on an owner-configured backend. backend,command,timeout_ms,background. SSH requires BatchMode and strict host key checks.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "type": "integer"
+          },
+          "background": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "execute",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "run",
+      "description": "Exécuter une commande bornée dans le workspace et attendre son résultat.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "maximum": 1800000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "search_files",
+      "description": "Compatibility name for grep. Rechercher du texte ou une expression régulière dans les fichiers.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "case_sensitive": {
+            "type": "boolean"
+          },
+          "context": {
+            "maximum": 10,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "include": {
+            "type": "string"
+          },
+          "include_ignored": {
+            "type": "boolean"
+          },
+          "include_sensitive": {
+            "type": "boolean"
+          },
+          "max_matches": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "session_search",
+      "family": "sessions",
+      "description": "Search prior IDE and CLI sessions with AND terms, after/before, exclusions, scope project/account; session_id reads messages with offset/around_message_id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "after": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "around_message_id": {
+            "type": "string"
+          },
+          "exclude_session_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "show_tip",
+      "family": "desktop",
+      "description": "Close a terminal view without terminating its process, apply an IDE layout (preset), or show a contextual tip (text). Same request visible to the CLI.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          },
+          "preset": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "computer",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "skill",
+      "description": "Charger les instructions d'une Skill Zaalis explicitement configurée.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "skill_manage",
+      "family": "skills",
+      "description": "Create/update/install a skill from explicit content; inspect/validate; delete manager-owned skills. Never install scripts from a remote source silently.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "list",
+        "inspect",
+        "view",
+        "validate"
+      ],
+      "status": "ready"
+    },
+    {
+      "name": "skill_view",
+      "family": "skills",
+      "description": "List or read project/user skills and referenced files. name, scope, path for skill_view.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "skills_list",
+      "family": "skills",
+      "description": "List or read project/user skills and referenced files. name, scope, path for skill_view.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "scope": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "spawn_agent",
+      "description": "Créer un sous-agent natif, strictement borné par le parent, et attendre son rapport.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "budget": {
+            "type": "object"
+          },
+          "model": {
+            "type": "object"
+          },
+          "objective": {
+            "type": "string"
+          },
+          "permissions": {
+            "type": "object"
+          },
+          "role": {
+            "additionalProperties": false,
+            "properties": {
+              "instructions": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "mutating": {
+                "type": "boolean"
+              },
+              "name": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "label"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "objective"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "speech_to_text",
+      "family": "media",
+      "description": "Transcribe a local audio file using configured speech provider. path, model, language.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_albums",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_devices",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_library",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_playback",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_playlists",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_queue",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "spotify_search",
+      "family": "spotify",
+      "description": "Spotify Web API. action depends on family: state/play/pause/next/previous/seek/shuffle/repeat/volume/recent; list/transfer; get/add queue; search query/type; list/create/update/get/items/add/remove/replace playlists; get/tracks albums; saved/save/remove/contains library. Requires OAuth and Spotify account capabilities.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          },
+          "uris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "device_id": {
+            "type": "string"
+          },
+          "device_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "position_ms": {
+            "type": "integer"
+          },
+          "volume_percent": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "state",
+        "recent",
+        "list",
+        "get",
+        "items",
+        "tracks",
+        "search",
+        "saved",
+        "contains",
+        "devices",
+        ""
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "terminal",
+      "description": "Compatibility name for run. Exécuter une commande bornée dans le workspace et attendre son résultat.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "background": {
+            "type": "boolean"
+          },
+          "command": {
+            "type": "string"
+          },
+          "timeout_ms": {
+            "maximum": 1800000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "terminal_backend_manage",
+      "family": "execution",
+      "description": "List configured local/SSH/Docker/Singularity/Modal/Daytona/RPC execution backends and availability. Remote gateways are configured by the user.",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "terminal_read",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "text_to_speech",
+      "family": "media",
+      "description": "Create speech audio from text. provider local uses Windows installed voices; API provider requires configured media credentials. voice, model, output optional.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "voice": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "ready"
+    },
+    {
+      "name": "todo",
+      "description": "Lire ou remplacer la liste de travail structuree. Un seul item peut etre in_progress.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "parent_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "todo_list",
+      "description": "Compatibility name for todo. Lire ou remplacer la liste de travail structuree. Un seul item peut etre in_progress.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "parent_id": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "text",
+                "status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 100,
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "tool_call",
+      "description": "Call a discovered tool with name and arguments. The nested call passes through the original permission guard; discovery never grants additional access.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "tool_describe",
+      "description": "Retrieve the precise schema of a named tool, including deferred tools. Read this before tool_call.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "tool_search",
+      "description": "Search the COMPLETE current tool registry by keyword/family, including deferred assistant tools. Returns names/descriptions. Availability is verified by calling the tool; optional services may require credentials.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "arguments": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "limit": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          },
+          "server": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "tree",
+      "description": "Afficher l'arborescence bornée du workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "depth": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "video_analyze",
+      "family": "media",
+      "description": "Analyze local image/video using the current model. path, question; video extracts bounded sampled frames via ffmpeg. Model must support vision.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "max_frames": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "requires_ffmpeg_and_vision"
+    },
+    {
+      "name": "video_generate",
+      "family": "media",
+      "description": "Submit/poll video generation, edit or extension to the configured video provider. prompt, model, video_url, image_url, request_id; action status checks an existing request. Provider-dependent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "video_url": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "status"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "video_info",
+      "description": "Recuperer les metadonnees d'une video (oEmbed) : titre, auteur, plateforme, miniature et code d'integration (embed) OFFICIEL. N'utilise l'embed que si les conditions de la plateforme l'autorisent. Ne telecharge pas la video, ne contourne aucune protection.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "vision_analyze",
+      "family": "media",
+      "description": "Analyze local image/video using the current model. path, question; video extracts bounded sampled frames via ffmpeg. Model must support vision.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "question": {
+            "type": "string"
+          },
+          "max_frames": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "requires_vision_model"
+    },
+    {
+      "name": "vm",
+      "description": "Machines virtuelles de l'IDE. Toujours autonome dans la VM, indépendamment du mode du PC hôte. Utilise list, create (linux ou windows), status, import_project (copie du projet actif sans .env, clés, .git ni dépendances locales), exec et stop. create démarre en arrière-plan : attends status=ready avant exec. Linux est Debian via SSH, Windows est PowerShell dans Windows Sandbox. exec renvoie stdout/stderr et exitCode. Linux : chaque exec ouvre un shell séparé, utilise cd /home/zaalis/workspace && ... ; Windows : le répertoire persiste. network=isolated par défaut ; internet donne accès au réseau hôte et à Internet. Ne lance pas des commandes de test sur le PC quand l'utilisateur demande la Sandbox. Aucun clic UI requis. Pas d'activation système ou de chemins hôte arbitraires.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "create",
+              "status",
+              "import_project",
+              "export_file",
+              "reset",
+              "exec",
+              "stop",
+              "templates",
+              "save_template"
+            ],
+            "type": "string"
+          },
+          "command": {
+            "type": "string"
+          },
+          "cpus": {
+            "maximum": 4,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "memoryMB": {
+            "maximum": 8192,
+            "minimum": 1024,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "network": {
+            "enum": [
+              "isolated",
+              "internet"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "Chemin invité pour export_file (fichier de 32 Mo maximum)",
+            "type": "string"
+          },
+          "system": {
+            "enum": [
+              "linux",
+              "windows"
+            ],
+            "type": "string"
+          },
+          "templateId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "web_extract",
+      "description": "Compatibility name for web_fetch. Lire une page web publique bornee. Les reseaux prives, metadata, identifiants URL et redirections sont refuses.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_chars": {
+            "maximum": 200000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "web_fetch",
+      "description": "Lire une page web publique bornee. Les reseaux prives, metadata, identifiants URL et redirections sont refuses.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_chars": {
+            "maximum": 200000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "web_search",
+      "description": "Rechercher sur le web et retourner des resultats structures avec leurs URLs.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "maximum": 10,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "window_read",
+      "family": "desktop",
+      "description": "Inspect the IDE/project, drives, integrated terminal, or desktop via the same server as the CLI. terminal_id optional. Desktop window access requires explicit computer control.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "terminal_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "requires_computer_control"
+    },
+    {
+      "name": "workspace",
+      "description": "Projets connus de l'IDE, terminal visible et création locale de fichiers. GitHub : action github avec input.action (repos, files, read, pulls, push, create_pull, merge), input.repo owner/name ; utilisez repos pour découvrir les dépôts autorisés. Les push et merge exigent le projet associé vérifié ; ne déduisez jamais le dépôt de son seul nom. list donne les projets connus. open sélectionne un projet connu et ouvre éventuellement son terminal. create_artifact crée un vrai PDF, DOCX, XLSX ou CSV dans artifacts/ du projet actif (ou de l'espace de chat) ; fournir format, name, title et content pour PDF/DOCX, ou rows/sheets pour XLSX, ou rows pour CSV. N'annonce le fichier créé qu'après le résultat de l'outil. Après open, confirme puis termine le tour : les outils restent dans l'ancien dossier jusqu'au prochain tour. Aucun chemin hôte arbitraire n'est accepté.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "list",
+              "open",
+              "create_artifact",
+              "github"
+            ],
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "format": {
+            "enum": [
+              "pdf",
+              "docx",
+              "xlsx",
+              "csv"
+            ],
+            "type": "string"
+          },
+          "input": {
+            "description": "GitHub : action repos, files, read (path), pulls, push (branch), create_pull (title, head, branch base, body), merge (number, sha exact). repo=owner/name. Toujours vérifier le dépôt et le projet ; les droits sont imposés par le serveur.",
+            "type": "object"
+          },
+          "name": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {},
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "sheets": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "rows": {
+                  "items": {
+                    "items": {},
+                    "type": "array"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "rows"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "terminal": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "write",
+      "description": "Créer ou remplacer atomiquement un fichier.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "write_file",
+      "description": "Compatibility name for write. Créer ou remplacer atomiquement un fichier.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "family": "native",
+      "status": "ready",
+      "access": "guarded"
+    },
+    {
+      "name": "x_search",
+      "family": "media",
+      "description": "Search X via configured xAI Responses API. query; requires xAI credentials and provider support.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "network",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "xai_video_edit",
+      "family": "media",
+      "description": "Submit/poll video generation, edit or extension to the configured video provider. prompt, model, video_url, image_url, request_id; action status checks an existing request. Provider-dependent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "video_url": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "status"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "xai_video_extend",
+      "family": "media",
+      "description": "Submit/poll video generation, edit or extension to the configured video provider. prompt, model, video_url, image_url, request_id; action status checks an existing request. Provider-dependent.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "video_url": {
+            "type": "string"
+          },
+          "image_url": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "duration": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [
+        "status"
+      ],
+      "status": "connection_required"
+    },
+    {
+      "name": "yb_query_group_info",
+      "family": "yuanbao",
+      "description": "Yuanbao MCP tool with exact provider name. group_id/query; requires owner-connected MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yb_query_group_members",
+      "family": "yuanbao",
+      "description": "Yuanbao MCP tool with exact provider name. group_id/query; requires owner-connected MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yb_search_sticker",
+      "family": "yuanbao",
+      "description": "Yuanbao MCP tool with exact provider name. group_id/query; requires owner-connected MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "query": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yb_send_dm",
+      "family": "yuanbao",
+      "description": "Send a private message or sticker using Yuanbao MCP. user_id/group_id,message/sticker_id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "sticker_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yb_send_sticker",
+      "family": "yuanbao",
+      "description": "Send a private message or sticker using Yuanbao MCP. user_id/group_id,message/sticker_id.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": {
+            "type": "string"
+          },
+          "group_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "sticker_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yuanbao_list_groups",
+      "family": "yuanbao",
+      "description": "Owner-configured Yuanbao MCP adapter; forwards only this named tool to the configured MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yuanbao_list_members",
+      "family": "yuanbao",
+      "description": "Owner-configured Yuanbao MCP adapter; forwards only this named tool to the configured MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yuanbao_list_stickers",
+      "family": "yuanbao",
+      "description": "Owner-configured Yuanbao MCP adapter; forwards only this named tool to the configured MCP server.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "read",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yuanbao_send_message",
+      "family": "yuanbao",
+      "description": "Send Yuanbao messages through the configured MCP adapter. group_id/user_id,message. Requires server support.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    },
+    {
+      "name": "yuanbao_send_private_message",
+      "family": "yuanbao",
+      "description": "Send Yuanbao messages through the configured MCP adapter. group_id/user_id,message. Requires server support.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "group_id": {
+            "type": "string"
+          },
+          "user_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "connection_required"
+    }
+  ],
+  "connections": [
+    {
+      "id": "discord",
+      "title": "Discord",
+      "auth": "bot-token",
+      "status": "connection_required",
+      "baseUrl": "https://discord.com/api/v10",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "spotify",
+      "title": "Spotify",
+      "auth": "oauth",
+      "status": "connection_required",
+      "baseUrl": "https://api.spotify.com/v1",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "feishu",
+      "title": "Feishu / Lark",
+      "auth": "tenant-token",
+      "status": "connection_required",
+      "baseUrl": "https://open.feishu.cn/open-apis",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "homeassistant",
+      "title": "Home Assistant",
+      "auth": "bearer-token",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "yuanbao",
+      "title": "Yuanbao",
+      "auth": "mcp",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "a2a",
+      "title": "A2A agents",
+      "auth": "endpoint",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "media",
+      "title": "Image, video and speech providers",
+      "auth": "api-key",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "cdp",
+      "title": "CDP browser",
+      "auth": "loopback-endpoint",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "execution",
+      "title": "Execution backends",
+      "auth": "owner-configured",
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    }
+  ]
+}

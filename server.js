@@ -611,6 +611,41 @@ app.get('/api/auth/me', (req, res) => {
 
 // Private loopback bridge used only by the Rust `computer` tool. Tokens are
 // random, per-run, memory-only, and never enter MCP or persisted config.
+const assistant = require('./assistant-tools/http').installAssistant(app, {
+  dataDir: DATA_DIR, port: PORT, encrypt: encryptSecret, decrypt: decryptSecret, loadUsers, safeEqual,
+  agent: rustAgentHttp,
+  resolveRoot: req => workspaceContext.agentRoot(req.method === 'GET' ? { root: req.query.root } : req.body || {}, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id)),
+  browserAvailable: () => browserHost.available(),
+  nativeTools: (req,root,config) => rustAgentBridge.catalogue(req.user.id,userApiKeys(req.user),root,rustMcpServersFor(req.user),{
+    ...config,...browserToolConfig(req),workspaceEndpoint:`http://127.0.0.1:${PORT}/api/internal/rust-workspace`,workspaceToken:workspaceTokens.get(req.user.id)?.token||BROWSER_TOOL_TOKEN,
+    compatEndpoints:compatEndpointsFor(req.user),ollamaUrl:sharedConfigForUser(req.user).ollamaUrl,ggufUrl:`http://127.0.0.1:${ENGINE_PORT}`
+  }),
+  browser: async (ctx, action, input) => { if (!browserHost.available()) throw Object.assign(Error('Navigateur intégré indisponible. Configurez un endpoint CDP.'), { status: 503 }); return browserHost.agentTool(action, input); },
+  terminals: ctx => [...terminalManager.sessions.values()].filter(t => t.userId === ctx.userId).map(t => terminalManager.snapshot(t)),
+  computer: async (ctx, input) => { const entry = computerRuns.get(ctx.computerToken); if (!entry) throw Object.assign(Error('Activez le contrôle ordinateur pour lire une fenêtre.'), { status: 409 }); return automationManager.execute(entry.session, input); },
+  project: async (ctx, input) => {
+    const user=loadUsers().find(u=>u.id===ctx.userId),projects=workspaceContext.knownProjects(user,ctx.root);
+    if((input.action||'list')==='list')return {projects,root:ctx.root};
+    let root;
+    if(input.action==='create'){root=require('./assistant-tools/common').within(ctx.root,input.path||input.name);fs.mkdirSync(root,{recursive:true});}
+    else if(input.action==='switch')root=workspaceContext.selectProject(projects,input.project||input.name||input.path);
+    else throw Error('Action projet inconnue.');
+    const terminal=terminalManager.snapshot(terminalManager.create({userId:ctx.userId,cwd:root,profileId:sharedConfigForUser(user).terminalProfile,origin:'user'}));
+    if(ctx.workspaceRun)ctx.workspaceRun.selected={root,terminalId:terminal.id};
+    ctx.emit?.({type:'workspace_selected',root,terminalId:terminal.id});return {root,terminalId:terminal.id,nextTurn:true};
+  },
+  mcp: async (ctx, action, input) => {
+    const user = loadUsers().find(u => u.id === ctx.userId), servers = rustMcpServersFor(user);
+    if (action === 'list') return publicMcpServers(user);
+    if(action==='tools'){const definitions=[];for(const source of servers.filter(s=>!input.server||s.id===input.server)){try{const tools=await mcpRegistry.tools(source,{baseDir:APP_DIR});for(const t of tools)if(mcpRegistry.allowed(source,t.name))definitions.push({name:`mcp:${source.id}:${t.name}`,description:t.description||'',input_schema:t.inputSchema||{type:'object',additionalProperties:true},dynamic:true});}catch(error){definitions.push({server:source.id,error:error.message});}}return {tools:definitions};}
+    if (action === 'install') {
+      const stored=storeMcpServer({id:input.id,name:input.id,enabled:true,transport:'http',endpoint:input.endpoint,token:input.token},storedMcpServers(user).find(s=>s.id===input.id));
+      const users=loadUsers(),owner=users.find(u=>u.id===ctx.userId);owner.mcpServers=[...storedMcpServers(owner).filter(s=>s.id!==stored.id),stored];saveUsers(users);return {id:stored.id,configured:true,tools:await mcpRegistry.tools(runnableMcpServer(stored),{baseDir:APP_DIR}).catch(()=>[])};
+    }
+    const server = servers.find(s => s.id === input.server); if (!server) throw Object.assign(Error('Serveur MCP non connecté.'), { status: 409 });
+    return action === 'call' ? mcpRegistry.call(server, input.tool, input.arguments, { baseDir: APP_DIR }) : mcpRegistry.describe(server, { baseDir: APP_DIR });
+  }
+});
 app.post('/api/internal/rust-computer', async (req, res) => {
   const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   const entry = computerRuns.get(raw);
@@ -826,6 +861,7 @@ app.use('/api', (req, res, next) => {
   }
   return res.status(401).json({ error: 'Authentification requise.' });
 });
+assistant.managementRoutes();
 
 // Per-account preference survives logout and application reinstalls because
 // users.json lives in the stable user data directory.
@@ -3480,6 +3516,7 @@ async function rustAgentHttp(req, res, next) {
   let workspaceEntry = null;
   let workspaceRun = null;
   let conversationLock;
+  let assistantRun;
   req.once('aborted', () => controller.abort());
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
@@ -3543,6 +3580,11 @@ async function rustAgentHttp(req, res, next) {
       },
     }))) : null;
     const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
+    const assistantContext = { userId: req.user.id, root, model, submodel: body.submodel,
+      permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
+      conversationId: body.conversationId, localBase: `http://127.0.0.1:${PORT}`, computerToken,
+      signal: controller.signal, emit, workspaceRun };
+    assistantRun = assistant.prepare(req.user.id, assistantContext);
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -3550,8 +3592,8 @@ async function rustAgentHttp(req, res, next) {
       model: lead.provider,
       submodel: lead.model,
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
-      message,
-      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
+      message: assistant.service.memory.recall(assistantContext) + "\nDEMANDE ACTUELLE :\n" + message,
+      systemPrompt: [body.systemPrompt, "OUTILS : tool_search retrouve le catalogue complet ; tool_describe donne le schéma, tool_call exécute avec les permissions de ce tour. Les connexions externes peuvent être absentes : rapporte leur état réel.", `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -3568,6 +3610,7 @@ async function rustAgentHttp(req, res, next) {
         compatEndpoints: compatEndpointsFor(req.user),
         ...browserToolConfig(req),
         ...workspaceConfig,
+        ...assistantRun.config,
         ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,
@@ -3575,12 +3618,14 @@ async function rustAgentHttp(req, res, next) {
       },
       signal: controller.signal,
     }, mirrorWebTools(req, event => {
+      assistantRun.event(event);
       if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) {
         const agent=event.event.agent, isolated=agent.workspace?.path;
         workspaceEntry.agents.set(String(agent.id),isolated ? {...workspaceRun,projectRoot:isolated,root:isolated,run:workspaceRun} : workspaceRun);
       }
       emit(event);
     }));
+    assistant.service.sessions.record(assistantContext, message, result);
     if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
     if (wantsStream) {
       emit({ type: 'done', result });
@@ -3595,6 +3640,7 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   } finally {
+    assistantRun?.close();
     if (conversationLock && !req.messengerContinuation) continuation.active.delete(conversationLock);
     if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun || context.run === workspaceRun) workspaceEntry.agents.delete(id);
     if (computerToken) computerRuns.delete(computerToken);
@@ -4226,6 +4272,7 @@ const server = app.listen(PORT, () => {
 process.on('exit', unpublishCodestraleBridge);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   process.on(signal, async () => {
+    assistant.close();
     unpublishCodestraleBridge();
     for (const id of githubBrowserAuth.flows.keys()) githubBrowserAuth.cancel(id);
     await messengers.shutdown();

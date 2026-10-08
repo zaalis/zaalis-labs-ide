@@ -148,6 +148,8 @@ impl AgentSession {
             .tools
             .register(NativePlanTool::new(Arc::downgrade(&inner), false))
             .expect("register exit_plan_mode tool");
+        crate::discovery::register(&inner);
+        inner.tools.register_deferred(crate::code::CodeTool::new(Arc::downgrade(&inner))).expect("code tool");
         Self { inner }
     }
 

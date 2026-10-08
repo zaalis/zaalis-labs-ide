@@ -20,6 +20,8 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const { spawn, spawnSync } = require('child_process');
+const assistantCli = require('./assistant-tools/cli');
+const pendingImages = [];
 
 // ---------------------------------------------------------------------------
 // Constants & paths
@@ -416,33 +418,8 @@ async function ensureAuth() {
 // Models — sub-model lists + display names mirror the IDE (state.js), newest
 // first; the first entry of each list is that provider's default.
 // ---------------------------------------------------------------------------
-const SUBMODELS = {
-  codex:  ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
-  claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
-  gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-  grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
-  mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
-  kimi:   ['kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
-};
-const MODEL_LABELS = {
-  'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
-  'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
-  'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
-  'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-  'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5', 'claude-haiku-4-5': 'Claude Haiku 4.5',
-  'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
-  'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
-  'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
-  'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
-  'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-  'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
-  'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
-  'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
-  'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
-  'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
-  'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6',
-};
-function modelLabel(id) { return MODEL_LABELS[id] || id; }
+const { MODEL_LABELS, modelLabel } = require('./model-catalog');
+const SUBMODELS = structuredClone(require('./model-catalog').SUBMODELS);
 
 const CLOUD = [
   { id: 'claude',  label: 'Claude',       keyName: 'anthropic', submodel: SUBMODELS.claude[0] },
@@ -1036,6 +1013,7 @@ async function applyTools(response, events) {
 }
 
 async function callChat(message, systemPrompt, hist) {
+  await refreshEfforts();
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
@@ -1134,6 +1112,7 @@ async function sendChat(message, hooks = {}) {
   } else if (session.responseStyle === 'deep') {
     effectiveMessage += '\n\n[STYLE] Sois approfondi : considere les cas limites, explique les compromis, et verifie via lectures/recherches si utile.';
   }
+  await refreshEfforts();
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
   const body = {
     model: session.model || 'claude',
@@ -1146,9 +1125,11 @@ async function sendChat(message, hooks = {}) {
     history: history.slice(-24),
     reasoningLevel: currentEffort().level,
     stream: true,
+    images: pendingImages.splice(0),
+    computerControl: session.computerControl === true,
   };
   const onEvent = event => {
-    if (['permission_required','plan_required','budget_required'].includes(event.type)) { decisionQueue = decisionQueue.then(() => terminalDecision(event)).catch(error => console.error('Décision : ' + error.message)); }
+    if (['permission_required','plan_required','budget_required','question_required'].includes(event.type)) { decisionQueue = decisionQueue.then(() => terminalDecision(event)).catch(error => console.error('Décision : ' + error.message)); }
     else if (typeof hooks.onEvent === 'function') hooks.onEvent(event);
   };
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
@@ -1184,21 +1165,19 @@ async function sendChat(message, hooks = {}) {
 // Effort / reasoning — mirrors the IDE's REASONING_MODES per model family.
 // `level` is the index sent to the server (0 = off, higher = more thinking).
 // ---------------------------------------------------------------------------
-const EFFORT = {
-  claude:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }, { label: 'MAX', level: 4 }],
-  gemini:  [{ label: 'OFF', level: 0 }, { label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
-  grok:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 2 }, { label: 'MAX', level: 3 }],
-  codex:   [{ label: 'LOW', level: 1 }, { label: 'MED', level: 2 }, { label: 'HIGH', level: 3 }],
-  mistral: [{ label: 'OFF', level: 0 }, { label: 'ON', level: 1 }],
-  kimi:    [{ label: 'LOW', level: 0 }, { label: 'HIGH', level: 1 }, { label: 'MAX', level: 2 }],
-  local:   [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
-  gguf:    [{ label: 'OFF', level: 0 }, { label: 'MED', level: 1 }, { label: 'MAX', level: 2 }],
-};
-function effortListFor(modelId) { return EFFORT[modelId] || EFFORT.local; }
+const effortCache = new Map();
+const { reasoningOptions } = require('./assistant-tools/model-options');
+const effortKey = (model, submodel) => model+':'+(submodel||'');
+function effortListFor(modelId, submodel = session.submodel || SUBMODELS[modelId]?.[0]) { return reasoningOptions(effortCache.get(effortKey(modelId,submodel))?.capabilities); }
+async function refreshEfforts(model = session.model || 'claude', submodel = session.submodel || SUBMODELS[model]?.[0]) {
+  const key=effortKey(model,submodel),cached=effortCache.get(key);if(cached&&Date.now()-cached.at<60000)return cached.capabilities;
+  const response=await authed('GET','/api/model-capabilities?provider='+encodeURIComponent(model)+'&model='+encodeURIComponent(submodel||''));
+  const capabilities=response.status===200?response.json:null;effortCache.set(key,{at:Date.now(),capabilities});return capabilities;
+}
 function currentEffort() {
   const list = effortListFor(session.model || 'claude');
   return list.find((e) => e.level === session.reasoningLevel)
-    || list.find((e) => e.label === 'MED') || list[Math.floor(list.length / 2)] || list[0];
+    || list[0];
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,13 +1186,15 @@ function currentEffort() {
 // the IDE's PERMISSION_LABELS (state.js).
 // ---------------------------------------------------------------------------
 const PERMISSIONS = [
+  { id: 'read-only',  label: 'Lecture seule', paint: (s) => green(s), desc: 'lecture et recherche uniquement' },
   { id: 'plan',       label: 'Plan',      paint: (s) => green(s),  desc: 'lecture seule — propose sans modifier' },
   { id: 'supervised', label: 'Supervisé', paint: (s) => brand(s),  desc: 'demande avant chaque action' },
   { id: 'semi',       label: 'Semi-auto', paint: (s) => brand(s),  desc: 'fichiers auto, commandes validées' },
   { id: 'auto',       label: 'Autonome',  paint: (s) => yellow(s), desc: 'agit sans demander' },
+  { id: 'bypass',     label: 'Bypass',    paint: (s) => yellow(s), desc: 'mode explicite sans confirmation du garde' },
 ];
 function currentPermission() {
-  return PERMISSIONS.find((p) => p.id === session.permissionMode) || PERMISSIONS[1];
+  return PERMISSIONS.find((p) => p.id === session.permissionMode) || PERMISSIONS.find(p=>p.id==='supervised');
 }
 function cyclePermission() {
   const i = PERMISSIONS.findIndex((p) => p.id === currentPermission().id);
@@ -1387,10 +1368,18 @@ const SLASH = [
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
-  { name: 'session', category: 'soon', desc: 'gestion de session', stub: true },
-  { name: 'tasks', category: 'soon', desc: 'liste de taches', stub: true },
-  { name: 'skills', category: 'soon', desc: 'competences disponibles', stub: true },
-  { name: 'mcp', category: 'soon', desc: 'serveurs MCP', stub: true },
+  { name: 'tools', category: 'tools', desc: 'outils partagés, disponibilités et recherche' },
+  { name: 'assistant-memory', category: 'context', desc: 'mémoire personnelle : list, search, add, delete, on, off' },
+  { name: 'sessions', category: 'context', desc: 'historique partagé : recherche ou read <id>' },
+  { name: 'schedule', category: 'tools', desc: 'tâches planifiées : list, create <JSON>, pause, resume, remove' },
+  { name: 'jobs', category: 'tools', desc: 'agents persistants : start, list, result, cancel, resume, questions' },
+  { name: 'connections', category: 'tools', desc: 'connexions : list, configure <fichier JSON>, test, authorize' },
+  { name: 'attach', category: 'tools', desc: 'joindre une image au prochain message' },
+  { name: 'computer', category: 'tools', desc: 'contrôle du bureau : on/off' },
+  { name: 'session', category: 'context', desc: 'historique partagé' },
+  { name: 'tasks', category: 'tools', desc: 'tableau de tâches partagé' },
+  { name: 'skills', category: 'tools', desc: 'compétences : list, view, install, update, delete' },
+  { name: 'mcp', category: 'tools', desc: 'serveurs MCP et connexions' },
   { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
   { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
   { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
@@ -1402,6 +1391,7 @@ const SLASH = [
 // Last reasoning text from the model, kept folded — `/think` expands it.
 let lastThinking = '';
 let decisionActive = false;
+let terminalQuestionActive = false;
 let decisionQueue = Promise.resolve();
 
 // Picker: choose source (provider or local model) → for a cloud provider,
@@ -1438,7 +1428,8 @@ async function rawPickModel() {
   }
 
   // Final step — reasoning effort for the chosen model
-  const list = effortListFor(model);
+  await refreshEfforts(model,submodel);
+  const list = effortListFor(model,submodel);
   const med = list.findIndex((e) => e.label === 'MED');
   const def = med >= 0 ? med : Math.floor(list.length / 2);
   const ei = await rawSelect({
@@ -1455,6 +1446,7 @@ async function rawPickModel() {
 
 // Arrow-key effort picker for the current model.
 async function pickEffort() {
+  const caps=await refreshEfforts();if(!caps?.reasoning?.supported){console.log('Raisonnement : '+reasoningOptions(caps)[0].label+' (aucun réglage ajustable).');return;}
   const list = effortListFor(session.model || 'claude');
   const items = list.map((e) => ({ label: e.label, level: e.level }));
   const cur = list.findIndex((e) => e.level === currentEffort().level);
@@ -1606,6 +1598,7 @@ async function runSlashCommand(ev, me) {
   const spec = SLASH.find((c) => c.name === name);
   if (!spec) { console.log(brand('✗ ') + `Commande inconnue : /${name}`); return; }
   if (spec.stub) { console.log(dim(`/${name} n est pas encore disponible dans le CLI.`)); return; }
+  if (await assistantCommand(name === 'session' ? 'sessions' : name === 'mcp' ? 'connections' : name, arg)) return;
 
   if (name === 'exit' || name === 'quit') return 'exit';
   if (name === 'help') { printHelp(); return; }
@@ -2109,6 +2102,7 @@ function buildFrame() {
 
 // Repaint the whole screen in place from the model — the heart of the renderer.
 function repaint() {
+  if (terminalQuestionActive) return;
   if (!process.stdout.isTTY) return;
   const rows = termRows();
   const cols = Math.max(1, termCols());
@@ -2599,6 +2593,12 @@ async function experienceCommand(arg = '') {
   } while(true);
 }
 async function terminalDecision(event) {
+  if (event.type === 'question_required') {
+    decisionActive = true; terminalQuestionActive = true; const previous = boxActive; boxActive = false;
+    if(process.stdout.isTTY)out('\x1b[2J\x1b[H');
+    try { await assistantCli.question(event, authed); } finally { terminalQuestionActive = false; decisionActive = false; boxActive = previous; if (previous) {emit('Question traitée : '+event.question);repaint();} }
+    return;
+  }
   let allow = false;
   const kind = event.type === 'permission_required' ? 'permission' : event.type === 'plan_required' ? 'plan' : 'budget';
   if (process.stdin.isTTY) {
@@ -2612,12 +2612,18 @@ async function terminalDecision(event) {
   if(r.status!==200) throw new Error(r.json?.error || 'Décision refusée');
 }
 
+async function assistantCommand(name, arg) {
+  return assistantCli.command(name, arg || '', { authed, root: projectRoot, session, images: pendingImages,
+    permission: () => currentPermission().id, save: () => saveSession(session) });
+}
+
 async function main() {
   // `zaalis -c` / `--continue` reprend la dernière conversation de ce dossier
   // (comme `claude --continue`). Le flag est retiré du reste des arguments.
   const rawArgv = process.argv.slice(2);
   const continueSession = rawArgv.includes('-c') || rawArgv.includes('--continue');
-  const argv = rawArgv.filter((a) => a !== '-c' && a !== '--continue');
+  const argv = [];
+  for(let i=0;i<rawArgv.length;i++){const a=rawArgv[i];if(a==='--image'){const file=rawArgv[++i];if(!file)throw Error('--image exige un fichier.');pendingImages.push(require('./assistant-tools/media').loadImage(path.resolve(file)));}else if(a==='--computer')session.computerControl=true;else if(a!=='-c'&&a!=='--continue')argv.push(a);}
   const cmd = argv[0];
 
   // Sub-commands that don't need a started chat session up front.
@@ -2636,6 +2642,16 @@ async function main() {
       '  zaalis pull <modèle>   télécharger un modèle (Ollama/GGUF)',
       '  zaalis connect <chatgpt|xai|minimax>  connecter un abonnement',
       '  zaalis memory [on|off|delete <id>]    mémoire des corrections',
+      '  zaalis tools [recherche]  catalogue des outils et disponibilités',
+      '  zaalis assistant-memory [list|add <note>|search <texte>|delete <id>]  notes',
+      '  zaalis sessions [recherche]  historique IDE et terminal',
+      '  zaalis skills [list|view <nom>|create <nom> <SKILL.md>|delete <nom>]',
+      '  zaalis tasks [list|show <id>]  tableau des tâches',
+      '  zaalis schedule [list|create|pause|resume|remove] [JSON]',
+      '  zaalis jobs [list|start <objectif>|result <id>|cancel <id>|questions]',
+      '  zaalis connections [list|configure <fichier.json>|test <service>|authorize <service>]',
+      '  zaalis --image <chemin> -p "<message>"  analyser une image',
+      '  zaalis --computer      activer le contrôle ordinateur',
       '  zaalis login           se connecter (compte zaalis)',
       '  zaalis logout          se déconnecter',
       '  zaalis serve           démarrer uniquement le serveur',
@@ -2674,7 +2690,7 @@ async function main() {
   if (cmd === 'logout') { await request('POST', '/api/auth/logout'); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
 
   // Work out whether this is a one-shot or the interactive REPL.
-  const subcommand = ['models','pull','connect','memory'].includes(cmd);
+  const subcommand = ['models','pull','connect','memory',...assistantCli.commands].includes(cmd);
   let message = '';
   if (cmd === '-p' || cmd === '--print') message = argv.slice(1).join(' ');
   else if (cmd && !cmd.startsWith('-') && !subcommand) message = argv.join(' ');
@@ -2688,6 +2704,8 @@ async function main() {
   void interactive;
 
   if (!(await ensureAuth())) process.exit(1);
+  await refreshEfforts();
+  if (await assistantCommand(cmd, argv.slice(1).join(' '))) return;
 
   if (cmd === 'connect') { await connectSubscription(argv[1]); return; }
   if (cmd === 'memory') { await experienceCommand(argv.slice(1).join(' ')); return; }

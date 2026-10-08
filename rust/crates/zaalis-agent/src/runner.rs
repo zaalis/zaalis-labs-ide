@@ -28,7 +28,7 @@ const TOOL_IMAGES_PROMPT_PREFIX: &str = "[Images renvoyées par les outils";
 const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
 /// The tools a desktop-control turn keeps.
-const DESKTOP_TOOLS: [&str; 3] = ["computer", "mcp", "skill"];
+const DESKTOP_TOOLS: [&str; 6] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call"];
 
 /// The desktop-mode instructions, naming the tools the turn actually has.
 fn desktop_mode_prompt(tools: &[zaalis_tools::ToolDefinition]) -> String {
@@ -157,7 +157,7 @@ pub(crate) async fn run_agent(
             ));
         }
 
-        let mut available_tools = session.tools.definitions();
+        let mut available_tools = session.tools.definitions_for_model();
         let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
         if desktop_control {
             // A desktop-control turn does not need filesystem, Git, terminal,
@@ -564,7 +564,7 @@ async fn execute_tool_raw(
 ///   - `images: [{mime, data}]`, the IDE's own tools (desktop capture, read);
 ///   - MCP content items `{type:"image", data, mimeType}`, which any MCP
 ///     server may return; each is replaced by a short text placeholder.
-fn detach_tool_images(outcome: &mut ToolOutcome) -> Vec<zaalis_providers::ImagePart> {
+pub(crate) fn detach_tool_images(outcome: &mut ToolOutcome) -> Vec<zaalis_providers::ImagePart> {
     let ToolOutcome::Ok { result, .. } = outcome else {
         return Vec::new();
     };

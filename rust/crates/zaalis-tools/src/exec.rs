@@ -106,6 +106,8 @@ struct RunInput {
 enum ProcessInput {
     Start { command: String },
     Poll { process_id: String },
+    Log { process_id:String, #[serde(default)] offset:usize, #[serde(default)] limit:Option<usize> },
+    Wait { process_id:String, #[serde(default)] timeout_ms:Option<u64> },
     Write { process_id: String, input: String },
     Kill { process_id: String },
     List,
@@ -167,6 +169,8 @@ impl Tool for ExecTool {
                 json!({"type":"object","oneOf":[
                     object(json!({"action":{"const":"start"},"command":{"type":"string"}}), &["action","command"]),
                     object(json!({"action":{"const":"poll"},"process_id":{"type":"string"}}), &["action","process_id"]),
+                    object(json!({"action":{"const":"log"},"process_id":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}}), &["action","process_id"]),
+                    object(json!({"action":{"const":"wait"},"process_id":{"type":"string"},"timeout_ms":{"type":"integer"}}), &["action","process_id"]),
                     object(json!({"action":{"const":"write"},"process_id":{"type":"string"},"input":{"type":"string"}}), &["action","process_id","input"]),
                     object(json!({"action":{"const":"kill"},"process_id":{"type":"string"}}), &["action","process_id"]),
                     object(json!({"action":{"const":"list"}}), &["action"]),
@@ -212,7 +216,7 @@ impl Tool for ExecTool {
                 ProcessInput::Kill { process_id } => {
                     (AccessKind::Execute, format!("process kill {process_id}"))
                 }
-                ProcessInput::Poll { process_id } => {
+                ProcessInput::Poll { process_id } | ProcessInput::Log {process_id,..} | ProcessInput::Wait {process_id,..} => {
                     (AccessKind::Session, format!("process poll {process_id}"))
                 }
                 ProcessInput::Remove { process_id } => {
@@ -263,6 +267,11 @@ impl Tool for ExecTool {
                 (summary, serde_json::to_value(output)?)
             }
             ExecKind::Process => match serde_json::from_value(input)? {
+                ProcessInput::Log {process_id,offset,limit}=> {let log=runtime.log(&process_id,offset,limit.unwrap_or(64000)).await?;("Process log".into(),serde_json::to_value(log)?)},
+                ProcessInput::Wait {process_id,timeout_ms}=> {
+                    let start=std::time::Instant::now();let timeout=Duration::from_millis(timeout_ms.unwrap_or(30000).clamp(1,1800000));
+                    loop{let log=runtime.log(&process_id,0,1024*1024).await?;if !log.running || start.elapsed()>=timeout{break("Process wait".into(),serde_json::to_value(log)?);}tokio::select!{()=cancel.cancelled()=>return Err(ZaalisError::cancelled()),()=tokio::time::sleep(Duration::from_millis(100))=>{}}}
+                },
                 ProcessInput::Start { command } => {
                     let started = runtime.start(&command).await?;
                     (

@@ -15,6 +15,10 @@ mod session;
 mod spawn;
 mod telemetry;
 mod envelope;
+mod discovery;
+mod code;
+#[cfg(test)]
+mod discovery_tests;
 
 pub use event_bus::EventBus;
 pub use guardian::ModelReviewer;
@@ -870,7 +874,7 @@ mod tests {
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
         offered.sort_unstable();
-        assert_eq!(offered, ["computer", "mcp"]);
+        assert_eq!(offered, ["computer", "mcp", "tool_call", "tool_describe", "tool_search"]);
         assert!(requests[0]
             .system
             .contains("outils disponibles : computer, mcp."));

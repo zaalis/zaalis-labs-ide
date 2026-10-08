@@ -319,6 +319,20 @@ class BrowserHost extends EventEmitter {
     }
     const tab = core.activeTab();
     if (!tab) return 'Aucune page web active.';
+    if (tool === 'cdp') {
+      if (!require('../assistant-tools/browser').SAFE_CDP.test(String(args.method || ''))) throw new Error('Méthode CDP refusée.');
+      return tab.view.webContents.cdp(args.method, args.params || {});
+    }
+    if (tool === 'press') {
+      const key=String(args.key||'Enter'),codes={Enter:13,Tab:9,Escape:27,Backspace:8,ArrowUp:38,ArrowDown:40,ArrowLeft:37,ArrowRight:39,Space:32};
+      await tab.view.webContents.cdp('Input.dispatchKeyEvent',{type:'keyDown',key,windowsVirtualKeyCode:codes[key]||0});
+      await tab.view.webContents.cdp('Input.dispatchKeyEvent',{type:'keyUp',key,windowsVirtualKeyCode:codes[key]||0});return 'Key sent: '+key;
+    }
+    if (tool === 'scroll') {
+      const d=args.direction||'down',amount=Math.max(1,Math.min(5000,Number(args.amount)||600));
+      await tab.view.webContents.cdp('Input.dispatchMouseEvent',{type:'mouseWheel',x:200,y:200,deltaX:d==='right'?amount:d==='left'?-amount:0,deltaY:d==='up'?-amount:d==='down'?amount:0});return 'Page scrolled';
+    }
+    if (tool === 'back') return core.runAgentTool(tab,'execute_js',{code:"history.back();return 'back';"});
     clearTimeout(this.agentBorderTimer);
     try {
       await core.setAiControlBorder(tab, true);

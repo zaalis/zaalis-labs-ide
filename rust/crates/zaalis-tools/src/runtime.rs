@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -105,6 +105,7 @@ pub trait RuleSink: Send + Sync + std::fmt::Debug {
 #[derive(Debug, Default)]
 pub struct ToolRuntime {
     tools: RwLock<HashMap<String, Arc<dyn Tool>>>,
+    deferred: RwLock<HashSet<String>>,
     guard: Mutex<Guard>,
     pending: Mutex<HashMap<RequestId, PendingCall>>,
     rule_sink: Option<Arc<dyn RuleSink>>,
@@ -146,6 +147,22 @@ impl ToolRuntime {
         }
         tools.insert(definition.name, Arc::new(tool));
         Ok(())
+    }
+
+    pub fn register_deferred<T: Tool + 'static>(&self, tool: T) -> Result<()> {
+        let name = tool.definition().name;
+        self.register(tool)?;
+        self.deferred.write().expect("deferred lock").insert(name);
+        Ok(())
+    }
+
+    pub fn definitions_for_model(&self) -> Vec<ToolDefinition> {
+        let deferred = self.deferred.read().expect("deferred lock");
+        self.definitions().into_iter().filter(|d| !deferred.contains(&d.name)).collect()
+    }
+
+    pub fn get_tool(&self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.read().expect("tools lock").get(name).cloned()
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {

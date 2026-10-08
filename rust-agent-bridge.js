@@ -106,6 +106,13 @@ class AgentdClient {
     if (runtimeConfig && runtimeConfig.browserToken) env.ZAALIS_BROWSER_TOOL_TOKEN = String(runtimeConfig.browserToken);
     if (runtimeConfig && runtimeConfig.workspaceEndpoint) env.ZAALIS_WORKSPACE_ENDPOINT = String(runtimeConfig.workspaceEndpoint);
     if (runtimeConfig && runtimeConfig.workspaceToken) env.ZAALIS_WORKSPACE_TOKEN = String(runtimeConfig.workspaceToken);
+    if (runtimeConfig && runtimeConfig.assistantEndpoint) env.ZAALIS_ASSISTANT_ENDPOINT = String(runtimeConfig.assistantEndpoint);
+    if (runtimeConfig && runtimeConfig.assistantToken) env.ZAALIS_ASSISTANT_TOKEN = String(runtimeConfig.assistantToken);
+    if (runtimeConfig && runtimeConfig.assistantTools) {
+      const manifest=JSON.stringify(runtimeConfig.assistantTools),file=path.join(configDir,'assistant-'+crypto.createHash('sha256').update(manifest).digest('hex').slice(0,24)+'.json');
+      fs.mkdirSync(configDir,{recursive:true});fs.writeFileSync(file,manifest,{mode:0o600});env.ZAALIS_ASSISTANT_MANIFEST=file;
+      delete env.ZAALIS_ASSISTANT_TOOLS;
+    }
     env.ZAALIS_GITHUB_READ_ONLY = runtimeConfig?.githubReadOnly ? '1' : '0';
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
@@ -211,6 +218,7 @@ class RustAgentBridge {
     this.executable = findAgentd(baseDir);
     this.clients = new Map();
     this.sessions = new Map();
+    this.catalogues = new Map();
   }
 
   status() { return { enabled: this.enabled, available: !!this.executable, executable: this.executable ? path.basename(this.executable) : '' }; }
@@ -219,9 +227,14 @@ class RustAgentBridge {
     if (!this.enabled) throw Object.assign(new Error('Core Rust desactive.'), { status: 404 });
     if (!this.executable) throw Object.assign(new Error('Binaire zaalis-agentd introuvable.'), { status: 503 });
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify({ keys: keys || {}, mcpServers: mcpServers || [], runtimeConfig: runtimeConfig || {} })).digest('hex');
-    const existing = this.clients.get(userId);
-    if (existing && existing.fingerprint === fingerprint && !existing.client.closed) return existing.client;
+    const clientKey = userId + ':' + fingerprint;
+    const existing = this.clients.get(clientKey);
+    if (existing && existing.fingerprint === fingerprint && !existing.client.closed) { existing.lastUsed=Date.now(); return existing.client; }
     if (existing) existing.client.stop();
+    const active = client => [...this.sessions.values()].some(session => session.client === client);
+    for (const [key,entry] of this.clients) if (entry.client.closed || entry.userId === userId && Date.now()-(entry.lastUsed||0)>300000 && !active(entry.client)) {entry.client.stop();this.clients.delete(key);}
+    const pool=[...this.clients.entries()].filter(([,e])=>e.userId===userId).sort((a,b)=>(a[1].lastUsed||0)-(b[1].lastUsed||0));
+    if(pool.length>=8){const idle=pool.find(([,e])=>!active(e.client));if(!idle)throw Object.assign(Error('Limite de huit moteurs concurrents atteinte.'),{status:429});idle[1].client.stop();this.clients.delete(idle[0]);}
     const userDir = path.join(this.dataDir, 'rust-agentd', crypto.createHash('sha256').update(String(userId)).digest('hex').slice(0, 24));
     fs.mkdirSync(userDir, { recursive: true });
     const configDir = path.join(userDir, 'extensions');
@@ -241,13 +254,22 @@ class RustAgentBridge {
     fs.writeFileSync(target, JSON.stringify({ servers }, null, 2), { encoding: 'utf8', mode: 0o600 });
     syncManagedSkills(configDir, skills);
     const client = new AgentdClient({ executable: this.executable, dataDir: userDir, configDir, keys, extensionEnv, runtimeConfig });
-    this.clients.set(userId, { fingerprint, client });
+    this.clients.set(clientKey, { userId, fingerprint, client, lastUsed:Date.now() });
     return client;
   }
 
   async usage(userId, keys, from, to, zone = []) {
-    const existing=this.clients.get(userId);
+    const existing=[...this.clients.values()].find(entry => entry.userId === userId && !entry.client.closed);
     return (existing ? existing.client : this._client(userId, keys)).request("usage.query", { from_ms: from, to_ms: to, ...(zone.length ? { zone } : {}) });
+  }
+
+  async catalogue(userId, keys, root, mcpServers, runtimeConfig) {
+    const client=this._client(userId,keys,mcpServers,runtimeConfig);
+    const key=userId+':'+crypto.createHash('sha256').update(JSON.stringify({root,runtimeConfig,mcpServers})).digest('hex');
+    const cached=this.catalogues.get(key);if(cached&&Date.now()-cached.at<60000)return cached.tools;
+    const made=await client.request('session.create',{root,mode:'chat',permission_mode:'read-only',model:{provider:'mistral'}});
+    try {const result=await client.request('tools.list',{session_id:made.session_id});this.catalogues.set(key,{at:Date.now(),tools:result.tools});return result.tools;}
+    finally {await client.request('session.close',{session_id:made.session_id}).catch(()=>{});}
   }
 
   async run(options, onEvent) {

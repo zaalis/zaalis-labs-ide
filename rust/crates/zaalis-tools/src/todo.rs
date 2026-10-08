@@ -14,6 +14,8 @@ struct TodoItem {
     id: String,
     text: String,
     status: TodoStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,7 +48,7 @@ impl Tool for TodoTool {
         ToolDefinition {
             name: "todo".into(),
             description: "Lire ou remplacer la liste de travail structuree. Un seul item peut etre in_progress.".into(),
-            input_schema: json!({"type":"object","properties":{"items":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["id","text","status"],"additionalProperties":false}}},"additionalProperties":false}),
+            input_schema: json!({"type":"object","properties":{"items":{"type":"array","maxItems":100,"items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"parent_id":{"type":"string"},"status":{"type":"string","enum":["pending","in_progress","completed"]}},"required":["id","text","status"],"additionalProperties":false}}},"additionalProperties":false}),
         }
     }
 
@@ -83,6 +85,27 @@ impl Tool for TodoTool {
             .lock()
             .map_err(|_| ZaalisError::internal("todo lock poisoned"))?;
         if let Some(items) = parsed.items {
+            if items.len() > 100 {
+                return Err(ZaalisError::invalid("todo limit is 100"));
+            }
+            let ids: std::collections::HashSet<_> = items.iter().map(|i| i.id.as_str()).collect();
+            if ids.len() != items.len() {
+                return Err(ZaalisError::invalid("duplicate todo id"));
+            }
+            for item in &items {
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(item.id.as_str());
+                let mut current = item;
+                while let Some(parent) = &current.parent_id {
+                    if !visited.insert(parent.as_str()) {
+                        return Err(ZaalisError::invalid("todo hierarchy cycle"));
+                    }
+                    current = items
+                        .iter()
+                        .find(|i| &i.id == parent)
+                        .ok_or_else(|| ZaalisError::invalid("todo parent missing"))?;
+                }
+            }
             if items
                 .iter()
                 .filter(|item| item.status == TodoStatus::InProgress)
