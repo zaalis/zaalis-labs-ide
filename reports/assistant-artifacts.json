@@ -18,31 +18,52 @@
   "integrationEntries": 33,
   "artifacts": [
     {
+      "path": "native/dist/zaalis.exe",
+      "bytes": 608768,
+      "modified": "2026-10-08T16:19:45.3844913Z",
+      "sha256": "857a10e6d038f9a82f79abf58558ba1d6a255519b5a9c27989ff7015de0fabba",
+      "signature": "NotSigned"
+    },
+    {
+      "path": "native/dist/pickfolder.exe",
+      "bytes": 105984,
+      "modified": "2026-10-08T16:19:45.7945330Z",
+      "sha256": "e44fba2fbd66af8d069974a55b9421d302a588b8341129942cef7d3474b1a0a1",
+      "signature": "NotSigned"
+    },
+    {
       "path": "native/dist/zaalis-server.exe",
-      "bytes": 79515967,
-      "modified": "2026-10-08T15:33:08.0133886Z",
-      "sha256": "a2671f1bb8ad1c1a39a0a5b8a2a08c4bac39f426a08fc9bb40a7d6de665ecb3e",
+      "bytes": 79517331,
+      "modified": "2026-10-08T16:20:25.5426691Z",
+      "sha256": "04931a23cb1f7d4d2fbea00a89f88d5a3fa27d66c690183842b49e0e88e3a5c4",
       "signature": "NotSigned"
     },
     {
       "path": "native/dist/zaalis-terminal.exe",
-      "bytes": 71136344,
-      "modified": "2026-10-08T15:22:34.0841911Z",
-      "sha256": "340b0692a354d2908d344534a09110e2cdabbe8aaa58c9e509ad36f048c910fd",
+      "bytes": 71137975,
+      "modified": "2026-10-08T16:20:31.2172936Z",
+      "sha256": "bfcb1e82382f8a152d492677d7b01cc9ba4459b9450b0795845f1681a46dcfc6",
       "signature": "NotSigned"
     },
     {
       "path": "native/dist/zaalis-agentd.exe",
       "bytes": 9757696,
-      "modified": "2026-10-08T15:10:02.1571963Z",
-      "sha256": "aa4ffce294d825c5ddafa74550fe80c04e84f77679cade9cc77585232eec0e9f",
+      "modified": "2026-10-08T16:20:15.9896787Z",
+      "sha256": "c83b12e9ac190f5df93b4a4ae2ab1e5c386664aa5e1f2b52b6be907f4fdc8a32",
+      "signature": "NotSigned"
+    },
+    {
+      "path": "native/dist/zaalis-cli.exe",
+      "bytes": 1305600,
+      "modified": "2026-10-08T14:55:57.5488195Z",
+      "sha256": "fbb9c6ac2c4e7d67f1231f6e7ef27d436d06ebf2536f66bc397c33925ce42d00",
       "signature": "NotSigned"
     },
     {
       "path": "native/installer/zaalis-setup.exe",
-      "bytes": 510192880,
-      "modified": "2026-10-08T15:35:12.8982337Z",
-      "sha256": "973d34ed8d58b4d39cb6fea21fb2f9fb9824c62e90ee5a5e9b0d060acdcfc9d2",
+      "bytes": 510207505,
+      "modified": "2026-10-08T16:34:42.9000762Z",
+      "sha256": "b78019d88973a49b34c036397ff6241fbd10571516ef56e82b3b14a4e4dc009c",
       "signature": "NotSigned"
     }
   ]

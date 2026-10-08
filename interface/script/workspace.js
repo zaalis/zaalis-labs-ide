@@ -398,6 +398,7 @@
                     const wrapper = el('div', 'ws-conversation-row');
                     const row = button(conv.title || 'Conversation', null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
                     row.dataset.focusKey = `${kind}:${conv.id}`;
+                    row.title = conv.title || 'Conversation';
                     const selected = kind === activeKind() && conv.id === state[kind === 'chat' ? 'currentConvId' : 'currentAgentConvId'];
                     row.classList.toggle('active', selected);
                     if (selected) row.setAttribute('aria-current', 'page');

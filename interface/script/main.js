@@ -33,6 +33,7 @@ function setSettingsSection(section) {
         if (key === 'vm') window.ZaalisVM?.settings();
         if (key === 'tokens') window.ZaalisTokenProfile?.mount();
         if (key === 'integrations') window.ZaalisIntegrations?.settings();
+        if (key === 'models') window.ZaalisAgentSettings?.settings();
     }
 }
 

@@ -17,7 +17,6 @@
     tile.append(mark,copy);tile.onclick=()=>settings(id);grid.append(tile);
    }
    search.oninput=()=>{const q=search.value.toLocaleLowerCase();for(const tile of grid.children)tile.hidden=!tile.textContent.toLocaleLowerCase().includes(q);};
-   window.ZaalisAgentSettings.mount(target).catch(e=>target.append(node('p',e.message,'integration-notice error')));
    target.append(grid,node('p',uiText('Vos connexions restent sur ce PC. Gardez Zaalis ouvert pour recevoir les réponses dans vos messageries.'),'integration-footnote'));return;
   }
   if(page==='whatsapp'||page==='telegram'){await window.ZaalisMessengers.mount(page,target,()=>settings('overview'));return;}
