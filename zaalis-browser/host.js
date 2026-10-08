@@ -18,6 +18,7 @@ const path = require('path');
 const Module = require('module');
 const { EventEmitter } = require('events');
 const { createElectron } = require('./electron-shim');
+const browserLocale = require('./locale');
 
 const APP_DIR = path.join(__dirname, 'app');
 const DATA_FILES = [
@@ -34,6 +35,7 @@ class BrowserHost extends EventEmitter {
     this.dataDir = options.dataDir || '';
     this.secretFile = options.secretFile || '';
     this.idePort = options.idePort || 3000;
+    this.language = 'fr';
     this.log = options.log || ((line) => console.error(line));
     this.socket = null;
     this.buffer = '';
@@ -45,7 +47,10 @@ class BrowserHost extends EventEmitter {
     this.starting = null;
     this.lastTabs = [];
     this.agentBorderTimer = null;
+    const browserHost = this;
     this.shim = createElectron({
+      get language() { return browserHost.language; },
+      translate: (value) => this.translate(value),
       command: (op, params) => this.command(op, params),
       send: (op, params) => this.send(op, params),
       log: (line) => this.log(line),
@@ -224,6 +229,16 @@ class BrowserHost extends EventEmitter {
 
   // ----- IDE-facing API ------------------------------------------------------------
   reveal() { this.send('reveal', {}); }
+
+  setLanguage(language) {
+    this.language = language === 'en' ? 'en' : 'fr';
+    if (this.shim) for (const view of this.shim.views.values()) {
+      const wc = view.webContents;
+      if (wc.getURL().startsWith('zaalis://home/')) wc.executeJavaScript(browserLocale.client(this.language));
+    }
+  }
+
+  translate(value) { return browserLocale.translate(value, this.language); }
 
   async open(url, { background = false, reveal = true } = {}) {
     const core = await this.ensureStarted();

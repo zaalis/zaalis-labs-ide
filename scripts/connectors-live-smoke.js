@@ -1,0 +1,12 @@
+'use strict';
+const fs=require('fs'),path=require('path'),os=require('os'),assert=require('node:assert/strict'),{spawn}=require('child_process'),{GitHubBrowserAuth}=require('../github-browser-auth');
+const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-connectors-live-')),port=37400+Math.floor(Math.random()*100),base='http://127.0.0.1:'+port;
+const installed=process.argv.includes('--installed'),appDir=installed?path.join(process.env.LOCALAPPDATA,'Programs','zaalis'):path.join(root,'native/dist');
+const child=spawn(path.join(appDir,'zaalis-server.exe'),[],{cwd:appDir,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});
+(async()=>{let auth;try{
+ for(let i=0;i<120;i++){try{if((await fetch(base)).ok)break;}catch{}await new Promise(r=>setTimeout(r,100));}
+ const registered=await fetch(base+'/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:'live@zaalis.local',password:'password123'})});assert.ok(registered.ok);const cookie=registered.headers.get('set-cookie').split(';')[0];
+ const api=async(url,body)=>{const response=await fetch(base+url,{headers:{Cookie:cookie,'Content-Type':'application/json'},...(body?{method:'POST',body:JSON.stringify(body)}:{})});const data=await response.json();assert.ok(response.ok,JSON.stringify(data));return data;};
+ const github=await api('/api/integrations/github');assert.equal(github.deviceAvailable,true);assert.equal(github.method,'github-cli');if(!process.argv.includes('--whatsapp-only')) { auth=new GitHubBrowserAuth({appDir,dataDir:temp});const login=await auth.start('fixture');assert.ok(login.code);assert.equal(login.url,'https://github.com/login/device');auth.cancel('fixture'); }
+ await api('/api/integrations/messengers/whatsapp',{action:'start'});let qr=false;for(let i=0;i<70;i++){const status=await api('/api/integrations/messengers/whatsapp');if(status.qr){qr=true;break;}if(status.error)throw Error(status.error);await new Promise(r=>setTimeout(r,1000));}assert.equal(qr,true,'Live WhatsApp QR was not received');await api('/api/integrations/messengers/whatsapp',{action:'disconnect'});console.log(JSON.stringify({packaged:true,installed,realGitHubDeviceFlow:!process.argv.includes('--whatsapp-only'),realWhatsAppQR:true,personalAccountAuthorization:false}));
+ }finally{auth?.cancel('fixture');child.kill();}})().catch(e=>{console.error(e.message);process.exitCode=1;});

@@ -25,7 +25,7 @@ function setPermissionMode(mode, persist = true) {
             body: JSON.stringify({ permissionMode: mode })
         }).then(response => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        }).catch(() => showToast('Préférence', 'Le mode reste actif, mais sa sauvegarde sur le compte a échoué.', { icon: '!' }));
+        }).catch(() => showToast(uiText('Préférence'), uiText('Le mode reste actif, mais sa sauvegarde sur le compte a échoué.'), { icon: '!' }));
     }
 }
 
@@ -146,14 +146,14 @@ function syncComputerControlUI() {
     $$('.computer-control-btn').forEach(btn => {
         btn.setAttribute('aria-pressed', state.computerControl ? 'true' : 'false');
         btn.title = state.computerControl
-            ? 'Contrôle du PC activé pour cette tâche (cliquer pour couper)'
-            : 'Activer le contrôle explicite du PC pour cette tâche';
+            ? uiText('Contrôle du PC activé pour cette tâche (cliquer pour couper)')
+            : uiText('Activer le contrôle explicite du PC pour cette tâche');
     });
 }
 $$('.computer-control-btn').forEach(btn => btn.addEventListener('click', () => {
     state.computerControl = !state.computerControl;
     syncComputerControlUI();
-    toast(state.computerControl ? 'Contrôle du PC activé : l’IA doit inspecter avant et après ses actions.' : 'Contrôle du PC désactivé.');
+    toast(state.computerControl ? uiText('Contrôle du PC activé : l’IA doit inspecter avant et après ses actions.') : uiText('Contrôle du PC désactivé.'));
 }));
 syncComputerControlUI();
 
@@ -222,15 +222,15 @@ $$('.ai-tab').forEach(tab => {
                 addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
                 state.agentMode = false;
             } else {
-                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || 'Mode Agents active.') + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || 'agents prets.'));
+                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents active.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prets.')));
             }
         } else if (!isAgentsTab && state.agentMode) {
             state.agentMode = false;
-            addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['mode-agents-inactive'] || 'Mode Agents desactive.');
+            addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['mode-agents-inactive'] || uiText('Mode Agents desactive.'));
             $$('.agent-card').forEach(c => {
                 c.classList.remove('working');
                 const badge = c.querySelector('.agent-badge');
-                badge.textContent = TRANSLATIONS[lang]['status-idle'] || 'Inactif';
+                badge.textContent = TRANSLATIONS[lang]['status-idle'] || uiText('Inactif');
                 badge.className = 'agent-badge idle';
             });
         }
@@ -371,7 +371,7 @@ function renderMarkdown(src) {
         }
         const language = (b.path ? b.path.split('.').pop() : b.info.split(/\s/)[0] || '').replace(/[^a-z0-9+#-]/gi, '').slice(0, 24);
         const highlighted = typeof highlightCode === 'function' && b.code.length <= 200000 ? highlightCode(b.code) : escapeHTML(b.code);
-        const pre = `<div class="code-snippet"><div class="code-snippet-bar"><span>${escapeHTML(language || 'code')}</span><button type="button" class="code-copy-btn" aria-label="Copier le code">Copier</button></div><pre class="code-block"><code>${highlighted}</code></pre></div>`;
+        const pre = uiTemplate(`<div class="code-snippet"><div class="code-snippet-bar"><span>${escapeHTML(language || 'code')}</span><button type="button" class="code-copy-btn" aria-label="Copier le code">Copier</button></div><pre class="code-block"><code>${highlighted}</code></pre></div>`);
         // Fold ONLY a real code file: it must name a file (path=) AND be more
         // than a couple of lines. A one/two-line snippet — or any block without
         // a path — stays inline, so only full files in the summary collapse.
@@ -580,7 +580,7 @@ async function readAgentEventStream(res, onEvent) {
         if (event.type === 'done') {
             result = event.result || {};
         } else if (event.type === 'error') {
-            streamError = event.error || 'Erreur agent.';
+            streamError = event.error || uiText('Erreur agent.');
         }
         if (typeof onEvent === 'function') onEvent(event);
     };
@@ -759,12 +759,12 @@ function ensurePendingChatDrawer() {
     const area = input && input.closest('.chat-input-area');
     pendingChatDrawer = document.createElement('div');
     pendingChatDrawer.className = 'chat-pending-drawer';
-    pendingChatDrawer.innerHTML = `
+    pendingChatDrawer.innerHTML = uiTemplate(`
         <div class="chat-pending-head">En attente</div>
         <div class="chat-pending-row">
             <span class="chat-pending-text"></span>
             <button type="button" class="chat-pending-cancel" aria-label="Annuler le message en attente" title="Annuler">&times;</button>
-        </div>`;
+        </div>`);
     const cancel = pendingChatDrawer.querySelector('.chat-pending-cancel');
     cancel.addEventListener('click', (e) => {
         e.preventDefault();
@@ -780,12 +780,12 @@ function ensurePendingAgentDrawer() {
     const area = input && input.closest('.chat-input-area');
     pendingAgentDrawer = document.createElement('div');
     pendingAgentDrawer.className = 'chat-pending-drawer agents-pending-drawer';
-    pendingAgentDrawer.innerHTML = `
+    pendingAgentDrawer.innerHTML = uiTemplate(`
         <div class="chat-pending-head">En attente</div>
         <div class="chat-pending-row">
             <span class="chat-pending-text"></span>
             <button type="button" class="chat-pending-cancel" aria-label="Annuler la tache en attente" title="Annuler">&times;</button>
-        </div>`;
+        </div>`);
     pendingAgentDrawer.querySelector('.chat-pending-cancel').addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1061,8 +1061,8 @@ async function sendChat(input) {
             body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
             restorePendingChatToInput();
         } else {
-            if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.');
-            body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur de connexion au serveur.';
+            if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.'));
+            body.textContent = TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.');
             body.classList.add('error');
         }
     } finally {
@@ -1148,7 +1148,7 @@ function applyOneHunk(content, search, replace, isMarkdown) {
     }
     if (count > 1) return { ok: false, error: `le texte SEARCH apparaît ${count} fois (rends-le unique)` };
 
-    return { ok: false, error: 'le texte SEARCH est introuvable dans le fichier (copie-le EXACTEMENT, indentation comprise)' };
+    return { ok: false, error: uiText('le texte SEARCH est introuvable dans le fichier (copie-le EXACTEMENT, indentation comprise)') };
 }
 
 // Build a compact red/green diff (HTML) from a list of applied hunks.
@@ -1380,7 +1380,7 @@ function createLiveAgentActivity(container) {
                 return;
             }
             if (event.type === 'error') {
-                this.fail(event.error || 'Erreur agent.');
+                this.fail(event.error || uiText('Erreur agent.'));
             }
         },
         finish(data) {
@@ -1417,7 +1417,7 @@ function createLiveAgentActivity(container) {
             seenActivity++;
             if (titleEl) titleEl.textContent = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
             setStatus(error || (lang === 'en' ? 'Agent error' : 'Erreur agent'));
-            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || 'Erreur agent')}</pre>`);
+            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || uiText('Erreur agent'))}</pre>`);
             body.classList.remove('live-agent-active');
             if (details) details.removeAttribute('open');
             followScroll(container);
@@ -1473,7 +1473,7 @@ async function applyEditBlocks(editBlocks, agentName, out, lang) {
             const preview = applied.map(h => `- ${(h.search || '').split('\n')[0]}\n+ ${(h.replace || '').split('\n')[0]}`).join('\n');
             const approved = await requestApproval(desc, preview.slice(0, 500));
             if (!approved) {
-                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusee.');
+                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || uiText('Modification refusee.'));
                 continue;
             }
         }
@@ -1568,7 +1568,7 @@ async function handleAIResponse(response, agentName, container) {
                 codeContent.substring(0, 500) + (codeContent.length > 500 ? '\n...' : '')
             );
             if (!approved) {
-                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || 'Modification refusee.');
+                addMsg(out, 'system', null, TRANSLATIONS[lang]['modification-refused'] || uiText('Modification refusee.'));
                 continue;
             }
         }
@@ -1676,7 +1676,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
             const d = await res.json().catch(() => ({}));
             const full = (res.ok && !d.error) ? (d.content || '') : '';
             const max = isLocal ? 4000 : 12000;
-            ctx += `\n# ${e.path} (${lang === 'en' ? 'error' : 'erreur'}: ${e.error})\n\`\`\`\n${full.slice(0, max)}${full.length > max ? '\n... (tronqué)' : ''}\n\`\`\`\n`;
+            ctx += `\n# ${e.path} (${lang === 'en' ? 'error' : 'erreur'}: ${e.error})\n\`\`\`\n${full.slice(0, max)}${full.length > max ? uiText('\n... (tronqué)') : ''}\n\`\`\`\n`;
         } catch {}
     }
 
@@ -1736,7 +1736,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
             const d = await res.json().catch(() => ({}));
             if (!res.ok || d.error) { ctx += `\n# ${p}\n(${(d && d.error) || ('HTTP ' + res.status)})\n`; continue; }
             const full = d.content || '';
-            ctx += `\n# ${p}\n\`\`\`\n${full.slice(0, maxChars)}${full.length > maxChars ? '\n... (tronqué)' : ''}\n\`\`\`\n`;
+            ctx += `\n# ${p}\n\`\`\`\n${full.slice(0, maxChars)}${full.length > maxChars ? uiText('\n... (tronqué)') : ''}\n\`\`\`\n`;
         } catch { ctx += `\n# ${p}\n(${lang === 'en' ? 'read failed' : 'lecture impossible'})\n`; }
     }
 
@@ -1904,12 +1904,10 @@ $('#send-btn').addEventListener('click', () => {
 // ==========================================================
 //  AGENTS MODE - MULTI AI
 // ==========================================================
-async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
-    if (state.config.rustAgentCore === false) return false;
-    const lang = state.language || 'fr';
+function buildRustAgentTeam(activeAgents, labels, lang) {
     const lead = activeAgents.find(agent => agent.role === 'lead') || activeAgents[0];
     const workers = activeAgents.filter(agent => agent !== lead);
-    const team = [
+    return [
         ...workers.map((agent, index) => ({
             role: {
                 name: `worker_${index}_${agent.agent}`,
@@ -1933,6 +1931,13 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
             depends_on: workers.map((agent, index) => `worker_${index}_${agent.agent}`), may_spawn: true
         }
     ];
+}
+
+async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
+    if (state.config.rustAgentCore === false) return false;
+    const lang = state.language || 'fr';
+    const lead = activeAgents.find(agent => agent.role === 'lead') || activeAgents[0];
+    const team = buildRustAgentTeam(activeAgents, labels, lang);
     const { aiText = '', names = [], images = [] } = taskDraft;
     if (!state.currentAgentConvId) state.currentAgentConvId = crypto.randomUUID();
     const response = await fetch('/api/rust-agent-team', {
@@ -2001,6 +2006,7 @@ async function sendAgentTask(input) {
     }
 
     const labels = { codex: 'Codex', claude: 'Claude', gemini: 'Gemini', grok: 'Grok', mistral: 'Mistral', kimi: 'Kimi', local: 'Ollama', gguf: 'GGUF' };
+    for (const provider of window.compatProviders || []) labels[`compat:${provider.id}`] = provider.label;
     const activeAgents = [];
     $$('.agent-check:checked').forEach(cb => {
         const agent = cb.dataset.agent;
@@ -2210,7 +2216,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
         }
     } catch (err) {
         stopThinking(streamTarget);
-        streamTarget.textContent = TRANSLATIONS[lang]['err-conn-lead'] || 'Erreur de connexion.';
+        streamTarget.textContent = TRANSLATIONS[lang]['err-conn-lead'] || uiText('Erreur de connexion.');
         streamTarget.classList.add('error');
     }
 
@@ -2257,12 +2263,12 @@ const HIST = {
     chat: {
         store: 'conversations', current: 'currentConvId',
         container: '#chat-messages', list: '#history-list', tab: 'chat',
-        defaultKey: 'chat-default-msg', defaultMsg: 'Selectionnez un modele et posez votre question.'
+        defaultKey: 'chat-default-msg', defaultMsg: uiText('Selectionnez un modele et posez votre question.')
     },
     agents: {
         store: 'agentConversations', current: 'currentAgentConvId',
         container: '#agents-log', list: '#history-list-agents', tab: 'agents',
-        defaultKey: 'agents-log-default', defaultMsg: 'Activez le Mode Agents et envoyez une tache.'
+        defaultKey: 'agents-log-default', defaultMsg: uiText('Activez le Mode Agents et envoyez une tache.')
     }
 };
 
@@ -2318,6 +2324,7 @@ function saveConversation(kind = 'chat') {
             text: body ? body.textContent : '',
             type: m.classList.contains('msg-system') ? 'system' : m.classList.contains('msg-user') ? 'user' : 'ai'
         };
+        if (m.dataset.remoteId) entry.remoteId = m.dataset.remoteId;
         const classes = persistedBodyClasses(body);
         if (classes.length) entry.bodyClasses = classes;
         if (body?.classList.contains('live-agent-body')) entry.activity = true;
@@ -2349,6 +2356,27 @@ function saveConversation(kind = 'chat') {
             if (!conv.title || conv.title === 'Conversation') conv.title = title;
         }
         else listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
+    }
+
+    // Migrate an older conversation when it is saved from the active IDE view.
+    // Its first messenger link then inherits the visible model/team configuration.
+    const savedConversation = listArr.find(c => c.id === curId);
+    if (savedConversation && !savedConversation.execution) {
+        const execution = { language: state.language, permissionMode: state.permissionMode, reasoningLevel: state.reasoningLevel };
+        if (kind === 'chat') {
+            execution.model = document.getElementById('ai-model').value;
+            execution.submodel = document.getElementById('ai-submodel').value;
+        } else {
+            const selected = [...document.querySelectorAll('.agent-check:checked')].map(cb => {
+                const card = document.querySelector(`.agent-card[data-agent="${cb.dataset.agent}"]`);
+                return { agent: cb.dataset.agent, role: card.querySelector('.agent-role-select').value, submodel: card.querySelector('.agent-model-select').value };
+            });
+            if (selected.length >= 2 && selected.every(a => a.submodel)) {
+                const labels = Object.fromEntries([...document.getElementById('ai-model').options].map(o => [o.value, o.textContent]));
+                execution.team = buildRustAgentTeam(selected, labels, state.language);
+            }
+        }
+        if (execution.model || execution.team) savedConversation.execution = execution;
     }
 
     window.ZaalisWorkspace?.flushConversation(kind);
@@ -2411,8 +2439,9 @@ function startChatSync() {
 
 async function syncChatsFromServer() {
     if (document.hidden) return;
-    if (chatAbort) return; // never mutate the stores while a request is in flight
+    if (chatAbort || agentTaskRunning) return; // never mutate the stores while a request is in flight
     let changed = false;
+    let refreshActive = null;
     for (const kind of ['chat', 'agents']) {
         const cfg = HIST[kind];
         try {
@@ -2422,11 +2451,15 @@ async function syncChatsFromServer() {
             const snap = JSON.stringify(Array.isArray(server) ? server : []);
             if (snap === _chatSnap[kind]) continue; // unchanged since last seen
             _chatSnap[kind] = snap;
+            const oldActive = state[cfg.store].find(c => c.id === state[cfg.current]);
+            const remoteActive = server.find(c => c.id === state[cfg.current]);
+            if (remoteActive?.remoteRevision && remoteActive.remoteRevision !== oldActive?.remoteRevision && document.getElementById('view-' + cfg.tab)?.classList.contains('active')) refreshActive = [kind, state[cfg.current]];
             state[cfg.store] = mergeConversations(state[cfg.store] || [], Array.isArray(server) ? server : [], state[cfg.current]);
             changed = true;
         } catch {}
     }
     if (changed) renderHistory();
+    if (refreshActive) await loadConversation(...refreshActive);
 }
 
 // Server is the source of truth across devices, but keep the local copy of the
@@ -2435,7 +2468,7 @@ async function syncChatsFromServer() {
 function mergeConversations(local, server, curId) {
     const localById = new Map(local.map(c => [c.id, c]));
     const serverIds = new Set(server.map(c => c.id));
-    const merged = server.map(c => (c.id === curId && localById.has(curId)) ? localById.get(curId) : c);
+    const merged = server.map(c => (c.id === curId && localById.has(curId) && (!c.remoteRevision || c.remoteRevision === localById.get(curId).remoteRevision)) ? localById.get(curId) : c);
     local.forEach(c => { if (!serverIds.has(c.id)) merged.push(c); });
     return merged;
 }
@@ -2457,6 +2490,7 @@ async function loadConversation(kind, id) {
     (conv.messages || []).forEach(m => {
         const hasRichHtml = m.html && m.type !== 'user';
         const body = addMsg(container, m.type, m.label, hasRichHtml ? safeSavedHTML(m.html) : (m.text || ''), !!hasRichHtml);
+        if (m.remoteId) body.closest('.msg').dataset.remoteId = m.remoteId;
         if (m.markdown && m.type === 'ai') body.dataset.markdownSource = m.markdown;
         if (m.activity || body.querySelector('.live-agent-activity')) {
             body.classList.add('live-agent-body');
@@ -2510,7 +2544,7 @@ const historyExpanded = {};                  // `${kind}|${groupKey}` -> expande
 
 function noProjectLabel() {
     const lang = state.language || 'fr';
-    return TRANSLATIONS[lang]['history-no-project'] || 'Aucun projet';
+    return TRANSLATIONS[lang]['history-no-project'] || uiText('Aucun projet');
 }
 
 // Resolve a project folder NAME back to its full path via the recent list.
@@ -2570,7 +2604,7 @@ function renderProjectPanelHistory(kind = activeKind()) {
 
     const lang = state.language || 'fr';
     if (!state.projectRoot) {
-        list.innerHTML = `<div class="history-empty" data-i18n="history-empty">${TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation'}</div>`;
+        list.innerHTML = `<div class="history-empty" data-i18n="history-empty">${TRANSLATIONS[lang]['history-empty'] || uiText('Aucune conversation')}</div>`;
         return;
     }
 
@@ -2580,7 +2614,7 @@ function renderProjectPanelHistory(kind = activeKind()) {
         : (state[cfg.store] || []).filter(c => c.project === folderName);
 
     if (!convs.length) {
-        list.innerHTML = `<div class="history-empty" data-i18n="history-empty">${TRANSLATIONS[lang]['history-empty'] || 'Aucune conversation'}</div>`;
+        list.innerHTML = `<div class="history-empty" data-i18n="history-empty">${TRANSLATIONS[lang]['history-empty'] || uiText('Aucune conversation')}</div>`;
         return;
     }
 
@@ -2986,7 +3020,7 @@ function renderReasoningSlider(caps) {
 
     sliderBar.classList.toggle('locked', levels.length < 2);
     sliderBar.title = caps?.provider === 'gguf'
-        ? 'Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.'
+        ? uiText('Effort demandé au moteur ; le modèle peut ignorer certains niveaux. Ultra est transmis comme max.')
         : '';
     sliderBar.setAttribute('aria-disabled', String(levels.length < 2));
     if (levels.length > 1) {
@@ -2999,7 +3033,7 @@ function renderReasoningSlider(caps) {
     if (tooltip) {
         tooltip.textContent = caps?.reasoning?.mode === 'native'
             ? (lang === 'en' ? 'Native reasoning, not adjustable' : 'Raisonnement natif, non réglable')
-            : (TRANSLATIONS[lang]?.['incompatible-tooltip'] || 'Modèle incompatible');
+            : (TRANSLATIONS[lang]?.['incompatible-tooltip'] || uiText('Modèle incompatible'));
     }
     updateSliderVisuals();
 }
@@ -3183,7 +3217,7 @@ function setupVoiceRecognition(btnId, textareaId) {
     overlay.className = 'voice-capture';
     overlay.hidden = true;
     overlay.setAttribute('role', 'group');
-    overlay.setAttribute('aria-label', say('Dictée vocale', 'Voice dictation'));
+    overlay.setAttribute('aria-label', say(uiText('Dictée vocale'), 'Voice dictation'));
     const action = (name, title, svg) => {
         const button = document.createElement('button');
         button.type = 'button';
@@ -3193,9 +3227,9 @@ function setupVoiceRecognition(btnId, textareaId) {
         button.innerHTML = svg;
         return button;
     };
-    const cancel = action('cancel', say('Annuler la dictée', 'Cancel dictation'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>');
-    const stop = action('stop', say('Arrêter et écrire le texte', 'Stop and insert text'), '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>');
-    const send = action('send', say('Transcrire et envoyer', 'Transcribe and send'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>');
+    const cancel = action('cancel', say(uiText('Annuler la dictée'), 'Cancel dictation'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>');
+    const stop = action('stop', say(uiText('Arrêter et écrire le texte'), 'Stop and insert text'), '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>');
+    const send = action('send', say(uiText('Transcrire et envoyer'), 'Transcribe and send'), '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5m-7 7 7-7 7 7"/></svg>');
     const waveform = document.createElement('div');
     waveform.className = 'voice-capture-wave';
     waveform.setAttribute('aria-hidden', 'true');
@@ -3251,9 +3285,9 @@ function setupVoiceRecognition(btnId, textareaId) {
         btn.classList.toggle('transcribing', next === 'transcribing');
         btn.setAttribute('aria-pressed', String(next === 'recording'));
         textarea.classList.toggle('recording-text', next === 'recording' || next === 'transcribing');
-        btn.title = next === 'recording' ? say('Enregistrement… cliquer pour arrêter', 'Recording… click to stop')
-            : next === 'transcribing' ? say('Transcription en cours…', 'Transcribing…')
-            : say('Activer la dictée vocale', 'Start voice dictation');
+        btn.title = next === 'recording' ? say(uiText('Enregistrement… cliquer pour arrêter'), 'Recording… click to stop')
+            : next === 'transcribing' ? say(uiText('Transcription en cours…'), 'Transcribing…')
+            : say(uiText('Activer la dictée vocale'), 'Start voice dictation');
     }
     function releaseMicrophone() {
         clearTimeout(limit);
@@ -3277,7 +3311,7 @@ function setupVoiceRecognition(btnId, textareaId) {
             });
             const data = await res.json().catch(() => ({}));
             if (id !== requestId) return;
-            if (!res.ok) throw new Error(data.hint || data.error || say('La transcription a échoué.', 'Transcription failed.'));
+            if (!res.ok) throw new Error(data.hint || data.error || say(uiText('La transcription a échoué.'), 'Transcription failed.'));
             if (data.pull && !dictationModelNoticeShown) {
                 dictationModelNoticeShown = true;
                 const percent = data.pull.total ? Math.floor(data.pull.completed / data.pull.total * 100) : 0;
@@ -3297,8 +3331,8 @@ function setupVoiceRecognition(btnId, textareaId) {
                 else handleAgentsSubmit();
             } else textarea.focus();
         } catch (error) {
-            if (id === requestId && error.name !== 'AbortError') notify(error.quiet ? say('Aucune parole détectée.', 'No speech detected.')
-                : (error.message || say('La transcription a échoué.', 'Transcription failed.')));
+            if (id === requestId && error.name !== 'AbortError') notify(error.quiet ? say(uiText('Aucune parole détectée.'), 'No speech detected.')
+                : (error.message || say(uiText('La transcription a échoué.'), 'Transcription failed.')));
         } finally {
             if (id === requestId) { transcriptController = null; setPhase('idle'); }
         }
@@ -3315,9 +3349,9 @@ function setupVoiceRecognition(btnId, textareaId) {
             if (id !== requestId) return;
             setPhase('idle');
             const name = error && error.name;
-            notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say('Aucun microphone détecté sur ce PC.', 'No microphone found on this PC.')
-                : name === 'NotAllowedError' || name === 'SecurityError' ? say('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).', 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
-                : say('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).', 'The microphone cannot be used right now (in use by another app?).'));
+            notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say(uiText('Aucun microphone détecté sur ce PC.'), 'No microphone found on this PC.')
+                : name === 'NotAllowedError' || name === 'SecurityError' ? say(uiText('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).'), 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                : say(uiText('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).'), 'The microphone cannot be used right now (in use by another app?).'));
             return;
         }
         const chunks = [];
@@ -3326,7 +3360,7 @@ function setupVoiceRecognition(btnId, textareaId) {
         } catch (error) {
             releaseMicrophone();
             setPhase('idle');
-            notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.'));
+            notify(say(uiText('L’enregistrement audio n’est pas disponible.'), 'Audio recording is not available.'));
             return;
         }
         const activeRecorder = recorder;
@@ -3342,10 +3376,10 @@ function setupVoiceRecognition(btnId, textareaId) {
         activeRecorder.addEventListener('error', () => {
             if (id !== requestId) return;
             cancelRecording();
-            notify(say('L’enregistrement audio a été interrompu.', 'Audio recording was interrupted.'));
+            notify(say(uiText('L’enregistrement audio a été interrompu.'), 'Audio recording was interrupted.'));
         });
         try { activeRecorder.start(); }
-        catch { releaseMicrophone(); setPhase('idle'); notify(say('L’enregistrement audio n’est pas disponible.', 'Audio recording is not available.')); return; }
+        catch { releaseMicrophone(); setPhase('idle'); notify(say(uiText('L’enregistrement audio n’est pas disponible.'), 'Audio recording is not available.')); return; }
         setPhase('recording');
         startVisualizer(stream);
         // Lets the server fetch its speech model while the user is speaking.
@@ -3428,7 +3462,7 @@ async function attachIntegratedTerminal(id) {
         try { const data = JSON.parse(e.data); $('#terminal-cwd').textContent = data.cwd || ''; $('#terminal-output').textContent = cleanTerminalOutput(data.output); } catch {}
     });
     terminalStream.addEventListener('data', (e) => { try { appendTerminalOutput(JSON.parse(e.data)); } catch { appendTerminalOutput(e.data); } });
-    terminalStream.addEventListener('exit', () => appendTerminalOutput('\n[terminal fermé]\n'));
+    terminalStream.addEventListener('exit', () => appendTerminalOutput(uiText('\n[terminal fermé]\n')));
     $('#terminal-input').focus();
 }
 

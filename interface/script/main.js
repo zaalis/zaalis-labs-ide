@@ -4,9 +4,9 @@ const SETTINGS_SECTION_TITLES = {
     general: 'settings-general-title',
     api: 'settings-api-keys-title',
     mcp: 'MCP',
-    vm: 'Machines virtuelles',
+    vm: 'settings-vm-title',
     tokens: 'Tokens',
-    integrations: 'Intégrations',
+    integrations: 'settings-integrations-title',
     appearance: 'settings-appearance-title',
     models: 'settings-models-title',
     hardware: 'settings-hardware-title',
@@ -27,7 +27,7 @@ function setSettingsSection(section) {
     const title = $('#settings-active-title');
     if (title) {
         const i18nKey = SETTINGS_SECTION_TITLES[key];
-        if (key === 'mcp' || key === 'vm' || key === 'tokens' || key === 'integrations') title.removeAttribute('data-i18n');
+        if (key === 'mcp' || key === 'tokens') title.removeAttribute('data-i18n');
         else title.dataset.i18n = i18nKey;
         title.textContent = TRANSLATIONS[state.language || 'fr']?.[i18nKey] || i18nKey;
         if (key === 'vm') window.ZaalisVM?.settings();
@@ -100,7 +100,7 @@ function populateTerminalProfiles(profiles) {
     select.replaceChildren(...profiles.map((profile) => {
         const option = document.createElement('option');
         option.value = profile.id;
-        option.textContent = profile.label + (profile.available ? '' : ' (non installé)');
+        option.textContent = profile.label + (profile.available ? '' : uiText(' (non installé)'));
         option.disabled = !profile.available;
         return option;
     }));
@@ -210,6 +210,7 @@ async function loadCompatProviders() {
         window.compatProviders = (await response.json()).providers || [];
     } catch { return; }
     renderCompatModelOptions();
+    window.refreshAgentCatalog?.();
     renderCompatKeyFields();
 }
 // Only configured providers appear in the model list; the others stay one
@@ -268,7 +269,7 @@ function renderCompatKeyFields() {
         status.className = 'key-status';
         if (provider.key.set || provider.configured) {
             status.classList.add('set');
-            status.textContent = provider.key.set ? (en ? 'Saved' : 'Enregistrée') : (en ? 'Active' : 'Activé');
+            status.textContent = provider.key.set ? (en ? 'Saved' : uiText('Enregistrée')) : (en ? 'Active' : uiText('Activé'));
             if (provider.key.last4) {
                 const last4 = document.createElement('span');
                 last4.className = 'key-last4';
@@ -290,7 +291,7 @@ function renderCompatKeyFields() {
         input.autocomplete = 'new-password';
         input.spellcheck = false;
         input.placeholder = provider.key.set ? '••••••••••••'
-            : provider.keyless ? (en ? 'API key (optional)' : 'Clé API (facultative)') : (en ? 'API key' : 'Clé API');
+            : provider.keyless ? (en ? 'API key (optional)' : uiText('Clé API (facultative)')) : (en ? 'API key' : uiText('Clé API'));
         row.append(head, input);
         if (provider.editableUrl) {
             const url = document.createElement('input');
@@ -389,8 +390,8 @@ function renderChatgptAccount(account) {
     const connected = !!(account && account.connected);
     const details = connected ? [account.email, account.plan && account.plan.toUpperCase()].filter(Boolean).join(' · ') : '';
     status.textContent = connected
-        ? chatgptSubText('Abonnement ChatGPT actif', 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
-        : chatgptSubText('Non connecté', 'Not connected');
+        ? chatgptSubText(uiText('Abonnement ChatGPT actif'), 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
+        : chatgptSubText(uiText('Non connecté'), 'Not connected');
     status.classList.toggle('connected', connected);
     $('#chatgpt-sub-connect').hidden = connected || !!chatgptSub.flow;
     $('#chatgpt-sub-disconnect').hidden = !connected;
@@ -437,13 +438,13 @@ async function pollChatgptFlow() {
     if (data && data.status === 'connected') {
         stopChatgptFlow();
         applyChatgptProviders(data);
-        showToast('ChatGPT', chatgptSubText('Abonnement connecté. Le fournisseur « ChatGPT (abonnement) » est disponible dans la liste des modèles.', 'Subscription connected. “ChatGPT (abonnement)” is now in the model list.'));
+        showToast('ChatGPT', chatgptSubText(uiText('Abonnement connecté. Le fournisseur « ChatGPT (abonnement) » est disponible dans la liste des modèles.'), 'Subscription connected. “ChatGPT (abonnement)” is now in the model list.'));
         return;
     }
     if (data && (data.status === 'expired' || data.status === 'error') || Date.now() > flow.expiresAt) {
         stopChatgptFlow();
         renderChatgptAccount({ connected: false });
-        showChatgptError((data && data.error) || chatgptSubText('Le code a expiré. Relancez la connexion.', 'The code expired. Start again.'));
+        showChatgptError((data && data.error) || chatgptSubText(uiText('Le code a expiré. Relancez la connexion.'), 'The code expired. Start again.'));
         return;
     }
     // Still waiting (or the server was briefly unreachable): ask again.
@@ -456,7 +457,7 @@ async function startChatgptFlow() {
     try {
         const response = await fetch('/api/chatgpt/device-start', { method: 'POST' });
         const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || chatgptSubText('Connexion impossible.', 'Sign-in failed.'));
+        if (!response.ok) throw new Error(data.error || chatgptSubText(uiText('Connexion impossible.'), 'Sign-in failed.'));
         chatgptSub.flow = data;
         $('#chatgpt-sub-code').textContent = data.userCode;
         $('#chatgpt-sub-flow').hidden = false;
@@ -487,7 +488,7 @@ $('#chatgpt-sub-copy')?.addEventListener('click', async event => {
     try { await navigator.clipboard.writeText(code); } catch { return; }
     const button = event.currentTarget;
     const label = button.textContent;
-    button.textContent = chatgptSubText('Copié', 'Copied');
+    button.textContent = chatgptSubText(uiText('Copié'), 'Copied');
     setTimeout(() => { button.textContent = label; }, 1500);
 });
 $('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
@@ -495,7 +496,7 @@ $('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
     try {
         const response = await fetch('/api/chatgpt/session', { method: 'DELETE' });
         const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || chatgptSubText('Déconnexion impossible.', 'Sign-out failed.'));
+        if (!response.ok) throw new Error(data.error || chatgptSubText(uiText('Déconnexion impossible.'), 'Sign-out failed.'));
         applyChatgptProviders(data);
     } catch (error) {
         showChatgptError(error.message);
@@ -505,8 +506,8 @@ $('#chatgpt-sub-disconnect')?.addEventListener('click', async () => {
 // xAI and MiniMax account sessions use the same device-code interaction as
 // ChatGPT, while each provider has its own server-side OAuth grant and route.
 const accountSubscriptions = [
-    { id: 'xai-sub', label: 'Grok / xAI', note: 'SuperGrok / X Premium+ · xAI peut refuser l’inférence OAuth selon le forfait.' },
-    { id: 'minimax-sub', label: 'MiniMax', note: 'Compte MiniMax international · modèles disponibles selon votre forfait.' },
+    { id: 'xai-sub', label: 'Grok / xAI', note: uiText('SuperGrok / X Premium+ · xAI peut refuser l’inférence OAuth selon le forfait.') },
+    { id: 'minimax-sub', label: 'MiniMax', note: uiText('Compte MiniMax international · modèles disponibles selon votre forfait.') },
 ];
 const accountFlows = new Map();
 function accountCard(id) { return document.querySelector(`[data-account-sub="${id}"]`); }
@@ -519,7 +520,7 @@ function accountRender(id, account) {
     if (!card) return;
     const connected = !!account?.connected;
     const status = card.querySelector('.account-sub-status');
-    status.textContent = connected ? chatgptSubText('Compte connecté', 'Account connected') : chatgptSubText('Non connecté', 'Not connected');
+    status.textContent = connected ? chatgptSubText(uiText('Compte connecté'), 'Account connected') : chatgptSubText(uiText('Non connecté'), 'Not connected');
     status.classList.toggle('connected', connected);
     card.querySelector('[data-action="connect"]').hidden = connected || accountFlows.has(id);
     card.querySelector('[data-action="disconnect"]').hidden = !connected;
@@ -551,7 +552,7 @@ async function accountPoll(id) {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ flowId: flow.flowId }),
         });
         data = await response.json().catch(() => null);
-        if (!response.ok) throw new Error(data?.error || 'Connexion refusée.');
+        if (!response.ok) throw new Error(data?.error || uiText('Connexion refusée.'));
     } catch (error) {
         if (data?.status === 'error') { accountStop(id); accountError(id, error.message); accountRender(id, { connected: false }); return; }
     }
@@ -559,12 +560,12 @@ async function accountPoll(id) {
     if (data?.status === 'connected') {
         accountStop(id);
         accountApply(id, data);
-        showToast('Abonnement', chatgptSubText('Compte connecté : choisissez son modèle dans la liste.', 'Account connected: choose its model in the list.'));
+        showToast('Abonnement', chatgptSubText(uiText('Compte connecté : choisissez son modèle dans la liste.'), 'Account connected: choose its model in the list.'));
         return;
     }
     if (data?.status === 'expired' || Date.now() > flow.expiresAt) {
         accountStop(id);
-        accountError(id, chatgptSubText('Le code a expiré. Relancez la connexion.', 'The code expired. Start again.'));
+        accountError(id, chatgptSubText(uiText('Le code a expiré. Relancez la connexion.'), 'The code expired. Start again.'));
         accountRender(id, { connected: false });
         return;
     }
@@ -579,7 +580,7 @@ async function accountStart(id) {
     try {
         const response = await fetch(`/api/subscriptions/${id}/start`, { method: 'POST' });
         const data = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(data.error || 'Connexion impossible.');
+        if (!response.ok) throw new Error(data.error || uiText('Connexion impossible.'));
         accountFlows.set(id, data);
         card.querySelector('.chatgpt-sub-code').textContent = data.userCode;
         card.querySelector('.chatgpt-sub-flow').hidden = false;
@@ -595,13 +596,13 @@ function renderAccountCards() {
         const card = document.createElement('div');
         card.className = 'chatgpt-sub account-sub-card';
         card.dataset.accountSub = provider.id;
-        card.innerHTML = `<div class="settings-status-row"><strong class="account-sub-label"></strong><strong class="account-sub-status">Non connecté</strong></div>
+        card.innerHTML = uiTemplate(`<div class="settings-status-row"><strong class="account-sub-label"></strong><strong class="account-sub-status">Non connecté</strong></div>
             <p class="account-sub-note"></p>
             <div class="chatgpt-sub-actions"><button class="btn btn-primary" data-action="connect" type="button">Connecter le compte</button><button class="btn btn-ghost" data-action="disconnect" type="button" hidden>Déconnecter</button></div>
             <div class="chatgpt-sub-flow" hidden><p class="chatgpt-sub-step">Ouvrez la page du fournisseur, connectez-vous, puis validez ce code :</p><div class="chatgpt-sub-code" aria-live="polite"></div>
             <div class="chatgpt-sub-actions"><button class="btn btn-primary" data-action="open" type="button">Ouvrir la page</button><button class="btn btn-ghost" data-action="copy" type="button">Copier le code</button><button class="btn btn-ghost" data-action="cancel" type="button">Annuler</button></div>
             <p class="chatgpt-sub-wait"><span class="chatgpt-sub-spinner" aria-hidden="true"></span>En attente de validation…</p></div>
-            <p class="chatgpt-sub-error" role="alert" hidden></p>`;
+            <p class="chatgpt-sub-error" role="alert" hidden></p>`);
         card.querySelector('.account-sub-label').textContent = provider.label;
         card.querySelector('.account-sub-note').textContent = provider.note;
         card.querySelector('[data-action="connect"]').addEventListener('click', () => accountStart(provider.id));
@@ -621,7 +622,7 @@ function renderAccountCards() {
             try {
                 const response = await fetch(`/api/subscriptions/${provider.id}/session`, { method: 'DELETE' });
                 const data = await response.json().catch(() => ({}));
-                if (!response.ok) throw new Error(data.error || 'Déconnexion impossible.');
+                if (!response.ok) throw new Error(data.error || uiText('Déconnexion impossible.'));
                 accountApply(provider.id, data);
             } catch (error) { accountError(provider.id, error.message); }
         });
@@ -648,17 +649,17 @@ function renderOpale(status) {
     if (!label) return;
     const vault = status && status.vault && status.vault.name ? ` — ${opaleText('coffre', 'vault')} « ${status.vault.name} »` : '';
     let text;
-    if (!status) text = opaleText('État inconnu', 'Unknown');
+    if (!status) text = opaleText(uiText('État inconnu'), 'Unknown');
     else if (!status.detected) text = opaleText('Opale introuvable sur ce PC', 'Opale not found on this PC');
-    else if (!status.connected) text = opaleText('Lien coupé', 'Link switched off') + (status.running ? vault : '');
-    else if (status.running) text = opaleText('Relié', 'Linked') + vault;
-    else text = opaleText('Relié — Opale est fermé', 'Linked — Opale is closed');
+    else if (!status.connected) text = opaleText(uiText('Lien coupé'), 'Link switched off') + (status.running ? vault : '');
+    else if (status.running) text = opaleText(uiText('Relié'), 'Linked') + vault;
+    else text = opaleText(uiText('Relié — Opale est fermé'), 'Linked — Opale is closed');
     label.textContent = text;
     label.classList.toggle('connected', !!(status && status.connected && status.running));
     const connect = $('#opale-connect');
     connect.hidden = !status || !status.detected || status.connected;
     $('#opale-open').hidden = !(status && status.detected);
-    $('#opale-open').textContent = status && status.running ? opaleText('Ouvrir Opale', 'Open Opale') : opaleText('Lancer Opale', 'Start Opale');
+    $('#opale-open').textContent = status && status.running ? opaleText(uiText('Ouvrir Opale'), 'Open Opale') : opaleText('Lancer Opale', 'Start Opale');
     $('#opale-disconnect').hidden = !(status && status.detected && status.connected);
 }
 function showOpaleError(message) {
@@ -670,7 +671,7 @@ function showOpaleError(message) {
 async function opaleRequest(method, route) {
     const response = await fetch(route, { method });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || opaleText('Opale ne répond pas.', 'Opale is not responding.'));
+    if (!response.ok) throw new Error(data.error || opaleText(uiText('Opale ne répond pas.'), 'Opale is not responding.'));
     return data;
 }
 async function loadOpaleStatus() {
@@ -722,15 +723,15 @@ function renderBlender(status) {
     const state = status ? status.state : '';
     const name = status && status.version ? `Blender ${status.version}` : 'Blender';
     const needsAddon = status && status.addon && !status.addon.installed;
-    label.textContent = !status ? 'État de Blender indisponible'
-        : state === 'missing' ? 'Blender n’est pas installé sur ce PC'
+    label.textContent = !status ? uiText('État de Blender indisponible')
+        : state === 'missing' ? uiText('Blender n’est pas installé sur ce PC')
         : state === 'unsupported' ? `${name} détecté — la version ${status.minVersion} ou plus récente est requise`
-        : state === 'install' ? `${name} détecté — add-on MCP à ${needsAddon ? 'installer' : 'activer'}`
-        : !status.connected ? `${name} est prêt — non activé`
+        : state === 'install' ? `${name} détecté — add-on MCP à ${needsAddon ? uiText('installer') : uiText('activer')}`
+        : !status.connected ? `${name} ${uiText('est prêt — non activé')}`
         : status.reachable ? `Activé — ${name} est ouvert et répond`
-        : blenderStarting ? 'Activé — Blender démarre…'
+        : blenderStarting ? uiText('Activé — Blender démarre…')
         : status.running ? `Activé — Blender est ouvert mais son add-on ne répond pas (port ${status.port})`
-        : 'Activé — Blender est fermé';
+        : uiText('Activé — Blender est fermé');
     const ready = state === 'ready';
     $('#blender-install').hidden = state !== 'install';
     $('#blender-connect').hidden = !(ready && !status.connected);
@@ -741,7 +742,7 @@ function renderBlender(status) {
 async function blenderRequest(method, route, body) {
     const response = await fetch(route, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined });
     const data = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(data.error || 'Blender ne répond pas.');
+    if (!response.ok) throw new Error(data.error || uiText('Blender ne répond pas.'));
     return data;
 }
 async function loadBlenderStatus() {
@@ -758,20 +759,20 @@ function renderBlenderInstall() {
     const found = !!(status && status.found);
     const supported = found && status.state !== 'unsupported';
     setCheck('blender-check-version', !status ? 'pending' : supported ? 'ok' : 'error',
-        !status ? 'Recherche de Blender…'
+        !status ? uiText('Recherche de Blender…')
             : !found ? 'Blender est introuvable sur ce PC.'
             : supported ? `Blender ${status.version} détecté (version ${status.minVersion} ou plus récente requise).`
             : `Blender ${status.version} est trop ancien : la version ${status.minVersion} ou plus récente est requise.`);
     const closed = supported && !status.running;
     setCheck('blender-check-closed', !supported ? 'pending' : closed ? 'ok' : 'error',
-        !supported || closed ? 'Blender est fermé.' : 'Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).');
+        !supported || closed ? uiText('Blender est fermé.') : uiText('Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).'));
     const present = !!(status && status.addon && status.addon.installed);
     $('#blender-step-addon').textContent = present
         ? `L’add-on officiel « MCP » de Blender Lab est déjà présent (version ${status.addon.version}) : il est conservé tel quel.`
         : `Installer l’add-on officiel « MCP » de Blender Lab (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`;
     const busy = modal.dataset.busy === 'true';
     $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
-    $('#blender-install-confirm').textContent = busy ? 'Installation…' : 'Installer';
+    $('#blender-install-confirm').textContent = busy ? 'Installation…' : uiText('Installer');
     $('#blender-install-cancel').disabled = busy;
     $('#blender-consent').disabled = busy;
 }
@@ -811,7 +812,7 @@ $('#blender-install-confirm')?.addEventListener('click', async () => {
         closeBlenderInstall();
         renderBlender(status);
         showBlenderError('');
-        showToast('Blender', 'Blender MCP est installé et activé. Ouvrez Blender : l’assistant peut y travailler.', { icon: '✓', duration: 7000 });
+        showToast('Blender', uiText('Blender MCP est installé et activé. Ouvrez Blender : l’assistant peut y travailler.'), { icon: '✓', duration: 7000 });
     } catch (error) {
         modal.dataset.busy = 'false';
         showBlenderError(error.message, errorBox);
@@ -990,13 +991,13 @@ function mcpShowTest(card, test) {
 }
 async function testPersonalMcp(server, card) {
     const button = card.querySelector('.mcp-test');
-    server.test = { state: 'running', text: 'Connexion au serveur…' };
+    server.test = { state: 'running', text: uiText('Connexion au serveur…') };
     mcpShowTest(card, server.test);
     if (button) button.disabled = true;
     try {
         const res = await fetch('/api/mcp/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server: mcpPayload(server) }) });
         const data = await res.json().catch(() => ({}));
-        if (!res.ok || !data.ok) throw new Error(data.error || 'Le serveur MCP ne répond pas.');
+        if (!res.ok || !data.ok) throw new Error(data.error || uiText('Le serveur MCP ne répond pas.'));
         const count = `${data.count} outil${data.count > 1 ? 's' : ''} disponible${data.count > 1 ? 's' : ''}`;
         const target = data.target;
         server.test = !target || target.reachable
@@ -1004,7 +1005,7 @@ async function testPersonalMcp(server, card) {
             : { state: 'warn', text: `Serveur prêt (${count}), mais ${target.label} ne répond pas sur le port ${target.port} : ouvrez ${target.label} et démarrez le serveur de son add-on MCP.` };
         server.test.detail = [data.serverName && `${data.serverName} ${data.serverVersion || ''}`.trim(), data.executable].filter(Boolean).join('\n');
     } catch (error) {
-        server.test = { state: 'error', text: error.message || 'Le serveur MCP ne répond pas.' };
+        server.test = { state: 'error', text: error.message || uiText('Le serveur MCP ne répond pas.') };
     }
     // The list may have been redrawn while the request was running.
     const current = document.querySelector(`.mcp-server-card[data-mcp-index="${personalMcpServers.indexOf(server)}"]`);
@@ -1024,16 +1025,16 @@ function renderPersonalMcpServers() {
     list.innerHTML = personalMcpServers.map((server, index) => {
         const stdio = server.transport === 'stdio';
         const connection = stdio
-            ? `<div class="mcp-server-grid">
+            ? uiTemplate(`<div class="mcp-server-grid">
                 <div class="form-group"><label>Commande</label><input class="mcp-command" value="${mcpEscape(server.command)}" placeholder="blender-mcp, npx, uvx ou chemin complet du programme" spellcheck="false"></div>
                 <div class="form-group"><label>Arguments <span class="form-hint">(optionnel)</span></label><input class="mcp-args" value="${mcpEscape(mcpJoinArgs(server.args))}" placeholder="-y @exemple/serveur-mcp" spellcheck="false"></div>
-            </div>`
-            : `<div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:8000/mcp" spellcheck="false"></div>
-            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>`;
+            </div>`)
+            : uiTemplate(`<div class="form-group"><label>URL MCP</label><input class="mcp-endpoint" type="url" value="${mcpEscape(server.endpoint)}" placeholder="https://mcp.exemple.com/mcp ou http://127.0.0.1:8000/mcp" spellcheck="false"></div>
+            <div class="form-group"><label>Jeton Bearer <span class="form-hint">(optionnel${server.tokenConfigured ? ', déjà enregistré' : ''})</span></label><input class="mcp-token" type="password" value="" placeholder="${server.tokenConfigured ? 'Laisser vide pour conserver le jeton' : 'Aucun jeton requis si le serveur n’en demande pas'}" autocomplete="new-password"></div>`);
         const environment = stdio
-            ? `<div class="form-group mcp-env-group"><label>Variables d’environnement <span class="form-hint">(une par ligne, NOM=valeur${server.envConfigured.length ? ' ; une valeur vide conserve celle déjà enregistrée' : ''})</span></label><textarea class="mcp-env" rows="3" spellcheck="false" placeholder="BLENDER_MCP_PORT=9876">${mcpEscape(mcpEnvText(server.env))}</textarea></div>`
+            ? uiTemplate(`<div class="form-group mcp-env-group"><label>Variables d’environnement <span class="form-hint">(une par ligne, NOM=valeur${server.envConfigured.length ? ' ; une valeur vide conserve celle déjà enregistrée' : ''})</span></label><textarea class="mcp-env" rows="3" spellcheck="false" placeholder="BLENDER_MCP_PORT=9876">${mcpEscape(mcpEnvText(server.env))}</textarea></div>`)
             : '';
-        return `
+        return uiTemplate(`
         <article class="mcp-server-card" data-mcp-index="${index}">
             <div class="form-group settings-row-group">
                 <div class="mcp-server-title">${mcpLogo(server)}<div class="settings-row-copy"><label>${mcpEscape(server.name || 'MCP personnel')}</label><p>${stdio ? 'Programme local (stdio), lancé par zaalis IDE' : 'Serveur Streamable HTTP personnel'}</p></div></div>
@@ -1053,7 +1054,7 @@ function renderPersonalMcpServers() {
                 <button class="btn btn-ghost mcp-action-btn mcp-remove" type="button">Retirer ce serveur</button>
                 <p class="mcp-test-status" role="status" aria-live="polite"></p>
             </div>
-        </article>`;
+        </article>`);
     }).join('');
     list.querySelectorAll('.mcp-server-card').forEach(card => {
         const index = Number(card.dataset.mcpIndex);
@@ -1119,12 +1120,12 @@ $('#mcp-config-file').addEventListener('change', async event => {
     try {
         const imported = parseImportedMcpConfig(JSON.parse(await file.text()));
         const usable = imported.filter(item => item && typeof item === 'object' && (item.url || item.endpoint || item.command));
-        if (!usable.length) throw new Error('Aucun serveur importable');
+        if (!usable.length) throw new Error(uiText('Aucun serveur importable'));
         for (const item of usable) personalMcpServers.push(newPersonalMcp({ ...item, id: mcpUniqueId(item.id || item.name) }));
         renderPersonalMcpServers();
         toast(`${usable.length} serveur MCP importé${usable.length > 1 ? 's' : ''}. Vérifiez-les, puis enregistrez.`);
     } catch {
-        toast('Ce fichier ne contient aucun serveur MCP importable (une URL ou une commande par serveur).', { icon: '!' });
+        toast(uiText('Ce fichier ne contient aucun serveur MCP importable (une URL ou une commande par serveur).'), { icon: '!' });
     } finally { event.target.value = ''; }
 });
 
@@ -1186,7 +1187,7 @@ $('#save-btn').addEventListener('click', async () => {
         const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers.map(mcpPayload) }) });
         if (!mcpRes.ok) {
             const problem = await mcpRes.json().catch(() => ({}));
-            toast(problem.error || 'Les serveurs MCP n’ont pas pu être enregistrés.', { icon: '!' });
+            toast(problem.error || uiText('Les serveurs MCP n’ont pas pu être enregistrés.'), { icon: '!' });
             throw new Error('MCP');
         }
         // Secrets are stored now: the cards go back to showing names only.
@@ -1302,20 +1303,20 @@ if (resetBtn) resetBtn.addEventListener('click', async () => {
 const checkNowBtn = $('#settings-check-now-btn');
 if (checkNowBtn) checkNowBtn.addEventListener('click', async () => {
     const en = state.language === 'en';
-    const orig = TRANSLATIONS[state.language || 'fr']['settings-check-now-btn'] || (en ? 'Check' : 'Vérifier');
+    const orig = TRANSLATIONS[state.language || 'fr']['settings-check-now-btn'] || (en ? 'Check' : uiText('Vérifier'));
     checkNowBtn.disabled = true;
     checkNowBtn.textContent = en ? 'Checking…' : 'Recherche…';
-    let result = en ? 'Up to date ✓' : 'Système à jour ✓';
+    let result = en ? 'Up to date ✓' : uiText('Système à jour ✓');
     try {
         const res = await fetch('/api/check-update');
         const data = res.ok ? await res.json() : {};
         if (data && data.updateAvailable && data.downloadUrl) {
-            result = en ? 'Update available' : 'Mise à jour dispo';
+            result = en ? 'Update available' : uiText('Mise à jour dispo');
         }
         // Also refresh the topbar update badge.
         try { await checkForUpdates(); } catch {}
     } catch {
-        result = en ? 'Check failed' : 'Échec de la vérif';
+        result = en ? 'Check failed' : uiText('Échec de la vérif');
     }
     // Show the result inside the button, then revert to "Vérifier".
     checkNowBtn.textContent = result;
@@ -1449,7 +1450,7 @@ function refreshGgufAgentSelect() {
         $('.agent-model-select[data-agent="gguf"]'),
         state.config.ggufModels || [],
         s => String(s || '').replace(/\.gguf$/i, ''),
-        (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr']['gguf-agent-empty']) || 'Aucun modele GGUF installe'
+        (TRANSLATIONS[state.language || 'fr'] && TRANSLATIONS[state.language || 'fr']['gguf-agent-empty']) || uiText('Aucun modele GGUF installe')
     );
 }
 const olAdd = $('#ollama-model-add'), olInput = $('#ollama-model-input');
@@ -1554,13 +1555,13 @@ function buildCard(name, label, size, tags, desc, extra, isHf, opts = {}) {
     card.dataset.target = opts.target || catalogInstallTarget;
     if (opts.ggufRepo) card.dataset.ggufRepo = opts.ggufRepo;
     if (opts.ggufFile) card.dataset.ggufFile = opts.ggufFile;
-    card.innerHTML = `
+    card.innerHTML = uiTemplate(`
         <div class="cat-top"><span class="cat-name">${label}</span><span class="cat-size">${size || ''}</span></div>
         ${(tags && tags.length) ? `<div class="cat-tags">${tags.map(t => `<span class="cat-tag ${t}">${t}</span>`).join('')}</div>` : ''}
         <div class="cat-desc">${desc || ''}</div>
         ${extra || ''}
         <div class="cat-actions"></div>
-        <div class="cat-progress" style="display:none"><div class="pbar"><div class="pfill"></div></div><div class="ptext"></div></div>`;
+        <div class="cat-progress" style="display:none"><div class="pbar"><div class="pfill"></div></div><div class="ptext"></div></div>`);
     const nameEl = card.querySelector('.cat-name');
     if (nameEl) nameEl.title = label || name;
     setCardActions(card, name);
@@ -1940,7 +1941,7 @@ async function checkForUpdates() {
                 const label = btn.querySelector('span');
                 if (label) {
                     label.dataset.i18n = 'update-btn';
-                    label.textContent = "Mise a jour disponible";
+                    label.textContent = uiText("Mise a jour disponible");
                 }
                 btn.onclick = () => {
                     const releaseNameEl = document.getElementById('update-release-name');
@@ -1959,7 +1960,7 @@ async function checkForUpdates() {
                     // semble echouer alors qu'elle a reussi.
                     if (statusText) statusText.textContent = data.tagMismatch
                         ? `Deja installe. Le fichier publie sous ${data.tag_name} contient la version ${data.currentVersion} : republiez un zaalis-setup.exe compile en ${String(data.tag_name || '').replace(/^v/i, '')}.`
-                        : "Pret a telecharger";
+                        : uiText("Pret a telecharger");
                     if (progressBar) progressBar.style.width = '0%';
                     if (stepDownload) {
                         stepDownload.classList.add('active');
@@ -1979,7 +1980,7 @@ async function checkForUpdates() {
                     const cancelBtn = document.getElementById('cancel-update-btn');
                     if (cancelBtn) {
                         cancelBtn.disabled = false;
-                        cancelBtn.textContent = "Annuler";
+                        cancelBtn.textContent = uiText("Annuler");
                         cancelBtn.classList.remove('hidden');
                     }
                     $('#update-modal').classList.add('active');
@@ -2017,7 +2018,7 @@ if (confirmUpdateBtn) {
         if (progressBar) progressBar.style.width = '0%';
         if (stepDownload) stepDownload.classList.add('active');
         if (stepInstall) stepInstall.classList.remove('active');
-        statusText.textContent = "Telechargement en cours...";
+        statusText.textContent = uiText("Telechargement en cours...");
 
         try {
             const res = await fetch('/api/update/download', {
@@ -2053,18 +2054,18 @@ if (confirmUpdateBtn) {
                             stepDownload.classList.add('done');
                         }
                         if (stepInstall) stepInstall.classList.add('active');
-                        statusText.textContent = "Telechargement termine. L'IDE va se fermer, s'installer et redemarrer tout seul.";
+                        statusText.textContent = uiText("Telechargement termine. L'IDE va se fermer, s'installer et redemarrer tout seul.");
                         // Un seul bouton orange : l'installation se fait en silence
                         // (aucun assistant) puis l'IDE se relance sur la nouvelle version.
                         if (cancelBtn) cancelBtn.classList.add('hidden');
                         confirmUpdateBtn.disabled = false;
                         confirmUpdateBtn.classList.remove('btn-primary');
                         confirmUpdateBtn.classList.add('btn-warning');
-                        confirmUpdateBtn.textContent = "Installer et redemarrer";
+                        confirmUpdateBtn.textContent = uiText("Installer et redemarrer");
                         confirmUpdateBtn.onclick = async () => {
                             confirmUpdateBtn.disabled = true;
                             confirmUpdateBtn.textContent = "Installation...";
-                            statusText.textContent = "Remplacement des fichiers en cours... l'IDE redemarre dans quelques secondes.";
+                            statusText.textContent = uiText("Remplacement des fichiers en cours... l'IDE redemarre dans quelques secondes.");
                             try {
                                 const iRes = await fetch('/api/update/install', { method: 'POST' });
                                 // Le serveur se coupe juste apres avoir repondu : une
@@ -2074,27 +2075,27 @@ if (confirmUpdateBtn) {
                                 throw new Error(iData.error || 'HTTP ' + iRes.status);
                             } catch (err) {
                                 if (err && err.name === 'TypeError') return; // serveur deja arrete
-                                statusText.textContent = "Erreur: " + err.message;
+                                statusText.textContent = uiText("Erreur: ") + err.message;
                                 confirmUpdateBtn.disabled = false;
-                                confirmUpdateBtn.textContent = "Installer et redemarrer";
+                                confirmUpdateBtn.textContent = uiText("Installer et redemarrer");
                             }
                         };
                     } else if (pData.progress < 0) {
                         clearInterval(interval);
-                        statusText.textContent = "Erreur lors du telechargement.";
+                        statusText.textContent = uiText("Erreur lors du telechargement.");
                         confirmUpdateBtn.disabled = false;
                         if (cancelBtn) cancelBtn.disabled = false;
                     }
                 } catch (err) {
                     clearInterval(interval);
-                    statusText.textContent = "Erreur: " + err.message;
+                    statusText.textContent = uiText("Erreur: ") + err.message;
                     confirmUpdateBtn.disabled = false;
                     if (cancelBtn) cancelBtn.disabled = false;
                 }
             }, 500);
 
         } catch (err) {
-            statusText.textContent = "Erreur: " + err.message;
+            statusText.textContent = uiText("Erreur: ") + err.message;
             confirmUpdateBtn.disabled = false;
             if (cancelBtn) cancelBtn.disabled = false;
         }
@@ -2358,7 +2359,7 @@ if (closeCatalog) closeCatalog.addEventListener('click', () => $('#catalog-modal
 function renderHelp() {
     const list = $('#help-list'); if (!list) return;
     list.replaceChildren();
-    (window.HELP_TOPICS || []).forEach(t => {
+    (state.language === 'en' ? window.HELP_TOPICS_EN : window.HELP_TOPICS || []).forEach(t => {
         const det = document.createElement('details');
         det.className = 'help-item';
         const summary = document.createElement('summary');
@@ -2484,12 +2485,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    fetch('/api/browser/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language:state.language}) }).catch(() => {});
     await loadCompatProviders();
     migrateRetiredModelState();
     await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
+    window.refreshAgentCatalog?.();
     // Make sure the preferred default agent is enabled in Agents mode.
     if (state.config.defaultAgentModel) {
         const defAgent = document.querySelector(`.agent-check[data-agent="${state.config.defaultAgentModel}"]`);
@@ -2531,7 +2534,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     _set('#ollama-url', state.config.ollamaUrl || 'http://127.0.0.1:11434');
     _set('#settings-lang-select', state.language || 'fr');
     _set('#gguf-variant-select', state.config.ggufVariant || '');
-    _set('#profile-pseudo', state.profile?.pseudo || 'Utilisateur');
+    _set('#profile-pseudo', state.profile?.pseudo || uiText('Utilisateur'));
 
     if (typeof updateProfileUI === 'function') updateProfileUI();
     window.ZaalisWelcome?.render();
@@ -2553,12 +2556,23 @@ document.addEventListener('DOMContentLoaded', async () => {
 // Restore language settings and select binding
 function setLanguage(lang) {
     state.language = lang || 'fr';
+    fetch('/api/browser/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language:state.language}) }).catch(() => {});
     saveState();
     const topLang = $('#lang-select');
     const settingsLang = $('#settings-lang-select');
     if (topLang) topLang.value = state.language;
     if (settingsLang) settingsLang.value = state.language;
     updateLanguage();
+    window.ZaalisWelcome?.render();
+    window.ZaalisWorkspace?.refresh();
+    window.ZaalisWorkspace?.refreshCapabilities();
+    const activeSection = document.querySelector('.settings-nav-item.active')?.dataset.settingsSection;
+    if (activeSection) setSettingsSection(activeSection);
+    document.dispatchEvent(new CustomEvent('zaalis-language-changed'));
+    renderCompatKeyFields();
+    loadAccountSubscriptions();
+    loadBlenderStatus();
+    loadOpaleStatus();
     if (typeof updateCatalogChrome === 'function') updateCatalogChrome();
     if (typeof loadGgufModels === 'function') loadGgufModels();
     if (typeof renderHistory === 'function') renderHistory(); // refresh "Aucun projet" label
@@ -2621,7 +2635,7 @@ function updateLoaderButton() {
         if (eject) eject.classList.remove('hidden');
     } else {
         wrap.classList.remove('loaded');
-        label.textContent = (TRANSLATIONS[lang] && TRANSLATIONS[lang]['loader-empty']) || 'Charger un modèle';
+        label.textContent = (TRANSLATIONS[lang] && TRANSLATIONS[lang]['loader-empty']) || uiText('Charger un modèle');
         if (badge) badge.classList.add('hidden');
         if (eject) eject.classList.add('hidden');
     }
@@ -2691,7 +2705,7 @@ function openLoaderConfig(name) {
 function resetLoadButton() {
     const btn = $('#ml-load-btn');
     const prog = $('#ml-progress'), fill = $('#ml-progress-fill');
-    if (btn) { btn.classList.remove('loading'); btn.disabled = false; btn.textContent = (TRANSLATIONS[state.language || 'fr'] || {})['loader-load'] || 'Charger le modèle'; }
+    if (btn) { btn.classList.remove('loading'); btn.disabled = false; btn.textContent = (TRANSLATIONS[state.language || 'fr'] || {})['loader-load'] || uiText('Charger le modèle'); }
     if (prog) prog.classList.add('hidden');
     if (fill) fill.style.width = '0%';
 }

@@ -348,7 +348,7 @@ function createElectron(host, hooks = {}) {
       const flat = this.items.filter((item) => item && item.visible !== false);
       const entries = flat.map((item) => item.type === 'separator'
         ? { separator: true }
-        : { label: String(item.label || roleLabel(item.role)), enabled: item.enabled !== false });
+        : { label: String(host.translate ? host.translate(item.label || roleLabel(item.role)) : item.label || roleLabel(item.role)), enabled: item.enabled !== false });
       quiet(host.command('menu', { items: entries }).then((result) => {
         const index = result && Number.isInteger(result.index) ? result.index : -1;
         const item = flat[index];
@@ -521,7 +521,11 @@ function createElectron(host, hooks = {}) {
       const handler = protocolHandlers.get(scheme);
       if (handler) {
         const response = await handler({ url: String(message.url), method: String(message.method || 'GET') });
-        const buffer = Buffer.from(await response.arrayBuffer());
+        let buffer = Buffer.from(await response.arrayBuffer());
+        if (String(message.url).startsWith('zaalis://home/') && (response.headers.get('content-type') || '').includes('text/html')) {
+          const locale = require('./locale');
+          buffer = Buffer.from(buffer.toString('utf8').replace('</body>', '<script>' + locale.client(host.language || 'fr') + '</script></body>'));
+        }
         reply = { req: message.req, status: response.status, headers: Object.fromEntries(response.headers.entries()), body: buffer.toString('base64') };
       }
     } catch (error) {

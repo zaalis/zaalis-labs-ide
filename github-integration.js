@@ -14,8 +14,8 @@ function rootKey(root) {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 class GitHubIntegration {
-  constructor({ loadUsers, saveUsers, encrypt, decrypt, fetchImpl = fetch, clientId = process.env.ZAALIS_GITHUB_CLIENT_ID || '' }) {
-    Object.assign(this, { loadUsers, saveUsers, encrypt, decrypt, fetch: fetchImpl, clientId });
+  constructor({ loadUsers, saveUsers, encrypt, decrypt, fetchImpl = fetch, clientId = process.env.ZAALIS_GITHUB_CLIENT_ID || '', browserAuth = null }) {
+    Object.assign(this, { loadUsers, saveUsers, encrypt, decrypt, fetch: fetchImpl, clientId, browserAuth });
     this.devices = new Map();
   }
   user(id) { const u = this.loadUsers().find(u => u.id === id); if (!u) throw Error('Compte introuvable.'); return u; }
@@ -31,33 +31,57 @@ class GitHubIntegration {
     if (!response.ok) throw Error(`GitHub : accès refusé ou opération impossible (HTTP ${response.status}). Vérifiez les permissions, la protection de branche et les limites API.`);
     return response.status === 204 ? {} : response.json();
   }
-  status(id) { const g = this.user(id).github; return { connected: !!g?.token, login: g?.login || '', deviceAvailable: !!this.clientId, permissions: g?.permissions || {} }; }
-  async connect(id, token) {
+  status(id) { const user = this.user(id), g = user.github; return { connected: !!g?.token, login: g?.login || '', deviceAvailable: !!(this.browserAuth?.available || user.githubClientId || this.clientId), method: user.githubClientId || this.clientId ? 'oauth' : 'github-cli', permissions: g?.permissions || {} }; }
+  configure(id, clientId) {
+    if (typeof clientId !== 'string' || !/^[a-zA-Z0-9._-]{10,100}$/.test(clientId)) throw Error('Client ID GitHub invalide.');
+    this.devices.delete(id);
+    this.save(id, u => { u.githubClientId = clientId; });
+    return this.status(id);
+  }
+  async connect(id, token, expectedDevice) {
     if (typeof token !== 'string' || token.length < 10 || token.length > 1000 || /\s/.test(token)) throw Error('Jeton GitHub invalide.');
     const account = await this.request(id, '/user', 'GET', undefined, token);
+    if (expectedDevice && this.devices.get(id) !== expectedDevice) throw Error('Connexion annulée.');
     this.save(id, u => { u.github = { token: this.encrypt(token), login: account.login, permissions: u.github?.login === account.login ? u.github.permissions || {} : {} }; });
     return this.status(id);
   }
-  disconnect(id) { this.devices.delete(id); this.save(id, u => { delete u.github; }); return this.status(id); }
+  disconnect(id) { this.cancel(id); this.save(id, u => { delete u.github; }); return this.status(id); }
+  cancel(id) { this.devices.delete(id); this.browserAuth?.cancel(id); return { cancelled: true }; }
   async start(id) {
-    if (!this.clientId) throw Error('La connexion navigateur nécessite ZAALIS_GITHUB_CLIENT_ID et le device flow activé dans l’application GitHub. Utilisez un jeton à permissions fines en attendant.');
-    const response = await this.fetch('https://github.com/login/device/code', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: this.clientId, scope: 'repo' }) });
+    const clientId = this.user(id).githubClientId || this.clientId;
+    this.cancel(id);
+    if (!clientId && this.browserAuth?.available) {
+      const device = { kind: 'cli', expires: Date.now() + 900000 };
+      this.devices.set(id, device);
+      const result = await this.browserAuth.start(id);
+      if (this.devices.get(id) !== device) throw Error('Connexion annulée.');
+      return result;
+    }
+    if (!clientId) throw Error('La connexion navigateur nécessite ZAALIS_GITHUB_CLIENT_ID ou un Client ID public configuré et le device flow activé dans l’application GitHub.');
+    const response = await this.fetch('https://github.com/login/device/code', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: clientId, scope: 'repo' }) });
     const d = await response.json();
-    if (!response.ok || !d.device_code || d.verification_uri !== 'https://github.com/login/device') throw Error('Connexion GitHub indisponible.');
-    this.devices.set(id, { code: d.device_code, expires: Date.now() + d.expires_in * 1000, interval: Math.max(5, d.interval || 5) * 1000, next: Date.now() });
-    return { code: d.user_code, url: d.verification_uri, interval: Math.max(5, d.interval || 5) };
+    if (!response.ok || !d.device_code || typeof d.user_code !== 'string' || !Number.isFinite(d.expires_in) || d.expires_in <= 0 || d.verification_uri !== 'https://github.com/login/device') throw Error('Connexion GitHub indisponible.');
+    this.devices.set(id, { clientId, code: d.device_code, expires: Date.now() + d.expires_in * 1000, interval: Math.max(5, d.interval || 5) * 1000, next: Date.now() });
+    return { code: d.user_code, url: d.verification_uri, interval: Math.max(5, d.interval || 5), expiresIn: d.expires_in };
   }
   async poll(id) {
     const d = this.devices.get(id);
     if (!d || d.expires < Date.now()) { this.devices.delete(id); throw Error('Connexion expirée. Recommencez.'); }
+    if (d.kind === 'cli') {
+      const result = await this.browserAuth.poll(id);
+      if (this.devices.get(id) !== d) throw Error('Connexion annulée.');
+      if (result.pending) return result;
+      const status = await this.connect(id, result.token, d); this.devices.delete(id); return status;
+    }
     if (Date.now() < d.next) return { pending: true };
     d.next = Date.now() + d.interval;
-    const response = await this.fetch('https://github.com/login/oauth/access_token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: this.clientId, device_code: d.code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }) });
+    const response = await this.fetch('https://github.com/login/oauth/access_token', { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30000), headers: { Accept: 'application/json', 'Content-Type': 'application/json' }, body: JSON.stringify({ client_id: d.clientId || this.clientId, device_code: d.code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' }) });
     const data = await response.json();
-    if (data.error === 'slow_down') { d.interval += 5000; return { pending: true }; }
-    if (data.error === 'authorization_pending') return { pending: true };
+    if (this.devices.get(id) !== d) throw Error('Connexion annulée.');
+    if (data.error === 'slow_down') { d.interval += 5000; d.next = Date.now() + d.interval; return { pending: true, interval: d.interval / 1000 }; }
+    if (data.error === 'authorization_pending') return { pending: true, interval: d.interval / 1000 };
     if (!response.ok || !data.access_token) { this.devices.delete(id); throw Error('Autorisation GitHub refusée ou expirée.'); }
-    const result = await this.connect(id, data.access_token); this.devices.delete(id); return result;
+    const result = await this.connect(id, data.access_token, d); this.devices.delete(id); return result;
   }
   async repos(id) {
     const repositories = [];

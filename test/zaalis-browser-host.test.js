@@ -94,10 +94,14 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
     assert.equal(home.inPrivate, false);
 
     // Its own pages come from the vendored copy, through zaalis://.
+    host.setLanguage('en');
+    assert.equal(host.translate('Fermer'), 'Close');
     sendEvent({ ev: 'resource', req: 7, view: chrome.view, url: 'zaalis://home/chrome.html', method: 'GET' });
     const page = await waitFor((m) => m.op === 'resourceReply' && m.req === 7, 'page chrome.html servie');
     assert.equal(page.status, 200);
     assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /zaalisBridge/);
+    assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /__zaalisBrowserLocale/);
+    assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /,"en"\);<\/script>/);
     sendEvent({ ev: 'resource', req: 8, view: chrome.view, url: 'zaalis://home/../main.js', method: 'GET' });
     const traversal = await waitFor((m) => m.op === 'resourceReply' && m.req === 8, 'refus hors interface');
     assert.notEqual(Buffer.from(traversal.body || '', 'base64').toString('utf8').includes('module.exports'), true);

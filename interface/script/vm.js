@@ -13,22 +13,22 @@
   function mount(target) {
     if (pane) return;
     pane = target;
-    const controls = node('div', 'vm-controls'); system = node('select'); system.setAttribute('aria-label','Système de la VM');
+    const controls = node('div', 'vm-controls'); system = node('select'); system.setAttribute('aria-label',uiText('Système de la VM'));
     for (const [value, label] of [['linux','Debian Linux'],['windows','Windows Sandbox']]) { const option = node('option','',label); option.value = value; system.append(option); }
-    network = node('select'); network.setAttribute('aria-label','Réseau de la VM');
-    for (const [value,label] of [['isolated','Sans accès réseau'],['internet','Internet + réseau hôte']]) { const option = node('option','',label); option.value = value; network.append(option); }
+    network = node('select'); network.setAttribute('aria-label',uiText('Réseau de la VM'));
+    for (const [value,label] of [['isolated',uiText('Sans accès réseau')],['internet',uiText('Internet + réseau hôte')]]) { const option = node('option','',label); option.value = value; network.append(option); }
     createButton = button('Nouvelle VM', async () => { createButton.disabled = true; try { const result = await action({action:'create',system:system.value,network:network.value}); activeId=result.machine.id; await refresh(); } finally { createButton.disabled=false; } });
     controls.append(system, network, createButton); tabs = node('div','vm-tabs'); tabs.setAttribute('role','tablist'); tabs.setAttribute('aria-label','Sessions VM');
-    status = node('div','vm-status','Choisissez un système pour démarrer.'); status.setAttribute('role','status');
+    status = node('div','vm-status',uiText('Choisissez un système pour démarrer.')); status.setAttribute('role','status');
     const actions = node('div','vm-actions');
-    importButton = button('Copier le projet', async () => { if (!state.projectRoot) throw new Error('Ouvrez d’abord un projet dans l’IDE.'); const result = await action({action:'import_project',id:activeId,root:state.projectRoot}); status.textContent = result.summary + ' ' + result.guestPath; });
-    stopButton = button('Arrêter', async () => { await action({action:'stop',id:activeId}); await refresh(); });
+    importButton = button(uiText('Copier le projet'), async () => { if (!state.projectRoot) throw new Error(uiText('Ouvrez d’abord un projet dans l’IDE.')); const result = await action({action:'import_project',id:activeId,root:state.projectRoot}); status.textContent = result.summary + ' ' + result.guestPath; });
+    stopButton = button(uiText('Arrêter'), async () => { await action({action:'stop',id:activeId}); await refresh(); });
     resetButton=button('Repartir propre',async()=>{const r=await action({action:'reset',id:activeId});activeId=r.machine.id;await refresh();});
-    const exportButton=button('Récupérer un fichier',async()=>{const path=window.prompt('Chemin complet du fichier dans la VM (32 Mo maximum)');if(path){await action({action:'export_file',id:activeId,path});await refresh();}});
+    const exportButton=button(uiText('Récupérer un fichier'),async()=>{const path=window.prompt(uiText('Chemin complet du fichier dans la VM (32 Mo maximum)'));if(path){await action({action:'export_file',id:activeId,path});await refresh();}});
     importButton.disabled=stopButton.disabled=resetButton.disabled=true;
-    const templateButton=button('Figer cet environnement Linux',async()=>{const result=await action({action:'save_template',id:activeId});status.textContent='Environnement réutilisable : '+result.template.id;await refresh();});
+    const templateButton=button(uiText('Figer cet environnement Linux'),async()=>{const result=await action({action:'save_template',id:activeId});status.textContent=uiText('Environnement réutilisable : ')+result.template.id;await refresh();});
     actions.append(importButton,stopButton,resetButton,exportButton,templateButton); consoleNode=node('div','vm-console');results=node('div','vm-results');
-    const details=node('details','vm-activity'); details.append(node('summary','','Activité de l’agent et démarrage')); activity=node('pre','vm-log'); details.append(activity);
+    const details=node('details','vm-activity'); details.append(node('summary','',uiText('Activité de l’agent et démarrage'))); activity=node('pre','vm-log'); details.append(activity);
     pane.append(controls,tabs,status,actions,consoleNode,results,details);
     terminal=new Terminal({fontFamily:'Consolas, monospace',fontSize:13,cursorBlink:true,convertEol:true,scrollback:5000,theme:{background:'#111216',foreground:'#eeeeef'}});
     fit=new FitAddon.FitAddon(); terminal.loadAddon(fit); terminal.open(consoleNode);
@@ -56,7 +56,7 @@
     stream=new EventSource(`/api/terminal/sessions/${terminalId}/stream`);
     stream.addEventListener('snapshot',e=>{const v=JSON.parse(e.data);terminal.reset();terminal.write(v.output);});
     stream.addEventListener('data',e=>terminal.write(JSON.parse(e.data)));
-    stream.addEventListener('exit',()=>terminal.write('\r\n[session fermée]\r\n'));
+    stream.addEventListener('exit',()=>terminal.write(uiText('\r\n[session fermée]\r\n')));
     fit.fit();terminal.focus();
   }
   let attachedKey='';
@@ -70,10 +70,10 @@
     const s=selected();importButton.disabled=stopButton.disabled=!s||s.status!=='ready';
     stopButton.disabled=!s||['stopped'].includes(s.status);resetButton.disabled=!s||s.status==='starting';
     results.replaceChildren();for(const a of s?.artifacts||[]){const link=node('a','',a.name);link.href=`/api/vm/${s.id}/artifacts/${a.id}`;link.download=a.name;results.append(link);}
-    if(!s) { status.textContent=caps.linux.available?'Prêt · sessions autonomes · 2 CPU / 2 Go par défaut':'Pack Linux absent. Consultez les paramètres Machines virtuelles.'; return; }
+    if(!s) { status.textContent=caps.linux.available?uiText('Prêt · sessions autonomes · 2 CPU / 2 Go par défaut'):uiText('Pack Linux absent. Consultez les paramètres Machines virtuelles.'); return; }
     status.classList.toggle('error',s.status==='error');
-    const labels={starting:'Démarrage…',ready:'Prête',stopped:'Arrêtée',error:'Erreur'};
-    status.textContent=`${labels[s.status]||s.status} · ${s.memoryMB/1024} Go · ${s.system==='linux'?s.cpus+' CPU · ':''}${s.network==='isolated'?'réseau désactivé':'Internet + réseau hôte'}${s.error?' · '+s.error:''}`;
+    const labels={starting:uiText('Démarrage…'),ready:uiText('Prête'),stopped:uiText('Arrêtée'),error:uiText('Erreur')};
+    status.textContent=`${labels[s.status]||s.status} · ${s.memoryMB/1024} Go · ${s.system==='linux'?s.cpus+' CPU · ':''}${s.network==='isolated'?uiText('réseau désactivé'):uiText('Internet + réseau hôte')}${s.error?' · '+s.error:''}`;
     activity.textContent=s.output;activity.scrollTop=activity.scrollHeight;
     const key=s.id+':'+s.status;
     if(attachedKey!==key) {await attach(s);attachedKey=key;}
@@ -84,16 +84,16 @@
     target.replaceChildren();target.className='vm-settings';
     try {
       const result=await api('/api/vm'); const c=result.capabilities;
-      for(const [name,body] of [['Linux intégré',`${c.linux.image} · ${(c.linux.imageBytes/1024/1024).toFixed(0)} Mo. ${c.linux.bundled?'Pack présent.':'Pack manquant.'} Accélération WHPX requise. Jusqu’à trois VM ; disque logique de 24 Go, espace utilisé progressivement.`],['Windows Sandbox',c.windows.reason]]) {
+      for(const [name,body] of [[uiText('Linux intégré'),`${c.linux.image} · ${(c.linux.imageBytes/1024/1024).toFixed(0)} Mo. ${c.linux.bundled?uiText('Pack présent.'):'Pack manquant.'} Accélération WHPX requise. Jusqu’à trois VM ; disque logique de 24 Go, espace utilisé progressivement.`],['Windows Sandbox',c.windows.reason]]) {
         const card=node('article');card.append(node('h4','',name),node('p','',body));
-        if(name==='Windows Sandbox'&&c.windows.compatible&&!c.windows.enabled) card.append(button('Activer Windows Sandbox',async()=>{card.append(node('p','','Autorisez la demande administrateur Windows…'));const value=await api('/api/vm/activate-sandbox',{});await settings();if(value.restartNeeded)target.append(node('p','','Activation terminée. Redémarrez Windows pour utiliser Sandbox.'));}));
-        if(name==='Linux intégré') {card.append(node('p','',`Accélération Windows : ${c.linux.accelerationEnabled?'activée':'désactivée'} · client SSH : ${c.linux.sshAvailable?'présent':'absent'}.`));if(c.linux.compatible&&(!c.linux.accelerationEnabled||!c.linux.sshAvailable))card.append(button('Activer les composants Linux',async()=>{const value=await api('/api/vm/activate-linux',{});await settings();if(value.restartNeeded)target.append(node('p','','Redémarrez Windows pour activer l’accélération Linux.'));}));}
+        if(name==='Windows Sandbox'&&c.windows.compatible&&!c.windows.enabled) card.append(button(uiText('Activer Windows Sandbox'),async()=>{card.append(node('p','',uiText('Autorisez la demande administrateur Windows…')));const value=await api('/api/vm/activate-sandbox',{});await settings();if(value.restartNeeded)target.append(node('p','',uiText('Activation terminée. Redémarrez Windows pour utiliser Sandbox.')));}));
+        if(name===uiText('Linux intégré')) {card.append(node('p','',`Accélération Windows : ${c.linux.accelerationEnabled?uiText('activée'):uiText('désactivée')} · client SSH : ${c.linux.sshAvailable?uiText('présent'):'absent'}.`));if(c.linux.compatible&&(!c.linux.accelerationEnabled||!c.linux.sshAvailable))card.append(button(uiText('Activer les composants Linux'),async()=>{const value=await api('/api/vm/activate-linux',{});await settings();if(value.restartNeeded)target.append(node('p','',uiText('Redémarrez Windows pour activer l’accélération Linux.')));}));}
         target.append(card);
       }
       const templates=await api('/api/vm/action',{action:'templates'});
-      if(templates.templates.length){const card=node('article');card.append(node('h4','','Environnements Linux préparés'));for(const t of templates.templates)card.append(node('p','',`${t.name} · ${(t.bytes/1024/1024).toFixed(0)} Mo · templateId : ${t.id}`));target.append(card);}
+      if(templates.templates.length){const card=node('article');card.append(node('h4','',uiText('Environnements Linux préparés')));for(const t of templates.templates)card.append(node('p','',`${t.name} · ${(t.bytes/1024/1024).toFixed(0)} Mo · templateId : ${t.id}`));target.append(card);}
       await window.ZaalisLaboratory?.mount(target);
-      target.append(node('p','','Les VM sont autonomes. Le projet est copié sur demande ; vos fichiers locaux restent séparés. Aucun dossier personnel ni presse-papiers n’est partagé. Windows : console PowerShell persistante, sans applications interactives en plein écran.'));
+      target.append(node('p','',uiText('Les VM sont autonomes. Le projet est copié sur demande ; vos fichiers locaux restent séparés. Aucun dossier personnel ni presse-papiers n’est partagé. Windows : console PowerShell persistante, sans applications interactives en plein écran.')));
     } catch(e) {target.textContent=e.message;}
   }
   window.ZaalisVM={open: async target=>{mount(target);await refresh().catch(error);clearInterval(timer);timer=setInterval(()=>{if(!pane.hidden)refresh().catch(error);},2000);},settings};

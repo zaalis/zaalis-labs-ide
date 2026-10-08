@@ -316,6 +316,10 @@ class RustAgentBridge {
     // silently overriding a newly selected Plan or Supervised mode.
     if (made?.resumed && !options.team &&
         made.agents?.[0]?.permissions?.mode !== create.permission_mode) made = null;
+    if (made?.resumed && options.team && made.agents?.some(agent => {
+      const desired = options.team.find(item => item.role?.name === agent.role?.name);
+      return !desired || agent.permissions?.mode !== (desired.permissions?.mode || create.permission_mode);
+    })) made = null;
     if (!made) made = await client.request('session.create', create);
     const sessionId = made.session_id;
     onEvent({ type: 'run_started', runId: sessionId, sessionId, conversationId: options.conversationId || null, resumed: !!made.resumed });
@@ -358,7 +362,11 @@ class RustAgentBridge {
         onEvent({ type: 'tool_done', id: frame.call_id, ...result });
       }
       if (frame.type === EVENTS.PERMISSION_REQUESTED) onEvent({ type: 'permission_required', sessionId, requestId: frame.request_id, summary: frame.summary, target: frame.target, risks: frame.risks || [] });
-      if (frame.type === EVENTS.PLAN_READY) onEvent({ type: 'plan_required', sessionId, requestId: frame.request_id, content: frame.content });
+      if (frame.type === EVENTS.PLAN_READY) {
+        const leadId = String(lead.id);
+        if (text.get(leadId)) text.set(leadId, text.get(leadId).trimEnd() + '\n\n');
+        onEvent({ type: 'plan_required', sessionId, requestId: frame.request_id, content: frame.content });
+      }
       if (frame.type === EVENTS.BUDGET_EXHAUSTED) onEvent({ type: 'budget_required', sessionId, requestId: frame.request_id, limit: frame.limit, usage: frame.usage });
       if (frame.type === EVENTS.AGENT_STATE_CHANGED) onEvent({ type: 'agent_state', agentId: frame.agent_id, state: frame.state });
       if (frame.type === EVENTS.PROVIDER_ERROR || frame.type === EVENTS.AGENT_FAILED) failure = frame.message || frame.error || 'Erreur agent.';

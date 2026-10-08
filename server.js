@@ -113,7 +113,30 @@ try {
 const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
 const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
 const { GitHubIntegration } = require('./github-integration');
-const githubIntegration = new GitHubIntegration({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret });
+const { GitHubBrowserAuth } = require('./github-browser-auth');
+const { MessengerIntegrations } = require('./messenger-integrations');
+const githubBrowserAuth = new GitHubBrowserAuth({ appDir: APP_DIR, dataDir: DATA_DIR });
+const githubIntegration = new GitHubIntegration({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret, browserAuth: githubBrowserAuth });
+const { MessengerContinuation } = require('./messenger-continuation');
+const continuation = new MessengerContinuation({ file: chatsFile, run: async (id, input, onEvent) => {
+  const { EventEmitter } = require('node:events');
+  const req = new EventEmitter();
+  Object.assign(req, { user: loadUsers().find(u => u.id === id), body: { ...input, stream: true }, headers: {}, messengerContinuation: true });
+  // A subsequent IDE permission change also applies when continuing by phone.
+  req.body.permissionMode = req.user.permissionMode || input.permissionMode || 'supervised';
+  if (input.team) req.body.team = input.team.map(agent => ({ ...agent, permissions: { ...agent.permissions,
+    mode: agent.role?.mutating === false ? 'read-only' : req.body.permissionMode } }));
+  const res = new EventEmitter(); let result, failure;
+  Object.assign(res, { status: () => res, setHeader: () => {}, flushHeaders: () => {},
+    write: line => { const event = JSON.parse(line); if (event.type === 'done') result = event.result; else if (event.type === 'error') failure = event.error; else onEvent?.(event); },
+    end: () => { res.writableEnded = true; }, json: value => { result = value; } });
+  const abort = () => req.emit('aborted');
+  input.signal?.addEventListener('abort', abort, { once: true });
+  try { if (input.signal?.aborted) throw Error('Tour interrompu.'); await rustAgentHttp(req, res); if (failure || result?.error) throw Error(failure || result.error); return result; }
+  finally { input.signal?.removeEventListener('abort', abort); }
+} });
+const messengers = new MessengerIntegrations({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret,
+  appDir: APP_DIR, dataDir: DATA_DIR, continuation, decide: (id, body) => rustAgentBridge.decide(id, body) });
 
 function encryptSecret(plain) {
   const iv = crypto.randomBytes(12);
@@ -822,6 +845,26 @@ app.put('/api/preferences', (req, res) => {
 });
 
 // GitHub credentials stay in the encrypted server vault, never in agent prompts.
+app.get('/api/integrations/messengers/:provider', (req, res) => {
+  if (!['telegram', 'whatsapp'].includes(req.params.provider)) return res.status(404).json({ error: 'Intégration inconnue.' });
+  res.json(messengers.status(req.user.id, req.params.provider));
+});
+app.post('/api/integrations/messengers/:provider', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée à l’IDE sur ce PC.' });
+  const provider = req.params.provider, body = req.body || {};
+  if (!['telegram', 'whatsapp'].includes(provider)) return res.status(404).json({ error: 'Intégration inconnue.' });
+  try {
+    let result;
+    if (body.action === 'settings') result = messengers.settings(req.user.id, { ...body, provider });
+    else if (body.action === 'configure' && provider === 'telegram') result = await messengers.configureTelegram(req.user.id, body.token);
+    else if (body.action === 'disconnect') result = await messengers.stop(req.user.id, provider, true);
+    else if (body.action === 'start') {
+      result = provider === 'telegram' ? await messengers.startTelegram(req.user.id) : await messengers.startWhatsApp(req.user.id);
+      if (result.url) result.opened = openInExternalBrowser(result.url);
+    } else throw Error('Action invalide.');
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
 app.get('/api/integrations/github', (req, res) => res.json(githubIntegration.status(req.user.id)));
 app.get('/api/integrations/github/repos', async (req, res) => {
   try { res.json(await githubIntegration.repos(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); }
@@ -832,11 +875,19 @@ app.post('/api/integrations/github', async (req, res) => {
     let result;
     if (body.action === 'connect') result = await githubIntegration.connect(req.user.id, body.token);
     else if (body.action === 'disconnect') result = githubIntegration.disconnect(req.user.id);
-    else if (body.action === 'start') result = await githubIntegration.start(req.user.id);
+    else if (body.action === 'configure') result = githubIntegration.configure(req.user.id, body.clientId);
+    else if (body.action === 'cancel') result = githubIntegration.cancel(req.user.id);
+    else if (body.action === 'start') {
+      result = await githubIntegration.start(req.user.id);
+      result.opened = openInExternalBrowser(result.url);
+    }
+    else if (body.action === 'open') {
+      result = { opened: openInExternalBrowser('https://github.com/login/device') };
+    }
     else if (body.action === 'poll') result = await githubIntegration.poll(req.user.id);
     else if (body.action === 'permission') result = await githubIntegration.permission(req.user.id, body);
     else throw Error('Action invalide.');
-    if (['connect', 'disconnect', 'permission'].includes(body.action)) {
+    if (['connect', 'disconnect', 'permission'].includes(body.action) || (body.action === 'poll' && result.connected)) {
       const active = rustAgentBridge.clients.get(req.user.id);
       if (active) { await active.client.stop(); rustAgentBridge.clients.delete(req.user.id); }
     }
@@ -1736,7 +1787,7 @@ app.get('/api/chats', (req, res) => {
 app.put('/api/chats', (req, res) => {
   try {
     const conversations = (req.body && req.body.conversations) || [];
-    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(conversations, null, 2));
+    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(continuation.merge(req.user.id, req.body && req.body.kind === 'agents' ? 'agents' : 'chat', conversations), null, 2));
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -2321,6 +2372,11 @@ app.get('/api/browser-open', async (req, res) => {
 
 app.get('/api/browser/status', (req, res) => {
   res.json({ available: browserHost.available(), started: !!browserHost.core, tabs: browserHost.tabs() });
+});
+app.post('/api/browser/language', (req, res) => {
+  if (req.isMobile || req.isTunnel || req.isBrowser) return res.sendStatus(403);
+  browserHost.setLanguage(req.body.language);
+  res.json({ language: browserHost.language });
 });
 
 app.post('/api/deep-search', async (req, res) => {
@@ -3416,10 +3472,21 @@ async function rustAgentHttp(req, res, next) {
   let computerSession = null;
   let workspaceEntry = null;
   let workspaceRun = null;
+  let conversationLock;
   req.once('aborted', () => controller.abort());
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     const body = req.body || {};
+    const kind = body.kind === 'agents' || Array.isArray(body.team) ? 'agents' : 'chat';
+    if (body.conversationId) {
+      conversationLock = continuation.key(req.user.id, kind, body.conversationId);
+      if (!req.messengerContinuation) {
+        if (continuation.active.has(conversationLock)) { conversationLock = null; throw Object.assign(Error('Cette conversation travaille déjà dans une messagerie ou dans l’IDE.'), { status: 409 }); }
+        continuation.active.add(conversationLock);
+      }
+      continuation.capture(req.user.id, kind, body.conversationId, { model: body.model, submodel: body.submodel, team: body.team,
+        language: body.language || 'fr', permissionMode: body.permissionMode || 'supervised', reasoningLevel: body.reasoningLevel, systemPrompt: body.systemPrompt });
+    }
     let savedConversations = [];
     if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
     const conversation = savedConversations.find(item => item.id === body.conversationId);
@@ -3461,6 +3528,7 @@ async function rustAgentHttp(req, res, next) {
     const modelFacts = selectedTeam ? null : await capabilitiesForUser(req.user, model, body.submodel);
     const team = selectedTeam ? await Promise.all(selectedTeam.map(async (agent) => ({
       ...agent,
+      ...(githubReadOnly ? { permissions: { ...agent.permissions, mode: 'read-only' } } : {}),
       model: {
         ...agent.model,
         ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
@@ -3520,6 +3588,7 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.status(error.status || 500).json({ error: error.message || String(error) });
   } finally {
+    if (conversationLock && !req.messengerContinuation) continuation.active.delete(conversationLock);
     if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun || context.run === workspaceRun) workspaceEntry.agents.delete(id);
     if (computerToken) computerRuns.delete(computerToken);
     if (computerSession) {
@@ -4141,6 +4210,7 @@ const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${bound} (local access only)`);
   publishCodestraleBridge(bound);
   startOllamaIfNeeded();
+  messengers.restore();
 });
 
 // Stop advertising a bridge that is going away. `exit` covers the normal path;
@@ -4150,6 +4220,8 @@ process.on('exit', unpublishCodestraleBridge);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   process.on(signal, async () => {
     unpublishCodestraleBridge();
+    for (const id of githubBrowserAuth.flows.keys()) githubBrowserAuth.cancel(id);
+    await messengers.shutdown();
     await laboratory.shutdown();
     await vmManager.shutdown(terminalManager);
     process.exit(0);

@@ -8,7 +8,7 @@
     "start": "node server.js",
     "test": "node --test \"test/*.test.js\"",
     "check:mojibake": "node scripts/check-mojibake.js",
-    "build:server": "npm run check:mojibake && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
+    "build:server": "npm run check:mojibake && node scripts/stage-connectors.js && pkg . --targets node22-win-x64 --no-bytecode --public --output native/dist/zaalis-server.exe",
     "build:rust": "cargo build --manifest-path rust/Cargo.toml --workspace --release && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
     "build:cli": "cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stage-rust-binaries.ps1",
     "sync:browser": "node scripts/sync-zaalis-browser.js",
@@ -22,6 +22,9 @@
       "zaalis-browser/app/interface/**/*",
       "zaalis-browser/app/assets/**/*",
       "zaalis-browser/app/UPSTREAM.json"
+    ],
+    "ignore": [
+      "**/node_modules/@whiskeysockets/baileys/**"
     ]
   },
   "keywords": [],
@@ -35,12 +38,12 @@
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
+    "@electron/packager": "^20.0.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "@yao-pkg/pkg": "^6.22.0",
-    "node-pty": "^1.1.0",
-    "@electron/packager": "^20.0.1",
     "electron": "^42.5.0",
+    "node-pty": "^1.1.0",
     "png2icons": "^2.0.1"
   }
 }

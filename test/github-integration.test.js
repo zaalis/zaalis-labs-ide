@@ -39,6 +39,30 @@ test('push identity mismatch refuses before remote mutation', async () => {
 test('disconnect removes grants and encrypted token', () => {const {g}=fixture();assert.equal(g.disconnect('u').connected,false);assert.equal(g.user('u').github,undefined);});
 test('device flow requires configured application and expires', async()=>{const {g}=fixture();g.clientId='';await assert.rejects(g.start('u'),/CLIENT_ID/);g.devices.set('u',{expires:0});await assert.rejects(g.poll('u'),/expirée/);});
 
+test('browser sign-in polls authorization and seals the token without exposing device secrets', async () => {
+ const {g}=fixture();g.configure('u','public-client-id');let polls=0;
+ g.fetch=async(url,opts)=>({ok:true,status:200,json:async()=>{
+  if(url.endsWith('/device/code')) { assert.equal(JSON.parse(opts.body).client_id,'public-client-id');return {device_code:'private-device-secret',user_code:'ABCD-EFGH',verification_uri:'https://github.com/login/device',expires_in:900,interval:5}; }
+  if(url.endsWith('/access_token')) return ++polls===1?{error:'slow_down'}:polls===2?{error:'authorization_pending'}:{access_token:'github_oauth_secret_token'};
+  return {login:'alice'};
+ }});
+ const start=await g.start('u');assert.equal(start.url,'https://github.com/login/device');assert.ok(!JSON.stringify(start).includes('private-device-secret'));
+ assert.deepEqual(await g.poll('u'),{pending:true,interval:10});assert.ok(g.devices.get('u').next>=Date.now()+9000);
+ g.devices.get('u').next=0;assert.deepEqual(await g.poll('u'),{pending:true,interval:10});g.devices.get('u').next=0;
+ const status=await g.poll('u');assert.equal(status.connected,true);assert.equal(status.login,'alice');assert.ok(!JSON.stringify(status).includes('github_oauth_secret_token'));assert.equal(g.devices.size,0);
+});
+
+test('cancelled browser authorization cannot restore credentials from an in-flight poll', async () => {
+ const {g}=fixture();g.devices.set('u',{code:'private',clientId:'public-client-id',expires:Date.now()+90000,interval:5000,next:0});
+ let resolve;g.fetch=()=>new Promise(r=>{resolve=r;});const pending=g.poll('u');g.cancel('u');resolve({ok:true,json:async()=>({access_token:'github_oauth_secret_token'})});
+ await assert.rejects(pending,/annulée/);assert.equal(g.user('u').github.token,'encrypted');
+});
+
+test('invalid browser authorization destinations are refused', async () => {
+ const {g}=fixture();g.configure('u','public-client-id');g.fetch=async()=>({ok:true,json:async()=>({device_code:'private',user_code:'ABCD',verification_uri:'https://evil.invalid',expires_in:900})});
+ await assert.rejects(g.start('u'),/indisponible/);assert.equal(g.devices.size,0);assert.throws(()=>g.configure('u','bad id'),/invalide/);
+});
+
 function writable() {
  const {g}=fixture(),requests=[],gitCalls=[];
  g.save('u',u=>{u.github.permissions['alice/project']={mode:'write',root:'verified-root',id:12};});

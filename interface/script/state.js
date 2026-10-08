@@ -439,10 +439,10 @@ const TRANSLATIONS = {
         'approve-btn': 'Autoriser',
         
         // Roles
-        'role-developer': 'Developpeur',
+        'role-developer': 'Développeur',
         'role-lead': 'Chef de projet',
         'role-architect': 'Architecte',
-        'role-reviewer': 'Reviewer',
+        'role-reviewer': 'Relecteur',
         'role-optimizer': 'Optimiseur',
         'role-tester': 'Testeur',
         
@@ -708,6 +708,8 @@ const TRANSLATIONS = {
 
 function updateLanguage() {
     const lang = state.language || 'fr';
+    document.documentElement.lang = lang;
+    if (typeof applyStaticLocale === 'function') applyStaticLocale();
     
     // Translate text elements
     $$('[data-i18n]').forEach(el => {
