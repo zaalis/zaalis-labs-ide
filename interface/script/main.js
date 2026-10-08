@@ -84,7 +84,7 @@ function sharedHardwareConfigPayload() {
     return {
         ollamaUrl: (c.ollamaUrl || 'http://127.0.0.1:11434').trim(),
         ollamaModel: c.ollamaModel || 'qwen3:8b',
-        ggufCtx: clampGgufCtx(c.ggufCtx || 8192),
+        ggufCtx: clampGgufCtx(c.ggufCtx || 16384),
         ggufVariant: c.ggufVariant || '',
         ggufGpuLayers: (c.ggufGpuLayers === undefined || c.ggufGpuLayers === null) ? '' : c.ggufGpuLayers,
         terminalProfile: c.terminalProfile || terminalProfileDefault()
@@ -114,7 +114,7 @@ function applySharedHardwareConfig(config) {
     const c = state.config || {};
     if ('ollamaUrl' in config) c.ollamaUrl = String(config.ollamaUrl || '').trim() || 'http://127.0.0.1:11434';
     if ('ollamaModel' in config) c.ollamaModel = String(config.ollamaModel || '').trim() || 'qwen3:8b';
-    if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 8192);
+    if ('ggufCtx' in config) c.ggufCtx = clampGgufCtx(config.ggufCtx || 16384);
     if ('ggufVariant' in config) c.ggufVariant = String(config.ggufVariant || '').trim().toLowerCase();
     if ('ggufGpuLayers' in config) {
         const raw = config.ggufGpuLayers;
@@ -164,7 +164,7 @@ function populateSettingsControls() {
     };
     setVal('settings-lang-select', state.language || 'fr');
     setVal('gguf-variant-select', c.ggufVariant || '');
-    setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 8192));
+    setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 16384));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
     setVal('settings-theme-select', c.theme || 'dark');
     setVal('settings-density-select', c.density || 'normal');
@@ -1164,7 +1164,7 @@ $('#save-btn').addEventListener('click', async () => {
     const selectedPermission = getVal('settings-default-permission-select');
     if (selectedPermission && typeof setPermissionMode === 'function') setPermissionMode(selectedPermission);
     // ----- Hardware advanced -----
-    c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '8192');
+    c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '16384');
     const nglVal = getVal('gguf-ngl-select');
     c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
     // ----- Integrated terminal -----

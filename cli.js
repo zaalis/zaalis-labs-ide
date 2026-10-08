@@ -272,7 +272,7 @@ function authed(method, pathname, body) {
 const SHARED_CONFIG_DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'qwen3:8b',
-  ggufCtx: 8192,
+  ggufCtx: 16384,
   ggufVariant: '',
   ggufGpuLayers: ''
 };

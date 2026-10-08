@@ -29,6 +29,52 @@ const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
 /// The tools a desktop-control turn keeps.
 const DESKTOP_TOOLS: [&str; 3] = ["computer", "mcp", "skill"];
+/// The tools kept when the model's context window cannot hold the whole
+/// catalogue: enough to explore, edit and verify a project.
+const ESSENTIAL_TOOLS: [&str; 14] = [
+    "read", "list", "tree", "glob", "grep", "code_search", "edit", "write", "apply_patch", "run",
+    "todo", "workspace", "enter_plan_mode", "exit_plan_mode",
+];
+const REDUCED_TOOLS_NOTE: &str = "\n\nCONTEXTE RÉDUIT : la fenêtre de contexte du modèle est petite, seuls les outils essentiels sont proposés pour ce tour.";
+/// Corrections a model without native tools may get, in a row, for an
+/// unreadable tool call before the turn reports it to the user.
+const MAX_TOOL_REPAIRS: u32 = 2;
+const ACTION_NUDGE: &str = "Tu as annoncé une action sans l'exécuter. Si un outil est nécessaire, réponds maintenant par son appel JSON {\"tool_call\":{\"name\":\"…\",\"arguments\":{…}}} et rien après ; sinon donne directement ta réponse finale.";
+
+/// The instruction sent back when a call under the fallback protocol could
+/// not be read. It names the defect, since a small model fixes what it is told.
+fn tool_repair_prompt(reason: &str) -> String {
+    format!(
+        "Ton appel d'outil n'a pas été exécuté : {reason}. Réessaie en terminant ta réponse par UN SEUL objet JSON valide, sans rien écrire après :\n{{\"tool_call\":{{\"name\":\"<nom>\",\"arguments\":{{ ... }}}}}}\nSi aucun outil n'est nécessaire, réponds directement en texte."
+    )
+}
+
+/// Whether a short answer ends by announcing an action it never performed
+/// ("Commençons par lister le dossier."). Small local models without native
+/// tools often stop there; only then is the model reminded to act.
+pub(crate) fn announces_pending_action(text: &str) -> bool {
+    let text = text.trim();
+    if text.is_empty() || text.chars().count() > 600 {
+        return false;
+    }
+    let last = text
+        .rsplit("\n\n")
+        .next()
+        .unwrap_or(text)
+        .to_lowercase();
+    const ANNOUNCES: [&str; 12] = [
+        "je vais", "je commence", "commençons", "commencons", "laisse-moi", "laissez-moi",
+        "je m'apprête", "d'abord", "let me", "i'll", "i will", "first,",
+    ];
+    const ACTIONS: [&str; 30] = [
+        "lister", "lire", "analyser", "explorer", "examiner", "afficher", "vérifier", "verifier",
+        "rechercher", "chercher", "ouvrir", "exécuter", "executer", "lancer", "regarder",
+        "consulter", "parcourir", "inspecter", "créer", "modifier", "list", "read", "check",
+        "look", "open", "run", "search", "explore", "inspect", "create",
+    ];
+    ANNOUNCES.iter().any(|phrase| last.contains(phrase))
+        && ACTIONS.iter().any(|verb| last.contains(verb))
+}
 
 /// The desktop-mode instructions, naming the tools the turn actually has.
 fn desktop_mode_prompt(tools: &[zaalis_tools::ToolDefinition]) -> String {
@@ -107,6 +153,8 @@ pub(crate) async fn run_agent(
     let mut planning = session.config.mode == SessionRunMode::Plan;
     let mut plan_revision = 0_u32;
     let mut partial_reason = None;
+    let mut tool_repairs = 0_u32;
+    let mut action_nudged = false;
 
     if session.hook_agents.lock().await.insert(node.id.clone()) {
         execute_hooks(
@@ -171,22 +219,38 @@ pub(crate) async fn run_agent(
             available_tools.retain(|tool| DESKTOP_TOOLS.contains(&tool.name.as_str()));
         }
         let mut runtime_system =
-            system_prompt(&session, &node, planning, &files_changed, usage.tool_calls);
+            system_prompt(&session, &node, planning, &files_changed);
         if desktop_control {
             runtime_system.push_str(&desktop_mode_prompt(&available_tools));
         }
-        let tools: Vec<ToolSpec> = available_tools.into_iter().map(|tool| ToolSpec {
+        let mut tools: Vec<ToolSpec> = available_tools.into_iter().map(|tool| ToolSpec {
             name: tool.name, description: tool.description, schema: tool.input_schema,
         }).collect();
         let capabilities = session.providers.metadata(node.model.provider)
             .map(|(_, caps)| caps.for_binding(&node.model)).unwrap_or_default();
         let context = capabilities.max_context as usize;
         let output_reserve = (context / 5).clamp(256, 8192);
-        let overhead = runtime_system.len().div_ceil(3)
-            + serde_json::to_string(&tools)?.len().div_ceil(3) + 256;
-        let input_budget = context.saturating_sub(output_reserve + overhead);
+        let overhead_of = |system: &str, tools: &[ToolSpec]| -> Result<usize> {
+            Ok(system.len().div_ceil(3) + serde_json::to_string(tools)?.len().div_ceil(3) + 256)
+        };
+        let mut overhead = overhead_of(&runtime_system, &tools)?;
+        let mut input_budget = context.saturating_sub(output_reserve + overhead);
+        // A small window (a local model at 8K) cannot carry the whole IDE
+        // catalogue and still leave room for the conversation. Keep the
+        // essential tools rather than refusing the turn.
+        if input_budget < context / 4 && !desktop_control {
+            let before = tools.len();
+            tools.retain(|tool| ESSENTIAL_TOOLS.contains(&tool.name.as_str()));
+            if tools.len() < before {
+                runtime_system.push_str(REDUCED_TOOLS_NOTE);
+                overhead = overhead_of(&runtime_system, &tools)?;
+                input_budget = context.saturating_sub(output_reserve + overhead);
+            }
+        }
         if input_budget < 256 {
-            return Err(ZaalisError::invalid("Le contexte du modèle est trop petit pour les instructions et outils actifs. Choisir un contexte plus grand ou réduire les outils."));
+            return Err(ZaalisError::invalid(format!(
+                "Le contexte du modèle ({context} tokens) est trop petit pour les instructions et outils actifs (environ {overhead} tokens). Augmenter la taille de contexte (16384 ou plus pour un modèle local) ou réduire les outils."
+            )));
         }
         if crate::context::compact(&mut history, input_budget)? {
             usage.context_compactions = usage.context_compactions.saturating_add(1);
@@ -196,6 +260,9 @@ pub(crate) async fn run_agent(
         let estimated_input=(crate::context::estimate(&history)+overhead) as u64;
         let output=remaining_tokens(&node,&usage).unwrap_or(output_reserve as u32).min(output_reserve as u32);
         let (mut reservation,allowed_output)=crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await?;
+        // Tools travel as a text protocol rather than natively (GGUF, Ollama
+        // models without tool support): the answer may need a correction.
+        let fallback_protocol = !capabilities.native_tools && !tools.is_empty();
         let request = TurnRequest {
             binding: node.model.clone(),
             system: runtime_system,
@@ -221,6 +288,7 @@ pub(crate) async fn run_agent(
         let mut round_usage = Usage::default();
         let mut usage_reported = false;
         let mut stop_reason = StopReason::EndTurn;
+        let mut invalid_call: Option<String> = None;
         while let Some(event) = stream.next().await {
             match event {
                 TurnEvent::TextDelta { text: delta } => {
@@ -242,6 +310,7 @@ pub(crate) async fn run_agent(
                     });
                 }
                 TurnEvent::ToolCallCompleted { call } => calls.push(call),
+                TurnEvent::InvalidToolCall { reason } => invalid_call = Some(reason),
                 TurnEvent::Usage {
                     usage: provider_usage,
                 } => { round_usage = provider_usage; usage_reported=true; telemetry.observe(provider_usage); },
@@ -275,6 +344,37 @@ pub(crate) async fn run_agent(
         usage.wall_time_ms = started.elapsed().as_millis() as u64;
         session.update_usage(&node.id, usage).await;
 
+        // An unreadable call is sent back for correction a bounded number of
+        // times; past that, the user is told plainly that nothing ran.
+        let mut correction = None;
+        if let Some(reason) = invalid_call.filter(|_| calls.is_empty()) {
+            if tool_repairs < MAX_TOOL_REPAIRS {
+                tool_repairs += 1;
+                correction = Some(tool_repair_prompt(&reason));
+            } else {
+                let notice = format!(
+                    "{}Le modèle local a produit un appel d'outil invalide ({reason}). Aucune commande n'a été exécutée ; reformulez la demande ou réessayez.",
+                    if text.trim().is_empty() { "" } else { "\n\n" }
+                );
+                let segment_id = ensure_segment(&session, &node, &mut timeline, SegmentKind::Text);
+                text.push_str(&notice);
+                session.events.emit(Event::TextDelta { segment_id, text: notice });
+                close_stream_segments(&session, &mut timeline);
+            }
+        } else if fallback_protocol
+            && calls.is_empty()
+            && !planning
+            && !action_nudged
+            && stop_reason != StopReason::MaxTokens
+            && announces_pending_action(&text)
+        {
+            action_nudged = true;
+            correction = Some(ACTION_NUDGE.to_owned());
+        }
+        if !calls.is_empty() {
+            tool_repairs = 0;
+        }
+
         history.push(Message::Assistant {
             text: text.clone(),
             reasoning: (!reasoning.is_empty()).then_some(reasoning),
@@ -282,6 +382,11 @@ pub(crate) async fn run_agent(
             provider_state: state,
         });
         session.checkpoint_history(&node.id, &history).await;
+
+        if let Some(correction) = correction {
+            history.push(Message::user(correction));
+            continue;
+        }
 
         if !calls.is_empty() {
             // Images returned during this round, by the tool that returned them.
@@ -308,7 +413,11 @@ pub(crate) async fn run_agent(
                     images.clear();
                 }
                 collect_web_usage(&call.name, &outcome, &mut usage);
-                collect_changed_files(&outcome, &mut files_changed);
+                // Only a write, edit or patch changes files; a read result
+                // also lists paths and must not be reported as a change.
+                if matches!(tool_category(&call.name), ToolCategory::Mutate) {
+                    collect_changed_files(&outcome, &mut files_changed);
+                }
                 let is_error = !outcome.is_ok();
                 if !is_error {
                     match tool_category(&call.name) {

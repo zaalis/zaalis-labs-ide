@@ -1263,4 +1263,262 @@ mod tests {
             "depuis enfant\n"
         );
     }
+
+    /// A node whose model receives its tools as a text protocol (GGUF).
+    fn fallback_node(session: &AgentSession, provider: ProviderId) -> AgentNode {
+        let mut node = node(session, provider, PermissionMode::ReadOnly);
+        node.model.capabilities = Some(zaalis_core::ModelCapabilities {
+            native_tools: Some(false),
+            ..Default::default()
+        });
+        node
+    }
+
+    fn read_call() -> TurnEvent {
+        TurnEvent::ToolCallCompleted {
+            call: ProviderToolCall {
+                id: "gguf_read".into(),
+                name: "read".into(),
+                arguments: serde_json::json!({"path": "input.txt"}),
+            },
+        }
+    }
+
+    fn turn(events: Vec<TurnEvent>, reason: StopReason) -> Vec<TurnEvent> {
+        let mut events = events;
+        events.push(TurnEvent::Completed { reason });
+        events
+    }
+
+    fn text(value: &str) -> TurnEvent {
+        TurnEvent::TextDelta { text: value.into() }
+    }
+
+    fn invalid(reason: &str) -> TurnEvent {
+        TurnEvent::InvalidToolCall { reason: reason.into() }
+    }
+
+    fn last_user_text(request: &TurnRequest) -> String {
+        request
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_local_tool_call_is_sent_back_for_correction() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Gguf,
+            vec![
+                turn(vec![text("Je lis le fichier."), invalid("du texte suit l'appel JSON")], StopReason::EndTurn),
+                turn(vec![read_call()], StopReason::ToolUse),
+                turn(vec![text("Le fichier contient « fixture ».")], StopReason::EndTurn),
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture.session.add_root(fallback_node(&fixture.session, ProviderId::Gguf)).await.unwrap();
+        let mut events = fixture.session.subscribe();
+        let usage = fixture.session.run_turn("Que contient input.txt ?").await.unwrap();
+
+        assert_eq!(usage.tool_calls, 1, "the corrected call must really run");
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 3);
+        let correction = last_user_text(&requests[1]);
+        assert!(correction.contains("n'a pas été exécuté") && correction.contains("du texte suit l'appel JSON"));
+        assert!(requests[2].messages.iter().any(|message| matches!(message,
+            Message::Tool { content, is_error: false, .. } if content.contains("fixture"))));
+        let mut shown = String::new();
+        while let Ok(frame) = events.try_recv() {
+            if let Event::TextDelta { text, .. } = frame.event {
+                shown.push_str(&text);
+            }
+        }
+        assert!(!shown.contains("invalide"), "a corrected call is not an error for the user: {shown}");
+    }
+
+    #[tokio::test]
+    async fn repeated_unreadable_calls_end_with_a_visible_notice() {
+        let attempt = || turn(vec![invalid("JSON mal formé ou incomplet")], StopReason::EndTurn);
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Gguf,
+            vec![attempt(), attempt(), attempt()],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        let agent = fixture.session.add_root(fallback_node(&fixture.session, ProviderId::Gguf)).await.unwrap();
+        let mut events = fixture.session.subscribe();
+        let usage = fixture.session.run_turn("Analyse le projet").await.unwrap();
+
+        // Two corrections, then the turn stops instead of looping.
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(usage.tool_calls, 0);
+        let mut shown = String::new();
+        let mut summary = String::new();
+        while let Ok(frame) = events.try_recv() {
+            match frame.event {
+                Event::TextDelta { text, .. } => shown.push_str(&text),
+                Event::AgentCompleted { report, .. } => summary = report.summary,
+                _ => {}
+            }
+        }
+        assert!(shown.contains("appel d'outil invalide (JSON mal formé ou incomplet)"));
+        assert_eq!(summary, shown);
+        assert!(matches!(
+            fixture.session.tree().await.get(&agent).unwrap().state,
+            zaalis_core::AgentState::Done
+        ));
+    }
+
+    #[tokio::test]
+    async fn an_announced_action_without_a_call_is_nudged_once() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Gguf,
+            vec![
+                turn(vec![text("Je vais analyser le projet.\n\nCommençons par lister le dossier principal.")], StopReason::EndTurn),
+                turn(vec![read_call()], StopReason::ToolUse),
+                turn(vec![text("Je vais maintenant lire la suite.")], StopReason::EndTurn),
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture.session.add_root(fallback_node(&fixture.session, ProviderId::Gguf)).await.unwrap();
+        fixture.session.run_turn("analyse et dit moi que contien le projet").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        // Nudged after the first announcement only: the second one ends the turn.
+        assert_eq!(requests.len(), 3);
+        assert!(last_user_text(&requests[1]).contains("annoncé une action sans l'exécuter"));
+        let nudges = requests[2].messages.iter().filter(|message| matches!(message,
+            Message::User { text, .. } if text.contains("annoncé une action"))).count();
+        assert_eq!(nudges, 1);
+    }
+
+    #[tokio::test]
+    async fn a_model_with_native_tools_is_never_nudged() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![turn(vec![text("Je vais lister le dossier.")], StopReason::EndTurn)],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::ReadOnly))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Liste le dossier").await.unwrap();
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    }
+
+    #[test]
+    fn only_a_short_unfinished_announcement_counts_as_pending() {
+        use crate::runner::announces_pending_action as pending;
+        assert!(pending("Je vais analyser le projet.\n\nCommençons par lister le contenu du dossier principal."));
+        assert!(pending("Let me read the configuration first."));
+        assert!(!pending("Le projet contient un serveur Express et une interface web."));
+        assert!(!pending("Je vais bien, merci !"));
+        assert!(!pending(&format!("Je vais lister les points suivants :\n\n{}", "- un point détaillé\n".repeat(60))));
+    }
+
+    #[tokio::test]
+    async fn a_read_is_never_reported_as_a_changed_file() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![
+                turn(vec![read_call()], StopReason::ToolUse),
+                turn(vec![read_call()], StopReason::ToolUse),
+                turn(vec![text("Le fichier contient « fixture ».")], StopReason::EndTurn),
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::ReadOnly))
+            .await
+            .unwrap();
+        let mut events = fixture.session.subscribe();
+        fixture.session.run_turn("Lis input.txt").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        assert!(requests.iter().all(|request| !request.system.contains("Fichiers déjà créés/modifiés")));
+        // Without a change, the prompt is identical round after round, which
+        // is what lets a local engine reuse its cached prefix.
+        assert!(requests.windows(2).all(|pair| pair[0].system == pair[1].system));
+        while let Ok(frame) = events.try_recv() {
+            if let Event::AgentCompleted { report, .. } = frame.event {
+                assert!(report.files_changed.is_empty(), "{:?}", report.files_changed);
+            }
+        }
+    }
+
+    /// A tool whose description alone fills a small context window.
+    #[derive(Debug)]
+    struct BulkyTool;
+
+    #[async_trait]
+    impl Tool for BulkyTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "deep_search".into(),
+                description: "recherche approfondie ".repeat(1200),
+                input_schema: serde_json::json!({"type":"object"}),
+            }
+        }
+
+        fn access(
+            &self,
+            _input: &serde_json::Value,
+            context: &ToolContext,
+        ) -> zaalis_core::Result<AccessRequest> {
+            Ok(AccessRequest::new(context.agent_id.clone(), "deep_search", AccessKind::Network))
+        }
+
+        async fn execute(
+            &self,
+            _input: serde_json::Value,
+            _context: ToolContext,
+            _cancel: CancellationToken,
+        ) -> zaalis_core::Result<ToolResult> {
+            Ok(ToolResult { summary: "rien".into(), value: serde_json::json!({}) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_small_context_keeps_the_essential_tools_instead_of_failing() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Gguf,
+            vec![turn(vec![text("Le dossier contient input.txt.")], StopReason::EndTurn)],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture.session.inner.tools.register(BulkyTool).expect("bulky tool");
+        let mut node = fallback_node(&fixture.session, ProviderId::Gguf);
+        node.model.capabilities.as_mut().expect("capabilities").max_context = Some(8192);
+        fixture.session.add_root(node).await.unwrap();
+        fixture.session.run_turn("Que contient le dossier ?").await.unwrap();
+
+        let requests = provider.requests.lock().expect("requests");
+        let names: Vec<_> = requests[0].tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(!names.contains(&"deep_search"), "the bulky tool must be dropped: {names:?}");
+        assert!(names.contains(&"read") && names.contains(&"list"));
+        assert!(requests[0].system.contains("CONTEXTE RÉDUIT"));
+    }
+
+    #[tokio::test]
+    async fn a_large_context_keeps_every_tool() {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Gguf,
+            vec![turn(vec![text("ok")], StopReason::EndTurn)],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        fixture.session.inner.tools.register(BulkyTool).expect("bulky tool");
+        let mut node = fallback_node(&fixture.session, ProviderId::Gguf);
+        node.model.capabilities.as_mut().expect("capabilities").max_context = Some(131_072);
+        fixture.session.add_root(node).await.unwrap();
+        fixture.session.run_turn("Bonjour").await.unwrap();
+        let requests = provider.requests.lock().expect("requests");
+        assert!(requests[0].tools.iter().any(|tool| tool.name == "deep_search"));
+        assert!(!requests[0].system.contains("CONTEXTE RÉDUIT"));
+    }
 }

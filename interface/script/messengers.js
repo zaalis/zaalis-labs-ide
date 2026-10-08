@@ -63,7 +63,10 @@
                     if (status.trigger) {
                         how.append(node('p', text('Dans WhatsApp, ouvrez la discussion avec vous-même (votre propre nom, « Moi »), puis commencez votre message par :', 'In WhatsApp, open the chat with yourself (your own name, “You”), then start your message with:')), node('code', `${status.trigger} ${text('résume où en est le projet', 'summarize where the project stands')}`, 'messenger-example'));
                         how.append(node('p', text(`Sans « ${status.trigger} », vos messages restent de simples notes : l’IA ne les lit pas.`, `Without “${status.trigger}”, your messages stay plain notes: the AI does not read them.`), 'messenger-hint'));
-                    } else how.append(node('p', text('Les numéros autorisés écrivent directement au numéro dédié.', 'Allowed numbers write directly to the dedicated number.')));
+                    } else {
+                        how.append(node('p', text('Depuis votre téléphone, écrivez directement à ce numéro WhatsApp, sans mot-clé : l’IA y répond comme un contact, erreurs comprises.', 'From your phone, write directly to this WhatsApp number, no keyword needed: the AI replies there like a contact, errors included.')));
+                        how.append(node('p', text('Numéros autorisés : ', 'Allowed numbers: ') + (status.allowedUsers || []).map(n => '+' + n).join(', '), 'messenger-hint'));
+                    }
                     stage.append(done, how, actions);
                     if (status.trigger) button(text('Envoyer un message de test', 'Send a test message'), () => act({ action: 'test' }, () => say(text('✓ Message envoyé. Ouvrez votre discussion avec vous-même sur le téléphone.', '✓ Message sent. Open your chat with yourself on the phone.'), 'success')), actions, true);
                     button(uiText('Déconnecter'), () => act({ action: 'disconnect' }, () => say(text('WhatsApp est déconnecté de ce PC.', 'WhatsApp is disconnected from this PC.'))), actions);
@@ -75,7 +78,7 @@
                     const grid = node('div', undefined, 'messenger-pairing');
                     qrImage = node('img', undefined, 'messenger-qr'); qrImage.alt = text('QR code d’association WhatsApp', 'WhatsApp pairing QR code'); qrImage.src = status.qr;
                     const steps = node('ol', undefined, 'integration-steps');
-                    for (const step of [text('Ouvrez WhatsApp sur votre téléphone.', 'Open WhatsApp on your phone.'), text('Android : touchez ⋮ puis « Appareils connectés ». iPhone : Réglages → « Appareils connectés ».', 'Android: tap ⋮ then “Linked devices”. iPhone: Settings → “Linked devices”.'), text('Touchez « Connecter un appareil ».', 'Tap “Link a device”.'), text('Visez ce QR code avec le téléphone.', 'Point the phone at this QR code.')]) steps.append(node('li', step));
+                    for (const step of [status.mode === 'bot' ? text('Ouvrez WhatsApp du numéro dédié (second téléphone, eSIM ou WhatsApp Business) — pas votre compte personnel.', 'Open WhatsApp of the dedicated number (second phone, eSIM or WhatsApp Business) — not your personal account.') : text('Ouvrez WhatsApp sur votre téléphone.', 'Open WhatsApp on your phone.'), text('Android : touchez ⋮ puis « Appareils connectés ». iPhone : Réglages → « Appareils connectés ».', 'Android: tap ⋮ then “Linked devices”. iPhone: Settings → “Linked devices”.'), text('Touchez « Connecter un appareil ».', 'Tap “Link a device”.'), text('Visez ce QR code avec le téléphone.', 'Point the phone at this QR code.')]) steps.append(node('li', step));
                     const side = node('div'); side.append(steps, node('p', text('Le code se renouvelle tout seul toutes les 20 secondes environ : gardez cette page ouverte.', 'The code renews itself about every 20 seconds: keep this page open.'), 'messenger-hint'));
                     grid.append(qrImage, side); stage.append(grid, actions);
                     button(text('Annuler', 'Cancel'), () => act({ action: 'disconnect' }), actions); return;
@@ -164,6 +167,41 @@
             }
             render(true);
 
+            // ── WhatsApp: how replies arrive. WhatsApp shows everything an
+            // account sends as that account's own, so only a dedicated number
+            // can answer like a contact. ──
+            if (whatsapp) {
+                const box = node('section', undefined, 'integration-section messenger-mode');
+                box.append(node('h4', text('Comment l’IA vous répond', 'How the AI replies')));
+                const current = status.mode || 'self-chat';
+                const choice = (value, title, detail) => {
+                    const label = node('label', undefined, 'messenger-mode-option');
+                    const input = node('input'); input.type = 'radio'; input.name = 'whatsapp-mode'; input.value = value; input.checked = current === value;
+                    const copy = node('span'); copy.append(node('strong', title), node('span', detail, 'messenger-hint'));
+                    label.append(input, copy); box.append(label); return input;
+                };
+                choice('self-chat', text('Discussion avec vous-même', 'Chat with yourself'),
+                    text('Vous écrivez « zaalis! … » dans votre propre discussion. WhatsApp affiche tout ce qui part de votre compte comme vos messages : les réponses apparaissent de votre côté, précédées de « Zaalis · ».', 'You write “zaalis! …” in your own chat. WhatsApp shows everything your account sends as your messages: replies appear on your side, prefixed with “Zaalis · ”.'));
+                const dedicated = choice('bot', text('Numéro dédié — l’IA répond comme un contact', 'Dedicated number — the AI replies like a contact'),
+                    text('Reliez un second compte WhatsApp (autre SIM, eSIM ou WhatsApp Business). Vous lui écrivez depuis votre téléphone : chaque réponse de l’IA, erreurs comprises, arrive comme le message reçu d’une personne, avec « en train d’écrire… » et accusé de lecture.', 'Link a second WhatsApp account (another SIM, eSIM or WhatsApp Business). You write to it from your phone: every AI reply, errors included, arrives like a message received from a person, with “typing…” and read receipts.'));
+                const peersLabel = node('label', text('Votre numéro personnel, autorisé à écrire au numéro dédié', 'Your personal number, allowed to write to the dedicated number'), 'lab-field');
+                const peers = node('input'); peers.type = 'text'; peers.inputMode = 'tel'; peers.autocomplete = 'off'; peers.placeholder = '33612345678'; peers.value = (status.allowedUsers || []).join(', ');
+                peersLabel.append(peers, node('span', text('Avec l’indicatif pays, sans « + » ni espaces. Plusieurs numéros : séparez-les par des virgules.', 'With the country code, no “+” or spaces. Several numbers: separate them with commas.'), 'messenger-hint'));
+                const sync = () => { peersLabel.hidden = !dedicated.checked; };
+                box.querySelectorAll('input[name="whatsapp-mode"]').forEach(input => { input.onchange = sync; }); sync();
+                const modeActions = node('div', undefined, 'integration-actions');
+                box.append(peersLabel, modeActions); card.append(box);
+                button(text('Enregistrer le mode', 'Save mode'), async () => {
+                    const mode = dedicated.checked ? 'bot' : 'self-chat';
+                    const allowedUsers = peers.value.split(/[,;\n]/).map(value => value.trim()).filter(Boolean);
+                    if (mode !== current && status.configured && !confirm(text('Changer de mode déconnecte le compte WhatsApp relié à ce PC. Vous scannerez ensuite le QR code avec le compte du nouveau mode. Continuer ?', 'Changing mode disconnects the WhatsApp account linked to this PC. You will then scan the QR code with the account for the new mode. Continue?'))) return;
+                    await api(provider, { action: 'mode', mode, allowedUsers });
+                    cleanup(); target.replaceChildren(); await mount(provider, target, back);
+                    const feedback = target.querySelector('.integration-notice');
+                    if (feedback) { feedback.textContent = mode === 'bot' ? text('✓ Mode numéro dédié enregistré. Connectez WhatsApp et scannez le QR code avec le compte du numéro dédié.', '✓ Dedicated number mode saved. Connect WhatsApp and scan the QR code with the dedicated number’s account.') : text('✓ Mode discussion avec vous-même enregistré.', '✓ Chat with yourself mode saved.'); feedback.classList.add('success'); }
+                }, modeActions, true);
+            }
+
             // ── 2. The conversation the messenger continues ──
             const contextBox = node('section', undefined, 'integration-section');
             contextBox.append(node('h4', text('Conversation à continuer', 'Conversation to continue')), node('p', text('Reprenez une conversation de l’IDE avec son projet, son historique et ses modèles. Sans choix, une nouvelle conversation est créée au premier message.', 'Resume an IDE conversation with its project, history and models. Without a choice, a new conversation is created on the first message.')));
@@ -193,7 +231,9 @@
             }, contextActions);
             const trigger = whatsapp ? (status.trigger || 'zaalis!') + ' ' : '';
             contextBox.append(node('p', text(`Les droits du projet restent ceux choisis dans l’IDE. Pour ajuster un plan, écrivez simplement vos consignes. Pour une validation, répondez ${trigger}/approve ou ${trigger}/deny suivi du code reçu. Gardez Zaalis ouvert sur ce PC.`, `Project permissions follow the IDE configuration. To adjust a plan, simply write your instructions. To answer an approval, reply ${trigger}/approve or ${trigger}/deny followed by the received code. Keep Zaalis open on this PC.`), 'integration-footnote'));
-            card.append(node('p', whatsapp ? text('Connexion par WhatsApp Web via un pont communautaire, pas l’API officielle de Meta. Seuls vos messages commençant par « zaalis! » dans votre discussion avec vous-même déclenchent l’IA.', 'WhatsApp Web connection through a community bridge, not Meta’s official API. Only your messages starting with “zaalis!” in your chat with yourself trigger the AI.') : text('Seule la conversation Telegram que vous avez associée peut utiliser votre IA. Les autres utilisateurs et les groupes sont ignorés.', 'Only your paired Telegram conversation can use your AI. Other users and groups are ignored.'), 'integration-footnote'));
+            card.append(node('p', whatsapp ? (status.mode === 'bot'
+                ? text('Connexion par WhatsApp Web via un pont communautaire, pas l’API officielle de Meta. Seuls les numéros autorisés peuvent écrire à l’IA ; les autres contacts et les groupes sont ignorés.', 'WhatsApp Web connection through a community bridge, not Meta’s official API. Only allowed numbers can write to the AI; other contacts and groups are ignored.')
+                : text('Connexion par WhatsApp Web via un pont communautaire, pas l’API officielle de Meta. Seuls vos messages commençant par « zaalis! » dans votre discussion avec vous-même déclenchent l’IA.', 'WhatsApp Web connection through a community bridge, not Meta’s official API. Only your messages starting with “zaalis!” in your chat with yourself trigger the AI.')) : text('Seule la conversation Telegram que vous avez associée peut utiliser votre IA. Les autres utilisateurs et les groupes sont ignorés.', 'Only your paired Telegram conversation can use your AI. Other users and groups are ignored.'), 'integration-footnote'));
 
             const poll = async () => { if (!active) return; try { status = await api(provider); if (active) render(false); } catch {} if (active) timer = setTimeout(poll, ['pairing', 'linking', 'connecting'].includes(status.state) ? 1200 : 3000); };
             timer = setTimeout(poll, 1200);

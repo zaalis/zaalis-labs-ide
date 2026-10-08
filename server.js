@@ -422,7 +422,7 @@ function chatsFile(userId, kind) {
 const SHARED_CONFIG_DEFAULTS = {
   ollamaUrl: 'http://127.0.0.1:11434',
   ollamaModel: 'qwen3:8b',
-  ggufCtx: 8192,
+  ggufCtx: 16384,
   ggufVariant: '',
   ggufGpuLayers: '',
   terminalProfile: DEFAULT_TERMINAL_PROFILE
@@ -860,6 +860,7 @@ app.post('/api/integrations/messengers/:provider', async (req, res) => {
     else if (body.action === 'disconnect') result = await messengers.stop(req.user.id, provider, true);
     else if (body.action === 'test') result = await messengers.test(req.user.id, provider);
     else if (body.action === 'reset' && provider === 'telegram') result = await messengers.resetTelegram(req.user.id);
+    else if (body.action === 'mode' && provider === 'whatsapp') result = await messengers.whatsappMode(req.user.id, body);
     else if (body.action === 'start') {
       result = provider === 'telegram' ? await messengers.startTelegram(req.user.id) : await messengers.startWhatsApp(req.user.id);
       if (result.url) result.opened = openInExternalBrowser(result.url);
@@ -3152,7 +3153,7 @@ async function ensureEngine(modelFile, preferredVariant, opts) {
   const modelPath = ggufModelPath(modelFile);
   if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
   // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
-  let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = 8192;
+  let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = SHARED_CONFIG_DEFAULTS.ggufCtx;
   ctx = Math.max(512, Math.min(131072, ctx));
   const nglRaw = opts.gpuLayers;
   const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);

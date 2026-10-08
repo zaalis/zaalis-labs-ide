@@ -75,7 +75,7 @@ const CONTEXT_WINDOWS = {
     'kimi-k2.6': 256000, _default: 256000
   },
   local: { _default: 8000 },
-  gguf:  { _default: 8192 }   // matches the engine's --ctx-size
+  gguf:  { _default: 16384 }   // matches the engine's --ctx-size
 };
 
 // Provider identity + which stored API key unlocks it. `keyName` is empty for

@@ -115,3 +115,27 @@ test('Telegram explains a wrong key when linking the bot', async () => {
  const { m } = fixture(); m.fetch = async () => ({ ok: false, status: 404, json: async () => ({ ok: false, error_code: 404 }) });
  await assert.rejects(m.configureTelegram('alice', '123456789:abcdefghijklmnopqrstuvwxyz'), /BotFather/);
 });
+test('a dedicated WhatsApp number replies like a contact, errors included, while the self-chat keeps its label', async () => {
+ const bot = gatewayFixture('bot'); await bot.m.startWhatsApp('alice'); bot.clients[0].emit('ready');
+ bot.clients[0].emit('message_create', bot.message('plain', 'bonjour')); await new Promise(r => setTimeout(r, 20));
+ assert.deepEqual(bot.calls.at(-1), { to: '1555@s.whatsapp.net', text: 'AI answer' });
+ bot.m.answer = async () => { throw Error('[invalid_request] modèle indisponible'); };
+ bot.clients[0].emit('message_create', bot.message('failing', 'encore')); await new Promise(r => setTimeout(r, 20));
+ assert.ok(!bot.calls.at(-1).text.startsWith('Zaalis · '), 'an error is a reply from the contact too');
+ const self = gatewayFixture(); await self.m.startWhatsApp('alice'); self.clients[0].emit('ready');
+ self.clients[0].emit('message_create', self.message('trigger', 'zaalis! bonjour')); await new Promise(r => setTimeout(r, 20));
+ assert.equal(self.calls.at(-1).text, 'Zaalis · AI answer');
+});
+test('the WhatsApp reply mode is validated, unlinks the old account and survives a conversation change', async () => {
+ const { m, clients } = gatewayFixture(); await m.startWhatsApp('alice'); clients[0].emit('ready');
+ await assert.rejects(m.whatsappMode('alice', { mode: 'bot', allowedUsers: [] }), /correspondant autorisé/);
+ await assert.rejects(m.whatsappMode('alice', { mode: 'bot', allowedUsers: ['abc'] }), /indicatif pays/);
+ const status = await m.whatsappMode('alice', { mode: 'bot', allowedUsers: ['+33 6 12 34 56 78'] });
+ assert.equal(status.mode, 'bot'); assert.deepEqual(status.allowedUsers, ['33612345678']);
+ // The personal account linked for the self-chat must not become the bot.
+ assert.equal(status.connected, false); assert.equal(m.user('alice').messengers.whatsapp.enabled, false);
+ m.continuation = { bind: () => ({ kind: 'chat', conversationId: 'c1' }), choices: () => [], validateExecution: value => value };
+ m.settings('alice', { provider: 'whatsapp', kind: 'chat', conversationId: 'c1' });
+ assert.equal(m.user('alice').messengers.whatsapp.mode, 'bot');
+ assert.deepEqual(m.user('alice').messengers.whatsapp.allowedUsers, ['33612345678']);
+});
