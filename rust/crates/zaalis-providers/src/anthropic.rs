@@ -287,7 +287,15 @@ impl AnthropicParser {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
                 if let Some(usage) = value.get("usage") {
+                    // The final delta carries cumulative counts. When it also
+                    // restates the input side, it supersedes message_start.
                     self.usage.output_tokens = number(usage, "output_tokens");
+                    if usage.get("input_tokens").is_some() {
+                        self.usage.input_tokens = number(usage, "input_tokens")
+                            + number(usage, "cache_read_input_tokens")
+                            + number(usage, "cache_creation_input_tokens");
+                        self.usage.cached_tokens = number(usage, "cache_read_input_tokens");
+                    }
                 }
             }
             "error" => {
@@ -460,6 +468,16 @@ mod tests {
         assert_eq!(parser.usage.input_tokens,130);
         assert_eq!(parser.usage.cached_tokens,100);
         assert_eq!(parser.usage.total_tokens(),133);
+    }
+
+    #[test]
+    fn final_delta_usage_supersedes_the_start_snapshot() {
+        let mut parser=AnthropicParser::default();
+        parser.handle(&json!({"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}),&mut Vec::new());
+        parser.handle(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":42}}),&mut Vec::new());
+        assert_eq!((parser.usage.input_tokens,parser.usage.output_tokens),(10,42));
+        parser.handle(&json!({"type":"message_delta","delta":{},"usage":{"input_tokens":12,"cache_read_input_tokens":50,"output_tokens":44}}),&mut Vec::new());
+        assert_eq!((parser.usage.input_tokens,parser.usage.cached_tokens,parser.usage.output_tokens),(62,50,44));
     }
 
     fn request() -> TurnRequest {

@@ -45,7 +45,7 @@ class MessengerContinuation {
       const seen = new Set(messages.map(m => m.remoteId).filter(Boolean));
       for (const m of old?.messages || []) if (m.remoteId && !seen.has(m.remoteId)) messages.push(m);
       return { ...c, messages, execution: this.execution.get(this.key(id, kind, c.id)) || old?.execution || c.execution,
-        remoteRevision: old?.remoteRevision || c.remoteRevision,
+        remoteRevision: old?.remoteRevision || c.remoteRevision, remoteRunning: old?.remoteRunning,
         ...(old?.remoteRevision && old.remoteRevision !== c.remoteRevision ? { sessionId: old.sessionId, apiHistory: undefined } : {}) };
     });
   }
@@ -55,19 +55,31 @@ class MessengerContinuation {
     const execution = this.execution.get(key) || conv.execution;
     if (!execution) throw Error('Rouvrez cette conversation dans l’IDE avant de la reprendre.');
     this.active.add(key);
-    const append = (type, text) => {
+    // `running` tells the IDE that this conversation is answering from a
+    // messenger, so the open chat shows it instead of looking idle.
+    const append = (type, text, running) => {
       const list = this.read(id, binding.kind), saved = list.find(c => c.id === conv.id);
       if (!saved) throw Error('La conversation a été supprimée.');
-      saved.messages ||= []; saved.messages.push({ type, text, label: type === 'user' ? input.provider : 'Zaalis', remoteId: crypto.randomUUID() });
+      saved.messages ||= []; if (text) saved.messages.push({ type, text, label: type === 'user' ? input.provider : 'Zaalis', remoteId: crypto.randomUUID() });
+      if (running) saved.remoteRunning = input.provider; else delete saved.remoteRunning;
       saved.remoteRevision = crypto.randomUUID(); delete saved.apiHistory;
       fs.writeFileSync(this.file(id, binding.kind), JSON.stringify(list, null, 2));
     };
     try {
       const history = (conv.messages || []).filter(m => m.type === 'user' || (m.type === 'ai' && !m.activity)).map(m => ({ role: m.type === 'user' ? 'user' : 'assistant', content: m.markdown || m.text || '' }));
-      append('user', input.message);
-      const result = await this.run(id, { ...execution, kind: binding.kind, conversationId: conv.id, root: conv.projectPath || null,
+      append('user', input.message, true);
+      let result;
+      try {
+        result = await this.run(id, { ...execution, kind: binding.kind, conversationId: conv.id, root: conv.projectPath || null,
         sessionId: conv.sessionId, history, message: input.message, images: input.images || [], signal: input.signal }, input.onEvent);
-      if (result.error) throw Error(result.error);
+        if (result.error) throw Error(result.error);
+      } catch (error) {
+        // The failure belongs to the conversation too: the IDE shows why
+        // nothing was answered (quota reached, provider down, stopped…).
+        const reason = failureText(error);
+        try { append('system', 'Échec de la réponse demandée depuis ' + (input.provider === 'whatsapp' ? 'WhatsApp' : 'Telegram') + ' : ' + reason); } catch {}
+        throw Object.assign(Error(reason), { failed: true });
+      }
       const reply = result.response || 'L’IA n’a pas renvoyé de réponse.';
       append('ai', reply);
       const list = this.read(id, binding.kind), saved = list.find(c => c.id === conv.id);
@@ -76,4 +88,9 @@ class MessengerContinuation {
     } finally { this.active.delete(key); }
   }
 }
-module.exports = { MessengerContinuation };
+// Provider errors arrive as "[code] message"; keep the readable part.
+function failureText(error) {
+  const text = String(error?.message || error || '').replace(/^\s*\[[\w-]+\]\s*/, '').trim();
+  return text || 'Tour interrompu.';
+}
+module.exports = { MessengerContinuation, failureText };

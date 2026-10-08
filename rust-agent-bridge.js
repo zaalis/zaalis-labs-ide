@@ -245,9 +245,9 @@ class RustAgentBridge {
     return client;
   }
 
-  async usage(userId, keys, from, to) {
+  async usage(userId, keys, from, to, zone = []) {
     const existing=this.clients.get(userId);
-    return (existing ? existing.client : this._client(userId, keys)).request("usage.query", { from_ms: from, to_ms: to });
+    return (existing ? existing.client : this._client(userId, keys)).request("usage.query", { from_ms: from, to_ms: to, ...(zone.length ? { zone } : {}) });
   }
 
   async run(options, onEvent) {
@@ -338,17 +338,30 @@ class RustAgentBridge {
       }
     }
     const text = new Map();
+    const textSegments = new Map();
     const reasoning = new Map();
     const startedTools = new Map();
     const toolResults = [];
     let usage = null;
+    // Exact provider-reported figures only: the session total before this
+    // prompt (to isolate the turn) and the lead's last measured context.
+    const sum = (agents, key) => (agents || []).reduce((n, agent) => n + Number(agent?.usage?.[key] || 0), 0);
+    const baseline = { input: sum(made.agents, 'input_tokens'), output: sum(made.agents, 'output_tokens') };
+    let leadUsage = lead.usage || null;
     let failure = '';
     this.sessions.set(sessionId, { client, userId: options.userId });
     let finish;
     const completed = new Promise((resolve) => { finish = resolve; });
     const off = client.onSession(sessionId, (frame) => {
       const agent = String(frame.agent_id || 'session');
-      if (frame.type === EVENTS.TEXT_DELTA) text.set(agent, (text.get(agent) || '') + String(frame.text || ''));
+      if (frame.type === EVENTS.TEXT_DELTA) {
+        // Text written around tool calls comes in separate segments: keep
+        // them as separate paragraphs instead of gluing their sentences.
+        const previous = text.get(agent) || '', segment = String(frame.segment_id || '');
+        const gap = previous && textSegments.get(agent) !== segment && !/\n\s*$/.test(previous) ? '\n\n' : '';
+        textSegments.set(agent, segment);
+        text.set(agent, previous + gap + String(frame.text || ''));
+      }
       if (frame.type === EVENTS.REASONING_DELTA) reasoning.set(agent, (reasoning.get(agent) || '') + String(frame.text || ''));
       if (frame.type === EVENTS.TOOL_STARTED) {
         startedTools.set(String(frame.call_id), { tool: frame.tool, input: frame.input || {} });
@@ -370,6 +383,10 @@ class RustAgentBridge {
       if (frame.type === EVENTS.BUDGET_EXHAUSTED) onEvent({ type: 'budget_required', sessionId, requestId: frame.request_id, limit: frame.limit, usage: frame.usage });
       if (frame.type === EVENTS.AGENT_STATE_CHANGED) onEvent({ type: 'agent_state', agentId: frame.agent_id, state: frame.state });
       if (frame.type === EVENTS.PROVIDER_ERROR || frame.type === EVENTS.AGENT_FAILED) failure = frame.message || frame.error || 'Erreur agent.';
+      if (frame.type === EVENTS.USAGE_UPDATED && String(frame.agent_id || '') === String(lead.id) && frame.usage) {
+        leadUsage = frame.usage;
+        if (leadUsage.context_tokens) onEvent({ type: 'context_measured', sessionId, tokens: leadUsage.context_tokens, compactions: leadUsage.context_compactions || 0 });
+      }
       if (frame.type === EVENTS.TURN_COMPLETED) { usage = frame.usage || usage; finish(); }
       onEvent({ type: 'rust_event', event: frame });
     });
@@ -396,6 +413,10 @@ class RustAgentBridge {
           webResults: usage.web_results || 0,
           webPagesRead: usage.web_pages_read || 0,
           contextCompactions: usage.context_compactions || 0,
+          // Lead agent: tokens in its most recent measured provider call.
+          context: Number(leadUsage?.context_tokens || 0),
+          turnInput: Math.max(0, Number(usage.input_tokens || 0) - baseline.input),
+          turnOutput: Math.max(0, Number(usage.output_tokens || 0) - baseline.output),
         } : null,
         toolResults,
         sessionId,

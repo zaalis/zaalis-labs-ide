@@ -218,6 +218,11 @@ pub struct Usage {
     pub context_compactions: u32,
     pub rounds: u32,
     pub wall_time_ms: u64,
+    /// Exact size of the context sent in the most recent measured provider
+    /// call: its input plus output tokens, as reported by the provider.
+    /// Zero until a provider reports usage. Never summed across calls.
+    #[serde(default)]
+    pub context_tokens: u64,
 }
 
 impl Usage {
@@ -237,6 +242,9 @@ impl Usage {
         self.context_compactions += other.context_compactions;
         self.rounds += other.rounds;
         self.wall_time_ms = self.wall_time_ms.max(other.wall_time_ms);
+        if other.context_tokens > 0 {
+            self.context_tokens = other.context_tokens;
+        }
     }
 
     /// Which limit, if any, this usage has reached.
@@ -1000,6 +1008,18 @@ mod tests {
         assert_eq!(total.total_tokens(), 200);
         // Wall time is concurrent, so it is a max rather than a sum.
         assert_eq!(total.wall_time_ms, 900);
+    }
+
+    #[test]
+    fn context_size_is_the_latest_measured_call_not_a_sum() {
+        let mut usage = Usage::default();
+        usage.merge(&Usage { input_tokens: 100, output_tokens: 10, context_tokens: 110, ..Usage::default() });
+        usage.merge(&Usage { input_tokens: 150, output_tokens: 20, context_tokens: 170, ..Usage::default() });
+        assert_eq!(usage.total_tokens(), 280);
+        assert_eq!(usage.context_tokens, 170);
+        // An unmeasured call keeps the last exact measurement.
+        usage.merge(&Usage::default());
+        assert_eq!(usage.context_tokens, 170);
     }
 
     #[test]

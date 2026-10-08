@@ -248,7 +248,7 @@ $('#clear-terminal').addEventListener('click', () => {
     state.currentConvId = null;
     state.currentAgentConvId = null;
     state.chatHistory = [];
-    state.contextTokens = 0;
+    resetContextMeasure();
     if (typeof updateTokenMeter === 'function') updateTokenMeter();
     addMsg($('#chat-messages'), 'system', null, TRANSLATIONS[lang]['terminal-cleared']);
     addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['history-cleared']);
@@ -669,17 +669,32 @@ async function handleRustInteractiveEvent(event) {
     }
 }
 
-// Token / context meter.
+// Token / context meter. It only ever shows what the provider reported for
+// the most recent model call of this conversation; nothing is estimated.
+function resetContextMeasure() {
+    state.contextTokens = 0;
+    state.contextMeasured = false;
+}
+function recordContextMeasure(tokens) {
+    const value = Number(tokens);
+    if (!Number.isFinite(value) || value <= 0) return;
+    state.contextTokens = Math.round(value);
+    state.contextMeasured = true;
+    updateTokenMeter();
+}
 function updateTokenMeter() {
     const fill = $('#token-fill'), txt = $('#token-text');
     if (!fill || !txt) return;
     const win = contextWindow(modelSelect.value, submodelSelect.value);
-    const used = state.contextTokens || 0;
-    const pct = Math.min(100, Math.round((used / win) * 100));
+    const measured = !!state.contextMeasured;
+    const used = measured ? state.contextTokens || 0 : 0;
+    const pct = measured ? Math.min(100, Math.round((used / win) * 100)) : 0;
     fill.style.width = pct + '%';
     fill.classList.toggle('warn', pct >= 70 && pct < 90);
     fill.classList.toggle('full', pct >= 90);
-    txt.textContent = `${fmtTokens(used)} / ${fmtTokens(win)} (${pct}%)`;
+    txt.textContent = measured ? `${fmtTokens(used)} / ${fmtTokens(win)} (${pct}%)` : `— / ${fmtTokens(win)}`;
+    const meter = $('#token-meter');
+    if (meter) meter.dataset.measured = String(measured);
 }
 
 // Auto-compact the context when it nears the model's window (summarize old turns).
@@ -695,14 +710,14 @@ async function compactContext(model, submodel, opts = {}) {
     const win = contextWindow(model, submodel);
     const threshold = (model === 'local' || model === 'gguf') ? 0.60 : 0.75;
     const lang = state.language || 'fr';
-    if (!force && state.contextTokens < win * threshold) return false;
+    // Automatic compaction relies on the provider's exact measurement only.
+    if (!force && (!state.contextMeasured || state.contextTokens < win * threshold)) return false;
     if (state.chatHistory.length <= 4) {
         if (force) addMsg($('#chat-messages'), 'system', null,
             lang === 'en' ? 'Nothing to compact yet — the conversation is too short.'
                           : 'Rien à compacter pour l’instant — la conversation est trop courte.');
         return false;
     }
-    const beforeTokens = state.contextTokens;
     const keep = 4;
     const older = state.chatHistory.slice(0, state.chatHistory.length - keep);
     const recent = state.chatHistory.slice(state.chatHistory.length - keep);
@@ -715,12 +730,11 @@ async function compactContext(model, submodel, opts = {}) {
         const data = await callAI(model, submodel, prompt, null, [], undefined, []);
         const summary = (data && data.response) || '';
         state.chatHistory = [{ role: 'user', content: (lang === 'en' ? '[Earlier context summary]: ' : '[Résumé du contexte précédent] : ') + summary }, ...recent];
-        state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+        // The new size is unknown until the provider measures the next call.
+        resetContextMeasure();
         updateTokenMeter();
-        const freed = Math.max(0, beforeTokens - state.contextTokens);
-        const freedTxt = freed > 0 ? ` (−${fmtTokens(freed)})` : '';
         addMsg($('#chat-messages'), 'system', null,
-            (lang === 'en' ? 'Context compacted.' : 'Contexte compacté.') + freedTxt);
+            lang === 'en' ? 'Context compacted. Its exact size will be measured on the next reply.' : 'Contexte compacté. Sa taille exacte sera mesurée à la prochaine réponse.');
         saveConversation();
         return true;
     } catch {
@@ -941,9 +955,10 @@ async function sendChat(input) {
     addMsg($('#chat-messages'), 'user', lang === 'en' ? 'You' : 'Vous', displayMsg);
     saveConversation('chat');
     const activeConversation = state.conversations.find(conv => conv.id === state.currentConvId);
-    const liveActivity = createLiveAgentActivity($('#chat-messages'));
-    let liveActivityFinished = false;
-    const body = addTypingMsg($('#chat-messages'), modelLabel);
+    // One message holds the whole turn, in order: text, actions, file changes.
+    const timeline = window.ZaalisTimeline.create($('#chat-messages'), { label: modelLabel });
+    const body = timeline.body;
+    if (isMaxReasoning()) body.classList.add('max-reasoning-text');
 
     // For local models, limit history to avoid overflowing the context window.
     // Keep only the last N turns so the system prompt + project context fit.
@@ -964,14 +979,6 @@ async function sendChat(input) {
         }
     }
 
-    // Reflect the prompt immediately. Exact provider usage is applied as soon
-    // as it arrives; until then the rendered response advances the output
-    // estimate so the meter never stays frozen during a turn.
-    const contextTokensBeforeTurn = state.contextTokens || state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
-    state.contextTokens = contextTokensBeforeTurn + estimateTokens(aiMessage);
-    updateTokenMeter();
-
-    const t0 = Date.now();
     const controller = new AbortController();
     chatAbort = controller;
     setChatBusy(true);
@@ -980,52 +987,31 @@ async function sendChat(input) {
             conversationId: activeConversation?.id,
             sessionId: activeConversation?.sessionId,
             onEvent: (event) => {
-                if (liveActivity) liveActivity.onEvent(event);
+                if (event && event.type === 'context_measured') recordContextMeasure(event.tokens);
+                timeline.onEvent(event);
                 window.ZaalisWorkspace?.onAgentEvent(event);
             }
         });
+        if (data.usage) {
+            recordContextMeasure(data.usage.context);
+            state.lastTurnUsage = { input: data.usage.turnInput || 0, output: data.usage.turnOutput || 0, model: `${model} / ${submodel}` };
+        }
         if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, activeConversation);
-        stopThinking(body);
         if (data.error) {
-            if (liveActivity) liveActivity.fail(data.error);
-            body.textContent = data.error;
-            body.classList.add('error');
+            timeline.fail(data.error);
         } else {
             completed = true;
-            if (liveActivity) {
-                liveActivity.finish(data);
-                liveActivityFinished = true;
-            }
-            const duration = Date.now() - t0;
-            if (isMaxReasoning()) body.classList.add('max-reasoning-text');
-            const reasoning = data.thinking ? reasoningBlock(data.thinking, duration) : '';
             const responseText = data.response || '';
-            body.dataset.markdownSource = responseText;
             const formatted = formatAIResponse(responseText);
             const isImg = formatted.includes('generated-image');
-            // `usage` from the Rust agent is the billable total of every
-            // provider round (including tool-follow-up rounds). It is not the
-            // size of the final provider context and can therefore be larger
-            // than the model window. Keep the meter tied to the active chat
-            // history instead.
-            const liveInputTokens = contextTokensBeforeTurn + estimateTokens(aiMessage);
-            const updateLiveTokens = (visibleText, final) => {
-                const output = estimateTokens(visibleText);
-                state.contextTokens = liveInputTokens + output;
-                updateTokenMeter();
-            };
-            // Generated image = single rectangle (instant); text = streamed word-by-word.
+            // A generated image is a single picture, not a working timeline.
             body.classList.toggle('has-image', isImg);
             if (isImg) {
-                body.innerHTML = reasoning + formatted;
-                updateLiveTokens(responseText, true);
+                timeline.finish(data);
+                body.innerHTML = formatted;
+                body.dataset.markdownSource = responseText;
             } else {
-                body.innerHTML = reasoning + '<div class="stream-target"></div>';
-                await streamInto(body.querySelector('.stream-target'), responseText, formatted, controller.signal, $('#chat-messages'), updateLiveTokens);
-            }
-            if (!liveActivity && Array.isArray(data.toolResults) && data.toolResults.length) {
-                body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
-                followScroll($('#chat-messages'));
+                timeline.finish(data);
             }
 
             // Update conversation memory + token meter. For images, keep a light
@@ -1048,22 +1034,14 @@ async function sendChat(input) {
                 assistantMemory += `\n\n[TODO STATE]\n${todoMemory}`;
             }
             state.chatHistory.push({ role: 'user', content: aiMessage }, { role: 'assistant', content: assistantMemory });
-            state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
-            updateTokenMeter();
         }
     } catch (err) {
-        stopThinking(body);
-        state.contextTokens = contextTokensBeforeTurn;
-        updateTokenMeter();
         if (err && err.name === 'AbortError') {
             aborted = true;
-            if (liveActivity && !liveActivityFinished) liveActivity.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
-            body.textContent = lang === 'en' ? 'Stopped.' : 'Interrompu.';
+            timeline.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
             restorePendingChatToInput();
         } else {
-            if (liveActivity && !liveActivityFinished) liveActivity.fail(TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.'));
-            body.textContent = TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.');
-            body.classList.add('error');
+            timeline.fail(TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.'));
         }
     } finally {
         chatAbort = null;
@@ -1071,6 +1049,11 @@ async function sendChat(input) {
     }
 
     saveConversation();
+    const measuredConversation = state.conversations.find(conv => conv.id === state.currentConvId);
+    if (measuredConversation && state.contextMeasured && measuredConversation.contextTokens !== state.contextTokens) {
+        measuredConversation.contextTokens = state.contextTokens;
+        persistChats('chat');
+    }
     if (completed && !aborted && pendingChatDraft) {
         const next = takePendingChatDraft();
         if (next) setTimeout(() => sendChat(next), 0);
@@ -1264,165 +1247,6 @@ function agentToolResultsHTML(results) {
     const changes = list.filter(r => ['edit', 'write'].includes(String(r.tool || '').toLowerCase()));
     const reads = list.filter(r => !['edit', 'write'].includes(String(r.tool || '').toLowerCase()));
     return fileChangeDetailsHTML(changes) + toolRunDetailsHTML(reads);
-}
-
-function liveToolResultHTML(result) {
-    const tool = String(result && result.tool || '').toLowerCase();
-    if (tool === 'edit' || tool === 'write') return fileChangeDetailsHTML([result]);
-    return toolRunDetailsHTML([result]);
-}
-
-function createLiveAgentActivity(container) {
-    if (!container) return null;
-    const lang = state.language || 'fr';
-    const startedAt = Date.now();
-    const body = addMsg(container, 'ai', null, '', true);
-    const msg = body.closest('.msg');
-    if (msg) msg.classList.add('live-agent-msg');
-    body.classList.add('live-agent-body', 'live-agent-active');
-    const chevron = '<svg class="file-card-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>';
-    body.innerHTML = `
-        <details class="ghost-tool-group live-agent-activity" open>
-            <summary>
-                <span class="ghost-chevron">${chevron}</span>
-                <span class="live-agent-title">${lang === 'en' ? 'Analyzing' : 'Analyse en cours'}</span>
-                <span class="live-agent-status">${lang === 'en' ? 'Preparing context' : 'Preparation du contexte'}</span>
-            </summary>
-            <div class="ghost-tool-body live-agent-tools"></div>
-        </details>`;
-    const details = body.querySelector('.live-agent-activity');
-    const titleEl = body.querySelector('.live-agent-title');
-    const statusEl = body.querySelector('.live-agent-status');
-    const toolsEl = body.querySelector('.live-agent-tools');
-    let seenActivity = 0;
-
-    const setStatus = (text) => {
-        if (!statusEl || !text) return;
-        statusEl.textContent = text;
-    };
-    const pendingHTML = (event) => {
-        const id = String(event.id || '');
-        const label = toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary });
-        const badge = event.tool || 'outil';
-        return `<div class="ghost-tool-item live-tool-pending" data-live-tool-id="${escapeHTML(id)}">
-            <span class="live-tool-dot"></span>
-            <span class="ghost-tool-name">${escapeHTML(label)}</span>
-            <span class="ghost-tool-badge">${escapeHTML(badge)}</span>
-        </div>`;
-    };
-    const replacePending = (event, html) => {
-        const id = String(event.id || '');
-        const existing = id ? toolsEl.querySelector(`[data-live-tool-id="${id}"]`) : null;
-        if (existing) existing.outerHTML = html;
-        else toolsEl.insertAdjacentHTML('beforeend', html);
-        followScroll(container);
-    };
-
-    return {
-        onEvent(event) {
-            if (!event || !event.type) return;
-            if (event.type === 'phase' || event.type === 'model_start') {
-                setStatus(event.label || (lang === 'en' ? 'Thinking' : 'Reflexion'));
-                return;
-            }
-            if (event.type === 'tool_batch') {
-                const count = Number(event.count || 0);
-                setStatus(lang === 'en'
-                    ? `${count} ${count === 1 ? 'tool' : 'tools'} planned`
-                    : `${count} ${pluralFr(count, 'outil prevu', 'outils prevus')}`);
-                return;
-            }
-            if (event.type === 'assistant_note') {
-                const note = String(event.text || '').trim();
-                if (note) {
-                    seenActivity++;
-                    toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(note)}</div>`);
-                    setStatus(lang === 'en' ? 'Planning tools' : 'Preparation des outils');
-                    followScroll(container);
-                }
-                return;
-            }
-            if (event.type === 'tool_started') {
-                seenActivity++;
-                toolsEl.insertAdjacentHTML('beforeend', pendingHTML(event));
-                setStatus(toolDisplayName({ tool: event.tool, input: event.input || {}, summary: event.summary }));
-                followScroll(container);
-                return;
-            }
-            if (event.type === 'permission_required') {
-                const label = lang === 'en' ? 'Waiting for your approval' : 'En attente de votre autorisation';
-                setStatus(label);
-                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(label)} : ${escapeHTML(event.summary || event.target || '')}</div>`);
-                followScroll(container);
-                return;
-            }
-            if (event.type === 'rust_event' && event.event?.type === 'permission_resolved') {
-                setStatus(event.event.allowed
-                    ? (lang === 'en' ? 'Approved; running command' : 'Autorisé ; exécution en cours')
-                    : (lang === 'en' ? 'Action denied' : 'Action refusée'));
-                return;
-            }
-            if (event.type === 'tool_done') {
-                seenActivity++;
-                const result = {
-                    tool: event.tool,
-                    input: event.input || {},
-                    summary: event.summary,
-                    text: event.text,
-                    error: event.error,
-                    blocked: event.blocked,
-                    todos: event.todos,
-                    events: event.events,
-                    subToolResults: event.subToolResults,
-                };
-                replacePending(event, liveToolResultHTML(result));
-                setStatus(event.summary || toolDisplayName(result));
-                return;
-            }
-            if (event.type === 'error') {
-                this.fail(event.error || uiText('Erreur agent.'));
-            }
-        },
-        finish(data) {
-            const results = Array.isArray(data && data.toolResults) ? data.toolResults : [];
-            if (!results.length && !seenActivity) {
-                if (msg) msg.remove();
-                return;
-            }
-            if (titleEl) {
-                titleEl.textContent = lang === 'en'
-                    ? `Analysis complete in ${fmtDuration(Date.now() - startedAt)}`
-                    : `Analyse terminee en ${fmtDuration(Date.now() - startedAt)}`;
-            }
-            setStatus(results.length
-                ? (lang === 'en' ? `${results.length} steps` : `${results.length} ${pluralFr(results.length, 'etape', 'etapes')}`)
-                : (lang === 'en' ? 'No tool executed' : 'Aucun outil execute'));
-            const html = agentToolResultsHTML(results);
-            toolsEl.innerHTML = html || `<div class="live-agent-empty">${lang === 'en' ? 'No tool executed.' : 'Aucun outil execute.'}</div>`;
-            const usage = data && data.usage;
-            const webQueries = Number(usage && usage.webQueries || 0);
-            const webResults = Number(usage && usage.webResults || 0);
-            const webPagesRead = Number(usage && usage.webPagesRead || 0);
-            if (webQueries || webResults || webPagesRead) {
-                const researchLabel = lang === 'en'
-                    ? `Web evidence: ${webQueries} ${webQueries === 1 ? 'query' : 'queries'}, ${webResults} ${webResults === 1 ? 'result' : 'results'}, ${webPagesRead} ${webPagesRead === 1 ? 'page read' : 'pages read'}.`
-                    : `Recherche web : ${webQueries} ${pluralFr(webQueries, 'requête', 'requêtes')}, ${webResults} ${pluralFr(webResults, 'résultat', 'résultats')}, ${webPagesRead} ${pluralFr(webPagesRead, 'page lue', 'pages lues')}.`;
-                toolsEl.insertAdjacentHTML('beforeend', `<div class="live-agent-note">${escapeHTML(researchLabel)}</div>`);
-            }
-            if (details) details.removeAttribute('open');
-            body.classList.remove('live-agent-active');
-            followScroll(container);
-        },
-        fail(error) {
-            seenActivity++;
-            if (titleEl) titleEl.textContent = lang === 'en' ? 'Analysis interrupted' : 'Analyse interrompue';
-            setStatus(error || (lang === 'en' ? 'Agent error' : 'Erreur agent'));
-            toolsEl.insertAdjacentHTML('beforeend', `<pre class="ghost-tool-pre">${escapeHTML(error || uiText('Erreur agent'))}</pre>`);
-            body.classList.remove('live-agent-active');
-            if (details) details.removeAttribute('open');
-            followScroll(container);
-        }
-    };
 }
 
 // Apply every ```edit block. Returns { wroteAny, errors:[{path,error}] }.
@@ -1955,12 +1779,12 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
 
     addMsg($('#agents-log'), 'user', lang === 'en' ? 'You' : 'Vous', task + (names.length ? `\n📎 ${names.join(', ')}` : ''));
     saveConversation('agents');
-    const body = addTypingMsg($('#agents-log'), labels[lead.agent] || lead.agent);
-    const activity = createLiveAgentActivity($('#agents-log'));
+    const workers = activeAgents.filter(agent => agent !== lead);
+    const timeline = window.ZaalisTimeline.create($('#agents-log'), { label: labels[lead.agent] || lead.agent });
     const byId = new Map();
     const data = await readAgentEventStream(response, (event) => {
         handleRustInteractiveEvent(event).catch(() => {});
-        if (activity) activity.onEvent(event);
+        timeline.onEvent(event);
         window.ZaalisWorkspace?.onAgentEvent(event);
         if (event.type === 'rust_event' && event.event) {
             const frame = event.event;
@@ -1981,17 +1805,8 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
         }
     });
     if (data.workspaceSelection) await applyWorkspaceSelection(data.workspaceSelection, state.agentConversations.find(conv => conv.id === state.currentAgentConvId));
-    stopThinking(body);
-    if (data.error) {
-        if (activity) activity.fail(data.error);
-        body.textContent = data.error;
-        body.classList.add('error');
-    } else {
-        if (activity) activity.finish(data);
-        const reasoning = data.thinking ? reasoningBlock(data.thinking, 0) : '';
-        body.innerHTML = reasoning + formatAIResponse(data.response || '');
-        if (Array.isArray(data.toolResults) && data.toolResults.length) body.insertAdjacentHTML('beforeend', agentToolResultsHTML(data.toolResults));
-    }
+    if (data.error) timeline.fail(data.error);
+    else timeline.finish(data);
     followScroll($('#agents-log'));
     saveConversation('agents');
     return true;
@@ -2319,9 +2134,11 @@ function saveConversation(kind = 'chat') {
         const label = m.querySelector('.msg-label');
         const body = m.querySelector('.msg-body');
         const img = body && body.querySelector('.generated-image');
+        if (body?.classList.contains('remote-running')) return; // live status, not history
         const entry = {
             label: label ? label.textContent : null,
-            text: body ? body.textContent : '',
+            // A timeline's text is its reply, not the labels of its action lines.
+            text: body ? (body.classList.contains('tl-body') && body.dataset.markdownSource ? body.dataset.markdownSource : body.textContent) : '',
             type: m.classList.contains('msg-system') ? 'system' : m.classList.contains('msg-user') ? 'user' : 'ai'
         };
         if (m.dataset.remoteId) entry.remoteId = m.dataset.remoteId;
@@ -2492,7 +2309,10 @@ async function loadConversation(kind, id) {
         const body = addMsg(container, m.type, m.label, hasRichHtml ? safeSavedHTML(m.html) : (m.text || ''), !!hasRichHtml);
         if (m.remoteId) body.closest('.msg').dataset.remoteId = m.remoteId;
         if (m.markdown && m.type === 'ai') body.dataset.markdownSource = m.markdown;
-        if (m.activity || body.querySelector('.live-agent-activity')) {
+        if (hasRichHtml && body.querySelector('.tl-flow')) {
+            body.classList.add('tl-body');
+            body.closest('.msg').classList.add('tl-msg');
+        } else if (m.activity || body.querySelector('.live-agent-activity')) {
             body.classList.add('live-agent-body');
             body.closest('.msg').classList.add('live-agent-msg');
             body.querySelectorAll('details').forEach(detail => detail.removeAttribute('open'));
@@ -2513,6 +2333,9 @@ async function loadConversation(kind, id) {
             body.classList.add('has-image');
         }
     });
+    if (conv.remoteRunning) addMsg(container, 'system', null, state.language === 'en'
+        ? `Zaalis is answering the request sent from ${conv.remoteRunning === 'whatsapp' ? 'WhatsApp' : 'Telegram'}…`
+        : `Zaalis répond à la demande envoyée depuis ${conv.remoteRunning === 'whatsapp' ? 'WhatsApp' : 'Telegram'}…`).classList.add('remote-running');
     forceScrollBottom(container, false);
 
     // Rebuild the API memory for the chat from its messages. For images we keep
@@ -2526,7 +2349,8 @@ async function loadConversation(kind, id) {
                     ? (m.image.alt ? `[Image générée : ${m.image.alt}]` : '[Image générée]')
                     : (m.text || '')
             }));
-        state.contextTokens = state.chatHistory.reduce((n, h) => n + estimateTokens(h.content), 0);
+        state.contextTokens = Number(conv.contextTokens) || 0;
+        state.contextMeasured = state.contextTokens > 0;
         updateTokenMeter();
     }
 
@@ -2673,7 +2497,7 @@ function newConversation(kind = 'chat') {
     state[cfg.current] = null;
     $(cfg.container).innerHTML = '';
     addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
-    if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
+    if (kind === 'chat') { state.chatHistory = []; resetContextMeasure(); updateTokenMeter(); }
     renderHistory();
 }
 
@@ -2699,7 +2523,7 @@ async function deleteConversation(kind, id) {
         state[cfg.current] = null;
         $(cfg.container).innerHTML = '';
         addMsg($(cfg.container), 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg);
-        if (kind === 'chat') { state.chatHistory = []; state.contextTokens = 0; updateTokenMeter(); }
+        if (kind === 'chat') { state.chatHistory = []; resetContextMeasure(); updateTokenMeter(); }
     }
     persistChats(kind);
     renderHistory();

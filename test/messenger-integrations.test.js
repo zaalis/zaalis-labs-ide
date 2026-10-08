@@ -62,3 +62,56 @@ test('WhatsApp self-chat accepts the owner LID alias and still rejects unrelated
  const msg=(id,to)=>({id:{_serialized:id},from:'self@c.us',to,fromMe:true,body:'!zaalis Hello',timestamp:Math.floor(Date.now()/1000)});
  client.emit('message_create',msg('foreign','stranger@lid'));client.emit('message_create',msg('owner','owner@lid'));await new Promise(r=>setTimeout(r,10));assert.equal(answers.length,1);await m.stop('alice','whatsapp',true);
 });
+
+function gatewayFixture(mode = 'self-chat') {
+ const base = fixture(), clients = [];
+ base.m.whatsappFactory = async () => { const client = new EventEmitter(); Object.assign(client, { isGateway: true, mode, info: { wid: { _serialized: '1555@s.whatsapp.net' }, pushname: 'Alice' }, initialize: async () => {}, destroy: async () => {}, logout: async () => {}, sendMessage: async (to, text) => { base.calls.push({ to, text }); } }); clients.push(client); return client; };
+ const message = (id, body) => ({ id: { _serialized: id }, body, fromMe: true, peer: '1555@s.whatsapp.net', gatewayMessage: true, timestamp: Math.floor(Date.now() / 1000) });
+ return { ...base, clients, message };
+}
+test('WhatsApp self-chat only treats messages starting with zaalis! as AI requests', async () => {
+ const { m, clients, answers, message } = gatewayFixture(); await m.startWhatsApp('alice'); const client = clients[0]; client.emit('ready');
+ client.emit('message_create', message('note', 'acheter du pain'));
+ client.emit('message_create', message('mention', 'demain je teste zaalis! ce soir'));
+ client.emit('message_create', message('trigger', 'zaalis! résume le projet'));
+ client.emit('message_create', message('spaced', 'Zaalis ! et les tests ?'));
+ client.emit('message_create', message('legacy', '!zaalis ancien format'));
+ await new Promise(r => setTimeout(r, 20));
+ assert.deepEqual(answers.map(a => a.input.message), ['résume le projet', 'et les tests ?', 'ancien format']);
+});
+test('a dedicated WhatsApp number answers allowed contacts without the trigger word', async () => {
+ const { m, clients, answers, message } = gatewayFixture('bot'); await m.startWhatsApp('alice'); clients[0].emit('ready');
+ clients[0].emit('message_create', message('plain', 'bonjour')); await new Promise(r => setTimeout(r, 20));
+ assert.equal(answers.length, 1); assert.equal(answers[0].input.message, 'bonjour');
+});
+test('WhatsApp pairing states: expired QR restarts, phone logout asks to link again', async () => {
+ const { m, clients } = gatewayFixture(); await m.startWhatsApp('alice');
+ clients[0].emit('linking'); assert.equal(m.status('alice', 'whatsapp').state, 'linking');
+ clients[0].emit('qr_expired'); assert.equal(m.status('alice', 'whatsapp').state, 'expired'); assert.equal(m.status('alice', 'whatsapp').qr, '');
+ await m.startWhatsApp('alice'); assert.equal(clients.length, 2); assert.equal(m.status('alice', 'whatsapp').state, 'connecting');
+ clients[1].emit('ready'); assert.equal(m.status('alice', 'whatsapp').connected, true); assert.equal(m.user('alice').messengers.whatsapp.enabled, true);
+ clients[1].emit('logged_out'); const status = m.status('alice', 'whatsapp');
+ assert.equal(status.connected, false); assert.equal(status.state, 'disconnected'); assert.match(status.error, /téléphone/); assert.equal(m.user('alice').messengers.whatsapp.enabled, false);
+ await m.startWhatsApp('alice'); assert.equal(clients.length, 3);
+});
+test('WhatsApp test message reaches the self-chat and explains the trigger word', async () => {
+ const { m, clients, calls } = gatewayFixture(); await assert.rejects(m.test('alice', 'whatsapp'), /Connectez/);
+ await m.startWhatsApp('alice'); clients[0].emit('ready'); const status = await m.test('alice', 'whatsapp');
+ assert.equal(status.tested, true); assert.equal(status.trigger, 'zaalis!'); assert.equal(calls.at(-1).to, '1555@s.whatsapp.net'); assert.match(calls.at(-1).text, /zaalis! votre demande/);
+});
+test('Telegram: refused key stops polling with a clear error, expired link is reported, bot can be changed', async () => {
+ const { m } = fixture(); await m.configureTelegram('alice', '123456789:abcdefghijklmnopqrstuvwxyz');
+ m.fetch = async () => ({ ok: false, status: 401, json: async () => ({ ok: false, error_code: 401, description: 'Unauthorized' }) });
+ const session = { controller: new AbortController(), offset: 0, state: 'connected', connected: true }; m.sessions.set('alice:telegram', session);
+ await m.pollTelegram('alice', 'token', session);
+ assert.equal(session.state, 'error'); assert.equal(session.connected, false); assert.match(m.status('alice', 'telegram').error, /BotFather/);
+ m.sessions.set('alice:telegram', { state: 'pairing', expires: Date.now() - 1, link: 'https://t.me/x?start=n', linkQr: 'data:image/png;base64,AA' });
+ const expired = m.status('alice', 'telegram'); assert.equal(expired.state, 'expired'); assert.equal(expired.link, ''); assert.equal(expired.linkQr, '');
+ m.save('alice', s => { s.telegram.binding = { kind: 'chat', conversationId: 'c1' }; s.telegram.chatId = '7'; });
+ const reset = await m.resetTelegram('alice'); assert.equal(reset.configured, false);
+ assert.deepEqual(m.user('alice').messengers.telegram, { binding: { kind: 'chat', conversationId: 'c1' } });
+});
+test('Telegram explains a wrong key when linking the bot', async () => {
+ const { m } = fixture(); m.fetch = async () => ({ ok: false, status: 404, json: async () => ({ ok: false, error_code: 404 }) });
+ await assert.rejects(m.configureTelegram('alice', '123456789:abcdefghijklmnopqrstuvwxyz'), /BotFather/);
+});

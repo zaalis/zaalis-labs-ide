@@ -1430,7 +1430,7 @@ function showAuthOverlay() {
     state.conversations = [];
     state.currentConvId = null;
     state.chatHistory = [];
-    state.contextTokens = 0;
+    resetContextMeasure();
     state.agentConversations = [];
     state.currentAgentConvId = null;
     $('#chat-messages').innerHTML = '';

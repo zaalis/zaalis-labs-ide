@@ -455,10 +455,11 @@ function createChunkTranslator(model) {
       if (type === 'response.completed' || type === 'response.incomplete') {
         finished = true;
         const response = event.response || {};
-        const usage = response.usage || {};
+        const usage = response.usage;
         const cut = response.incomplete_details && response.incomplete_details.reason === 'max_output_tokens';
         const final = chunk({}, calls.size ? 'tool_calls' : cut ? 'length' : 'stop');
-        final.usage = {
+        // No usage block means "not measured", never "zero tokens".
+        if (usage && typeof usage === 'object' && (usage.input_tokens !== undefined || usage.output_tokens !== undefined)) final.usage = {
           prompt_tokens: Number(usage.input_tokens) || 0,
           completion_tokens: Number(usage.output_tokens) || 0,
           prompt_tokens_details: { cached_tokens: Number(usage.input_tokens_details && usage.input_tokens_details.cached_tokens) || 0 },

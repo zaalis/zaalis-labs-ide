@@ -1250,7 +1250,7 @@ async function clearLocalHistory() {
         await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'agents', conversations: [] }) });
     } catch {}
     state.conversations = []; state.currentConvId = null; state.chatHistory = [];
-    state.agentConversations = []; state.currentAgentConvId = null; state.contextTokens = 0;
+    state.agentConversations = []; state.currentAgentConvId = null; resetContextMeasure();
     const cm = $('#chat-messages'); if (cm) cm.innerHTML = '';
     if (typeof renderHistory === 'function') renderHistory();
     if (typeof updateTokenMeter === 'function') updateTokenMeter();

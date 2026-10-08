@@ -266,6 +266,11 @@ pub(crate) async fn run_agent(
         telemetry.complete();
         close_stream_segments(&session, &mut timeline);
         round_usage.rounds = 0;
+        round_usage.context_tokens = if usage_reported {
+            round_usage.input_tokens + round_usage.output_tokens
+        } else {
+            0
+        };
         usage.merge(&round_usage);
         usage.wall_time_ms = started.elapsed().as_millis() as u64;
         session.update_usage(&node.id, usage).await;

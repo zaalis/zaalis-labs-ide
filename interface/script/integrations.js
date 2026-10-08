@@ -23,35 +23,41 @@
   const notice=node('p',uiText('Chargement des intégrations…'),'lab-note');notice.setAttribute('role','status');target.append(notice);
   try{
    let status=await api('/api/integrations/github');if(version!==revision)return;
-   const card=node('article',undefined,'integration-card'),header=node('div',undefined,'integration-heading');const mark=node('img',undefined,'integration-heading-logo');mark.src='assets/integrations/github.svg';mark.alt='';header.append(mark,node('strong','GitHub'),node('span',status.connected?uiText('Connecté · @')+status.login:uiText('Non connecté'),'integration-status'));card.append(header);
+   const card=node('article',undefined,'integration-card'),header=node('div',undefined,'integration-heading');const mark=node('img',undefined,'integration-heading-logo');mark.src='assets/integrations/github.svg';mark.alt='';header.append(mark,node('strong','GitHub'),node('span',status.reauth?uiText('Reconnexion nécessaire'):status.connected?uiText('Connecté · @')+status.login:uiText('Non connecté'),'integration-status'));card.append(header);
+   if(status.reauth){const warn=node('p',uiText('L’autorisation GitHub de @')+status.login+uiText(' a expiré ou a été révoquée. Reconnectez le compte : vos droits par dépôt sont conservés.'),'integration-notice error');card.append(warn);}
    card.append(node('p',uiText('Dépôts, fichiers et pull requests pour l’IA. Chaque dépôt exige une autorisation explicite ; le mode autonome respecte cette limite.'),'lab-note'));
    const actions=node('div',undefined,'lab-toolbar');card.append(actions);target.append(card);
    const button=(text,fn,parent=actions)=>{const b=node('button',text,'integration-button');b.type='button';parent.append(b);b.addEventListener('click',async()=>{b.disabled=true;notice.classList.remove('success','error');notice.textContent=uiText('Opération en cours…');try{await fn();}catch(e){notice.textContent=uiText(e.message);notice.classList.add('error');}finally{b.disabled=false;}});return b;};
-   if(!status.connected){
-    const connect=button(uiText('Connecter le compte'),async()=>{
+   if(!status.connected||status.reauth){
+    const connect=button(status.reauth?uiText('Reconnecter le compte'):uiText('Connecter le compte'),async()=>{
      if(!status.deviceAvailable){notice.textContent=uiText('Le client de connexion GitHub est manquant. Réinstallez la dernière version de Zaalis.');return;}
      const d=await api('/api/integrations/github',{action:'start'});
      const authorization=node('div',undefined,'github-authorization');authorization.setAttribute('role','status');
      authorization.append(node('p',uiText('Validez la connexion dans votre navigateur, puis revenez ici.')),node('strong',d.code,'github-device-code'));card.append(authorization);
      authorization.append(node('p',uiText('Sur la page GitHub, saisissez ce code puis autorisez la connexion.')));
      button(uiText('Copier le code'),async()=>{await navigator.clipboard.writeText(d.code);notice.textContent=uiText('Code copié. Vous pouvez le coller sur GitHub.');},authorization);
-     notice.textContent=uiText('Autorisation GitHub en attente…');
+     // The code is copied right away: on GitHub the user only has to paste it.
+     let copied=false;try{await navigator.clipboard.writeText(d.code);copied=true;}catch{}
+     const countdown=node('p','', 'github-countdown');authorization.append(countdown);
+     const tick=()=>{const left=Math.max(0,Math.round((deadline-Date.now())/1000));countdown.textContent=uiText('Code valable encore ')+`${Math.floor(left/60)}:${String(left%60).padStart(2,'0')}`;};
+     notice.textContent=copied?uiText('Code copié ✓ Collez-le sur la page GitHub ouverte dans votre navigateur.'):uiText('Autorisation GitHub en attente…');
      connect.hidden=true;
      button(uiText('Rouvrir GitHub dans le navigateur'),async()=>{await api('/api/integrations/github',{action:'open'});},authorization);
-     let stopped=false,timer;const stop=()=>{stopped=true;clearTimeout(timer);observer.disconnect();connect.hidden=false;authorization.remove();};
+     let stopped=false,timer,clock;const stop=()=>{stopped=true;clearTimeout(timer);clearInterval(clock);observer.disconnect();connect.hidden=false;authorization.remove();};
      const observer=new MutationObserver(()=>{if(!card.isConnected||!document.getElementById('settings-modal').classList.contains('active'))stop();});observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});
      button(uiText('Annuler'),async()=>{stop();await api('/api/integrations/github',{action:'cancel'});notice.textContent=uiText('Connexion annulée.');},authorization);
-     const deadline=Date.now()+d.expiresIn*1000;
+     const deadline=Date.now()+d.expiresIn*1000;tick();clock=setInterval(tick,1000);
      const poll=async()=>{if(stopped)return;try{if(Date.now()>deadline)throw Error(uiText('Connexion expirée. Recommencez.'));const r=await api('/api/integrations/github',{action:'poll'});if(stopped)return;if(r.pending){timer=setTimeout(poll,(r.interval||d.interval)*1000);}else{stop();await settings();}}catch(e){stop();notice.textContent=uiText(e.message);}};
      timer=setTimeout(poll,d.interval*1000);
     });
     card.append(node('p',uiText('La connexion s’ouvre dans le navigateur par défaut de Windows. Aucun jeton à copier.'),'lab-note'));
     card.append(node('p',uiText('L’autorisation est présentée par le client officiel GitHub CLI. Les dépôts restent soumis aux droits que vous choisissez ici.'),'lab-note'));
-   }else{
+   }
+   if(status.connected){
     button(uiText('Déconnecter'),async()=>{await api('/api/integrations/github',{action:'disconnect'});await settings();});
     const search=node('input');search.type='search';search.placeholder=uiText('Filtrer les dépôts…');search.setAttribute('aria-label',uiText('Filtrer les dépôts GitHub'));search.className='integration-search';card.append(search);
     const list=node('div',undefined,'integration-repos');card.append(list);
-    async function load(){notice.textContent=uiText('Chargement des dépôts autorisés par GitHub…');const result=await api('/api/integrations/github/repos');if(version!==revision)return;list.replaceChildren();
+    async function load(){if(status.reauth){notice.textContent=uiText('Reconnectez GitHub pour afficher vos dépôts.');return;}notice.textContent=uiText('Chargement des dépôts autorisés par GitHub…');const result=await api('/api/integrations/github/repos');if(version!==revision)return;list.replaceChildren();
      const render=()=>{list.querySelectorAll('select').forEach(s=>s._customSelectCleanup?.());list.replaceChildren();const repos=result.repositories.filter(r=>r.name.toLowerCase().includes(search.value.toLowerCase()));
       if(!repos.length)list.append(node('p',uiText('Aucun dépôt visible. Vérifiez les dépôts sélectionnés, les droits du jeton et l’autorisation de votre organisation.'),'lab-note'));
       for(const repo of repos){const grant=status.permissions[repo.name.toLowerCase()]||{},row=node('details',undefined,'integration-repo'),summary=node('summary',repo.name+(repo.private?uiText(' · privé'):'')+' · '+({read:uiText('Lecture seule'),write:uiText('Lecture et écriture')}[grant.mode]||uiText('Non autorisé')));row.append(summary);

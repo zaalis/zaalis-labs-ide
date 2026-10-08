@@ -1,20 +1,36 @@
 'use strict';
 const fs = require('node:fs'), path = require('node:path'), crypto = require('node:crypto');
 
+// In the WhatsApp self-chat, only messages that start with "zaalis!" are for
+// the AI; everything else stays a personal note. "!zaalis" is still accepted.
+const WHATSAPP_TRIGGER = /^\s*(?:zaalis\s*!|!\s*zaalis)(?=\s|$)\s*/i;
+const TRIGGER_WORD = 'zaalis!';
+
 class MessengerIntegrations {
   constructor({ loadUsers, saveUsers, encrypt, decrypt, dataDir, appDir, answer, continuation, decide, media, fetchImpl = fetch, whatsappFactory }) {
     Object.assign(this, { loadUsers, saveUsers, encrypt, decrypt, dataDir, appDir, answer, continuation, decide, media, fetch: fetchImpl, whatsappFactory });
-    this.sessions = new Map(); this.queues = new Map(); this.histories = new Map();
+    this.sessions = new Map(); this.queues = new Map(); this.histories = new Map(); this.activity = new Map();
   }
+  // Last exchange per account and messenger, shown on the integration page so
+  // a message that was ignored or failed never looks like silence.
+  note(id, provider, kind, detail = '') { this.activity.set(this.key(id, provider), { at: Date.now(), kind, detail: String(detail).slice(0, 300) }); }
   user(id) { const user = this.loadUsers().find(u => u.id === id); if (!user) throw Error('Compte introuvable.'); return user; }
   save(id, fn) { const users = this.loadUsers(), user = users.find(u => u.id === id); if (!user) throw Error('Compte introuvable.'); user.messengers ||= {}; fn(user.messengers); this.saveUsers(users); }
   key(id, provider) { return `${id}:${provider}`; }
+  // Text prefix the owner types before a command in this messenger.
+  prefix(id, provider) { return provider === 'whatsapp' && (this.user(id).messengers?.whatsapp?.mode || 'self-chat') !== 'bot' ? TRIGGER_WORD + ' ' : ''; }
   status(id, provider) {
     const stored = this.user(id).messengers || {}, session = this.sessions.get(this.key(id, provider));
+    let state = session?.state || (stored[provider]?.enabled ? 'offline' : 'disconnected');
+    // An unused Telegram pairing link is only valid for ten minutes.
+    if (provider === 'telegram' && state === 'pairing' && !(session.expires > Date.now())) state = 'expired';
+    const pairing = state === 'pairing';
     return { provider, configured: provider === 'telegram' ? !!stored.telegram?.token : !!stored.whatsapp?.enabled,
-      connected: !!session?.connected, state: session?.state || (stored[provider]?.enabled ? 'offline' : 'disconnected'),
+      connected: !!session?.connected, state,
       name: provider === 'telegram' ? stored.telegram?.username || '' : session?.name || '',
-      qr: session?.qr || '', link: session?.link || '', error: session?.error || '',
+      qr: session?.qr || '', link: pairing ? session?.link || '' : '', linkQr: pairing ? session?.linkQr || '' : '',
+      expiresAt: pairing ? session?.expires || 0 : 0, error: session?.error || '',
+      trigger: this.prefix(id, provider).trim(), activity: this.activity.get(this.key(id, provider)) || null,
       binding: stored[provider]?.binding || null, conversations: this.continuation?.choices(id) || [],
       gateway: true, mode: stored.whatsapp?.mode || 'self-chat', allowedUsers: stored.whatsapp?.allowedUsers || [],
       model: stored.model || 'codex', submodel: stored.submodel || 'gpt-5.6-sol', language: stored.language || 'fr' };
@@ -41,17 +57,27 @@ class MessengerIntegrations {
     return { saved: true };
   }
   async telegramCall(token, method, body = {}, signal) {
+    let response, data;
     try {
-      const response = await this.fetch(`https://api.telegram.org/bot${token}/${method}`, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: signal || AbortSignal.timeout(35000) });
-      const data = await response.json();
-      if (!response.ok || !data.ok) throw Error('refused');
-      return data.result;
-    } catch { throw Error('Telegram est indisponible. Vérifiez la connexion ou le bot.'); }
+      response = await this.fetch(`https://api.telegram.org/bot${token}/${method}`, { method: 'POST', redirect: 'error', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body), signal: signal || AbortSignal.timeout(35000) });
+      data = await response.json();
+    } catch { throw Object.assign(Error('Telegram est injoignable. Vérifiez la connexion Internet.'), { code: 'network' }); }
+    if (response.ok && data?.ok) return data.result;
+    // Telegram's error codes say what the owner has to do; keep them apart.
+    const code = Number(data?.error_code || response.status) || 0;
+    const message = code === 401 || code === 404 ? 'Telegram refuse la clé de ce bot (révoquée ou changée dans BotFather). Associez à nouveau votre bot.'
+      : code === 409 ? 'Ce bot est déjà utilisé par un autre programme (webhook ou autre instance). Arrêtez-le ou créez un bot dédié à Zaalis.'
+      : code === 429 ? 'Telegram limite temporairement les envois. Nouvel essai automatique.'
+      : code === 403 ? 'Telegram refuse l’envoi : la conversation a peut-être bloqué le bot.'
+      : 'Telegram a refusé la demande. Réessayez.';
+    throw Object.assign(Error(message), { code, retryAfter: Number(data?.parameters?.retry_after) || 0 });
   }
   async configureTelegram(id, token) {
     if (typeof token !== 'string' || !/^\d{5,16}:[a-zA-Z0-9_-]{20,150}$/.test(token)) throw Error('Identifiant du bot Telegram invalide.');
     if (this.loadUsers().some(u => u.id !== id && u.messengers?.telegram?.token && this.decrypt(u.messengers.telegram.token) === token)) throw Error('Ce bot est déjà associé à un autre compte Zaalis.');
-    const bot = await this.telegramCall(token, 'getMe');
+    let bot;
+    try { bot = await this.telegramCall(token, 'getMe'); }
+    catch (e) { if (e.code === 401 || e.code === 404) throw Error('Telegram refuse cette clé. Copiez la clé complète donnée par BotFather (format 123456789:ABC…).'); throw e; }
     if (!bot.is_bot || !/^[a-zA-Z0-9_]{5,64}$/.test(bot.username || '')) throw Error('Bot Telegram invalide.');
     const hook = await this.telegramCall(token, 'getWebhookInfo');
     if (hook.url) throw Error('Ce bot utilise déjà un webhook. Choisissez un bot privé dédié à Zaalis.');
@@ -66,6 +92,8 @@ class MessengerIntegrations {
     const token = this.decrypt(stored.token), nonce = crypto.randomBytes(24).toString('base64url');
     const session = { connected: !!stored.chatId, state: stored.chatId ? 'connected' : 'pairing', nonce, expires: Date.now() + 600000, offset: stored.offset || 0, controller: new AbortController() };
     session.link = `https://t.me/${stored.username}?start=${nonce}`;
+    // Scannable from the phone, so the link opens directly in Telegram there.
+    if (!stored.chatId) session.linkQr = await require('qrcode').toDataURL(session.link, { width: 240, margin: 2 }).catch(() => '');
     this.sessions.set(this.key(id, 'telegram'), session);
     this.save(id, m => { m.telegram.enabled = true; });
     this.pollTelegram(id, token, session);
@@ -86,10 +114,13 @@ class MessengerIntegrations {
         }
         session.error = '';
         if (!updates.length) await new Promise(resolve => { session.delay = setTimeout(resolve, 250); session.delay.unref(); });
-      } catch {
+      } catch (e) {
         if (this.sessions.get(key) !== session) return;
-        session.error = 'Connexion Telegram interrompue. Nouvelle tentative en cours.';
-        await new Promise(resolve => { session.delay = setTimeout(resolve, 5000); session.delay.unref(); });
+        // A refused key cannot recover by itself: stop and ask for a new one.
+        if (e.code === 401 || e.code === 404) { session.connected = false; session.state = 'error'; session.error = e.message; return; }
+        session.error = e.code === 'network' ? 'Connexion Telegram interrompue. Nouvelle tentative en cours.' : e.message;
+        const wait = e.code === 409 ? 30000 : e.code === 429 ? Math.max(1, e.retryAfter) * 1000 : 5000;
+        await new Promise(resolve => { session.delay = setTimeout(resolve, wait); session.delay.unref(); });
       }
     }
   }
@@ -97,16 +128,22 @@ class MessengerIntegrations {
     if (this.sessions.get(this.key(id, 'telegram')) !== session) return;
     if (!message || message.chat?.type !== 'private' || message.from?.is_bot || !Number.isSafeInteger(message.from?.id) || message.chat.id !== message.from.id || typeof message.text !== 'string') return;
     const stored = this.user(id).messengers?.telegram;
-    if (message.text === `/start ${session.nonce}` && session.expires > Date.now() && !stored.chatId) {
-      this.save(id, m => { m.telegram.chatId = String(message.chat.id); }); session.nonce = ''; session.link = ''; session.connected = true; session.state = 'connected';
-      await this.telegramCall(token, 'sendMessage', { chat_id: message.chat.id, text: 'Zaalis est connecté. Vos messages continuent la conversation choisie dans l’IDE. Les questions et validations arrivent ici.' }); return;
+    if (session.nonce && message.text === `/start ${session.nonce}` && session.expires > Date.now() && !stored.chatId) {
+      this.save(id, m => { m.telegram.chatId = String(message.chat.id); }); session.nonce = ''; session.link = ''; session.linkQr = ''; session.connected = true; session.state = 'connected';
+      await this.telegramCall(token, 'sendMessage', { chat_id: message.chat.id, text: 'Zaalis est connecté ✓ Écrivez simplement votre demande : elle continue la conversation choisie dans l’IDE. Les questions et validations arrivent ici.\n/status · /new · /sessions · /stop' }); return;
+    }
+    // A stale or foreign pairing link: say what to do instead of staying silent.
+    if (!stored?.chatId && message.text.startsWith('/start')) {
+      await this.telegramCall(token, 'sendMessage', { chat_id: message.chat.id, text: 'Ce lien d’association n’est plus valide. Dans Zaalis, ouvrez Intégrations → Telegram puis cliquez sur « Nouveau lien ».' }).catch(() => {}); return;
     }
     if (!stored?.chatId || stored.chatId !== String(message.chat.id)) return;
     if (message.text === '/new' && !this.continuation) { this.histories.delete(this.key(id, 'telegram')); this.save(id, m => { delete m.telegram.history; }); await this.telegramCall(token, 'sendMessage', { chat_id: message.chat.id, text: 'Nouvelle conversation Zaalis.' }); return; }
     if (message.text.startsWith('/start')) return;
+    this.note(id, 'telegram', 'received');
     const reply = await this.respond(id, 'telegram', message.text, { peer: String(message.chat.id) });
     if (this.sessions.get(this.key(id, 'telegram')) !== session) return;
     for (let i = 0; i < reply.length; i += 3900) await this.telegramCall(token, 'sendMessage', { chat_id: message.chat.id, text: reply.slice(i, i + 3900) });
+    if (reply && this.activity.get(this.key(id, 'telegram'))?.kind === 'received') this.note(id, 'telegram', 'replied');
   }
   async respond(id, provider, text, input = {}) {
     const channelKey = this.key(id, provider), session = this.sessions.get(channelKey), peer = input.peer || '';
@@ -133,7 +170,7 @@ class MessengerIntegrations {
         try { await this.decide(id, { ...pending, kind: 'plan', allow: false, feedback: text.slice(0, 12000) }); return 'Vos consignes sont transmises. L’IA révise le plan.'; }
         catch { return 'Ce plan n’attend plus de réponse.'; }
       }
-      if (this.queues.has(key) && owner?.pending) return owner?.pending ? 'Une validation attend votre réponse. Envoyez /approve ou /deny avec le code indiqué.' : 'Un tour est déjà en cours. Attendez la réponse avant de poursuivre.';
+      if (this.queues.has(key) && owner?.pending) return `Une validation attend votre réponse. Envoyez ${this.prefix(id, provider)}/approve ou ${this.prefix(id, provider)}/deny avec le code indiqué.`;
     }
     const task = previous.catch(() => {}).then(async () => {
       if (!valid()) return '';
@@ -157,7 +194,7 @@ class MessengerIntegrations {
               if (!['permission_required', 'plan_required', 'budget_required'].includes(event.type) || !valid()) return;
               const kind = event.type.split('_')[0], code = crypto.randomBytes(4).toString('hex');
               owner.pending = { kind, code, sessionId: event.sessionId, requestId: event.requestId };
-              const prefix = '';
+              const prefix = this.prefix(id, provider);
               const detail = kind === 'plan' ? event.content : kind === 'permission' ? event.summary + (event.target ? '\n' + event.target : '') : 'Budget atteint. Arrêtez ce tour ; relancez depuis l’IDE pour ajuster le budget.';
               const prompt = String(detail || 'Validation demandée.') + '\n\n' + (kind === 'budget' ? '' : `Accepter : ${prefix}/approve ${code}\n`) + `Refuser : ${prefix}/deny ${code}`;
               this.send(id, provider, prompt, { peer }).catch(() => { owner.controller?.abort(); });
@@ -170,7 +207,12 @@ class MessengerIntegrations {
         const next = [...history, { role: 'user', content: text }, { role: 'assistant', content: reply }].slice(-20);
         this.histories.set(key, next); this.save(id, m => { m[provider] ||= {}; m[provider].history = this.encrypt(JSON.stringify(next)); });
         return reply;
-      } catch (e) { owner?.delivery?.cancel(); return this.continuation ? String(e.message || 'Tour interrompu.').slice(0, 1000) : 'Zaalis ne peut pas répondre pour le moment. Vérifiez le modèle et sa connexion dans l’IDE.'; }
+      } catch (e) {
+        owner?.delivery?.cancel();
+        const reason = String(e.message || 'Tour interrompu.').slice(0, 1000);
+        this.note(id, provider, 'failed', reason);
+        return this.continuation ? '⚠️ L’IA n’a pas pu répondre : ' + reason : 'Zaalis ne peut pas répondre pour le moment. Vérifiez le modèle et sa connexion dans l’IDE.';
+      }
     });
     this.queues.set(key, task); try { return await task; } finally { if (this.queues.get(key) === task) this.queues.delete(key); if (owner) owner.pending = null; }
   }
@@ -189,9 +231,10 @@ class MessengerIntegrations {
     const command = match[1].toLowerCase();
     if (command === 'stop') { owner?.controller?.abort(); owner?.delivery?.cancel(); return 'Arrêt demandé. Vous pouvez reprendre depuis cette messagerie ou l’IDE.'; }
     const choices = this.continuation.choices(id);
-    if (command === 'sessions') return choices.map((c, i) => `${i + 1}. ${c.title} · ${c.project || 'Sans projet'}`).join('\n') + '\n\nReprendre : /resume numéro';
-    if (command === 'status') { try { const c = this.continuation.find(id, this.gatewayBinding(id, provider, peer)); return `${c.title}\nProjet : ${c.projectPath || 'Sans projet'}\n${this.queues.has(key) ? 'Travail en cours' : 'Prêt'}\n/new : nouveau fil · /sessions : conversations · /stop : arrêter`; } catch (e) { return e.message; } }
-    if (this.queues.has(key)) return 'Arrêtez le travail avec /stop et attendez sa fin avant de changer de conversation.';
+    const prefix = this.prefix(id, provider);
+    if (command === 'sessions') return choices.map((c, i) => `${i + 1}. ${c.title} · ${c.project || 'Sans projet'}`).join('\n') + `\n\nReprendre : ${prefix}/resume numéro`;
+    if (command === 'status') { try { const c = this.continuation.find(id, this.gatewayBinding(id, provider, peer)); return `${c.title}\nProjet : ${c.projectPath || 'Sans projet'}\n${this.queues.has(key) ? 'Travail en cours' : 'Prêt'}\n${prefix}/new : nouveau fil · ${prefix}/sessions : conversations · ${prefix}/stop : arrêter`; } catch (e) { return e.message; } }
+    if (this.queues.has(key)) return `Arrêtez le travail avec ${prefix}/stop et attendez sa fin avant de changer de conversation.`;
     try {
       const config = this.user(id).messengers?.[provider] || {};
       const binding = command === 'new' ? this.continuation.create(id, provider, config.execution, config.binding) : choices[Number(match[2]) - 1];
@@ -220,9 +263,29 @@ class MessengerIntegrations {
       await this.telegramCall(this.decrypt(stored.token), 'sendMessage', { chat_id: input.peer || stored.chatId, text: text.slice(i, i + 3900) });
     }
   }
+  // Proves the link end to end: a message that the owner sees on the phone.
+  async test(id, provider) {
+    const session = this.sessions.get(this.key(id, provider));
+    if (!session?.connected) throw Error(provider === 'whatsapp' ? 'Connectez WhatsApp avant d’envoyer un test.' : 'Associez votre conversation Telegram avant d’envoyer un test.');
+    if (provider === 'whatsapp' && session.client.mode === 'bot') throw Error('Avec un numéro dédié, écrivez au bot depuis un numéro autorisé pour tester.');
+    const text = provider === 'whatsapp'
+      ? `Test réussi ✓ Cette discussion est reliée à Zaalis sur votre PC.\nPour parler à l’IA, écrivez : ${TRIGGER_WORD} votre demande\nSans « ${TRIGGER_WORD} », vos messages restent de simples notes.`
+      : 'Test réussi ✓ Cette conversation est reliée à Zaalis sur votre PC. Écrivez simplement votre demande.';
+    await this.send(id, provider, text);
+    this.note(id, provider, 'tested');
+    return { ...this.status(id, provider), tested: true };
+  }
+  // Forget the Telegram bot (its key, paired chat and offset), keep the
+  // conversation choice, so another bot can be linked from scratch.
+  async resetTelegram(id) {
+    await this.stop(id, 'telegram');
+    this.save(id, m => { if (m.telegram) m.telegram = { binding: m.telegram.binding, ...(m.telegram.execution ? { execution: m.telegram.execution } : {}) }; });
+    return this.status(id, 'telegram');
+  }
   async startWhatsApp(id) {
     const key = this.key(id, 'whatsapp');
-    if (this.sessions.has(key) && this.sessions.get(key).state !== 'error') return this.status(id, 'whatsapp');
+    // A finished attempt (error, expired QR, logged out) is replaced by a new one.
+    if (this.sessions.has(key) && !['error', 'expired', 'disconnected'].includes(this.sessions.get(key).state)) return this.status(id, 'whatsapp');
     if (this.sessions.has(key)) await this.stop(id, 'whatsapp');
     const session = { connected: false, state: 'connecting', startedAt: Math.floor(Date.now() / 1000), seen: new Set(), controller: new AbortController() }; this.sessions.set(key, session);
     try {
@@ -234,7 +297,16 @@ class MessengerIntegrations {
         client = new WhatsAppBridge({ appDir: this.appDir, dataDir: this.dataDir, id, mode: settings.mode || 'self-chat', allowedUsers: settings.allowedUsers || [] });
       }
       session.client = client;
-      client.on('qr', async qr => { if (this.sessions.get(key) !== session) return; const image = await require('qrcode').toDataURL(qr, { width: 280, margin: 2 }); if (this.sessions.get(key) === session && !session.connected) { session.qr = image; session.state = 'pairing'; } });
+      client.on('qr', async qr => { if (this.sessions.get(key) !== session) return; const image = await require('qrcode').toDataURL(qr, { width: 300, margin: 2 }); if (this.sessions.get(key) === session && !session.connected && session.state !== 'linking') { session.qr = image; session.state = 'pairing'; session.error = ''; } });
+      // The phone scanned the code: WhatsApp finishes linking this device.
+      client.on('linking', () => { if (this.sessions.get(key) === session && !session.connected) { session.qr = ''; session.state = 'linking'; } });
+      client.on('qr_expired', () => { if (this.sessions.get(key) !== session) return; session.qr = ''; session.state = 'expired'; session.error = ''; client.destroy().catch(() => {}); });
+      client.on('logged_out', () => {
+        if (this.sessions.get(key) !== session) return;
+        Object.assign(session, { connected: false, qr: '', state: 'disconnected', error: 'WhatsApp a été déconnecté depuis votre téléphone. Cliquez sur « Connecter WhatsApp » pour l’associer à nouveau.' });
+        this.save(id, m => { m.whatsapp = { ...m.whatsapp, enabled: false }; }); client.destroy().catch(() => {});
+      });
+      client.on('replaced', () => { if (this.sessions.get(key) !== session) return; Object.assign(session, { connected: false, qr: '', state: 'error', error: 'Cette session WhatsApp a été ouverte par un autre programme. Fermez-le puis reconnectez.' }); client.destroy().catch(() => {}); });
       client.on('ready', () => {
         if (this.sessions.get(key) !== session) return;
         session.connected = true; session.state = 'connected'; session.qr = ''; session.error = ''; session.name = client.info?.pushname || 'WhatsApp';
@@ -248,22 +320,27 @@ class MessengerIntegrations {
         }).catch(() => {});
       });
       client.on('reconnecting', () => { if (this.sessions.get(key) === session) { session.connected = false; session.state = 'connecting'; } });
-      client.on('auth_failure', () => { session.state = 'error'; session.error = 'L’association WhatsApp a échoué. Recommencez.'; });
+      client.on('auth_failure', () => { if (this.sessions.get(key) !== session || ['expired', 'disconnected'].includes(session.state)) return; session.connected = false; session.qr = ''; session.state = 'error'; session.error = 'L’association WhatsApp a échoué. Cliquez sur « Réessayer ».'; });
       client.on('disconnected', () => { if (this.sessions.get(key) === session) { this.sessions.delete(key); client.destroy().catch(() => {}); } });
       client.on('message_create', async msg => {
         if (this.sessions.get(key) !== session) return;
         const me = client.info?.wid?._serialized;
         if (!session.connected || !me || (msg.timestamp && msg.timestamp < session.startedAt)) return;
-        if (!client.isGateway && (!msg.fromMe || !session.selfIds?.has(msg.from) || !session.selfIds?.has(msg.to) || msg.hasMedia || !/^!zaalis(?:\s|$)/i.test(msg.body || ''))) return;
+        if (!client.isGateway && (!msg.fromMe || !session.selfIds?.has(msg.from) || !session.selfIds?.has(msg.to) || msg.hasMedia)) return;
         if (client.isGateway && (!msg.gatewayMessage || !msg.peer)) return;
+        // Self-chat: a message without "zaalis!" is a personal note, not a request.
+        const selfChat = client.isGateway ? client.mode !== 'bot' : true;
+        if (selfChat && !WHATSAPP_TRIGGER.test(msg.body || '')) { if (msg.body && !msg.body.startsWith('Zaalis · ')) this.note(id, 'whatsapp', 'ignored'); return; }
         const messageId = msg.id?._serialized; if (!messageId || session.seen.has(messageId)) return;
         session.seen.add(messageId); if (session.seen.size > 500) session.seen.delete(session.seen.values().next().value);
-        const text = (msg.body || '').replace(/^!zaalis\s*/i, '').trim(); if (!text && !msg.hasMedia) return;
+        const text = (msg.body || '').replace(WHATSAPP_TRIGGER, '').trim(); if (!text && !msg.hasMedia) return;
         const peer = client.isGateway ? msg.peer : undefined;
+        this.note(id, 'whatsapp', 'received');
         try {
           const reply = await this.respond(id, 'whatsapp', text, { peer, media: msg.media });
           if (reply && this.sessions.get(key) === session) await client.sendMessage(peer || me, `Zaalis · ${reply}`);
-        } catch { session.error = 'La réponse WhatsApp n’a pas pu être envoyée.'; }
+          if (reply && this.activity.get(key)?.kind === 'received') this.note(id, 'whatsapp', 'replied');
+        } catch { session.error = 'La réponse WhatsApp n’a pas pu être envoyée.'; this.note(id, 'whatsapp', 'failed', session.error); }
       });
       client.initialize().catch(() => { session.state = 'error'; session.error = 'WhatsApp ne peut pas démarrer. Vérifiez Internet et réessayez.'; client.destroy().catch(() => {}); });
       return this.status(id, 'whatsapp');
@@ -298,4 +375,4 @@ class MessengerIntegrations {
   restore() { for (const u of this.loadUsers()) { if (u.messengers?.telegram?.enabled) this.startTelegram(u.id).catch(() => {}); if (u.messengers?.whatsapp?.enabled) this.startWhatsApp(u.id).catch(() => {}); } }
   async shutdown() { await Promise.allSettled([...this.sessions.keys()].map(key => { const split = key.lastIndexOf(':'); return this.stop(key.slice(0, split), key.slice(split + 1)); })); }
 }
-module.exports = { MessengerIntegrations };
+module.exports = { MessengerIntegrations, WHATSAPP_TRIGGER, TRIGGER_WORD };

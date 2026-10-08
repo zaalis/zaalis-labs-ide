@@ -177,8 +177,20 @@ function miniMaxRequest(chat) {
 function miniMaxTranslator(model) {
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
-  let callIndex = 0, stop = 'stop', complete = false;
+  let callIndex = 0, stop = 'stop', complete = false, usage = null;
   const blocks = new Map();
+  // Anthropic-style counts: message_start opens them, message_delta carries
+  // the cumulative final values. Cache reads are part of the prompt.
+  const count = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+  const measure = (reported = {}) => {
+    const next = usage ? { ...usage } : { input: 0, cached: 0, output: 0 };
+    if (reported.input_tokens !== undefined) {
+      next.input = count(reported.input_tokens) + count(reported.cache_read_input_tokens) + count(reported.cache_creation_input_tokens);
+      next.cached = count(reported.cache_read_input_tokens);
+    }
+    if (reported.output_tokens !== undefined) next.output = count(reported.output_tokens);
+    usage = next;
+  };
   const chunk = (delta, finish = null, usage) => ({ id, object: 'chat.completion.chunk', created, model,
     choices: [{ index: 0, delta, finish_reason: finish }], ...(usage ? { usage } : {}) });
   return {
@@ -202,8 +214,13 @@ function miniMaxTranslator(model) {
         if (event.delta?.type === 'text_delta') return [chunk({ content: event.delta.text || '' })];
         return [];
       }
-      if (event.type === 'message_delta') { stop = event.delta?.stop_reason === 'tool_use' ? 'tool_calls' : 'stop'; return []; }
-      if (event.type === 'message_stop') { complete = true; return [chunk({}, stop)]; }
+      if (event.type === 'message_start') { if (event.message?.usage) measure(event.message.usage); return []; }
+      if (event.type === 'message_delta') { stop = event.delta?.stop_reason === 'tool_use' ? 'tool_calls' : 'stop'; if (event.usage) measure(event.usage); return []; }
+      if (event.type === 'message_stop') {
+        complete = true;
+        return [chunk({}, stop, usage && (usage.input || usage.output) ? { prompt_tokens: usage.input, completion_tokens: usage.output,
+          prompt_tokens_details: { cached_tokens: usage.cached } } : undefined)];
+      }
       return [];
     },
     finish() { return complete ? [] : [{ error: { message: 'Flux MiniMax interrompu.' } }]; },

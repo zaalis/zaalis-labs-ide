@@ -727,7 +727,10 @@
     // The context meter's tooltip also carries what the model supports.
     tokenMeter.addEventListener('mouseenter', () => {
         const usage = byId('token-text')?.textContent || '';
-        tokenMeter.title = [text('Contexte utilisé', 'Context used') + ` : ${usage}`, tokenMeter.dataset.capabilities].filter(Boolean).join('\n');
+        const source = tokenMeter.dataset.measured === 'true'
+            ? text('Mesuré par le fournisseur lors du dernier appel du modèle.', 'Measured by the provider on the last model call.')
+            : text('Pas encore mesuré : la valeur exacte apparaît après la réponse du modèle.', 'Not measured yet: the exact value appears after the model replies.');
+        tokenMeter.title = [text('Contexte utilisé', 'Context used') + ` : ${usage}`, source, tokenMeter.dataset.capabilities].filter(Boolean).join('\n');
     });
     document.addEventListener('change', event => { if (event.target.matches('#ai-model, #ai-submodel, .agent-model-select, .agent-role-select, .agent-check')) refreshCapabilities(); });
     document.querySelectorAll('.ai-tab').forEach(tab => tab.addEventListener('click', () => { placeComposerControls(); refresh(); refreshCapabilities(); }));

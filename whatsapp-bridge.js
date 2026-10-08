@@ -43,13 +43,18 @@ class WhatsAppBridge extends EventEmitter {
           this.info = { wid: { _serialized: jid }, pushname: event.user?.name || 'WhatsApp' }; this.connected = true; this.emit('ready');
         }
         if (event.event === 'disconnected') { this.connected = false; this.emit('reconnecting'); }
+        if (event.event === 'linking') this.emit('linking');
+        if (event.event === 'qr_expired') { this.ended = true; this.emit('qr_expired'); }
+        if (event.event === 'logged_out') { this.ended = true; this.connected = false; this.emit('logged_out'); }
+        if (event.event === 'replaced') { this.ended = true; this.connected = false; this.emit('replaced'); }
         if (event.event === 'error') this.emit('auth_failure');
       }
     });
     // Do not expose bridge stdout/stderr: they can contain account identifiers.
     this.child.stderr.resume();
     this.child.once('error', () => { if (!this.controller.signal.aborted) this.emit('auth_failure'); });
-    this.child.once('exit', () => { if (!this.controller.signal.aborted) this.emit('auth_failure'); });
+    // A bridge that announced why it stopped (expired QR, logged out) exits on purpose.
+    this.child.once('exit', () => { if (!this.controller.signal.aborted && !this.ended) this.emit('auth_failure'); });
     this.poll().catch(() => {});
   }
   async call(endpoint, body) {

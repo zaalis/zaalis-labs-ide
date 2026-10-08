@@ -118,3 +118,25 @@ for (const mode of ['supervised', 'plan']) test(`real Rust ${mode} continuation 
   assert.match(c.find('alice', binding).messages.at(-1).text, /Project updated\. What shall we do next\?$/);
   if (mode === 'plan') assert.match(c.find('alice', binding).messages.at(-1).text, /validation\.\n\nProject updated/);
 });
+test('a failed messenger turn is written in the IDE conversation with a readable reason', async t => {
+  let during;
+  const { c, binding } = fixture(t, async () => { during = c.find('alice', binding).remoteRunning; return { error: '[invalid_request] Limite d’utilisation de votre abonnement ChatGPT atteinte.' }; });
+  await assert.rejects(c.answer('alice', { binding, provider: 'whatsapp', message: 'Analyse le projet' }), /^Error: Limite d’utilisation/);
+  assert.equal(during, 'whatsapp');
+  const conv = c.find('alice', binding), last = conv.messages.at(-1);
+  assert.equal(conv.remoteRunning, undefined);
+  assert.equal(last.type, 'system'); assert.match(last.text, /depuis WhatsApp : Limite d’utilisation de votre abonnement ChatGPT atteinte\.$/);
+});
+test('the integration page sees received, failed and ignored WhatsApp messages', async t => {
+  const { c, binding } = fixture(t, async () => ({ error: '[rate_limited] Quota atteint.' }));
+  const { EventEmitter } = require('node:events');
+  let users = [{ id: 'alice', messengers: { whatsapp: { binding } } }], sent = [];
+  const client = Object.assign(new EventEmitter(), { isGateway: true, mode: 'self-chat', info: { wid: { _serialized: '1@s.whatsapp.net' } }, initialize: async () => {}, destroy: async () => {}, sendMessage: async (to, text) => { sent.push(text); } });
+  const m = new MessengerIntegrations({ loadUsers: () => structuredClone(users), saveUsers: v => { users = v; }, encrypt: v => v, decrypt: v => v, dataDir: 'x', appDir: 'x', continuation: c, whatsappFactory: async () => client });
+  await m.startWhatsApp('alice'); client.emit('ready');
+  const msg = (id, body) => ({ id: { _serialized: id }, body, fromMe: true, peer: '1@s.whatsapp.net', gatewayMessage: true, timestamp: Math.floor(Date.now() / 1000) });
+  client.emit('message_create', msg('a', 'une note')); assert.equal(m.status('alice', 'whatsapp').activity.kind, 'ignored');
+  client.emit('message_create', msg('b', 'zaalis! analyse')); await new Promise(r => setTimeout(r, 30));
+  const activity = m.status('alice', 'whatsapp').activity;
+  assert.equal(activity.kind, 'failed'); assert.equal(activity.detail, 'Quota atteint.'); assert.match(sent.at(-1), /L’IA n’a pas pu répondre : Quota atteint\./);
+});

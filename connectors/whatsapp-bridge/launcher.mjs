@@ -1,4 +1,4 @@
-import makeWASocket, { useMultiFileAuthState, DisconnectReason, jidNormalizedUser, Browsers } from '@whiskeysockets/baileys';
+import makeWASocket, { useMultiFileAuthState, DisconnectReason, jidNormalizedUser, Browsers, fetchLatestBaileysVersion } from '@whiskeysockets/baileys';
 import express from 'express';
 import pino from 'pino';
 import fs from 'node:fs';
@@ -9,24 +9,57 @@ if (!session || !port || !token) throw Error('Invalid bridge configuration');
 fs.mkdirSync(session, { recursive: true });
 const { state, saveCreds } = await useMultiFileAuthState(session);
 const log = event => process.stdout.write(JSON.stringify(event) + '\n');
-const logger = pino({ level: 'silent' });
+// Protocol traces only when explicitly requested for a diagnosis (they can
+// contain account identifiers, so they never go to stdout).
+const logger = process.env.ZAALIS_WHATSAPP_DEBUG_LOG
+  ? pino({ level: 'debug' }, pino.destination({ dest: process.env.ZAALIS_WHATSAPP_DEBUG_LOG, sync: true }))
+  : pino({ level: 'silent' });
 const queue = [], seen = new Set(), outbound = new Set();
 const allowed = new Set((process.env.WHATSAPP_ALLOWED_USERS || '').split(','));
-let socket, connected = false, closing = false, retry, writes = Promise.resolve(), sends = Promise.resolve();
+let socket, connected = false, closing = false, retry, writes = Promise.resolve(), sends = Promise.resolve(), version, failures = 0;
 const remember = (set, id) => { set.add(id); if (set.size > 2000) set.delete(set.values().next().value); };
+// WhatsApp refuses outdated web clients (HTTP 405). Ask for the current
+// version once per bridge start; the bundled one is the offline fallback.
+async function currentVersion() {
+  if (version) return version;
+  try { const latest = await fetchLatestBaileysVersion({ signal: AbortSignal.timeout(8000) }); if (Array.isArray(latest?.version)) version = latest.version; } catch {}
+  return version;
+}
+// Credentials that WhatsApp rejected can never connect again: remove them so
+// the next "Connect" shows a fresh QR instead of failing forever.
+async function forget(reason) {
+  closing = true; clearTimeout(retry);
+  try { socket?.end(undefined); } catch {}
+  await writes.catch(() => {});
+  try { fs.rmSync(session, { recursive: true, force: true }); } catch {}
+  log({ event: reason });
+  setTimeout(() => process.exit(0), 200);
+}
 async function connect() {
-  socket = makeWASocket({ auth: state, logger, browser: Browsers.ubuntu('Zaalis'), syncFullHistory: false, markOnlineOnConnect: false });
+  const known = await currentVersion();
+  socket = makeWASocket({ auth: state, logger, browser: Browsers.ubuntu('Zaalis'), syncFullHistory: false, markOnlineOnConnect: false, ...(known ? { version: known } : {}) });
   const current = socket;
+  let showedQr = false;
   socket.ev.on('creds.update', () => { writes = writes.then(saveCreds).catch(() => log({ event: 'error' })); });
   socket.ev.on('connection.update', update => {
     if (closing || socket !== current) return;
-    if (update.qr) log({ event: 'qr', qr: update.qr });
-    if (update.connection === 'open') { connected = true; log({ event: 'connected', user: socket.user }); }
+    if (update.qr) { showedQr = true; log({ event: 'qr', qr: update.qr }); }
+    if (update.connection === 'open') { connected = true; failures = 0; log({ event: 'connected', user: socket.user }); }
     if (update.connection === 'close') {
       connected = false;
       const code = update.lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) { log({ event: 'error' }); return; }
-      log({ event: 'disconnected' }); clearTimeout(retry); retry = setTimeout(() => connect().catch(() => log({ event: 'error' })), 2000);
+      // Removed from "Linked devices" on the phone, or a corrupted session.
+      if (code === DisconnectReason.loggedOut || code === DisconnectReason.badSession) { forget('logged_out'); return; }
+      // Another program opened this same WhatsApp session.
+      if (code === DisconnectReason.connectionReplaced) { closing = true; log({ event: 'replaced' }); return; }
+      // The QR codes were shown until WhatsApp stopped issuing new ones.
+      if (!state.creds.registered && showedQr && code === DisconnectReason.timedOut) { closing = true; log({ event: 'qr_expired' }); return; }
+      // Right after a scan WhatsApp asks for one immediate restart.
+      if (code === DisconnectReason.restartRequired) { log({ event: 'linking' }); clearTimeout(retry); retry = setTimeout(() => connect().catch(() => log({ event: 'error' })), 100); return; }
+      if (code === 405) version = undefined;
+      failures++;
+      log({ event: 'disconnected' }); clearTimeout(retry);
+      retry = setTimeout(() => connect().catch(() => log({ event: 'error' })), Math.min(30000, 2000 * failures));
     }
   });
   socket.ev.on('messages.upsert', async ({ messages, type }) => {

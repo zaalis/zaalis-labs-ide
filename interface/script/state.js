@@ -42,7 +42,8 @@ const state = {
     conversations: [],        // single-chat history
     currentConvId: null,
     chatHistory: [],          // API memory for the current chat [{role, content}]
-    contextTokens: 0,         // estimated tokens currently in context
+    contextTokens: 0,         // provider-measured tokens of the last model call
+    contextMeasured: false,   // true once a provider has reported that size
     agentConversations: [],   // agents-mode history (separate)
     currentAgentConvId: null,
     attachments: [], // [{ name, ext, isImage, url?, content }]
@@ -193,6 +194,9 @@ const CONTEXT_WINDOWS = {
 function contextWindow(model, submodel) {
     const m = CONTEXT_WINDOWS[model] || {};
     if (model === 'gguf') return clampGgufCtx(state.config && state.config.ggufCtx);
+    // The server catalog is the reference; this table only covers startup.
+    const caps = window.ZaalisWorkspace?.getCapabilities?.(model, submodel);
+    if (caps && Number(caps.contextWindow) > 0) return Number(caps.contextWindow);
     const s = (submodel || '').toLowerCase().trim();
     if (m[s]) return m[s];
     // Sort keys by length descending to match longest exact substring/prefix first (e.g. gpt-5.5 before gpt-5)
@@ -207,6 +211,8 @@ function clampGgufCtx(value) {
     if (!Number.isFinite(n) || n <= 0) return 8192;
     return Math.max(512, Math.min(131072, n));
 }
+// Rough safety margin used only to trim history sent to small local models.
+// It is never displayed: every visible token count comes from the provider.
 function estimateTokens(text) { return Math.ceil(((text || '') + '').length / 4); }
 function fmtTokens(n) {
     // Round to at most 2 decimals and drop trailing zeros so 1 050 000 -> "1.05M"

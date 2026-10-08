@@ -72,8 +72,25 @@ test('MiniMax stream becomes chat-completions text and tool chunks', () => {
     delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' } });
   assert.equal(args[0].choices[0].delta.tool_calls[0].function.arguments, '{"path":"a"}');
   translator.push({ type: 'message_delta', delta: { stop_reason: 'tool_use' } });
-  assert.equal(translator.push({ type: 'message_stop' })[0].choices[0].finish_reason, 'tool_calls');
+  const stop = translator.push({ type: 'message_stop' })[0];
+  assert.equal(stop.choices[0].finish_reason, 'tool_calls');
+  assert.equal(stop.usage, undefined, 'no reported usage must stay unmeasured');
   assert.deepEqual(translator.finish(), []);
+});
+
+test('MiniMax provider usage reaches the ledger with cache reads in the prompt', () => {
+  const translator = auth.miniMaxTranslator('MiniMax-M2.7');
+  translator.push({ type: 'message_start', message: { usage: { input_tokens: 12, cache_read_input_tokens: 100, output_tokens: 1 } } });
+  translator.push({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } });
+  translator.push({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 37 } });
+  const [last] = translator.push({ type: 'message_stop' });
+  assert.deepEqual(last.usage, { prompt_tokens: 112, completion_tokens: 37, prompt_tokens_details: { cached_tokens: 100 } });
+});
+
+test('a Responses stream without usage is not recorded as zero tokens', () => {
+  const translator = auth.createChunkTranslator('grok-4.6');
+  const [last] = translator.push({ type: 'response.completed', response: { usage: {} } });
+  assert.equal(last.usage, undefined);
 });
 
 test('xAI account uses the Responses endpoint and translates its stream', async () => {

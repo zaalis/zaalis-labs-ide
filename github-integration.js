@@ -21,6 +21,7 @@ class GitHubIntegration {
   user(id) { const u = this.loadUsers().find(u => u.id === id); if (!u) throw Error('Compte introuvable.'); return u; }
   save(id, change) { const users = this.loadUsers(); const u = users.find(u => u.id === id); if (!u) throw Error('Compte introuvable.'); change(u); this.saveUsers(users); }
   async request(id, endpoint, method = 'GET', body, token) {
+    const stored = !token;
     token ||= this.decrypt(this.user(id).github?.token || '');
     if (!token) throw Error('Connectez GitHub dans les intégrations.');
     const response = await this.fetch(`https://api.github.com${endpoint}`, {
@@ -28,10 +29,21 @@ class GitHubIntegration {
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'User-Agent': 'zaalis-ide', 'X-GitHub-Api-Version': '2022-11-28', ...(body ? { 'Content-Type': 'application/json' } : {}) },
       ...(body ? { body: JSON.stringify(body) } : {})
     });
+    // A revoked or expired authorization cannot recover: flag it so the
+    // integration page asks for a reconnection instead of a vague failure.
+    if (response.status === 401 && stored) {
+      this.save(id, u => { if (u.github) u.github.reauth = true; });
+      throw Object.assign(Error('Votre autorisation GitHub a expiré ou a été révoquée. Reconnectez le compte dans Intégrations → GitHub.'), { status: 401 });
+    }
+    if (response.status === 403 && response.headers?.get?.('x-ratelimit-remaining') === '0') {
+      const reset = Number(response.headers.get('x-ratelimit-reset')) * 1000;
+      const at = Number.isFinite(reset) && reset > 0 ? new Date(reset).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '';
+      throw Object.assign(Error(`Limite d’appels GitHub atteinte.${at ? ` Réessayez après ${at}.` : ' Réessayez plus tard.'}`), { status: 429 });
+    }
     if (!response.ok) throw Error(`GitHub : accès refusé ou opération impossible (HTTP ${response.status}). Vérifiez les permissions, la protection de branche et les limites API.`);
     return response.status === 204 ? {} : response.json();
   }
-  status(id) { const user = this.user(id), g = user.github; return { connected: !!g?.token, login: g?.login || '', deviceAvailable: !!(this.browserAuth?.available || user.githubClientId || this.clientId), method: user.githubClientId || this.clientId ? 'oauth' : 'github-cli', permissions: g?.permissions || {} }; }
+  status(id) { const user = this.user(id), g = user.github; return { connected: !!g?.token, reauth: !!g?.reauth, login: g?.login || '', deviceAvailable: !!(this.browserAuth?.available || user.githubClientId || this.clientId), method: user.githubClientId || this.clientId ? 'oauth' : 'github-cli', permissions: g?.permissions || {} }; }
   configure(id, clientId) {
     if (typeof clientId !== 'string' || !/^[a-zA-Z0-9._-]{10,100}$/.test(clientId)) throw Error('Client ID GitHub invalide.');
     this.devices.delete(id);

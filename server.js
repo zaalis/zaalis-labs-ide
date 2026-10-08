@@ -858,6 +858,8 @@ app.post('/api/integrations/messengers/:provider', async (req, res) => {
     if (body.action === 'settings') result = messengers.settings(req.user.id, { ...body, provider });
     else if (body.action === 'configure' && provider === 'telegram') result = await messengers.configureTelegram(req.user.id, body.token);
     else if (body.action === 'disconnect') result = await messengers.stop(req.user.id, provider, true);
+    else if (body.action === 'test') result = await messengers.test(req.user.id, provider);
+    else if (body.action === 'reset' && provider === 'telegram') result = await messengers.resetTelegram(req.user.id);
     else if (body.action === 'start') {
       result = provider === 'telegram' ? await messengers.startTelegram(req.user.id) : await messengers.startWhatsApp(req.user.id);
       if (result.url) result.opened = openInExternalBrowser(result.url);
@@ -870,6 +872,8 @@ app.get('/api/integrations/github/repos', async (req, res) => {
   try { res.json(await githubIntegration.repos(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); }
 });
 app.post('/api/integrations/github', async (req, res) => {
+  // Account and repository permissions are changed only from the IDE on this PC.
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée à l’IDE sur ce PC.' });
   try {
     const body = req.body || {};
     let result;
@@ -979,7 +983,10 @@ app.post('/api/token-profile', (req,res) => {
 app.get('/api/usage', async (req,res) => {
   try { const from=Number(req.query.from),to=Number(req.query.to);
     if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from<0||to<=from||to-from>367*86400000)throw new Error('Période invalide.');
-    const value=await rustAgentBridge.usage(req.user.id,userApiKeys(req.user),from,to);
+    // Local calendar: "ms:offsetMinutes" transitions computed by the client.
+    const zone=String(req.query.zone||'').split(',').filter(Boolean).slice(0,2000).map(item=>item.split(':').map(Number))
+      .filter(([at,offset])=>Number.isSafeInteger(at)&&Number.isInteger(offset)&&Math.abs(offset)<=18*60).map(([at,offset])=>[at,offset*60000]);
+    const value=await rustAgentBridge.usage(req.user.id,userApiKeys(req.user),from,to,zone);
     value.comparison=require('./engine-comparison').comparisonSummary(DATA_DIR,req.user.id,from,to);
     res.json(value);
   } catch(e){res.status(400).json({error:e.message});}

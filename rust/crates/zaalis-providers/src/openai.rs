@@ -709,7 +709,13 @@ impl StreamParser {
             return;
         }
 
-        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
+        // Most providers report usage at the top level of the last chunk;
+        // Moonshot/Kimi nests it in the final choice instead.
+        if let Some(usage) = value
+            .get("usage")
+            .or_else(|| value.pointer("/choices/0/usage"))
+            .filter(|usage| !usage.is_null())
+        {
             self.usage = Some(parse_usage(usage));
         }
 
@@ -1251,6 +1257,16 @@ mod tests {
                 "« {key} » doit produire un delta de raisonnement"
             );
         }
+    }
+
+    #[test]
+    fn usage_nested_in_the_final_choice_is_measured() {
+        let mut parser = StreamParser::new();
+        let mut events = Vec::new();
+        parser.handle(&json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop","usage":{"prompt_tokens":7,"completion_tokens":3}}]}), &mut events);
+        events.extend(parser.finish());
+        let usage = events.iter().find_map(|event| match event { TurnEvent::Usage { usage } => Some(*usage), _ => None }).expect("usage");
+        assert_eq!((usage.input_tokens, usage.output_tokens), (7, 3));
     }
 
     #[test]

@@ -157,7 +157,10 @@ impl Daemon {
             ClientMethod::UsageQuery => {
                 let from=request.params.as_ref().and_then(|p|p.get("from_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("from_ms requis"))?;
                 let to=request.params.as_ref().and_then(|p|p.get("to_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("to_ms requis"))?;
-                Ok((self.store.usage_summary(from,to).map_err(RpcError::from)?,Vec::new()))
+                let zone=request.params.as_ref().and_then(|p|p.get("zone")).and_then(Value::as_array).map(|items| items.iter().filter_map(|item| {
+                    let pair=item.as_array()?; Some((pair.first()?.as_i64()?, pair.get(1)?.as_i64()?))
+                }).collect::<Vec<_>>()).unwrap_or_default();
+                Ok((self.store.usage_summary_in_zone(from,to,&zone).map_err(RpcError::from)?,Vec::new()))
             },
         }
     }
