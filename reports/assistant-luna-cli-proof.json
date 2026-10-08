@@ -4,5 +4,6 @@
   "model": "gpt-6-luna",
   "surface": "packaged terminal",
   "response": "LUNA_CLI_OK",
-  "personalStores": "unchanged"
+  "personalStores": "unchanged",
+  "moa": true
 }

@@ -300,6 +300,12 @@ impl Daemon {
         system_prompt: Option<String>,
     ) -> std::result::Result<(AgentSession, CheckpointStore), RpcError> {
         let mut config = SessionConfig::new(workspace.clone(), mode);
+        if let Ok(raw) = std::env::var("ZAALIS_AGENT_LIMITS") {
+            if let Ok(value) = serde_json::from_str::<Value>(&raw) {
+                config.subagent_turns = value["subagentTurns"].as_u64().unwrap_or(250).clamp(1,250) as u32;
+                config.max_concurrency = value["maxSubagents"].as_u64().unwrap_or(10).clamp(1,10) as usize + 1;
+            }
+        }
         config.usage_store = Some(Arc::clone(&self.store));
         config.session_id = id;
         if let Some(system_prompt) = system_prompt {

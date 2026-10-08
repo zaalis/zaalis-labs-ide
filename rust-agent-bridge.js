@@ -97,6 +97,8 @@ function syncManagedSkills(configDir, skills) {
 class AgentdClient {
   constructor({ executable, dataDir, configDir, keys, extensionEnv, runtimeConfig }) {
     const env = { ...process.env, ...(extensionEnv || {}), ZAALIS_AGENTD_DATA_DIR: dataDir, ZAALIS_USER_CONFIG_DIR: configDir };
+    if (runtimeConfig?.modelPolicy) env.ZAALIS_MODEL_POLICY = JSON.stringify(runtimeConfig.modelPolicy);
+    if (runtimeConfig?.agentLimits) env.ZAALIS_AGENT_LIMITS = JSON.stringify(runtimeConfig.agentLimits);
     if (runtimeConfig && runtimeConfig.ollamaUrl) env.ZAALIS_OLLAMA_URL = String(runtimeConfig.ollamaUrl);
     if (runtimeConfig && runtimeConfig.ggufUrl) env.ZAALIS_GGUF_URL = String(runtimeConfig.ggufUrl);
     if (runtimeConfig && runtimeConfig.computerEndpoint) env.ZAALIS_COMPUTER_ENDPOINT = String(runtimeConfig.computerEndpoint);
@@ -234,7 +236,7 @@ class RustAgentBridge {
     const active = client => [...this.sessions.values()].some(session => session.client === client);
     for (const [key,entry] of this.clients) if (entry.client.closed || entry.userId === userId && Date.now()-(entry.lastUsed||0)>300000 && !active(entry.client)) {entry.client.stop();this.clients.delete(key);}
     const pool=[...this.clients.entries()].filter(([,e])=>e.userId===userId).sort((a,b)=>(a[1].lastUsed||0)-(b[1].lastUsed||0));
-    if(pool.length>=8){const idle=pool.find(([,e])=>!active(e.client));if(!idle)throw Object.assign(Error('Limite de huit moteurs concurrents atteinte.'),{status:429});idle[1].client.stop();this.clients.delete(idle[0]);}
+    if(pool.length>=12){const idle=pool.find(([,e])=>!active(e.client));if(!idle)throw Object.assign(Error('Limite de douze moteurs concurrents atteinte.'),{status:429});idle[1].client.stop();this.clients.delete(idle[0]);}
     const userDir = path.join(this.dataDir, 'rust-agentd', crypto.createHash('sha256').update(String(userId)).digest('hex').slice(0, 24));
     fs.mkdirSync(userDir, { recursive: true });
     const configDir = path.join(userDir, 'extensions');
@@ -311,6 +313,7 @@ class RustAgentBridge {
       ...(options.systemPrompt ? { system_prompt: String(options.systemPrompt).slice(0, 200000) } : {}),
     };
     if (options.budget) create.budget = options.budget;
+    if (options.runtimeConfig?.agentLimits) create.budget = { max_rounds: options.runtimeConfig.agentLimits.maxSteps, max_depth: 3, ...(options.budget || {}) };
     if (options.team) create.agents = options.team;
     else create.model = { provider: options.model, model: options.submodel || undefined,
       reasoning: options.reasoningLevel || 0, ...(options.modelCapabilities ? { capabilities: options.modelCapabilities } : {}) };
@@ -343,6 +346,7 @@ class RustAgentBridge {
       return !desired || agent.permissions?.mode !== (desired.permissions?.mode || create.permission_mode);
     })) made = null;
     if (!made) made = await client.request('session.create', create);
+    if(made?.resumed && create.budget){for(const agent of made.agents||[])if(!agent.parent_id){const updated=await client.request("agent.update",{session_id:made.session_id,agent_id:agent.id,budget:create.budget});Object.assign(agent,updated.agent);}}
     const sessionId = made.session_id;
     onEvent({ type: 'run_started', runId: sessionId, sessionId, conversationId: options.conversationId || null, resumed: !!made.resumed });
     for (const agent of made.agents || []) {

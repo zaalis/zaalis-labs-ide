@@ -1,6 +1,7 @@
 'use strict';
 const { crypto, fail, text, publicData } = require('./common');
 const SERVICES = Object.freeze({
+  ...Object.fromEntries(require("../interface/script/integration-catalog").filter(c=>c.adapter!=="native").map(c=>[c.id,{title:c.title,baseUrl:c.baseUrl,auth:c.auth}])),
   discord: { title: 'Discord', baseUrl: 'https://discord.com/api/v10', auth: 'bot-token' },
   spotify: { title: 'Spotify', baseUrl: 'https://api.spotify.com/v1', auth: 'oauth', authorizeUrl: 'https://accounts.spotify.com/authorize', tokenUrl: 'https://accounts.spotify.com/api/token', scopes: 'user-read-playback-state user-modify-playback-state user-read-recently-played user-read-playback-position user-read-private user-library-read user-library-modify playlist-read-private playlist-modify-private playlist-modify-public' },
   feishu: { title: 'Feishu / Lark', baseUrl: 'https://open.feishu.cn/open-apis', auth: 'tenant-token' },
@@ -25,7 +26,7 @@ class Connections {
     const settings = this.settings(userId);
     return Object.entries(SERVICES).map(([id, service]) => {
       const row = settings[id], configured = !!row && row.enabled !== false;
-      return { id, title: service.title, auth: service.auth, status: configured ? 'configured' : row?.enabled === false ? 'disabled' : 'connection_required', baseUrl: row?.baseUrl || service.baseUrl, detail: row?.lastError || '', hasCredential: !!row?.encrypted, lastVerifiedAt: row?.lastVerifiedAt || null };
+      return { id, title: service.title, auth: service.auth, mcpServer:row?.mcpServer, options:publicData(row?.options||{}), status: configured ? 'configured' : row?.enabled === false ? 'disabled' : 'connection_required', baseUrl: row?.baseUrl || service.baseUrl, detail: row?.lastError || '', hasCredential: !!row?.encrypted, lastVerifiedAt: row?.lastVerifiedAt || null };
     });
   }
   configure(userId, input) {
@@ -36,8 +37,9 @@ class Connections {
     const rejectSecrets=value=>{for(const[k,v]of Object.entries(value||{})){if(/^(token|tokens|apiKey|password|secret|clientSecret|authorization)$/i.test(k))throw fail('Store credentials in the encrypted credentials field, not options.');if(v&&typeof v==='object')rejectSecrets(v);}};rejectSecrets(row.options);
     if(JSON.stringify(row.options).length>64000)throw fail('Connection options too large.');
     if (row.baseUrl) validateBase(row.baseUrl);
-    if (input.credentials) { if(typeof input.credentials!=='object'||Array.isArray(input.credentials)||JSON.stringify(input.credentials).length>128000)throw fail('Credentials must be an object up to 128000 characters.');row.encrypted = this.encrypt(JSON.stringify(input.credentials)); }
+    if (input.credentials) { if(typeof input.credentials!=='object'||Array.isArray(input.credentials)||JSON.stringify(input.credentials).length>128000)throw fail('Credentials must be an object up to 128000 characters.');row.encrypted = this.encrypt(JSON.stringify({...((previous.encrypted && JSON.parse(this.decrypt(previous.encrypted)))||{}),...input.credentials})); }
     if (input.clearCredentials) delete row.encrypted;
+    delete row.lastVerifiedAt;delete row.lastError;
     settings[id] = row; this.store.write(userId, 'connections', settings); return this.list(userId).find(row => row.id === id);
   }
   async run(input, ctx) {
@@ -59,6 +61,12 @@ class Connections {
     if (action === 'disable' || action === 'enable') { const rows = this.settings(ctx.userId); if (!rows[id]) throw fail('Configure this connection first.', 'connection_required', 409); rows[id].enabled = action === 'enable'; this.store.write(ctx.userId, 'connections', rows); return this.list(ctx.userId).find(row => row.id === id); }
     if (action === 'disconnect') { const rows = this.settings(ctx.userId); delete rows[id]; this.store.write(ctx.userId, 'connections', rows); return { disconnected: id }; }
     if (action === 'test') {
+      const info=require('../interface/script/integration-catalog').find(c=>c.id===id);
+      if(info && !['existing','native'].includes(info.adapter)){
+        const row=this.get(ctx.userId,id);const response=info.adapter==='mcp'&&!row.options?.tools?.test?await this.mcp(ctx,'describe',{server:row.mcpServer}):await require('./connectors/messaging').run(this,'messaging_read',{service:id,action:'test'},ctx);
+        if(response?.ok===false)throw fail('Service rejected verification.','authorization_required',401);
+        const rows=this.settings(ctx.userId);rows[id].lastVerifiedAt=new Date().toISOString();this.store.write(ctx.userId,'connections',rows);return {verified:id,response};
+      }
       const row = this.get(ctx.userId, id), target = { discord: '/users/@me', spotify: '/me', homeassistant: '/api/', feishu: '/drive/v1/files' }[id];
       if (!target) { if (row.mcpServer) return this.mcp(ctx, 'describe', { server: row.mcpServer }); throw fail('Use the matching tool to verify this adapter.', 'verification_required', 409); }
       const response = await this.request(ctx.userId, id, target, { signal: ctx.signal });
@@ -96,11 +104,11 @@ class Connections {
     for (const [key, value] of Object.entries(query || {})) if (value !== undefined && value !== null) url.searchParams.set(key, String(value));
     const token = row.token || row.apiKey;
     const response = await this.fetch(url, { method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000), headers: { ...(token ? { Authorization: (service === 'discord' ? 'Bot ' : 'Bearer ') + token } : {}), ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    const data = response.status === 204 ? { success: true } : await boundedJson(response);
+    const data = response.status === 204 ? { success: true } : await boundedJson(response,2*1024*1024,service==='ntfy');
     if (!response.ok) throw fail(`${service} HTTP ${response.status}: ${String(data.message || data.error?.message || data.error || 'request failed').slice(0, 500)}`, response.status === 401 ? 'authorization_required' : 'provider_error', response.status);
     return publicData(data);
   }
 }
 function validateBase(raw) { const url = new URL(raw); if (url.username || url.password || url.hash || url.search || !['https:', 'http:', 'ws:', 'wss:'].includes(url.protocol)) throw fail('Invalid connection endpoint.'); if (['http:', 'ws:'].includes(url.protocol) && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && !/^192\.168\.|^10\.|^172\.(1[6-9]|2\d|3[01])\./.test(url.hostname)) throw fail('Remote endpoints require HTTPS.'); return url; }
-async function boundedJson(response, limit = 2 * 1024 * 1024) { let size = 0, chunks = []; for await (const chunk of response.body || []) { size += chunk.length; if (size > limit) throw fail('Connector response too large.', 'response_limit', 502); chunks.push(chunk); } const raw = Buffer.concat(chunks).toString('utf8'); if (!raw) return {}; try { return JSON.parse(raw); } catch { throw fail('Provider returned non-JSON data.', 'provider_error', 502); } }
+async function boundedJson(response, limit = 2 * 1024 * 1024, ndjson = false) { let size = 0, chunks = []; for await (const chunk of response.body || []) { size += chunk.length; if (size > limit) throw fail('Connector response too large.', 'response_limit', 502); chunks.push(chunk); } const raw = Buffer.concat(chunks).toString('utf8'); if (!raw) return {}; try { return ndjson ? {messages:raw.trim().split(/\r?\n/).map(line=>JSON.parse(line))} : JSON.parse(raw); } catch { throw fail('Provider returned non-JSON data.', 'provider_error', 502); } }
 module.exports = { Connections, SERVICES, validateBase, boundedJson };

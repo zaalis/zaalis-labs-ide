@@ -134,6 +134,9 @@ impl Message {
 /// Everything needed for one model call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRequest {
+    /// Internal per-agent turn identity; never sent to a provider.
+    #[serde(skip)]
+    pub composition_key: Option<String>,
     pub binding: ModelBinding,
     pub system: String,
     pub messages: Vec<Message>,
@@ -151,6 +154,7 @@ impl TurnRequest {
     pub fn new(binding: ModelBinding, system: impl Into<String>, messages: Vec<Message>) -> Self {
         Self {
             binding,
+            composition_key: None,
             system: system.into(),
             messages,
             tools: Vec::new(),

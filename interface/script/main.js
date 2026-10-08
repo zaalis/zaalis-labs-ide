@@ -224,7 +224,7 @@ function renderCompatModelOptions() {
     const add = group.querySelector('option[data-action="add"]');
     group.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
     subscriptions.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
-    window.compatProviders.filter(provider => provider.configured).forEach(provider => {
+    window.compatProviders.filter(provider => provider.configured || `compat:${provider.id}` === wanted).forEach(provider => {
         const option = document.createElement('option');
         option.value = `compat:${provider.id}`;
         option.textContent = provider.label;

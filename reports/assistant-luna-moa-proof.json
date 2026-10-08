@@ -1,0 +1,35 @@
+{
+  "status": "passed",
+  "provider": "ChatGPT subscription",
+  "model": "gpt-6-luna",
+  "tools": 171,
+  "called": [
+    "tool_search",
+    "tool_describe",
+    "memory",
+    "tool_call",
+    "execute_code"
+  ],
+  "codeResult": {
+    "notes": 1,
+    "value": 42
+  },
+  "response": "Test réussi : résultat **42** et **1 note** trouvée.",
+  "usage": {
+    "input": 28338,
+    "output": 309,
+    "cached": 15360,
+    "reasoning": 25,
+    "toolCalls": 5,
+    "rounds": 6,
+    "webQueries": 0,
+    "webResults": 0,
+    "webPagesRead": 0,
+    "contextCompactions": 0,
+    "context": 5202,
+    "turnInput": 28338,
+    "turnOutput": 309
+  },
+  "personalStores": "unchanged",
+  "moa": true
+}

@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),readline=require('node:readline');
-const commands=['tools','assistant-memory','sessions','schedule','jobs','tasks','skills','connections','attach','computer'];
+const commands=['tools','assistant-memory','sessions','schedule','jobs','tasks','skills','connections','attach','computer','agent-settings','model-policy','integrations'];
 async function command(name,arg,env){
   if(!commands.includes(name))return false;
   const words=arg.trim().split(/\s+/),action=words[0]||'list';
@@ -8,7 +8,9 @@ async function command(name,arg,env){
   const view=(tool,input)=>api('GET','/api/assistant/manage/'+tool+'?root='+encodeURIComponent(env.root())+'&input='+encodeURIComponent(JSON.stringify(input)));
   const mutate=(tool,input)=>api('POST','/api/assistant/manage/'+tool,{root:env.root(),model:env.session.model,submodel:env.session.submodel,permissionMode:env.permission(),input});
   let result;
-  if(name==='tools'){const data=await api('GET','/api/assistant/catalog');const query=arg.toLowerCase();result={shared:data.shared,tools:data.tools.filter(t=>!query||(`${t.name} ${t.family} ${t.description}`).toLowerCase().includes(query)).map(t=>({name:t.name,family:t.family,status:t.status,description:t.description}))};}
+  if(['agent-settings','model-policy','integrations'].includes(name)){if(action==='configure'){const file=path.resolve(env.root(),words.slice(1).join(' '));if(fs.statSync(file).size>16000)throw Error('Settings too large.');result=await api('POST','/api/assistant/'+name,JSON.parse(fs.readFileSync(file,'utf8')));if(name==='model-policy'&&result.main){env.session.model=result.main.provider;env.session.submodel=result.main.model;env.save();}}else result=await api('GET','/api/assistant/'+name);}
+  else if(name==='integrations')result=await api('GET','/api/assistant/integrations');
+  else if(name==='tools'){const data=await api('GET','/api/assistant/catalog');const query=arg.toLowerCase();result={shared:data.shared,tools:data.tools.filter(t=>!query||(`${t.name} ${t.family} ${t.description}`).toLowerCase().includes(query)).map(t=>({name:t.name,family:t.family,status:t.status,description:t.description}))};}
   else if(name==='attach'){const file=path.resolve(env.root(),arg);const {loadImage}=require('./media');env.images.push(loadImage(file));result={attached:path.basename(file),pending:env.images.length};}
   else if(name==='computer'){env.session.computerControl=action==='on';env.save();result={computerControl:env.session.computerControl};}
   else if(name==='connections'){

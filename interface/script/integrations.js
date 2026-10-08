@@ -8,17 +8,21 @@
   const version=++revision,target=document.getElementById('integrations-content');if(!target)return;target.replaceChildren();
   if(page==='overview'){
    const intro=node('div',undefined,'integrations-intro');intro.append(node('span',uiText('VOTRE ESPACE CONNECTÉ'),'integration-eyebrow'),node('h3',uiText('Vos outils, au même endroit')),node('p',uiText('Connectez vos comptes pour travailler sur vos dépôts et continuer vos projets dans votre messagerie.')));target.append(intro);
+   const search=node('input');search.type='search';search.placeholder=state.language==='en'?'Search integrations…':'Rechercher une intégration…';search.setAttribute('aria-label',search.placeholder);search.className='integration-search';target.append(search);
    const grid=node('div',undefined,'integrations-grid');
-   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],['whatsapp','WhatsApp','Continuez vos projets et conversations depuis WhatsApp sur votre téléphone.','Messagerie personnelle'],['telegram','Telegram','Retrouvez vos projets et conversations de l’IDE dans votre bot privé.','Messagerie privée']]){
-    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',uiText('Ouvrir '+name));
+   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],...window.ZaalisIntegrationCatalog.map(c=>[c.id,c.title,state.language==='en'?c.en:c.fr,c.adapter==='native'?'Messagerie privée':c.adapter==='mcp'?(state.language==='en'?'MCP bridge required':'Pont MCP requis'):(state.language==='en'?'API connection':'Connexion API')])]){
+    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',(state.language==='en'?'Open ':'Ouvrir ')+name);
     const mark=node('span',undefined,'integration-brand '+id),image=node('img');image.src='assets/integrations/'+id+'.svg';image.alt='';mark.append(image);
     const copy=node('span',undefined,'integration-tile-copy');copy.append(node('span',uiText(tag),'integration-eyebrow'),node('strong',name),node('span',uiText(description)),node('span',uiText('Configurer la connexion')+' →','integration-tile-cta'));
     tile.append(mark,copy);tile.onclick=()=>settings(id);grid.append(tile);
    }
+   search.oninput=()=>{const q=search.value.toLocaleLowerCase();for(const tile of grid.children)tile.hidden=!tile.textContent.toLocaleLowerCase().includes(q);};
+   window.ZaalisAgentSettings.mount(target).catch(e=>target.append(node('p',e.message,'integration-notice error')));
    target.append(grid,node('p',uiText('Vos connexions restent sur ce PC. Gardez Zaalis ouvert pour recevoir les réponses dans vos messageries.'),'integration-footnote'));return;
   }
   if(page==='whatsapp'||page==='telegram'){await window.ZaalisMessengers.mount(page,target,()=>settings('overview'));return;}
 
+  if(page!=='github'){await window.ZaalisIntegrationSetup.mount(page,target,()=>settings('overview'));return;}
   const back=node('button',uiText('← Retour aux intégrations'),'integration-back');back.type='button';back.onclick=()=>settings('overview');target.append(back);
   const notice=node('p',uiText('Chargement des intégrations…'),'lab-note');notice.setAttribute('role','status');target.append(notice);
   try{

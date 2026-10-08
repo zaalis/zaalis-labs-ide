@@ -3,7 +3,7 @@ const { fs, path, crypto, text, fail, publicData, hash } = require('./common');
 const { parseSchedule, advance } = require('./schedule');
 const OMIT = /^(\.git|node_modules|target|server-data|\.env(?:\..*)?|\.ssh|\.aws|\.codex|native|image|video-pub)$/i;
 class TaskTools {
-  constructor(store, run, emit) { this.store = store; this.run = run; this.emit = emit; this.active = new Map(); this.users = new Set(); this.timer = null; }
+  constructor(store, run, emit, settings) { this.settings = settings; this.store = store; this.run = run; this.emit = emit; this.active = new Map(); this.users = new Set(); this.timer = null; }
   recover(userId) {
     if (this.users.has(userId)) return;
     this.users.add(userId); const rows = this.store.read(userId, 'tasks'); let changed = false;
@@ -20,10 +20,11 @@ class TaskTools {
     if (['list', 'status', 'result', 'cancel', 'resume'].includes(action)) return this.manage(action, input, ctx);
     if (action !== 'start') throw fail('Unknown delegation action.');
     if (Array.isArray(input.tasks)) {
-      if (!input.tasks.length || input.tasks.length > 8) throw fail('One to eight delegation tasks are allowed.');
-      const results = []; for (const task of input.tasks) results.push(await this.delegate({ ...task, background: input.background === true }, ctx)); return { tasks: results };
+      if (!input.tasks.length || input.tasks.length > (this.settings?.get(ctx.userId).maxSubagents || 10)) throw fail('At most ten delegation tasks are allowed.');
+      const active=[...this.active.values()].filter(v=>v.userId===ctx.userId).length;if(active+input.tasks.length>(this.settings?.get(ctx.userId).maxSubagents||10))throw fail('Concurrent subagent limit reached.','concurrency_limit',429);
+      const results = await Promise.all(input.tasks.map(task => this.delegate({ ...task, background: input.background === true }, ctx))); return { tasks: results };
     }
-    if ([...this.active.values()].filter(v => v.userId === ctx.userId).length >= 4) throw fail('Four background agents are already running.', 'concurrency_limit', 429);
+    if ([...this.active.values()].filter(v => v.userId === ctx.userId).length >= (this.settings?.get(ctx.userId).maxSubagents || 10)) throw fail('Concurrent subagent limit reached.', 'concurrency_limit', 429);
     const goal = text(input.goal || input.objective, 'goal', 32000), id = crypto.randomUUID();
     const root = isolatedWorkspace(this.store, ctx, id);
     const row = publicData({ id, title: goal.slice(0, 160), prompt: goal, context: String(input.context || '').slice(0, 32000), root, parentRoot: ctx.root, model: ctx.model, submodel: ctx.submodel, permissionMode: ctx.permissionMode, status: 'queued', createdAt: new Date().toISOString(), events: [], source: input.source || 'delegation' });
@@ -37,7 +38,7 @@ class TaskTools {
     const parentAbort=()=>controller.abort();ctx.signal?.addEventListener('abort',parentAbort,{once:true});if(ctx.signal?.aborted)controller.abort();
     this.update(ctx.userId, row.id, { status: 'running', startedAt: new Date().toISOString() });
     try {
-      const result = await this.run(ctx.userId, { root: row.root, model: row.model, submodel: row.submodel, permissionMode: row.permissionMode, message: row.prompt + (row.context ? '\nCONTEXT:\n' + row.context : ''), assistantTaskId: row.id }, controller.signal, event => {
+      const result = await this.run(ctx.userId, { root: row.root, model: row.model, submodel: row.submodel, permissionMode: row.permissionMode, message: row.prompt + (row.context ? '\nCONTEXT:\n' + row.context : ''), assistantTaskId: row.id, budget: this.settings?.budget(ctx.userId,true) || {max_rounds:250,max_depth:3} }, controller.signal, event => {
         const state = this.update(ctx.userId, row.id, previous => ({ events: [...(previous.events || []), publicData(event)].slice(-150) }));
         this.emit(ctx.userId, { type: 'background_event', taskId: row.id, event });
         if (['permission_required', 'plan_required', 'budget_required', 'question_required'].includes(event.type)) ctx.emit?.(event);
@@ -58,7 +59,7 @@ class TaskTools {
     if (action === 'list') return { tasks: rows.map(({ events, result, context, prompt, ...row }) => row) };
     const row = rows.find(r => r.id === (input.delegation_id || input.id)); if (!row) throw fail('Delegation not found.', 'not_found', 404);
     if (action === 'cancel') { const active = this.active.get(row.id); if (active) active.controller.abort(); else this.update(ctx.userId, row.id, { status: 'cancelled' }); return { id: row.id, cancelling: !!active }; }
-    if (action === 'resume') { if (this.active.has(row.id)) throw fail('Task is running.');if([...this.active.values()].filter(v=>v.userId===ctx.userId).length>=4)throw fail('Four background agents are already running.','concurrency_limit',429); this.execute(row, ctx).catch(() => {}); return { id: row.id, status: 'running' }; }
+    if (action === 'resume') { if (this.active.has(row.id)) throw fail('Task is running.');if([...this.active.values()].filter(v=>v.userId===ctx.userId).length>=(this.settings?.get(ctx.userId).maxSubagents||10))throw fail('Concurrent subagent limit reached.','concurrency_limit',429); this.execute(row, ctx).catch(() => {}); return { id: row.id, status: 'running' }; }
     return publicData(row);
   }
   cron(input, ctx) {

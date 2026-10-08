@@ -4,33 +4,45 @@
   "base": "86450e1618f0c8c13ab29a24180b2dbbaa91d698",
   "platform": "Windows x64",
   "installedCopyUpdated": false,
+  "nodeTests": {
+    "passed": 184,
+    "failed": 0,
+    "skipped": 1
+  },
+  "rustTests": {
+    "passed": 486,
+    "failed": 0,
+    "ignored": 8
+  },
+  "sharedTools": 171,
+  "integrationEntries": 33,
   "artifacts": [
     {
       "path": "native/dist/zaalis-server.exe",
-      "bytes": 79439007,
-      "modified": "2026-10-08T14:17:41.1712802Z",
-      "sha256": "f507347c77a090fc5ec810334fd8c5e8fa8920f6453d9ee4a3ccf11b0a5c4557",
+      "bytes": 79515967,
+      "modified": "2026-10-08T15:33:08.0133886Z",
+      "sha256": "a2671f1bb8ad1c1a39a0a5b8a2a08c4bac39f426a08fc9bb40a7d6de665ecb3e",
       "signature": "NotSigned"
     },
     {
       "path": "native/dist/zaalis-terminal.exe",
-      "bytes": 71065917,
-      "modified": "2026-10-08T14:17:32.2628404Z",
-      "sha256": "cad94f2844f503ac98c8c0434291c69500e5864014a4672442a82611258ed0a8",
+      "bytes": 71136344,
+      "modified": "2026-10-08T15:22:34.0841911Z",
+      "sha256": "340b0692a354d2908d344534a09110e2cdabbe8aaa58c9e509ad36f048c910fd",
       "signature": "NotSigned"
     },
     {
       "path": "native/dist/zaalis-agentd.exe",
-      "bytes": 9653248,
-      "modified": "2026-10-08T13:54:24.7841053Z",
-      "sha256": "8dc5d75e6c9fcce8ac1ad8ebb2ca43d1aaec0b9397ba26992735d2b399fc06e8",
+      "bytes": 9757696,
+      "modified": "2026-10-08T15:10:02.1571963Z",
+      "sha256": "aa4ffce294d825c5ddafa74550fe80c04e84f77679cade9cc77585232eec0e9f",
       "signature": "NotSigned"
     },
     {
       "path": "native/installer/zaalis-setup.exe",
-      "bytes": 510119042,
-      "modified": "2026-10-08T14:20:00.8915308Z",
-      "sha256": "20a02d48725d85d521d39c09bcae65e4f39788df7299cdebf29d87915c5ed650",
+      "bytes": 510192880,
+      "modified": "2026-10-08T15:35:12.8982337Z",
+      "sha256": "973d34ed8d58b4d39cb6fea21fb2f9fb9824c62e90ee5a5e9b0d060acdcfc9d2",
       "signature": "NotSigned"
     }
   ]

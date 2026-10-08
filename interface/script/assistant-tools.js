@@ -1,6 +1,6 @@
 /* Shared assistant catalogue and human interactions for IDE and terminal. */
 (() => {
-    const seen = new Set(); let panel, stream, account, section = 'catalog';
+    const seen = new Set(),questionDialogs=new Map(); let panel, stream, account, section = 'catalog';
     const copy = (fr, en) => state.language === 'en' ? en : fr;
     const connectionTitle = c => ({media:copy('Images, vidéo et voix','Image, video and speech providers'),cdp:copy('Navigateur CDP','CDP browser'),execution:copy('Environnements d’exécution','Execution backends'),a2a:copy('Agents A2A','A2A agents')})[c.id] || c.title;
     const node = (tag, text) => { const e = document.createElement(tag); if (text !== undefined) e.textContent = text; return e; };
@@ -23,7 +23,8 @@
             input.required = field.required !== false; if(event.multi_select && input.tagName==='SELECT'){input.multiple=true;input.size=Math.min(8,event.options.length);} input.name = field.name; label.append(input); form.append(label); fields[field.name] = input;
         }
         const submit = node('button', copy('Répondre', 'Submit')); submit.className = 'btn btn-primary'; submit.type = 'submit'; form.append(submit, status); d.append(form);
-        let answered = false;
+        let answered = false;questionDialogs.set(event.requestId,()=>{answered=true;d.close();});
+        d.addEventListener("close",()=>questionDialogs.delete(event.requestId));
         form.onsubmit = async e => { e.preventDefault(); submit.disabled = true; try { const answer = Object.fromEntries(Object.entries(fields).map(([k, input]) => [k, event.multi_select && input.tagName==='SELECT' ? Array.from(input.selectedOptions).map(o=>o.value) : input.value])); await api('/api/assistant/answer', { requestId: event.requestId, answer }); answered = true; for (const input of Object.values(fields)) input.value = ''; d.close(); } catch (error) { status.textContent = error.message; submit.disabled = false; } };
         d.addEventListener('close', () => { if (!answered) api('/api/assistant/answer', { requestId: event.requestId, answer: { cancelled: true } }).catch(() => {}); });
         d.showModal(); Object.values(fields)[0]?.focus();
@@ -78,7 +79,7 @@
         function create(key){const choices={memory:['memory',{action:'add',scope:'personal'},[{name:'title',label:copy('Titre','Title')},{name:'text',label:copy('Note','Note'),area:true,required:true}]],skills:['skill_manage',{action:'create'},[{name:'name',label:copy('Nom','Name'),required:true},{name:'content',label:'SKILL.md',area:true,required:true}]],schedule:['cronjob_manage',{action:'create'},[{name:'name',label:copy('Nom','Name')},{name:'prompt',label:copy('Instruction','Instruction'),area:true,required:true},{name:'schedule',label:copy('Calendrier (every 5m, cron ou date ISO)','Schedule (every 5m, cron or ISO date)'),required:true},{name:'timezone',label:copy('Fuseau horaire','Time zone'),value:'Europe/Paris'}]],jobs:['delegate_task',{action:'start',background:true},[{name:'goal',label:copy('Objectif','Goal'),area:true,required:true}]]};const[name,input,fields]=choices[key];form(copy('Ajouter','Add'),fields,v=>owner(name,{...input,...v}));}
         panel.showModal(); await safe(render)();
     }
-    function connectEvents(){if(!document.getElementById('auth-overlay')?.classList.contains('hidden')){stream?.close();stream=null;account=null;seen.clear();document.querySelectorAll('.assistant-dialog[open]').forEach(d=>d.close());return;}const id=document.getElementById('profile-email')?.textContent||'local';if(account===id&&stream&&stream.readyState!==EventSource.CLOSED)return;stream?.close();account=id;stream=new EventSource('/api/assistant/events');stream.onmessage=e=>{let event;try{event=JSON.parse(e.data)}catch{return;}if(event.type==='question_required')question(event).catch(()=>{});else if(event.type==='background_event')handleRustInteractiveEvent(event.event).catch(()=>{});else if(event.type==='ui_request')uiRequest(event);};api('/api/assistant/questions').then(d=>d.questions.forEach(q=>question(q).catch(()=>{}))).catch(()=>{});}
+    function connectEvents(){if(!document.getElementById('auth-overlay')?.classList.contains('hidden')){stream?.close();stream=null;account=null;seen.clear();document.querySelectorAll('.assistant-dialog[open]').forEach(d=>d.close());return;}const id=document.getElementById('profile-email')?.textContent||'local';if(account===id&&stream&&stream.readyState!==EventSource.CLOSED)return;stream?.close();account=id;stream=new EventSource('/api/assistant/events');stream.onmessage=e=>{let event;try{event=JSON.parse(e.data)}catch{return;}if(event.type==='question_required')question(event).catch(()=>{});else if(event.type==='question_closed')questionDialogs.get(event.requestId)?.();else if(event.type==='background_event')handleRustInteractiveEvent(event.event).catch(()=>{});else if(event.type==='ui_request')uiRequest(event);};api('/api/assistant/questions').then(d=>d.questions.forEach(q=>question(q).catch(()=>{}))).catch(()=>{});}
     window.ZaalisAssistant={open,question,uiRequest};
     const b=button(copy('Outils','Tools'),()=>open());b.id='assistant-tools-btn';b.className='topbar-label-btn';document.querySelector('.topbar-right')?.prepend(b);
     document.addEventListener('zaalis-language-changed',()=>{b.textContent=copy('Outils','Tools');if(panel?.open){panel.close();open();}});

@@ -614,6 +614,7 @@ app.get('/api/auth/me', (req, res) => {
 const assistant = require('./assistant-tools/http').installAssistant(app, {
   dataDir: DATA_DIR, port: PORT, encrypt: encryptSecret, decrypt: decryptSecret, loadUsers, safeEqual,
   agent: rustAgentHttp,
+  modelCapabilities:(req,b)=>capabilitiesForUser(req.user,b.provider,b.model),
   resolveRoot: req => workspaceContext.agentRoot(req.method === 'GET' ? { root: req.query.root } : req.body || {}, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id)),
   browserAvailable: () => browserHost.available(),
   nativeTools: (req,root,config) => rustAgentBridge.catalogue(req.user.id,userApiKeys(req.user),root,rustMcpServersFor(req.user),{
@@ -1459,6 +1460,8 @@ app.delete('/api/subscriptions/:provider/session', (req, res) => {
   const user = storeAccountSession(req.user.id, kind, null);
   res.json({ account: accountStatus(user, kind), providers: compatStatus(user) });
 });
+
+app.get('/api/assistant/model-slots',(req,res)=>res.json({models:{...modelCatalog.SUBMODELS,...Object.fromEntries(compatStatus(req.user).map(p=>['compat:'+p.id,p.models||[]]))},labels:Object.fromEntries(compatStatus(req.user).map(p=>['compat:'+p.id,p.label]))}));
 
 app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
 
@@ -3521,6 +3524,7 @@ async function rustAgentHttp(req, res, next) {
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     const body = req.body || {};
+    if(!body.model&&!body.team){const preferred=assistant.service.modelPolicy.get(req.user.id).main;if(preferred){body.model=preferred.provider;body.submodel=preferred.model;body.reasoningLevel=preferred.reasoning;}}
     const kind = body.kind === 'agents' || Array.isArray(body.team) ? 'agents' : 'chat';
     if (body.conversationId) {
       conversationLock = continuation.key(req.user.id, kind, body.conversationId);
@@ -3544,6 +3548,8 @@ async function rustAgentHttp(req, res, next) {
       workspaceRun = { user: req.user, root, projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
       workspaceConfig = { workspaceEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-workspace`, workspaceToken: workspaceEntry.token };
     }
+    const policy=assistant.service.modelPolicy.get(req.user.id);
+    if(policy.moa.enabled&&!body.team&&!body.assistantAnalysis){body.model=policy.moa.aggregator.provider;body.submodel=policy.moa.aggregator.model;body.reasoningLevel=policy.moa.aggregator.reasoning;}
     const model = String(body.model || '');
     const message = String(body.message || '');
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
@@ -3591,6 +3597,7 @@ async function rustAgentHttp(req, res, next) {
       root,
       model: lead.provider,
       submodel: lead.model,
+      budget: body.assistantTaskId ? assistant.service.agentSettings.budget(req.user.id,true) : assistant.service.agentSettings.budget(req.user.id),
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message: assistant.service.memory.recall(assistantContext) + "\nDEMANDE ACTUELLE :\n" + message,
       systemPrompt: [body.systemPrompt, "OUTILS : tool_search retrouve le catalogue complet ; tool_describe donne le schéma, tool_call exécute avec les permissions de ce tour. Les connexions externes peuvent être absentes : rapporte leur état réel.", `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
@@ -3611,6 +3618,7 @@ async function rustAgentHttp(req, res, next) {
         ...browserToolConfig(req),
         ...workspaceConfig,
         ...assistantRun.config,
+        modelPolicy: {...assistant.service.modelPolicy.runtime(req.user.id,{provider:model,model:body.submodel,reasoning:body.reasoningLevel||0},b=>({...b,...(compatProviders.binding(b.provider,b.model)||{})})),...(body.assistantAnalysis?{moa:{enabled:false}}:{})},
         ...(computerToken ? {
         computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
         computerToken,

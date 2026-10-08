@@ -5,6 +5,8 @@ const rows = [];
 function add(names, family, description, properties = {}, access = 'write', reads = []) {
   for (const name of names.split(' ')) rows.push({ name, family, description, input_schema: object(properties), access, reads });
 }
+add('messaging_read','messaging','Read messages or test an owner-configured service. service,target,route; MCP bridge required for bridge services. Matrix encrypted rooms are unsupported by this REST adapter.',{service:s,target:s,route:s,action:s,arguments:o},'network');
+add('messaging_send','messaging','Send an explicitly authorized message through an owner-configured service. service,target,text,body,arguments. Requires write permission and a configured native API or MCP bridge.',{service:s,target:s,text:s,body:o,arguments:o},'write');
 add('memory', 'memory', 'Persistent personal/profile/project notes. action list/read/search/add/update/replace/delete/settings; notes are historical, revalidate before relying on them.', { action: s, scope: s, query: s, title: s, text: s, id: s, enabled: b }, 'write', ['list','read','search']);
 add('session_search', 'sessions', 'Search prior IDE and CLI sessions with AND terms, after/before, exclusions, scope project/account; session_id reads messages with offset/around_message_id.', { query: s, session_id: s, scope: s, after: s, before: s, limit: n, offset: n, around_message_id: s, exclude_session_ids: { type:'array',items:s } }, 'read');
 add('skills_list skill_view', 'skills', 'List or read project/user skills and referenced files. name, scope, path for skill_view.', { name:s, scope:s, path:s }, 'read');
@@ -54,6 +56,7 @@ add('yb_query_group_info yb_query_group_members yb_search_sticker','yuanbao','Yu
 add('yb_send_dm yb_send_sticker','yuanbao','Send a private message or sticker using Yuanbao MCP. user_id/group_id,message/sticker_id.',{user_id:s,group_id:s,message:s,sticker_id:s},'write');
 for(const d of rows){if(d.family==='discord')d.reads=[...d.reads,'fetch_channel','fetch_messages','fetch_member','list_roles'];if(d.family==='spotify')d.reads=[...d.reads,''];}
 function classify(def, input = {}) {
+  if(def.family==='messaging' && require('../interface/script/integration-catalog').find(c=>c.id===input.service)?.adapter==='mcp')return 'write';
   if(def.family==='discord'&&['fetch_channel','fetch_messages','fetch_member','list_roles'].includes(input.action))return 'read';
   if(def.family==='spotify'&&!input.action)return 'read';
   if (def.access === 'read' || def.access === 'network') return def.access;

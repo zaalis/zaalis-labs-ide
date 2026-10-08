@@ -1,7 +1,7 @@
 {
   "status": "passed",
   "packaged": false,
-  "tools": 169,
+  "tools": 171,
   "modelRequests": 29,
   "checks": [
     "shared IDE/CLI catalogue",

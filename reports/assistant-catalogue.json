@@ -3433,6 +3433,67 @@
       "access": "guarded"
     },
     {
+      "name": "messaging_read",
+      "family": "messaging",
+      "description": "Read messages or test an owner-configured service. service,target,route; MCP bridge required for bridge services. Matrix encrypted rooms are unsupported by this REST adapter.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string"
+          },
+          "arguments": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "network",
+      "reads": [],
+      "status": "requires_service_connection"
+    },
+    {
+      "name": "messaging_send",
+      "family": "messaging",
+      "description": "Send an explicitly authorized message through an owner-configured service. service,target,text,body,arguments. Requires write permission and a configured native API or MCP bridge.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "service": {
+            "type": "string"
+          },
+          "target": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "body": {
+            "type": "object",
+            "additionalProperties": true
+          },
+          "arguments": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "additionalProperties": true
+      },
+      "access": "write",
+      "reads": [],
+      "status": "requires_service_connection"
+    },
+    {
       "name": "panel_focus",
       "family": "desktop",
       "description": "Request an IDE panel focus, guided tour, annotation, or reaction. panel/title/text/steps. CLI reports the same request as an event; IDE renders it when connected.",
@@ -5892,6 +5953,7 @@
       "id": "discord",
       "title": "Discord",
       "auth": "bot-token",
+      "options": {},
       "status": "connection_required",
       "baseUrl": "https://discord.com/api/v10",
       "detail": "",
@@ -5899,21 +5961,52 @@
       "lastVerifiedAt": null
     },
     {
-      "id": "spotify",
-      "title": "Spotify",
-      "auth": "oauth",
+      "id": "slack",
+      "title": "Slack",
+      "auth": "bearer-token",
+      "options": {},
       "status": "connection_required",
-      "baseUrl": "https://api.spotify.com/v1",
+      "baseUrl": "https://slack.com/api",
       "detail": "",
       "hasCredential": false,
       "lastVerifiedAt": null
     },
     {
-      "id": "feishu",
-      "title": "Feishu / Lark",
-      "auth": "tenant-token",
+      "id": "mattermost",
+      "title": "Mattermost",
+      "auth": "bearer-token",
+      "options": {},
       "status": "connection_required",
-      "baseUrl": "https://open.feishu.cn/open-apis",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "matrix",
+      "title": "Matrix",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "signal",
+      "title": "Signal",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "bluebubbles",
+      "title": "BlueBubbles (iMessage)",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
       "detail": "",
       "hasCredential": false,
       "lastVerifiedAt": null
@@ -5922,6 +6015,100 @@
       "id": "homeassistant",
       "title": "Home Assistant",
       "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "email",
+      "title": "Email",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "twilio",
+      "title": "SMS (Twilio)",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://api.twilio.com/2010-04-01",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "dingtalk",
+      "title": "DingTalk",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "feishu",
+      "title": "Feishu / Lark",
+      "auth": "tenant-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://open.feishu.cn/open-apis",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "googlechat",
+      "title": "Google Chat",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://chat.googleapis.com/v1",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "wecombot",
+      "title": "WeCom (group bot)",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "wecom",
+      "title": "WeCom (app)",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "weixin",
+      "title": "Weixin / WeChat (Personal)",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "qq",
+      "title": "QQ Bot",
+      "auth": "mcp",
+      "options": {},
       "status": "connection_required",
       "detail": "",
       "hasCredential": false,
@@ -5931,6 +6118,27 @@
       "id": "yuanbao",
       "title": "Yuanbao",
       "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "apiserver",
+      "title": "API server",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "webhooks",
+      "title": "Webhooks",
+      "auth": "bearer-token",
+      "options": {},
       "status": "connection_required",
       "detail": "",
       "hasCredential": false,
@@ -5940,7 +6148,134 @@
       "id": "a2a",
       "title": "A2A agents",
       "auth": "endpoint",
+      "options": {},
       "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "buzz",
+      "title": "Buzz",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "photon",
+      "title": "iMessage via Photon",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "irc",
+      "title": "IRC",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "line",
+      "title": "LINE",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://api.line.me/v2/bot",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "microsoftgraph",
+      "title": "Microsoft Graph Webhooks",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://graph.microsoft.com/v1.0",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "teams",
+      "title": "Microsoft Teams",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://graph.microsoft.com/v1.0",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "ntfy",
+      "title": "ntfy",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://ntfy.sh",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "raft",
+      "title": "Raft",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "relay",
+      "title": "Relay (experimental)",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "simplex",
+      "title": "SimpleX Chat",
+      "auth": "mcp",
+      "options": {},
+      "status": "connection_required",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "whatsappcloud",
+      "title": "WhatsApp Cloud API",
+      "auth": "bearer-token",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://graph.facebook.com/v23.0",
+      "detail": "",
+      "hasCredential": false,
+      "lastVerifiedAt": null
+    },
+    {
+      "id": "spotify",
+      "title": "Spotify",
+      "auth": "oauth",
+      "options": {},
+      "status": "connection_required",
+      "baseUrl": "https://api.spotify.com/v1",
       "detail": "",
       "hasCredential": false,
       "lastVerifiedAt": null
@@ -5949,6 +6284,7 @@
       "id": "media",
       "title": "Image, video and speech providers",
       "auth": "api-key",
+      "options": {},
       "status": "connection_required",
       "detail": "",
       "hasCredential": false,
@@ -5958,6 +6294,7 @@
       "id": "cdp",
       "title": "CDP browser",
       "auth": "loopback-endpoint",
+      "options": {},
       "status": "connection_required",
       "detail": "",
       "hasCredential": false,
@@ -5967,6 +6304,7 @@
       "id": "execution",
       "title": "Execution backends",
       "auth": "owner-configured",
+      "options": {},
       "status": "connection_required",
       "detail": "",
       "hasCredential": false,
