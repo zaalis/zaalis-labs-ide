@@ -96,9 +96,9 @@
                         <div class="ml-field">
                             <div class="ml-field-head">
                                 <span class="ml-field-label" data-i18n="loader-context">Longueur de contexte</span>
-                                <input class="ml-num" id="ml-ctx-num" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="8192">
+                                <input class="ml-num" id="ml-ctx-num" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="16384">
                             </div>
-                            <input class="ml-slider" id="ml-ctx-slider" type="range" min="512" max="131072" step="512" value="8192" list="ml-ctx-marks">
+                            <input class="ml-slider" id="ml-ctx-slider" type="range" min="512" max="131072" step="512" value="16384" list="ml-ctx-marks">
                             <datalist id="ml-ctx-marks">
                                 <option value="2048"></option><option value="4096"></option><option value="8192"></option>
                                 <option value="16384"></option><option value="32768"></option><option value="65536"></option><option value="131072"></option>
@@ -886,7 +886,7 @@
                             <label for="gguf-ctx-input" data-i18n="settings-gguf-ctx-label">Contexte GGUF par défaut</label>
                             <p data-i18n="settings-gguf-ctx-hint">Taille de la fenêtre de contexte du moteur local (tokens). Plus grand = plus de mémoire utilisée.</p>
                         </div>
-                        <input class="settings-number-input" id="gguf-ctx-input" type="number" min="512" max="131072" step="1024" value="8192" list="gguf-ctx-presets" inputmode="numeric">
+                        <input class="settings-number-input" id="gguf-ctx-input" type="number" min="512" max="131072" step="1024" value="16384" list="gguf-ctx-presets" inputmode="numeric">
                         <datalist id="gguf-ctx-presets">
                             <option value="2048" label="2K"></option>
                             <option value="4096" label="4K"></option>

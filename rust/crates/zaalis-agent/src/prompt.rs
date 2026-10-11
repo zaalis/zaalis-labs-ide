@@ -62,7 +62,6 @@ pub(crate) fn system_prompt(
     node: &AgentNode,
     planning: bool,
     files_changed: &[String],
-    tool_calls: u32,
 ) -> String {
     let mut prompt = format!(
         "{}\n\nRôle: {}\nObjectif: {}\n{}",
@@ -80,12 +79,13 @@ pub(crate) fn system_prompt(
     }
     // Compact task state, regenerated every round rather than pushed into the
     // history: it always reflects the latest real state and cannot accumulate.
+    // It changes only when a new file is changed — no per-round counter — so
+    // the prompt prefix stays identical and a local engine keeps its cache.
     if !files_changed.is_empty() {
         prompt.push_str(
             "\n\nÉTAT RÉEL DE LA TÂCHE (tenu par le runtime — fais-y confiance) :\n- Fichiers déjà créés/modifiés : ",
         );
         prompt.push_str(&files_changed.join(", "));
-        prompt.push_str(&format!("\n- Outils déjà exécutés : {tool_calls}"));
         prompt.push_str("\nCes actions sont FAITES : ne les redécris pas comme restant à faire.");
     }
     if planning {

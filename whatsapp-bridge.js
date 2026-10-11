@@ -29,7 +29,7 @@ class WhatsAppBridge extends EventEmitter {
     const env = { ...process.env, ZAALIS_WHATSAPP_BRIDGE_TOKEN: this.token,
       WHATSAPP_MODE: this.mode, WHATSAPP_DM_POLICY: 'allowlist', WHATSAPP_GROUP_POLICY: 'disabled',
       WHATSAPP_ALLOWED_USERS: this.allowedUsers.join(','), WHATSAPP_GROUP_ALLOWED_USERS: '', WHATSAPP_FORWARD_OWNER_MESSAGES: 'false',
-      WHATSAPP_DEBUG: 'false', WHATSAPP_REPLY_PREFIX: 'Zaalis · ', WHATSAPP_SEND_READ_RECEIPTS: 'false',
+      WHATSAPP_DEBUG: 'false', WHATSAPP_REPLY_PREFIX: this.mode === 'bot' ? '' : 'Zaalis · ', WHATSAPP_SEND_READ_RECEIPTS: this.mode === 'bot' ? 'true' : 'false',
       ZAALIS_IMAGE_CACHE_DIR: path.join(this.cacheDir, 'images'), ZAALIS_DOCUMENT_CACHE_DIR: path.join(this.cacheDir, 'documents'), ZAALIS_AUDIO_CACHE_DIR: path.join(this.cacheDir, 'audio') };
     this.child = spawn(node, [script, '--port', String(this.port), '--session', this.profile, '--mode', this.mode, '--pair-json'], { env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     let output = '';

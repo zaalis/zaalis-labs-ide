@@ -494,13 +494,13 @@ fn value_type(value: &Value) -> Option<&'static str> {
     }
 }
 
-/// The strict-JSON tool protocol handed to a model that has no native tool
-/// calling. Its shape is exactly what [`parse_fallback_tool_call`] accepts.
+/// The JSON tool protocol handed to a model that has no native tool calling.
+/// Its shape is exactly what [`classify_fallback`] accepts.
 fn fallback_tool_instructions(tools: &[ToolSpec]) -> String {
     let mut out = String::from(
-        "Tu ne disposes pas d'appels d'outils natifs. Pour APPELER un outil, réponds STRICTEMENT et UNIQUEMENT par un objet JSON, sans aucun texte autour :\n\
+        "Tu ne disposes pas d'appels d'outils natifs. Pour APPELER un outil, termine ta réponse par UN SEUL objet JSON, sur sa propre ligne :\n\
         {\"tool_call\":{\"name\":\"<nom>\",\"arguments\":{ ... }}}\n\
-        Les arguments doivent respecter le schéma de l'outil ci-dessous. Toute sortie non conforme est rejetée sans être exécutée. Si aucun outil n'est nécessaire, réponds normalement en texte (aucun JSON).\n\nOutils disponibles :\n",
+        Règles : une courte phrase avant le JSON est permise ; n'écris RIEN après le JSON (le résultat de l'outil te sera renvoyé dans le message suivant) ; un seul appel par réponse ; les arguments respectent le schéma de l'outil ci-dessous. N'annonce jamais une action sans inclure son appel JSON dans la même réponse. Toute sortie non conforme est rejetée sans être exécutée. Si aucun outil n'est nécessaire, réponds normalement en texte (aucun JSON).\n\nOutils disponibles :\n",
     );
     for tool in tools {
         out.push_str(&format!(
@@ -511,49 +511,180 @@ fn fallback_tool_instructions(tools: &[ToolSpec]) -> String {
     out
 }
 
-/// Extract a tool call from a fallback model's answer, strictly.
+/// What the complete answer of a model without native tools turned out to be.
+#[derive(Debug, Clone, PartialEq)]
+enum FallbackAnswer {
+    /// Ordinary text: no tool envelope in it.
+    Text,
+    /// Exactly one well-formed call, after an optional short announcement.
+    /// `visible_end` is where the announcement ends in the raw text.
+    Call {
+        visible_end: usize,
+        call: ToolInvocation,
+    },
+    /// The model tried to call a tool, but the answer is not a call that can
+    /// be trusted. Nothing runs; `reason` tells the model what to fix.
+    Invalid {
+        visible_end: usize,
+        reason: &'static str,
+    },
+}
+
+/// Longest announcement accepted before a call. Beyond that the answer is a
+/// text that merely ends with JSON, not an action.
+const MAX_FALLBACK_PREFACE_CHARS: usize = 4000;
+
+/// Where a tool envelope starts: the `<tool_call>` tag some templates train
+/// models to write, or a `{` whose first key is `"tool_call"`.
+fn envelope_start(text: &str) -> Option<usize> {
+    let tagged = text.find("<tool_call>");
+    let bare = text.match_indices('{').map(|(index, _)| index).find(|&index| {
+        text[index + 1..]
+            .trim_start()
+            .starts_with("\"tool_call\"")
+    });
+    match (tagged, bare) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Read a model answer under the fallback protocol.
 ///
-/// A bare envelope or a single fenced envelope after a short preface is
-/// accepted. Multiple blocks, trailing prose, and malformed arguments remain
-/// ambiguous and are never executed. The tool validates its own arguments.
-fn parse_fallback_tool_call(text: &str) -> Option<ToolInvocation> {
-    let trimmed = text.trim();
-    let envelope = if let Some(open) = trimmed.find("```") {
-        // Small local models often announce the action before the one JSON
-        // block. Accept that shape, but never extract a call from a response
-        // containing another fence, a second call, or trailing prose.
-        let preface = trimmed[..open].trim();
-        if preface.chars().count() > 500 || preface.contains("tool_call") {
-            return None;
-        }
-        let fenced = &trimmed[open + 3..];
-        let (language, body) = fenced.split_once('\n')?;
-        if !language.trim().is_empty() && !language.trim().eq_ignore_ascii_case("json") {
-            return None;
-        }
-        let (body, trailing) = body.split_once("```")?;
-        if !trailing.trim().is_empty() {
-            return None;
-        }
-        body.trim()
-    } else {
-        trimmed
+/// Accepted: one envelope, bare or in a ```json fence or `<tool_call>` tags,
+/// optionally after a short announcement — the shape small local models
+/// produce even when told to answer with JSON only. Refused (fail-closed,
+/// nothing runs): malformed or truncated JSON, a second call, prose after the
+/// call (often an invented result), non-object arguments. The tool still
+/// validates its own arguments.
+fn classify_fallback(text: &str) -> FallbackAnswer {
+    let Some(start) = envelope_start(text) else {
+        return FallbackAnswer::Text;
     };
-    let value: Value = serde_json::from_str(envelope).ok()?;
-    let call = value.get("tool_call")?;
-    let name = call.get("name").and_then(Value::as_str)?.trim().to_owned();
-    if name.is_empty() {
-        return None;
+    // The announcement ends where the envelope's opening fence or tag begins.
+    let before = text[..start].trim_end();
+    let visible_end = ["```json", "```JSON", "```Json", "```"]
+        .iter()
+        .find_map(|fence| before.strip_suffix(fence))
+        .map(str::len)
+        .unwrap_or(start);
+    let invalid = |reason| FallbackAnswer::Invalid {
+        visible_end,
+        reason,
+    };
+    if strip_reasoning_tags(&text[..visible_end]).trim().chars().count()
+        > MAX_FALLBACK_PREFACE_CHARS
+    {
+        return invalid("texte trop long avant l'appel JSON");
     }
-    let arguments = call.get("arguments").cloned().unwrap_or_else(|| json!({}));
-    if !arguments.is_object() {
-        return None;
+
+    let tagged = text[start..].starts_with("<tool_call>");
+    let json_start = if tagged {
+        let inner = &text[start + "<tool_call>".len()..];
+        start + "<tool_call>".len() + (inner.len() - inner.trim_start().len())
+    } else {
+        start
+    };
+    let mut values = serde_json::Deserializer::from_str(&text[json_start..]).into_iter::<Value>();
+    let value = match values.next() {
+        Some(Ok(value)) => value,
+        _ => return invalid("JSON mal formé ou incomplet"),
+    };
+    let mut rest = text[json_start + values.byte_offset()..].trim_start();
+    for closing in ["</tool_call>", "```"] {
+        if let Some(after) = rest.strip_prefix(closing) {
+            rest = after.trim_start();
+        }
     }
-    Some(ToolInvocation {
-        id: format!("gguf_{name}"),
-        name,
-        arguments,
-    })
+    if !rest.is_empty() {
+        return invalid(if envelope_start(rest).is_some() {
+            "plusieurs appels dans la même réponse"
+        } else {
+            "du texte suit l'appel JSON"
+        });
+    }
+
+    let call = match value.get("tool_call") {
+        Some(call) => call,
+        // Hermes/Qwen-style `<tool_call>{"name":…,"arguments":…}</tool_call>`.
+        None if tagged && value.get("name").is_some() => &value,
+        None => return invalid("enveloppe JSON sans clé tool_call"),
+    };
+    if call.is_array() {
+        return invalid("plusieurs appels dans la même réponse");
+    }
+    let Some(name) = call
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    else {
+        return invalid("nom d'outil manquant");
+    };
+    let arguments = match call
+        .get("arguments")
+        .or_else(|| call.get("parameters"))
+        .cloned()
+    {
+        None | Some(Value::Null) => json!({}),
+        Some(object @ Value::Object(_)) => object,
+        // Some models serialise the arguments a second time, as in the native
+        // OpenAI wire format. Only an embedded JSON object is accepted.
+        Some(Value::String(encoded)) => match serde_json::from_str::<Value>(&encoded) {
+            Ok(object @ Value::Object(_)) => object,
+            _ => return invalid("les arguments doivent être un objet JSON"),
+        },
+        Some(_) => return invalid("les arguments doivent être un objet JSON"),
+    };
+    FallbackAnswer::Call {
+        visible_end,
+        call: ToolInvocation {
+            id: format!("gguf_{name}"),
+            name: name.to_owned(),
+            arguments,
+        },
+    }
+}
+
+/// Remove `<think>…</think>` blocks and stray reasoning tags from visible
+/// text. Reasoning templates sometimes leak a closing `</think>` into the
+/// content when thinking is disabled.
+fn strip_reasoning_tags(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find("<think>") {
+        out.push_str(&rest[..open]);
+        rest = match rest[open..].find("</think>") {
+            Some(close) => &rest[open + close + "</think>".len()..],
+            None => "",
+        };
+    }
+    out.push_str(rest);
+    out.replace("</think>", "")
+}
+
+/// Markers after which fallback text is held back until the answer is
+/// complete: one of them may begin a tool envelope or a reasoning tag.
+const HOLD_MARKERS: [&str; 5] = ["{", "```", "<tool_call", "<think", "</think"];
+
+/// How much of `pending` can be shown now, and whether a marker was reached.
+fn streamable_prefix(pending: &str) -> (usize, bool) {
+    if let Some(index) = HOLD_MARKERS
+        .iter()
+        .filter_map(|marker| pending.find(marker))
+        .min()
+    {
+        return (index, true);
+    }
+    // Keep back a tail that could still grow into a marker (`<thi`, "``").
+    let partial = HOLD_MARKERS
+        .iter()
+        .flat_map(|marker| (1..marker.len()).map(move |length| &marker[..length]))
+        .filter(|prefix| pending.ends_with(prefix))
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    (pending.len() - partial, false)
 }
 
 fn encode_message(message: &Message, provider: ProviderId, vision: bool, native_tools: bool) -> Value {
@@ -650,6 +781,10 @@ pub struct StreamParser {
     reasoning: String,
     content_parts: Vec<Value>,
     fallback_tools: bool,
+    /// Bytes of `text` already shown under the fallback protocol.
+    streamed: usize,
+    /// A possible envelope began: the rest waits for the complete answer.
+    held: bool,
 }
 
 impl StreamParser {
@@ -732,6 +867,9 @@ impl StreamParser {
         if let Some(content) = delta.get("content") {
             emit_content(content, events, self.fallback_tools);
             collect_content(content, &mut self.text, &mut self.content_parts);
+            if self.fallback_tools {
+                self.stream_fallback_text(events);
+            }
         }
         // Several providers expose reasoning under their own key; accept all the
         // spellings rather than special-casing per vendor.
@@ -789,6 +927,32 @@ impl StreamParser {
         }
     }
 
+    /// Under the fallback protocol, show the answer as it streams up to the
+    /// first character that may open a tool envelope; the rest waits for the
+    /// complete answer so raw protocol JSON never reaches the user.
+    fn stream_fallback_text(&mut self, events: &mut Vec<TurnEvent>) {
+        if self.held {
+            return;
+        }
+        let pending = &self.text[self.streamed..];
+        let (length, held) = streamable_prefix(pending);
+        if length > 0 {
+            events.push(TurnEvent::TextDelta {
+                text: pending[..length].to_owned(),
+            });
+        }
+        self.streamed += length;
+        self.held = held;
+    }
+
+    /// The held-back part of the fallback text up to `end`, cleaned for display.
+    fn fallback_remainder(&self, end: usize) -> Option<TurnEvent> {
+        let start = self.streamed.min(end);
+        let text = strip_reasoning_tags(&self.text[start..end]);
+        let text = if end < self.text.len() { text.trim_end().to_owned() } else { text };
+        (!text.trim().is_empty()).then_some(TurnEvent::TextDelta { text })
+    }
+
     /// Close the stream and emit the terminal events.
     pub fn finish(mut self) -> Vec<TurnEvent> {
         let mut events = Vec::new();
@@ -800,22 +964,33 @@ impl StreamParser {
             }
         }
 
-        let mut calls = self.calls.finish();
-        // GGUF fallback: no native tool call arrived, so try to read a strict
-        // JSON envelope out of the text. Anything that is not exactly the
-        // envelope is left as a normal answer — fail-closed, nothing runs.
-        if calls.is_empty() && self.fallback_tools {
-            if let Some(call) = parse_fallback_tool_call(&self.text) {
-                calls.push(call);
-            }
-        }
-        if self.fallback_tools && calls.is_empty() && !self.text.is_empty() {
-            let visible = if self.text.contains("\"tool_call\"") {
-                "Le modèle local a produit un appel d'outil invalide. Aucune commande n'a été exécutée ; reformulez la demande ou réessayez.".to_owned()
+        let mut calls = std::mem::take(&mut self.calls).finish();
+        // Fallback protocol: no native tool call arrived, so read the JSON
+        // envelope out of the text. Anything that is not exactly one call is
+        // never run — fail-closed — and an attempted call is reported so the
+        // runtime can ask the model to correct it.
+        if self.fallback_tools {
+            let answer = if calls.is_empty() {
+                classify_fallback(&self.text)
             } else {
-                self.text.clone()
+                FallbackAnswer::Text
             };
-            events.push(TurnEvent::TextDelta { text: visible });
+            match answer {
+                FallbackAnswer::Text => events.extend(self.fallback_remainder(self.text.len())),
+                FallbackAnswer::Call { visible_end, call } => {
+                    events.extend(self.fallback_remainder(visible_end));
+                    calls.push(call);
+                }
+                FallbackAnswer::Invalid {
+                    visible_end,
+                    reason,
+                } => {
+                    events.extend(self.fallback_remainder(visible_end));
+                    events.push(TurnEvent::InvalidToolCall {
+                        reason: reason.to_owned(),
+                    });
+                }
+            }
         }
         let has_calls = !calls.is_empty();
         for call in &calls {
@@ -826,7 +1001,12 @@ impl StreamParser {
         }
         if let Some(provider) = self.provider {
             let content = if self.content_parts.is_empty() {
-                Value::String(self.text)
+                // A leaked reasoning tag is not part of what the model said.
+                Value::String(if self.fallback_tools {
+                    strip_reasoning_tags(&self.text)
+                } else {
+                    self.text
+                })
             } else {
                 Value::Array(self.content_parts)
             };
@@ -1402,21 +1582,41 @@ mod tests {
         assert!(content.contains("read") && content.contains("contenu"));
     }
 
+    fn fallback_call(text: &str) -> Option<ToolInvocation> {
+        match classify_fallback(text) {
+            FallbackAnswer::Call { call, .. } => Some(call),
+            _ => None,
+        }
+    }
+
+    fn fallback_refusal(text: &str) -> Option<&'static str> {
+        match classify_fallback(text) {
+            FallbackAnswer::Invalid { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
     #[test]
     fn the_fallback_parser_is_strict_and_fail_closed() {
-        // Not JSON, inline prose, empty name, non-object args: all refused.
-        assert!(parse_fallback_tool_call("je vais lire le fichier").is_none());
-        assert!(
-            parse_fallback_tool_call("Voici : {\"tool_call\":{\"name\":\"read\"}} — fait")
-                .is_none()
+        // No envelope at all is ordinary text, even when it mentions the word.
+        assert_eq!(classify_fallback("je vais lire le fichier"), FallbackAnswer::Text);
+        assert_eq!(classify_fallback("la clé \"tool_call\" sert au protocole"), FallbackAnswer::Text);
+        // Prose after the call, empty name, non-object args: refused with a reason.
+        assert_eq!(
+            fallback_refusal("Voici : {\"tool_call\":{\"name\":\"read\"}} — fait"),
+            Some("du texte suit l'appel JSON")
         );
-        assert!(parse_fallback_tool_call("{\"tool_call\":{\"name\":\"\"}}").is_none());
-        assert!(
-            parse_fallback_tool_call("{\"tool_call\":{\"name\":\"read\",\"arguments\":42}}")
-                .is_none()
+        assert_eq!(fallback_refusal("{\"tool_call\":{\"name\":\"\"}}"), Some("nom d'outil manquant"));
+        assert_eq!(
+            fallback_refusal("{\"tool_call\":{\"name\":\"read\",\"arguments\":42}}"),
+            Some("les arguments doivent être un objet JSON")
+        );
+        assert_eq!(
+            fallback_refusal("{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":"),
+            Some("JSON mal formé ou incomplet")
         );
 
-        let call = parse_fallback_tool_call(
+        let call = fallback_call(
             "{\"tool_call\":{\"name\":\"read\",\"arguments\":{\"path\":\"a.js\"}}}",
         )
         .expect("valid envelope");
@@ -1424,18 +1624,123 @@ mod tests {
         assert_eq!(call.arguments["path"], "a.js");
 
         // A single code fence is tolerated; a missing arguments object defaults.
-        let fenced = parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"grep\"}}\n```")
+        let fenced = fallback_call("```json\n{\"tool_call\":{\"name\":\"grep\"}}\n```")
             .expect("fenced envelope");
         assert_eq!(fenced.name, "grep");
         assert_eq!(fenced.arguments, json!({}));
-        let announced = parse_fallback_tool_call(
+        let announced = fallback_call(
             "Je vais vérifier quelle version de Blender est installée.\n```json\n{\"tool_call\":{\"name\":\"run\",\"arguments\":{\"command\":\"blender --version\"}}}\n```",
         )
         .expect("a short preface followed by one tool block");
         assert_eq!(announced.name, "run");
         assert_eq!(announced.arguments["command"], "blender --version");
-        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nEncore du texte").is_none());
-        assert!(parse_fallback_tool_call("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\n```json\n{\"tool_call\":{\"name\":\"read\"}}\n```").is_none());
+        assert_eq!(
+            fallback_refusal("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nEncore du texte"),
+            Some("du texte suit l'appel JSON")
+        );
+        assert_eq!(
+            fallback_refusal("```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\n```json\n{\"tool_call\":{\"name\":\"read\"}}\n```"),
+            Some("plusieurs appels dans la même réponse")
+        );
+        assert_eq!(
+            fallback_refusal("{\"tool_call\":{\"name\":\"list\"}}\n{\"tool_call\":{\"name\":\"read\"}}"),
+            Some("plusieurs appels dans la même réponse")
+        );
+    }
+
+    /// The exact answers Qwen3.5-9B (GGUF, llama.cpp b9690) gave to « analyse
+    /// et dit moi que contien le projet », recorded on the wire. Each is a
+    /// valid call after an announcement, without a fence; all used to be
+    /// reported as « appel d'outil invalide ».
+    #[test]
+    fn recorded_local_model_answers_are_read_as_calls() {
+        let recorded = [
+            ("Je vais analyser le contenu du projet `firenow` situé dans `C:\\Users\\boque\\Desktop\\firenow`.\n\nCommençons par lister le contenu du dossier pour comprendre sa structure.\n\n{\"tool_call\":{\"name\":\"list\",\"arguments\":{\"path\":\"C:\\\\Users\\\\boque\\\\Desktop\\\\firenow\"}}}", "list"),
+            ("Je vais d'abord explorer la structure du projet pour comprendre son architecture et son code actuel, puis je proposerai des axes d'amélioration.\n\n{\"tool_call\":{\"name\":\"tree\",\"arguments\":{\"depth\":3,\"max\":10,\"path\":\"C:\\\\Users\\\\boque\\\\Desktop\\\\firenow\"}}}", "tree"),
+            ("Je vais analyser la structure du projet `firenow`.\n\nD'abord, je vais afficher l'arborescence complète du projet pour voir les fichiers et dossiers principaux.\n</think>\n\n{\"tool_call\":{\"name\":\"tree\",\"arguments\":{}}}", "tree"),
+            ("Je vais analyser la structure du projet **firenow** pour voir ce qu'il contient.\n\n{\"tool_call\":{\"name\":\"list\",\"arguments\":{\"path\":\".\"}}}", "list"),
+        ];
+        for (answer, tool) in recorded {
+            let call = fallback_call(answer).unwrap_or_else(|| panic!("appel non reconnu : {answer}"));
+            assert_eq!(call.name, tool);
+            assert!(call.arguments.is_object());
+        }
+        let FallbackAnswer::Call { visible_end, .. } = classify_fallback(recorded[0].0) else {
+            unreachable!()
+        };
+        assert!(recorded[0].0[..visible_end].trim_end().ends_with("sa structure."));
+    }
+
+    #[test]
+    fn tagged_and_double_encoded_calls_are_accepted() {
+        let hermes = fallback_call(
+            "Je regarde.\n<tool_call>\n{\"name\": \"read\", \"arguments\": {\"path\": \"a.js\"}}\n</tool_call>",
+        )
+        .expect("Hermes/Qwen tagged call");
+        assert_eq!((hermes.name.as_str(), &hermes.arguments["path"]), ("read", &json!("a.js")));
+        let wrapped = fallback_call("<tool_call>{\"tool_call\":{\"name\":\"list\",\"arguments\":{}}}</tool_call>")
+            .expect("our envelope inside tags");
+        assert_eq!(wrapped.name, "list");
+        let encoded = fallback_call("{\"tool_call\":{\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"b.js\\\"}\"}}")
+            .expect("arguments serialised as a string");
+        assert_eq!(encoded.arguments["path"], "b.js");
+        assert!(fallback_call("{\"tool_call\":{\"name\":\"read\",\"arguments\":\"b.js\"}}").is_none());
+        // Without the tag, a bare {"name":…} object is ordinary JSON, not a call.
+        assert_eq!(classify_fallback("{\"name\":\"read\"}"), FallbackAnswer::Text);
+    }
+
+    #[test]
+    fn reasoning_tags_never_reach_the_visible_text() {
+        assert_eq!(strip_reasoning_tags("a\n</think>\n\nb"), "a\n\n\nb");
+        assert_eq!(strip_reasoning_tags("<think>plan</think>réponse"), "réponse");
+        assert_eq!(strip_reasoning_tags("x<think>sans fin"), "x");
+    }
+
+    fn visible_text(events: &[TurnEvent]) -> String {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                TurnEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn sse(content: &str) -> String {
+        format!("data: {}\n\n", json!({"choices":[{"delta":{"content": content}}]}))
+    }
+
+    #[test]
+    fn a_fallback_announcement_streams_while_the_envelope_is_held_back() {
+        let mut parser = StreamParser::for_provider(ProviderId::Gguf);
+        let mut early = parser.push(&sse("Je vais lister "));
+        early.extend(parser.push(&sse("le dossier.\n\n")));
+        assert_eq!(visible_text(&early), "Je vais lister le dossier.\n\n");
+        let held = parser.push(&sse("{\"tool_call\":{\"name\":\"list\",\"arguments\":{}}}"));
+        assert!(visible_text(&held).is_empty(), "le JSON du protocole ne doit jamais s'afficher");
+        let events = parser.finish();
+        assert!(!visible_text(&events).contains("tool_call"));
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::ToolCallCompleted { call } if call.name == "list")));
+    }
+
+    #[test]
+    fn a_partial_marker_is_kept_until_it_is_resolved() {
+        let mut parser = StreamParser::for_provider(ProviderId::Gguf);
+        let first = parser.push(&sse("Réponse finale </thi"));
+        assert_eq!(visible_text(&first), "Réponse finale ");
+        let mut events = parser.push(&sse("nk> sans outil."));
+        events.extend(parser.finish());
+        assert_eq!(visible_text(&events), " sans outil.");
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::Completed { reason: StopReason::EndTurn })));
+    }
+
+    #[test]
+    fn plain_text_with_braces_is_shown_whole_at_the_end() {
+        let mut parser = StreamParser::for_provider(ProviderId::Gguf);
+        let mut events = parser.push(&sse("La config vaut {\"port\": 3000} par défaut."));
+        events.extend(parser.finish());
+        assert_eq!(visible_text(&events), "La config vaut {\"port\": 3000} par défaut.");
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::InvalidToolCall { .. } | TurnEvent::ToolCallCompleted { .. })));
     }
 
     #[test]
@@ -1447,7 +1752,8 @@ mod tests {
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
         let streamed = parser.push(&chunk);
-        assert!(!streamed.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
+        // The announcement is shown; the fenced envelope never is.
+        assert_eq!(visible_text(&streamed), "Je vais lire le fichier.\n");
         let events = parser.finish();
         assert!(!events.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         let call = events
@@ -1490,9 +1796,10 @@ mod tests {
             json!({"choices":[{"delta":{"content":"Voici la réponse en texte."}}]})
         );
         let mut parser = StreamParser::for_provider(ProviderId::Gguf);
-        assert!(parser.push(&chunk).is_empty());
+        // Plain text streams as it arrives instead of appearing all at the end.
+        assert_eq!(visible_text(&parser.push(&chunk)), "Voici la réponse en texte.");
         let events = parser.finish();
-        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text == "Voici la réponse en texte.")));
+        assert!(!events.iter().any(|event| matches!(event, TurnEvent::TextDelta { .. })));
         assert!(!events
             .iter()
             .any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
@@ -1505,7 +1812,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_gguf_tool_output_is_explained_without_showing_the_internal_json() {
+    fn malformed_gguf_tool_output_is_reported_without_showing_the_internal_json() {
         let chunk = format!(
             "data: {}\n\n",
             json!({"choices":[{"delta":{"content":"```json\n{\"tool_call\":{\"name\":\"run\"}}\n```\nTerminé"}}]})
@@ -1514,6 +1821,8 @@ mod tests {
         assert!(parser.push(&chunk).is_empty());
         let events = parser.finish();
         assert!(!events.iter().any(|event| matches!(event, TurnEvent::ToolCallCompleted { .. })));
-        assert!(events.iter().any(|event| matches!(event, TurnEvent::TextDelta { text } if text.contains("invalide") && !text.contains("tool_call"))));
+        assert!(!visible_text(&events).contains("tool_call"));
+        // The runtime decides between a correction round and a visible notice.
+        assert!(events.iter().any(|event| matches!(event, TurnEvent::InvalidToolCall { reason } if reason == "du texte suit l'appel JSON")));
     }
 }

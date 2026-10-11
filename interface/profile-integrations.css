@@ -64,6 +64,7 @@ body.theme-light .integration-heading-logo{filter:none}
 .messenger-flow li[data-step=done] .messenger-flow-dot::after{content:"✓";font-size:11px}
 .messenger-stage{display:flex;flex-direction:column;gap:14px;min-height:64px}
 .messenger-hint{margin:0;color:var(--text-1);font-size:13px;line-height:1.65}
+.messenger-mode-option{display:flex;gap:12px;align-items:flex-start;padding:14px 16px;border:1px solid var(--border);border-radius:12px;cursor:pointer}.messenger-mode-option input{flex:none;margin:3px 0 0;accent-color:var(--accent)}.messenger-mode-option>span{display:flex;flex-direction:column;gap:4px;min-width:0}.messenger-mode-option:has(input:checked){border-color:var(--accent);background:var(--accent-muted)}.messenger-mode .lab-field[hidden]{display:none}
 .messenger-wait{display:flex;align-items:center;gap:12px;padding:16px;border-radius:12px;background:var(--bg-1);border:1px dashed var(--border);color:var(--text-0);font-size:13px}
 .messenger-spinner{flex:none;width:18px;height:18px;border-radius:50%;border:2px solid var(--border);border-top-color:var(--accent);animation:messenger-spin .8s linear infinite}
 @keyframes messenger-spin{to{transform:rotate(360deg)}}

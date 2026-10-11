@@ -34,7 +34,7 @@ const state = {
         updateChannel: 'stable',        // 'stable' | 'beta'
         rustAgentCore: true,            // shared Rust runtime; server keeps a rollback flag
         // ----- Advanced hardware (GGUF engine) -----
-        ggufCtx: 8192,                  // default context size for the local engine
+        ggufCtx: 16384,                 // default context size for the local engine
         ggufGpuLayers: '',              // '' = all layers on GPU; number = cap (VRAM limit)
         keys: { openai: '', anthropic: '', google: '', grok: '', mistral: '', moonshot: '' }
     },
@@ -188,7 +188,7 @@ const CONTEXT_WINDOWS = {
         _default: 8000
     },
     gguf: {
-        _default: 8192   // matches the engine's --ctx-size
+        _default: 16384  // matches the engine's --ctx-size
     }
 };
 function contextWindow(model, submodel) {
@@ -208,7 +208,7 @@ function contextWindow(model, submodel) {
 }
 function clampGgufCtx(value) {
     const n = parseInt(value, 10);
-    if (!Number.isFinite(n) || n <= 0) return 8192;
+    if (!Number.isFinite(n) || n <= 0) return 16384;
     return Math.max(512, Math.min(131072, n));
 }
 // Rough safety margin used only to trim history sent to small local models.

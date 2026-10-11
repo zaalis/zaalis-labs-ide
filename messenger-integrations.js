@@ -5,6 +5,10 @@ const fs = require('node:fs'), path = require('node:path'), crypto = require('no
 // the AI; everything else stays a personal note. "!zaalis" is still accepted.
 const WHATSAPP_TRIGGER = /^\s*(?:zaalis\s*!|!\s*zaalis)(?=\s|$)\s*/i;
 const TRIGGER_WORD = 'zaalis!';
+// In the self-chat every message is the owner's, so AI replies carry a label.
+// A dedicated number is a contact of its own: it answers without one.
+const REPLY_LABEL = 'Zaalis · ';
+const outgoing = (client, text) => client?.mode === 'bot' ? String(text).replace(/^Zaalis · /, '') : REPLY_LABEL + String(text).replace(/^Zaalis · /, '');
 
 class MessengerIntegrations {
   constructor({ loadUsers, saveUsers, encrypt, decrypt, dataDir, appDir, answer, continuation, decide, media, fetchImpl = fetch, whatsappFactory }) {
@@ -43,7 +47,8 @@ class MessengerIntegrations {
       const binding = automatic ? null : this.continuation.bind(id, input);
       if ([...this.queues.keys()].some(key => key === this.key(id, input.provider) || key.startsWith(this.key(id, input.provider) + ':')) && JSON.stringify(binding) !== JSON.stringify(current.binding || null)) throw Object.assign(Error('Attendez la fin du tour avant de changer de conversation.'), { status: 409 });
       const execution = input.execution ? this.continuation.validateExecution(input.execution) : current.execution;
-      const mode = input.mode === 'bot' ? 'bot' : 'self-chat';
+      // Choosing a conversation must not reset the WhatsApp mode it omits.
+      const mode = input.mode === undefined ? current.mode || 'self-chat' : input.mode === 'bot' ? 'bot' : 'self-chat';
       const allowedUsers = Array.isArray(input.allowedUsers) ? [...new Set(input.allowedUsers.map(String))] : current.allowedUsers || [];
       if (allowedUsers.length > 32 || allowedUsers.some(number => !/^\d{6,16}$/.test(number))) throw Error('Indiquez des numéros avec leur indicatif pays, sans espaces ni signe +.');
       if (input.provider === 'whatsapp' && mode === 'bot' && !allowedUsers.length) throw Error('Le numéro dédié exige au moins un correspondant autorisé.');
@@ -256,7 +261,7 @@ class MessengerIntegrations {
   }
   async send(id, provider, text, input = {}) {
     const session = this.sessions.get(this.key(id, provider)); if (!session?.connected) throw Error('Messagerie déconnectée.');
-    if (provider === 'whatsapp') return session.client.sendMessage(input.peer || session.client.info.wid._serialized, 'Zaalis · ' + text);
+    if (provider === 'whatsapp') return session.client.sendMessage(input.peer || session.client.info.wid._serialized, outgoing(session.client, text));
     const stored = this.user(id).messengers.telegram;
     for (let i = 0; i < text.length; i += 3900) {
       if (this.sessions.get(this.key(id, provider)) !== session) return;
@@ -274,6 +279,29 @@ class MessengerIntegrations {
     await this.send(id, provider, text);
     this.note(id, provider, 'tested');
     return { ...this.status(id, provider), tested: true };
+  }
+  // How WhatsApp replies arrive. WhatsApp shows every message an account sends
+  // as that account's own, so in the self-chat the AI's replies look like the
+  // owner's. Only a second account — the dedicated number — can answer like a
+  // contact, errors included. Changing mode unlinks the current account: the
+  // other one is then linked with a new QR code.
+  async whatsappMode(id, input) {
+    const mode = input.mode === 'bot' ? 'bot' : 'self-chat';
+    const current = this.user(id).messengers?.whatsapp || {};
+    const allowedUsers = Array.isArray(input.allowedUsers)
+      ? [...new Set(input.allowedUsers.map(value => String(value).replace(/[\s+().-]/g, '')).filter(Boolean))]
+      : current.allowedUsers || [];
+    if (allowedUsers.length > 32 || allowedUsers.some(number => !/^\d{6,16}$/.test(number))) throw Error('Indiquez des numéros avec leur indicatif pays, sans espaces ni signe +.');
+    if (mode === 'bot' && !allowedUsers.length) throw Error('Le numéro dédié exige au moins un correspondant autorisé : indiquez votre numéro personnel.');
+    const modeChanged = (current.mode || 'self-chat') !== mode;
+    const peersChanged = JSON.stringify(allowedUsers) !== JSON.stringify(current.allowedUsers || []);
+    // The bridge reads its correspondents at start: a running one restarts.
+    const restart = !modeChanged && peersChanged && this.sessions.has(this.key(id, 'whatsapp'));
+    if (modeChanged) await this.stop(id, 'whatsapp', true);
+    else if (restart) await this.stop(id, 'whatsapp');
+    this.save(id, m => { m.whatsapp = { ...m.whatsapp, mode, allowedUsers }; });
+    if (restart) await this.startWhatsApp(id);
+    return this.status(id, 'whatsapp');
   }
   // Forget the Telegram bot (its key, paired chat and offset), keep the
   // conversation choice, so another bot can be linked from scratch.
@@ -338,7 +366,7 @@ class MessengerIntegrations {
         this.note(id, 'whatsapp', 'received');
         try {
           const reply = await this.respond(id, 'whatsapp', text, { peer, media: msg.media });
-          if (reply && this.sessions.get(key) === session) await client.sendMessage(peer || me, `Zaalis · ${reply}`);
+          if (reply && this.sessions.get(key) === session) await client.sendMessage(peer || me, outgoing(client, reply));
           if (reply && this.activity.get(key)?.kind === 'received') this.note(id, 'whatsapp', 'replied');
         } catch { session.error = 'La réponse WhatsApp n’a pas pu être envoyée.'; this.note(id, 'whatsapp', 'failed', session.error); }
       });

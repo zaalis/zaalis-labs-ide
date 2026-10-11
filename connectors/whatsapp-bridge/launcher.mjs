@@ -82,6 +82,8 @@ async function connect() {
       remember(seen, id);
       queue.push({ messageId: id, chatId: peer, body, fromMe: key.fromMe, timestamp: Number(message.messageTimestamp), isGroup: false });
       if (queue.length > 200) queue.shift();
+      // A dedicated number reads the message like a person would (blue ticks).
+      if (process.env.WHATSAPP_SEND_READ_RECEIPTS === 'true') socket.readMessages([key]).catch(() => {});
     }
   });
 }
@@ -96,7 +98,11 @@ for (const operation of ['send', 'edit']) app.post('/' + operation, async (req, 
     const peer = req.body.chatId;
     if (!connected || !/^[\d]+@(s.whatsapp.net|lid)$/.test(peer || '')) throw Error('Unavailable');
     let last;
-    const text = 'Zaalis · ' + String(req.body.message || '').replace(/^Zaalis · /, '');
+    // Self-chat replies are labelled (they appear as the owner's own messages
+    // and the label stops them looping back); a dedicated number answers as a
+    // contact, without one.
+    const message = String(req.body.message || '').replace(/^Zaalis · /, '');
+    const text = process.env.WHATSAPP_MODE === 'bot' ? message : 'Zaalis · ' + message;
     for (let i = 0; i < text.length; i += 3900) {
       const result = await socket.sendMessage(peer, { text: text.slice(i, i + 3900), ...(operation === 'edit' ? { edit: { remoteJid: peer, id: req.body.messageId, fromMe: true } } : {}) });
       remember(outbound, result.key.id); last = result.key.id;
