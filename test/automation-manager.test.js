@@ -24,22 +24,26 @@ test('activate_app conserve les applications Windows admises', () => {
 
 test('activate_app limite les lanceurs Linux', () => {
   onPlatform('linux', () => {
-    for (const path of ['chrome', 'gedit.desktop', '/usr/share/applications/firefox.desktop', '/usr/local/share/applications/code.desktop', '~/.local/share/applications/local.desktop', '/var/lib/flatpak/exports/share/applications/org.example.App.desktop']) {
+    // Known launchers, allowed .desktop files and, as on Windows, the name the
+    // applications menu shows (looked up there only, never on PATH).
+    for (const path of ['chrome', 'gedit.desktop', '/usr/share/applications/firefox.desktop', '/usr/local/share/applications/code.desktop', '~/.local/share/applications/local.desktop', '/var/lib/flatpak/exports/share/applications/org.example.App.desktop', 'Blender', 'Éditeur de texte', 'notepad']) {
       assert.equal(normalizeAction({ action: 'activate_app', path })?.path, path);
     }
-    for (const path of ['/bin/sh', '/tmp/x.sh', '/tmp/x.desktop', '/usr/share/applications/../x.desktop', 'notepad', 'explorer', 'edge', 'msedge']) {
+    for (const path of ['/bin/sh', '/tmp/x.sh', '/tmp/x.desktop', '/usr/share/applications/../x.desktop', 'rm -rf /', '$(reboot)', '../bin/sh']) {
       assert.equal(normalizeAction({ action: 'activate_app', path }), null);
     }
   });
 });
 
-test('activate_app limite les applications macOS', () => {
+test('activate_app limite les applications macOS aux bundles installés et aux noms affichés', () => {
   onPlatform('darwin', () => {
-    for (const path of ['Safari', 'Google Chrome', 'Visual Studio Code', '/Applications/Safari.app', '/System/Applications/Notes.app', '~/Applications/Calculator.app']) {
+    // As on Windows: the name Launchpad shows ("Blender"), resolved by the bridge
+    // among installed bundles, never through PATH.
+    for (const path of ['Safari', 'Google Chrome', 'Visual Studio Code', 'Blender', 'Other App', '/Applications/Safari.app', '/System/Applications/Notes.app', '~/Applications/Calculator.app']) {
       assert.equal(normalizeAction({ action: 'activate_app', path })?.path, path);
     }
-    for (const path of ['/tmp/Evil.app', '/Applications/../Evil.app', '/bin/sh', 'Other App', 'Safari.app']) {
-      assert.equal(normalizeAction({ action: 'activate_app', path }), null);
+    for (const path of ['/tmp/Evil.app', '/Applications/../Evil.app', '/bin/sh', 'a/b', ' Safari', 'x'.repeat(81), 'nom;commande']) {
+      assert.equal(normalizeAction({ action: 'activate_app', path }), null, path);
     }
   });
 });

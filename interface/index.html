@@ -681,7 +681,7 @@
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="models">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
-                <span data-i18n="settings-models-title">Modèles par défaut</span>
+                <span data-i18n="settings-models-title">Modèles</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
@@ -959,7 +959,9 @@
 
                 <!-- ===== DEFAULT MODELS ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="models">
-                    <h3 data-i18n="settings-models-title">Modèles par défaut</h3>
+                    <h3 data-i18n="settings-models-title">Modèles</h3>
+                    <div id="assistant-model-settings"></div>
+                    <h3 data-i18n="settings-default-models-title">Modèles par défaut</h3>
                     <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
@@ -1425,9 +1427,14 @@
 <script src="script/correction-memory.js?v=20261007.2" defer></script>
 <script src="script/workspace.js?v=20261008.1" defer></script>
 <link rel="stylesheet" href="profile-integrations.css?v=20261008.1">
+<script src="script/integration-catalog.js" defer></script>
+<script src="script/integration-setup.js" defer></script>
+<script src="script/agent-settings.js" defer></script>
 <script src="script/integrations.js?v=20261008.1" defer></script>
 <script src="script/messengers.js?v=20261008.1" defer></script>
 <script src="script/token-profile.js?v=20261008.1" defer></script>
 <script src="script/welcome.js?v=20261007.2" defer></script>
+<link rel="stylesheet" href="assistant-tools.css?v=20261008.2">
+<script src="script/assistant-tools.js?v=20261008.2" defer></script>
 </body>
 </html>

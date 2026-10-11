@@ -255,7 +255,35 @@ func keyPress(_ request: JSON) -> Bool {
     return true
 }
 
-func resolveAppURL(_ pathValue: String) -> URL {
+// Every installed application bundle, as Launchpad and the Finder's
+// Applications folder list them (one level of subfolders, e.g. "Microsoft Office").
+func installedApplications() -> [URL] {
+    let manager = FileManager.default
+    let roots = ["/Applications", "/Applications/Utilities", "/System/Applications", "/System/Applications/Utilities",
+                 (NSHomeDirectory() as NSString).appendingPathComponent("Applications")]
+    var found: [URL] = []
+    for root in roots {
+        guard let entries = try? manager.contentsOfDirectory(atPath: root) else { continue }
+        for entry in entries {
+            let full = (root as NSString).appendingPathComponent(entry)
+            if entry.lowercased().hasSuffix(".app") { found.append(URL(fileURLWithPath: full)); continue }
+            var isDirectory: ObjCBool = false
+            guard manager.fileExists(atPath: full, isDirectory: &isDirectory), isDirectory.boolValue,
+                  !["Utilities"].contains(entry),
+                  let nested = try? manager.contentsOfDirectory(atPath: full) else { continue }
+            for child in nested where child.lowercased().hasSuffix(".app") {
+                found.append(URL(fileURLWithPath: (full as NSString).appendingPathComponent(child)))
+            }
+        }
+    }
+    return found
+}
+
+func applicationName(_ url: URL) -> String { (url.lastPathComponent as NSString).deletingPathExtension }
+
+struct ApplicationNotFound: Error { let suggestions: [String] }
+
+func resolveAppURL(_ pathValue: String) throws -> URL {
     let manager = FileManager.default
     if manager.fileExists(atPath: pathValue) { return URL(fileURLWithPath: pathValue) }
     // Models frequently guess "/Applications/Notes.app" for apps that live in
@@ -282,11 +310,21 @@ func resolveAppURL(_ pathValue: String) -> URL {
             return found
         }
     }
-    return URL(fileURLWithPath: pathValue)
+    // As on Windows (Start menu) and Linux (applications menu): the name the
+    // user sees, matched without regard to case, never through PATH.
+    let wanted = (requestedName as NSString).deletingPathExtension.lowercased()
+    let installed = installedApplications()
+    if let exact = installed.first(where: { applicationName($0).lowercased() == wanted }) { return exact }
+    let close = installed.map(applicationName).filter { name in
+        let lower = name.lowercased()
+        return !wanted.isEmpty && (lower.contains(wanted) || wanted.contains(lower))
+    }
+    if close.count == 1, let only = installed.first(where: { applicationName($0) == close[0] }) { return only }
+    throw ApplicationNotFound(suggestions: Array(Set(close)).sorted().prefix(8).map { $0 })
 }
 
 func activateApp(_ pathValue: String) throws {
-    let url = resolveAppURL(pathValue)
+    let url = try resolveAppURL(pathValue)
     let configuration = NSWorkspace.OpenConfiguration()
     configuration.activates = true
     // The helper exits right after answering: wait for the launch to actually
@@ -603,6 +641,8 @@ do {
     default:
         error("unsupported action")
     }
+} catch let missing as ApplicationNotFound {
+    output(["ok": false, "error": "application-not-found", "suggestions": missing.suggestions])
 } catch {
     output(["ok": false, "error": error.localizedDescription])
 }

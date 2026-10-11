@@ -1,0 +1,9 @@
+{
+  "status": "passed",
+  "provider": "ChatGPT subscription",
+  "model": "gpt-6-luna",
+  "surface": "packaged terminal",
+  "response": "LUNA_CLI_OK",
+  "personalStores": "unchanged",
+  "moa": true
+}

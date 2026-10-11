@@ -1,0 +1,35 @@
+{
+  "date": "2026-10-08",
+  "node": {
+    "total": 173,
+    "passed": 172,
+    "failed": 0,
+    "skipped": 1
+  },
+  "rust": {
+    "passed": 479,
+    "failed": 0,
+    "ignored": 8
+  },
+  "ignoredReasons": [
+    "Node: external Opale project absent",
+    "Rust: seven external network checks and one operating system credential vault check"
+  ],
+  "realProvider": "ChatGPT subscription / gpt-6-luna",
+  "browserUI": [
+    "catalogue search",
+    "memory form",
+    "FR/EN dynamic labels",
+    "structured question and agent continuation"
+  ],
+  "warnings": [
+    "Existing ConPTY teardown warning in npm test",
+    "pkg legacy Electron browser assets and external dependencies"
+  ],
+  "notProven": [
+    "Installed WebView2 shell launch",
+    "Every external connector with real accounts",
+    "Modal SDK and live cloud sandbox execution",
+    "Strict filesystem/network isolation on this Windows device"
+  ]
+}

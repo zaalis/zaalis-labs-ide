@@ -44,12 +44,19 @@ echo [4/9] Building Linux node-pty native runtime...
 wsl -e sh "%WSL_ROOT%/native/build_linux_node_pty.sh" "%WSL_ROOT%"
 if errorlevel 1 goto :failed
 
+echo [4b/9] Staging connectors: WhatsApp bridge, GitHub client, cloudflared...
+wsl -e sh "%WSL_ROOT%/native/stage_linux_connectors.sh" "%WSL_ROOT%" "%WSL_ROOT%/native/dist-linux-server"
+if errorlevel 1 goto :failed
+
 echo [5/9] Building the Rust core (zaalis-agentd, CLI, sandbox) in WSL...
 wsl -e sh -lc "cd '%WSL_ROOT%' && cargo build --manifest-path rust/Cargo.toml --release -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper"
 if errorlevel 1 goto :nocargo
 
 echo [6/9] Staging the Rust binaries -^> %SERVERDIST% ...
 wsl -e sh "%WSL_ROOT%/scripts/stage-rust-binaries.sh" "%WSL_ROOT%/native/dist-linux-server"
+if errorlevel 1 goto :failed
+REM Same terminal client as Windows (bin\zaalis.exe = packaged cli.js).
+call npx pkg src/app/cli.js --no-bytecode --public --targets node22-linux-x64 --output "%SERVERDIST%\bin\zaalis"
 if errorlevel 1 goto :failed
 
 echo [7/9] Copying interface and metadata...
@@ -62,7 +69,8 @@ copy /Y README_LINUX.md "%SERVERDIST%\README.txt" >nul
 
 echo [8/9] Packaging Electron app -^> %DIST% ...
 node native\package_electron.js linux x64 "%SERVERDIST%" "%DIST%"
-if errorlevel 1 goto :failed
+REM A crashed node exits with a negative code, which "if errorlevel 1" misses.
+if not "%errorlevel%"=="0" goto :failed
 
 echo [9/9] Creating portable archive and Debian double-click installer...
 tar -czf "%INSTALLER%\zaalis-linux-x64.tar.gz" -C "%DIST%" .

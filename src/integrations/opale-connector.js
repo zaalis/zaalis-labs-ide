@@ -3,7 +3,8 @@
 // zaalis IDE <-> Opale, the notes application. Opale is a separate project
 // (by default in the "opale" folder on the Desktop); nothing of it lives here.
 //
-// Opale advertises itself in %APPDATA%\Opale:
+// Opale advertises itself in %APPDATA%\Opale (macOS: ~/Library/Application
+// Support/Opale, elsewhere $XDG_CONFIG_HOME/Opale):
 //   instance.json  while it runs: port, access token, open vault
 //   install.json   how to start it again
 // This module reads those files, starts Opale when asked, and turns a running
@@ -21,7 +22,10 @@ const CLIENT_NAME = 'zaalis IDE';
 
 function homeDir() {
   if (process.env.OPALE_HOME) return path.resolve(process.env.OPALE_HOME);
-  return path.join(process.env.APPDATA || path.join(os.homedir(), '.config'), 'Opale');
+  const config = process.env.APPDATA || (process.platform === 'darwin'
+    ? path.join(os.homedir(), 'Library', 'Application Support')
+    : process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'));
+  return path.join(config, 'Opale');
 }
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); } catch { return null; }
@@ -90,6 +94,9 @@ function validLaunch(command) {
   const name = path.basename(command.file).toLowerCase();
   if (name === 'opale.exe' && !args.length) return { file: command.file, args: [], cwd: path.dirname(command.file) };
   if (name === 'opale-server.exe' && args.every((arg) => arg === '--window')) return { file: command.file, args: ['--window'], cwd: path.dirname(command.file) };
+  // macOS: Opale.app/Contents/MacOS/Opale (native window) or its packaged server.
+  if (process.platform === 'darwin' && name === 'opale' && !args.length) return { file: command.file, args: [], cwd: path.dirname(command.file) };
+  if (process.platform === 'darwin' && /^opale-server(?:-arm64|-x64)?$/.test(name) && args.every((arg) => arg === '--window')) return { file: command.file, args: ['--window'], cwd: path.dirname(command.file) };
   if ((name === 'node.exe' || name === 'node') && args.length >= 1 && path.isAbsolute(args[0]) && path.basename(args[0]) === 'server.js' && fs.existsSync(args[0])) {
     const manifest = readJson(path.join(path.dirname(args[0]), 'package.json'));
     if (manifest && manifest.name === 'opale') return { file: command.file, args: [args[0], '--window'], cwd: path.dirname(args[0]) };
@@ -112,6 +119,11 @@ function launcher() {
     if (!process.pkg) candidates.push({ file: process.execPath, args: [path.join(desktop, 'opale', 'server.js'), '--window'] });
   }
   if (process.env.LOCALAPPDATA) candidates.push({ file: path.join(process.env.LOCALAPPDATA, 'Programs', 'Opale', 'Opale.exe'), args: [] });
+  if (process.platform === 'darwin') {
+    for (const folder of ['/Applications', path.join(os.homedir(), 'Applications'), ...desktops().flatMap((desktop) => [path.join(desktop, 'opale', 'dist'), path.join(desktop, 'Opale-MacOS', 'dist')])]) {
+      candidates.push({ file: path.join(folder, 'Opale.app', 'Contents', 'MacOS', 'Opale'), args: [] });
+    }
+  }
   for (const candidate of candidates) { const valid = validLaunch(candidate); if (valid) return valid; }
   return null;
 }

@@ -75,11 +75,17 @@ pub struct ProcessInfo {
 struct Captured {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
+    history_stdout: Vec<u8>,
+    history_stderr: Vec<u8>,
     truncated: bool,
 }
 
 impl Captured {
     fn append(&mut self, stderr: bool, bytes: &[u8]) {
+        let room=MAX_OUTPUT_BYTES.saturating_sub(self.history_stdout.len()+self.history_stderr.len());
+        let history=&bytes[..bytes.len().min(room)];
+        if stderr{self.history_stderr.extend_from_slice(history);}else{self.history_stdout.extend_from_slice(history);}
+        self.truncated |= history.len()<bytes.len();
         let used = self.stdout.len() + self.stderr.len();
         let remaining = MAX_OUTPUT_BYTES.saturating_sub(used);
         let visible = &bytes[..bytes.len().min(remaining)];
@@ -192,6 +198,11 @@ impl NetworkPolicy {
 }
 
 impl ExecRuntime {
+    pub fn with_sandbox_level(mut self, level: SandboxLevel) -> Result<Self> {
+        self.sandbox_policy.required = level;
+        self.sandbox_policy.validate()?;
+        Ok(self)
+    }
     pub fn new(root: impl AsRef<Path>) -> Result<Self> {
         let root = dunce::canonicalize(root)?;
         if !root.is_dir() {
@@ -234,6 +245,10 @@ impl ExecRuntime {
         #[cfg(windows)]
         let resolved_command = resolve_windows_version_command(command);
         #[cfg(windows)]
+        let command = resolved_command.as_deref().unwrap_or(command);
+        #[cfg(target_os = "macos")]
+        let resolved_command = resolve_macos_version_command(command);
+        #[cfg(target_os = "macos")]
         let command = resolved_command.as_deref().unwrap_or(command);
         if self.sandbox_policy.required == SandboxLevel::Strict {
             return run_strict(&self.root, command, timeout, cancel).await;
@@ -323,6 +338,28 @@ impl ExecRuntime {
             truncated,
             duration_ms: session.started.elapsed().as_millis() as u64,
         })
+    }
+
+    /// Argument-array execution for owned helpers; no shell quoting or parsing.
+    pub async fn run_program(&self,program:&str,args:&[String],timeout:Duration,cancel:CancellationToken)->Result<CommandOutput>{
+        if self.sandbox_policy.required==SandboxLevel::Strict{return Err(ZaalisError::unsupported("strict argument-array helper unavailable"));}
+        let mut process=Command::new(program);process.args(args).current_dir(&self.root).env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);copy_minimal_environment(&mut process);
+        let mut wrapped=CommandWrap::from(process);wrapped.wrap(KillOnDrop);
+        #[cfg(windows)] wrapped.wrap(JobObject);
+        #[cfg(unix)] wrapped.wrap(ProcessGroup::leader());
+        let mut child=wrapped.spawn()?;let started=Instant::now();let captured=Arc::new(Mutex::new(Captured::default()));let readers=take_readers(&mut child,captured.clone())?;let mut timed_out=false;
+        let status=tokio::select!{status=child.wait()=>status?,()=cancel.cancelled()=>{child.start_kill()?;let _=child.wait().await;join_readers(readers).await;return Err(ZaalisError::cancelled());},()=tokio::time::sleep(timeout.min(MAX_TIMEOUT))=>{timed_out=true;child.start_kill()?;child.wait().await?}};
+        join_readers(readers).await;let(stdout,stderr,truncated)=captured.lock().expect("capture lock").drain();Ok(CommandOutput{stdout,stderr,truncated,exit_code:status.code(),success:status.success()&&!timed_out,timed_out,duration_ms:started.elapsed().as_millis() as u64})
+    }
+
+    pub async fn log(&self, process_id:&str, offset:usize, limit:usize)->Result<ProcessPoll>{
+        let session=self.session(process_id).await?;
+        let status=session.child.lock().await.try_wait()?;
+        if let Some(status)=status{*session.exit_code.lock().expect("exit lock")=status.code();}
+        let exit_code=*session.exit_code.lock().expect("exit lock");
+        let captured=session.captured.lock().expect("capture lock");
+        let page=|v:&[u8]|{let start=offset.min(v.len());let end=start.saturating_add(limit.min(MAX_OUTPUT_BYTES)).min(v.len());zaalis_secrets::sanitize(&String::from_utf8_lossy(&v[start..end])).into_owned()};
+        Ok(ProcessPoll{process_id:process_id.into(),command:session.command.clone(),stdout:page(&captured.history_stdout),stderr:page(&captured.history_stderr),running:status.is_none(),exit_code,truncated:captured.truncated,duration_ms:session.started.elapsed().as_millis() as u64})
     }
 
     pub async fn write(&self, process_id: &str, input: &str) -> Result<()> {
@@ -457,6 +494,41 @@ fn find_blender_executable(roots: impl IntoIterator<Item = PathBuf>) -> Option<P
         }
     }
     candidates.into_iter().max_by(|left, right| left.0.cmp(&right.0)).map(|(_, path)| path)
+}
+
+/// macOS counterpart: Blender installs as an application bundle and never adds
+/// itself to PATH, so `blender --version` probes the bundle's executable.
+#[cfg(target_os = "macos")]
+fn resolve_macos_version_command(command: &str) -> Option<String> {
+    let mut words = command.split_whitespace();
+    let executable = words.next()?;
+    let flag = words.next()?;
+    if words.next().is_some()
+        || !executable.eq_ignore_ascii_case("blender")
+        || !["--version", "-v"].iter().any(|option| flag.eq_ignore_ascii_case(option))
+    {
+        return None;
+    }
+    if std::env::var_os("PATH").is_some_and(|value| {
+        std::env::split_paths(&value).any(|directory| directory.join("blender").is_file())
+    }) {
+        return None;
+    }
+    let mut roots = vec![PathBuf::from("/Applications")];
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+    let path = find_blender_bundle(roots)?;
+    let quoted = path.to_string_lossy().replace('\'', "'\\''");
+    Some(format!("'{quoted}' {flag}"))
+}
+
+#[cfg(target_os = "macos")]
+fn find_blender_bundle(roots: impl IntoIterator<Item = PathBuf>) -> Option<PathBuf> {
+    roots
+        .into_iter()
+        .map(|root| root.join("Blender.app").join("Contents").join("MacOS").join("Blender"))
+        .find(|executable| executable.is_file())
 }
 
 fn spawn_shell(

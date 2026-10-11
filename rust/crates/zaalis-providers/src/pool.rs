@@ -115,6 +115,8 @@ impl Clone for Entry {
 #[derive(Debug)]
 pub struct ProviderPool {
     config: PoolConfig,
+    pub(crate) policy: crate::policy::Policy,
+    pub(crate) advice: tokio::sync::Mutex<HashMap<u64,String>>,
     global: Arc<Semaphore>,
     providers: RwLock<HashMap<ProviderId, Entry>>,
 }
@@ -124,6 +126,8 @@ impl ProviderPool {
         let global_concurrency = config.global_concurrency.max(1);
         Self {
             config,
+            advice: tokio::sync::Mutex::new(HashMap::new()),
+            policy: std::env::var("ZAALIS_MODEL_POLICY").ok().and_then(|s|serde_json::from_str(&s).ok()).unwrap_or_default(),
             global: Arc::new(Semaphore::new(global_concurrency)),
             providers: RwLock::new(HashMap::new()),
         }
@@ -176,7 +180,9 @@ impl ProviderPool {
             .map(|entry| entry.stats.snapshot())
     }
 
-    pub async fn stream_turn(
+    pub async fn stream_turn(&self, request: TurnRequest, cancel: CancellationToken) -> Result<ProviderStream, ProviderError> { crate::policy::run(self,request,cancel).await }
+
+    pub(crate) async fn stream_raw(
         &self,
         request: TurnRequest,
         cancel: CancellationToken,

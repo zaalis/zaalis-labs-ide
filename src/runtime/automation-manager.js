@@ -108,8 +108,12 @@ function normalizeAction(input) {
       ? (/^(?:[A-Za-z]:\\|\\\\).+\.(?:exe|bat|cmd)$/i.test(out.path) || /^(?:notepad|calc|mspaint|chrome|edge|msedge|firefox|code|explorer|cmd|powershell)(?:\.exe)?$/i.test(out.path)
         || /^[\p{L}\p{N}][\p{L}\p{N} ._+&'()-]{0,79}$/u.test(out.path))
       : process.platform === 'darwin'
-        ? (/^(?:\/Applications\/|\/System\/Applications\/|~\/Applications\/)[^\0\r\n]+\.app$/.test(out.path) || /^(?:Safari|Google Chrome|Firefox|TextEdit|Notes|Finder|Terminal|Visual Studio Code|Calculator)$/.test(out.path))
-        : ((linuxApplications.some((dir) => out.path.startsWith(dir)) && /^[^\0\r\n]+\.desktop$/.test(out.path)) || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path));
+        ? (/^(?:\/Applications\/|\/System\/Applications\/|~\/Applications\/)[^\0\r\n]+\.app$/.test(out.path) || /^(?:Safari|Google Chrome|Firefox|TextEdit|Notes|Finder|Terminal|Visual Studio Code|Calculator)$/.test(out.path)
+          // As on Windows, the name Launchpad and the Applications folder show ("Blender").
+          || /^[\p{L}\p{N}][\p{L}\p{N} ._+&'()-]{0,79}$/u.test(out.path))
+        : ((linuxApplications.some((dir) => out.path.startsWith(dir)) && /^[^\0\r\n]+\.desktop$/.test(out.path)) || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path)
+          // As on Windows, the name the applications menu shows ("Blender").
+          || /^[\p{L}\p{N}][\p{L}\p{N} ._+&'()-]{0,79}$/u.test(out.path));
     if (!validPath) return null;
   }
   if (action === 'ask') {
@@ -312,7 +316,7 @@ class AutomationManager {
     }
     if (!result.ok && result.error === 'application-not-found') {
       const suggestions = Array.isArray(result.suggestions) ? result.suggestions.slice(0, 8).map((name) => text(name, 80)) : [];
-      return { name: 'computer', error: true, summary: 'computer application introuvable', text: `computer: aucune application « ${text(action.path, 80)} » dans le menu Démarrer.${suggestions.length ? ` Noms proches : ${suggestions.join(', ')}.` : ''}` };
+      return { name: 'computer', error: true, summary: 'computer application introuvable', text: `computer: aucune application « ${text(action.path, 80)} » dans le menu ${process.platform === 'win32' ? 'Démarrer' : 'des applications'}.${suggestions.length ? ` Noms proches : ${suggestions.join(', ')}.` : ''}` };
     }
     if (!result.ok) return { name: 'computer', error: true, summary: `computer ${action.action} échec`, text: `computer: ${result.error || 'échec'}` };
     if (CHANGING.has(action.action)) {

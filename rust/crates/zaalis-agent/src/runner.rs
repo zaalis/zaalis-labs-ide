@@ -17,7 +17,7 @@ use zaalis_providers::{
 };
 use zaalis_tools::{ToolContext, ToolDispatch, ToolInvocation};
 
-const MAX_RUNTIME_ROUNDS: u32 = 128;
+const MAX_RUNTIME_ROUNDS: u32 = 500;
 const COMPUTER_CAPTURE_PROMPT: &str =
     "[Capture actuelle du bureau — utilise cette image pour poursuivre le contrôle.]";
 /// Label of the vision message carrying images that tools other than the
@@ -28,7 +28,7 @@ const TOOL_IMAGES_PROMPT_PREFIX: &str = "[Images renvoyées par les outils";
 const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
 /// The tools a desktop-control turn keeps.
-const DESKTOP_TOOLS: [&str; 3] = ["computer", "mcp", "skill"];
+const DESKTOP_TOOLS: [&str; 6] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
 const ESSENTIAL_TOOLS: [&str; 14] = [
@@ -139,8 +139,10 @@ pub(crate) async fn run_agent(
     mut history: Vec<Message>,
     cancel: CancellationToken,
 ) -> Result<AgentRun> {
+    let composition_key = zaalis_core::RequestId::new().to_string();
     let started = Instant::now();
     let mut usage = node.usage;
+    let mut turn_rounds = 0_u32;
     let mut timeline = Timeline::default();
     let mut tools_used = Vec::new();
     let mut files_changed = Vec::new();
@@ -192,20 +194,20 @@ pub(crate) async fn run_agent(
             return Err(ZaalisError::cancelled());
         }
         usage.wall_time_ms = started.elapsed().as_millis() as u64;
-        if let Some(limit) = usage.exceeded(&node.budget) {
+        if let Some(limit) = (Usage { rounds: turn_rounds, ..usage }).exceeded(&node.budget) {
             if !request_budget(&session, &mut node, &mut usage, limit, &cancel).await? {
                 partial_reason = Some(format!("budget {} non prolongé", limit.as_str()));
                 break;
             }
         }
-        if usage.rounds >= MAX_RUNTIME_ROUNDS {
+        if turn_rounds >= if node.parent_id.is_some() { 250 } else { MAX_RUNTIME_ROUNDS } {
             return Err(ZaalisError::new(
                 zaalis_core::ErrorCode::BudgetExceeded,
-                "limite de sécurité de 128 rounds atteinte",
+                "limite maximale des tours atteinte",
             ));
         }
 
-        let mut available_tools = session.tools.definitions();
+        let mut available_tools = session.tools.definitions_for_model();
         let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
         if desktop_control {
             // A desktop-control turn does not need filesystem, Git, terminal,
@@ -264,6 +266,7 @@ pub(crate) async fn run_agent(
         // models without tool support): the answer may need a correction.
         let fallback_protocol = !capabilities.native_tools && !tools.is_empty();
         let request = TurnRequest {
+            composition_key: Some(composition_key.clone()),
             binding: node.model.clone(),
             system: runtime_system,
             messages: history.clone(),
@@ -272,6 +275,7 @@ pub(crate) async fn run_agent(
             max_output_tokens: Some(allowed_output),
             temperature: None,
         };
+        turn_rounds = turn_rounds.saturating_add(1);
         usage.rounds = usage.rounds.saturating_add(1);
         session.update_usage(&node.id, usage).await;
         let mut telemetry = crate::telemetry::ProviderCall::new(session.config.usage_store.clone(), session.config.session_id.to_string(), node.model.provider.to_string(), node.model.model.clone().unwrap_or_default());
@@ -673,7 +677,7 @@ async fn execute_tool_raw(
 ///   - `images: [{mime, data}]`, the IDE's own tools (desktop capture, read);
 ///   - MCP content items `{type:"image", data, mimeType}`, which any MCP
 ///     server may return; each is replaced by a short text placeholder.
-fn detach_tool_images(outcome: &mut ToolOutcome) -> Vec<zaalis_providers::ImagePart> {
+pub(crate) fn detach_tool_images(outcome: &mut ToolOutcome) -> Vec<zaalis_providers::ImagePart> {
     let ToolOutcome::Ok { result, .. } = outcome else {
         return Vec::new();
     };

@@ -152,8 +152,8 @@ impl Budget {
         Budget {
             max_tokens: Some(400_000),
             max_wall_time_ms: Some(30 * 60 * 1_000),
-            max_tool_calls: Some(300),
-            max_rounds: Some(24),
+            max_tool_calls: None,
+            max_rounds: Some(500),
             max_depth: Some(3),
         }
     }
@@ -164,7 +164,7 @@ impl Budget {
             max_tokens: parent.max_tokens.map(|value| value / 3).max(Some(20_000)),
             max_wall_time_ms: parent.max_wall_time_ms.map(|value| value / 2),
             max_tool_calls: parent.max_tool_calls.map(|value| value / 2),
-            max_rounds: parent.max_rounds.map(|value| value.min(12)),
+            max_rounds: parent.max_rounds.map(|value| value.min(250)),
             max_depth: parent.max_depth.map(|value| value.saturating_sub(1)),
         }
     }

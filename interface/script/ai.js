@@ -643,7 +643,18 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
     }
 }
 
+const rustInteractiveRequests = new Map();
 async function handleRustInteractiveEvent(event) {
+    if (event?.type === 'question_required') return window.ZaalisAssistant?.question(event);
+    if (event?.type === 'ui_request') return window.ZaalisAssistant?.uiRequest(event);
+    if (!event || !event.sessionId || !event.requestId) return;
+    const key=event.sessionId+':'+event.requestId;
+    if(rustInteractiveRequests.has(key))return rustInteractiveRequests.get(key);
+    const pending=performRustInteractiveDecision(event);rustInteractiveRequests.set(key,pending);
+    if(rustInteractiveRequests.size>1000)rustInteractiveRequests.delete(rustInteractiveRequests.keys().next().value);
+    return pending;
+}
+async function performRustInteractiveDecision(event) {
     if (!event || !event.sessionId || !event.requestId) return;
     const lang = state.language || 'fr';
     let body = null;
@@ -3174,7 +3185,9 @@ function setupVoiceRecognition(btnId, textareaId) {
             setPhase('idle');
             const name = error && error.name;
             notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say(uiText('Aucun microphone détecté sur ce PC.'), 'No microphone found on this PC.')
-                : name === 'NotAllowedError' || name === 'SecurityError' ? say(uiText('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).'), 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                : name === 'NotAllowedError' || name === 'SecurityError' ? (HOST_IS_WINDOWS ? say(uiText('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).'), 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                    : HOST_IS_MAC ? say(uiText('Microphone bloqué : autorisez zaalis IDE dans Réglages Système › Confidentialité et sécurité › Microphone, puis relancez l’application.'), 'Microphone blocked: allow zaalis IDE in System Settings › Privacy & Security › Microphone, then restart the app.')
+                    : say(uiText('Microphone bloqué : vérifiez l’entrée audio dans les paramètres Son du système et qu’aucune règle de confidentialité ne bloque le micro.'), 'Microphone blocked: check the audio input in the system Sound settings and that no privacy rule blocks the microphone.'))
                 : say(uiText('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).'), 'The microphone cannot be used right now (in use by another app?).'));
             return;
         }

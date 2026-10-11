@@ -54,6 +54,7 @@ pub struct SessionConfig {
     /// They are rendered as lower-priority project guidance by the prompt composer.
     pub project_guidance: String,
     pub max_concurrency: usize,
+    pub subagent_turns: u32,
     pub usage_store: Option<Arc<zaalis_store::Store>>,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
@@ -69,7 +70,8 @@ impl SessionConfig {
                 "Tu es un agent Zaalis. Utilise les outils typés, vérifie ton travail, et rapporte au passé ce que tu as réellement fait."
                     .into(),
             project_guidance,
-            max_concurrency: 8,
+            max_concurrency: 11,
+            subagent_turns: 250,
             usage_store: None,
             extensions: None,
         }
@@ -88,6 +90,7 @@ pub(crate) struct SessionInner {
     pub events: Arc<EventBus>,
     pub cancel: CancellationToken,
     pub concurrency: Arc<Semaphore>,
+    pub child_concurrency: Arc<Semaphore>,
     pub agent_cancels: Mutex<HashMap<AgentId, CancellationToken>>,
     pub hook_agents: Mutex<HashSet<AgentId>>,
     pub plan_mode: AtomicBool,
@@ -123,6 +126,7 @@ impl AgentSession {
             events,
             cancel: CancellationToken::new(),
             concurrency: Arc::new(Semaphore::new(max_concurrency)),
+            child_concurrency: Arc::new(Semaphore::new(max_concurrency.saturating_sub(1).max(1))),
             agent_cancels: Mutex::new(HashMap::new()),
             hook_agents: Mutex::new(HashSet::new()),
             plan_mode: AtomicBool::new(initial_plan),
@@ -148,6 +152,8 @@ impl AgentSession {
             .tools
             .register(NativePlanTool::new(Arc::downgrade(&inner), false))
             .expect("register exit_plan_mode tool");
+        crate::discovery::register(&inner);
+        inner.tools.register_deferred(crate::code::CodeTool::new(Arc::downgrade(&inner))).expect("code tool");
         Self { inner }
     }
 

@@ -246,6 +246,54 @@ function desktopFilePath(id) {
   return '';
 }
 
+// Application du menu, par le nom qu'il affiche (« Blender », « Éditeur de
+// texte ») : equivalent Linux de la recherche dans le menu Demarrer de Windows.
+// Memes regles (exact, prefixe, mot entier, sans accents) et memes suggestions.
+function plainName(value) {
+  return String(value || '').normalize('NFD').replace(/\p{Mn}/gu, '').toLowerCase().trim();
+}
+function desktopEntries() {
+  const dirs = [
+    path.join(os.homedir(), '.local', 'share', 'applications'),
+    '/usr/local/share/applications', '/usr/share/applications',
+    '/var/lib/flatpak/exports/share/applications',
+    path.join(os.homedir(), '.local', 'share', 'flatpak', 'exports', 'share', 'applications'),
+    '/var/lib/snapd/desktop/applications',
+  ];
+  const lang = String(process.env.LANG || '').split(/[._@]/)[0];
+  const seen = new Set(), entries = [];
+  for (const dir of dirs) {
+    let files = [];
+    try { files = fs.readdirSync(dir).filter((f) => f.endsWith('.desktop')).slice(0, 3000); } catch { continue; }
+    for (const file of files) {
+      if (seen.has(file)) continue;
+      seen.add(file);
+      let body = '';
+      try { body = fs.readFileSync(path.join(dir, file), 'utf8').slice(0, 65536); } catch { continue; }
+      const section = (body.split(/^\[Desktop Entry\]\s*$/m)[1] || '').split(/^\[/m)[0];
+      const field = (key) => { const m = section.match(new RegExp(`^${key.replace(/[[\]]/g, '\\$&')}=(.*)$`, 'm')); return m ? m[1].trim() : ''; };
+      if (field('Type') && field('Type') !== 'Application') continue;
+      if (/^true$/i.test(field('NoDisplay')) || /^true$/i.test(field('Hidden'))) continue;
+      const names = [field(`Name[${lang}]`), field(`Name[${lang.split('_')[0]}]`), field('Name'), field('GenericName')].filter(Boolean);
+      if (names.length) entries.push({ id: file.replace(/\.desktop$/, ''), path: path.join(dir, file), name: names[0], names });
+    }
+  }
+  return entries;
+}
+function findDesktopApp(name) {
+  const wanted = plainName(name);
+  if (!wanted) return { app: null, suggestions: [] };
+  const apps = desktopEntries();
+  for (const rule of ['exact', 'prefix', 'word']) {
+    for (const app of apps) {
+      if (app.names.some((n) => { const p = plainName(n); return rule === 'exact' ? p === wanted : rule === 'prefix' ? p.startsWith(wanted) : ` ${p} `.includes(` ${wanted} `); })) return { app, suggestions: [] };
+    }
+  }
+  const first = wanted.split(/\s+/)[0];
+  const suggestions = first.length >= 3 ? apps.filter((a) => plainName(a.name).includes(first.slice(0, 3))).slice(0, 8).map((a) => a.name) : [];
+  return { app: null, suggestions };
+}
+
 function createLinuxComputerAction({ port, secret }) {
   let overlayProcess = null;
   let overlayState = '';
@@ -453,8 +501,13 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         const requested = String(action.path || '');
         const candidates = appCandidates(requested);
         let launched = null; // { pid, name, byDesktop }
+        // Un nom libre (« Blender ») n'est cherche que dans le menu, jamais sur
+        // le PATH, comme sous Windows : seuls les lanceurs connus et les .desktop
+        // admis peuvent designer une commande.
+        const menuName = !(requested.startsWith('/') || requested.startsWith('~/') || /\.desktop$/.test(requested)
+          || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)$/i.test(requested));
         // 1) Executable direct : chemin absolu, ou commande trouvee sur le PATH.
-        for (const candidate of candidates) {
+        for (const candidate of menuName ? [] : candidates) {
           if (candidate && path.isAbsolute(candidate) && fs.existsSync(candidate)) {
             try { fs.accessSync(candidate, fs.constants.X_OK); const c = spawn(candidate, [], { detached: true, stdio: 'ignore' }); c.unref(); launched = { pid: c.pid, name: path.basename(candidate).replace(/-stable$/, '') }; break; } catch {}
           }
@@ -483,7 +536,18 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
             } catch {}
           }
         }
-        if (!launched) throw new Error(`application-not-found:${requested}`);
+        // 3) Nom affiche dans le menu des applications, comme le menu Demarrer.
+        if (!launched) {
+          const found = findDesktopApp(requested);
+          if (!found.app) return { ok: false, error: 'application-not-found', suggestions: found.suggestions };
+          const gtk = await commandPath(['gtk-launch']);
+          try {
+            const c = gtk
+              ? spawn(gtk, [found.app.id], { detached: true, stdio: 'ignore', env: process.env })
+              : spawn('gio', ['launch', found.app.path], { detached: true, stdio: 'ignore', env: process.env });
+            c.unref(); launched = { pid: c.pid, name: found.app.id.split('.').pop(), byDesktop: true };
+          } catch { return { ok: false, error: 'application-not-found', suggestions: [] }; }
+        }
         // On attend que la fenetre soit reellement visible avant de rendre la
         // main : une app qui demarre a froid (Firefox, LibreOffice, un Flatpak)
         // peut mettre plusieurs secondes, et un type/key envoye trop tot partirait
@@ -553,4 +617,5 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
   };
 }
 
-module.exports = { createLinuxComputerAction };
+module.exports = {
+  findDesktopApp, createLinuxComputerAction };

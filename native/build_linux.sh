@@ -47,6 +47,9 @@ npx pkg . --no-bytecode --public --public-packages "*" --targets node22-linux-x6
 echo "[4/8] Compilation de node-pty pour le runtime Node embarque..."
 sh "$ROOT/native/build_linux_node_pty.sh" "$ROOT"
 
+echo "[4b/8] Connecteurs : pont WhatsApp, client GitHub, tunnel cloudflared..."
+sh "$ROOT/native/stage_linux_connectors.sh" "$ROOT" "$SERVERDIST"
+
 # zaalis-agentd est le coeur agent : sans lui, Chat, Agents et le CLI n'ont
 # aucun moteur. On le construit donc avant tout empaquetage.
 echo "[5/8] Compilation du coeur Rust (agentd, CLI, bac a sable)..."

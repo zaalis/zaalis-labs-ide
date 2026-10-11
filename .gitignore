@@ -51,7 +51,15 @@ native/.electron-cache/
 native/.whisper-build/
 native/linux-node-runtime/
 native/linux-node-pty/
+native/linux-gh/
+native/linux-cloudflared/
+native/macos-node-runtime/
+native/macos-gh/
+native/macos-cloudflared/
 native/package-linux/
 native/whisper/whisper-cli
 native/macos-computer-bridge
 native/macos-speech-transcriber
+
+# Disposable local assistant smoke account context
+.assistant-smoke-context.json

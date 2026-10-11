@@ -70,7 +70,7 @@ trap restore_host_pty EXIT
 # local builds use a verifiable ad-hoc signature.
 sign_app() {
   app="$1"
-  identity="${MACOS_CODESIGN_IDENTITY:--}"
+  identity="${MACOS_CODESIGN_IDENTITY:-${ZAALIS_CODESIGN_ID:--}}"
   echo "    - signing application bundle (${identity})"
   codesign --force --deep --sign "$identity" "$app"
   codesign --verify --deep --strict "$app"
@@ -131,6 +131,11 @@ build_arch() {
   ZAALIS_RUST_RELEASE_DIR="$ROOT/rust/target/$rust_target/release" \
     sh scripts/stage-rust-binaries.sh "$ROOT/$serverdist"
   npx pkg src/app/cli.js --no-bytecode --public --targets "$pkg_target" --output "$serverdist/bin/zaalis"
+
+  # Same connectors as the Windows installer (github\gh.exe,
+  # messenger-runtime\, cloudflared.exe), built for this architecture.
+  echo "    - staging connectors (WhatsApp bridge, GitHub client, cloudflared)"
+  PKG_NODE_VERSION="$PKG_NODE_VERSION" sh native/stage_macos_connectors.sh "$ROOT" "$arch" "$ROOT/$serverdist"
 
   echo "    - copying assets"
   cp -R interface "$serverdist/interface"

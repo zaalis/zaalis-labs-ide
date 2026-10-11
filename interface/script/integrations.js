@@ -8,17 +8,20 @@
   const version=++revision,target=document.getElementById('integrations-content');if(!target)return;target.replaceChildren();
   if(page==='overview'){
    const intro=node('div',undefined,'integrations-intro');intro.append(node('span',uiText('VOTRE ESPACE CONNECTÉ'),'integration-eyebrow'),node('h3',uiText('Vos outils, au même endroit')),node('p',uiText('Connectez vos comptes pour travailler sur vos dépôts et continuer vos projets dans votre messagerie.')));target.append(intro);
+   const search=node('input');search.type='search';search.placeholder=state.language==='en'?'Search integrations…':'Rechercher une intégration…';search.setAttribute('aria-label',search.placeholder);search.className='integration-search';target.append(search);
    const grid=node('div',undefined,'integrations-grid');
-   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],['whatsapp','WhatsApp','Continuez vos projets et conversations depuis WhatsApp sur votre téléphone.','Messagerie personnelle'],['telegram','Telegram','Retrouvez vos projets et conversations de l’IDE dans votre bot privé.','Messagerie privée']]){
-    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',uiText('Ouvrir '+name));
+   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],...window.ZaalisIntegrationCatalog.map(c=>[c.id,c.title,state.language==='en'?c.en:c.fr,c.adapter==='native'?'Messagerie privée':c.adapter==='mcp'?(state.language==='en'?'MCP bridge required':'Pont MCP requis'):(state.language==='en'?'API connection':'Connexion API')])]){
+    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',(state.language==='en'?'Open ':'Ouvrir ')+name);
     const mark=node('span',undefined,'integration-brand '+id),image=node('img');image.src='assets/integrations/'+id+'.svg';image.alt='';mark.append(image);
     const copy=node('span',undefined,'integration-tile-copy');copy.append(node('span',uiText(tag),'integration-eyebrow'),node('strong',name),node('span',uiText(description)),node('span',uiText('Configurer la connexion')+' →','integration-tile-cta'));
     tile.append(mark,copy);tile.onclick=()=>settings(id);grid.append(tile);
    }
+   search.oninput=()=>{const q=search.value.toLocaleLowerCase();for(const tile of grid.children)tile.hidden=!tile.textContent.toLocaleLowerCase().includes(q);};
    target.append(grid,node('p',uiText('Vos connexions restent sur ce PC. Gardez Zaalis ouvert pour recevoir les réponses dans vos messageries.'),'integration-footnote'));return;
   }
   if(page==='whatsapp'||page==='telegram'){await window.ZaalisMessengers.mount(page,target,()=>settings('overview'));return;}
 
+  if(page!=='github'){await window.ZaalisIntegrationSetup.mount(page,target,()=>settings('overview'));return;}
   const back=node('button',uiText('← Retour aux intégrations'),'integration-back');back.type='button';back.onclick=()=>settings('overview');target.append(back);
   const notice=node('p',uiText('Chargement des intégrations…'),'lab-note');notice.setAttribute('role','status');target.append(notice);
   try{
@@ -50,7 +53,7 @@
      const poll=async()=>{if(stopped)return;try{if(Date.now()>deadline)throw Error(uiText('Connexion expirée. Recommencez.'));const r=await api('/api/integrations/github',{action:'poll'});if(stopped)return;if(r.pending){timer=setTimeout(poll,(r.interval||d.interval)*1000);}else{stop();await settings();}}catch(e){stop();notice.textContent=uiText(e.message);}};
      timer=setTimeout(poll,d.interval*1000);
     });
-    card.append(node('p',uiText('La connexion s’ouvre dans le navigateur par défaut de Windows. Aucun jeton à copier.'),'lab-note'));
+    card.append(node('p',uiText(HOST_IS_WINDOWS?'La connexion s’ouvre dans le navigateur par défaut de Windows. Aucun jeton à copier.':'La connexion s’ouvre dans votre navigateur par défaut. Aucun jeton à copier.'),'lab-note'));
     card.append(node('p',uiText('L’autorisation est présentée par le client officiel GitHub CLI. Les dépôts restent soumis aux droits que vous choisissez ici.'),'lab-note'));
    }
    if(status.connected){
@@ -62,7 +65,7 @@
       if(!repos.length)list.append(node('p',uiText('Aucun dépôt visible. Vérifiez les dépôts sélectionnés, les droits du jeton et l’autorisation de votre organisation.'),'lab-note'));
       for(const repo of repos){const grant=status.permissions[repo.name.toLowerCase()]||{},row=node('details',undefined,'integration-repo'),summary=node('summary',repo.name+(repo.private?uiText(' · privé'):'')+' · '+({read:uiText('Lecture seule'),write:uiText('Lecture et écriture')}[grant.mode]||uiText('Non autorisé')));row.append(summary);
        const content=node('div',undefined,'integration-repo-content');row.append(content);
-       const rootLabel=node('label',uiText('Dossier local associé'),'lab-field'),root=node('input');root.value=grant.root||state.projectRoot||'';root.placeholder='C:\\Projets\\MonProjet';rootLabel.append(root);content.append(rootLabel);content.append(node('p',state.language==='en'?'The folder where this repository is cloned on this PC, containing .git. Example: C:\\Projets\\MonProjet. Use your actual folder path.':'Le dossier où ce dépôt est cloné sur ce PC, contenant .git. Exemple : C:\\Projets\\MonProjet. Indiquez le chemin de votre dossier.','lab-note integration-folder-help'));
+       const rootLabel=node('label',uiText('Dossier local associé'),'lab-field'),root=node('input');root.value=grant.root||state.projectRoot||'';root.placeholder=HOST_SAMPLE_FOLDER;rootLabel.append(root);content.append(rootLabel);content.append(node('p',state.language==='en'?`The folder where this repository is cloned on this PC, containing .git. Example: ${HOST_SAMPLE_FOLDER}. Use your actual folder path.`:`Le dossier où ce dépôt est cloné sur ce PC, contenant .git. Exemple : ${HOST_SAMPLE_FOLDER}. Indiquez le chemin de votre dossier.`,'lab-note integration-folder-help'));
        const choose=node('div',undefined,'lab-toolbar integration-project-actions');content.append(choose);button(uiText('Utiliser le projet actif'),async()=>{root.value=state.projectRoot||'';feedback.hidden=true;notice.textContent=root.value?uiText('Projet sélectionné. Enregistrez ensuite le droit.'):uiText('Ouvrez un projet dans l’IDE.');},choose);
        const label=node('label',uiText('Droits de l’IA'),'lab-field'),select=node('select');select.id='github-permission-'+String(repo.id || repos.indexOf(repo));for(const [value,text] of [['none',uiText('Aucun accès')],['read',uiText('Lecture seule')],['write',uiText('Lecture et écriture')]]){const option=node('option',text);option.value=value;option.disabled=value==='write'&&!repo.canPush;select.append(option);}select.value=grant.mode||'none';label.append(select);content.append(label);
        content.append(node('p',uiText('L’écriture exige le même dépôt origin et un dossier vérifié. Changer les droits interrompt les agents en cours. La lecture seule bloque aussi les modifications locales de l’IA pour ce projet.'),'lab-note'));

@@ -1,0 +1,21 @@
+{
+  "status": "passed",
+  "packaged": false,
+  "tools": 171,
+  "modelRequests": 29,
+  "checks": [
+    "shared IDE/CLI catalogue",
+    "same model catalogue",
+    "guarded deferred tools",
+    "memory persistence",
+    "Python tool orchestration",
+    "structured question",
+    "read-only denial",
+    "supervised approval",
+    "dynamic MCP discovery and invocation",
+    "persistent background agent",
+    "cron creation",
+    "CLI commands",
+    "shared session search"
+  ]
+}

@@ -22,7 +22,7 @@ class WhatsAppBridge extends EventEmitter {
   }
   async initialize() {
     const runtime = process.pkg ? path.join(this.appDir, 'messenger-runtime') : path.join(this.appDir, 'native', 'dist', 'messenger-runtime');
-    const node = process.pkg ? path.join(runtime, 'node.exe') : process.execPath;
+    const node = process.pkg ? path.join(runtime, process.platform === 'win32' ? 'node.exe' : 'node') : process.execPath;
     const script = path.join(runtime, 'launcher.mjs');
     if (!fs.existsSync(node) || !fs.existsSync(script)) throw Error('Le pont WhatsApp Zaalis est manquant. Réinstallez Zaalis.');
     this.port = await freePort(); this.base = `http://127.0.0.1:${this.port}`; this.startedAt = Math.floor(Date.now() / 1000);
