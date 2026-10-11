@@ -1,5 +1,5 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
-const {VmManager}=require('../vm-manager');
+const {VmManager}=require('../src/laboratory/vm-manager');
 test('disposable VM reclamation requires a stopped owned session and its exact managed folder',async()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'lab-discard-')),vm=new VmManager({appDir:root,dataDir:root}),outside=path.join(root,'external');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'keep'),'keep');
  const s={id:crypto.randomUUID(),status:'ready',dir:outside};vm.sessions.set(s.id,s);

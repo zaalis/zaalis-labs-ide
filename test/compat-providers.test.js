@@ -10,8 +10,8 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
-const { findAgentd } = require('../rust-agent-bridge');
-const compat = require('../compat-providers');
+const { findAgentd } = require('../src/agent/rust-agent-bridge');
+const compat = require('../src/accounts/compat-providers');
 
 test('the catalogue only lists direct OpenAI-compatible endpoints', () => {
   assert.ok(compat.PROVIDERS.length >= 20);
@@ -65,7 +65,7 @@ test('keys stay in the zaalis vault and chat goes straight to the endpoint', asy
   fs.mkdirSync(project, { recursive: true });
   const fake = await fakeProvider();
   const port = 33000 + Math.floor(Math.random() * 1000);
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'), stdio: 'ignore', windowsHide: true,
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: data, ZAALIS_RUST_CORE: 'on' },
   });

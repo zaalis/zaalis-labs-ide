@@ -17,7 +17,7 @@ const projects = ['Projet A', 'Projet B'].map(name => {
 });
 const port = 35700 + Math.floor(Math.random() * 700);
 const base = `http://127.0.0.1:${port}`;
-const server = spawn(process.execPath, ['server.js'], { cwd: root, windowsHide: true, stdio: 'ignore',
+const server = spawn(process.execPath, ['src/app/server.js'], { cwd: root, windowsHide: true, stdio: 'ignore',
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: path.join(temp, 'data'), ZAALIS_RUST_CORE: 'off' } });
 let browser;
 let releaseTranscription;

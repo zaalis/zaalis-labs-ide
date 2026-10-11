@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const connector = require('../blender-connector');
+const connector = require('../src/integrations/blender-connector');
 
 test('versions are read and compared as numbers', () => {
   assert.deepEqual(connector.parseVersion('Blender 5.2.2 LTS'), [5, 2, 2]);

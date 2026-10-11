@@ -7,7 +7,7 @@ const evidence=path.join(baseDir,'.tmp','github-profile-ui');fs.mkdirSync(eviden
 const port=35900+Math.floor(Math.random()*300),base=`http://127.0.0.1:${port}`;
 const packaged=process.argv.includes('--packaged');
 const executable=packaged?path.join(baseDir,'native/dist/zaalis-server.exe'):process.execPath;
-const child=spawn(executable,packaged?[]:['server.js'],{cwd:path.dirname(executable)===path.join(baseDir,'native/dist')?path.dirname(executable):baseDir,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});
+const child=spawn(executable,packaged?[]:['src/app/server.js'],{cwd:path.dirname(executable)===path.join(baseDir,'native/dist')?path.dirname(executable):baseDir,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});
 let browser;
 async function main(){
  for(let i=0;i<100;i++){try{if((await fetch(base)).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}

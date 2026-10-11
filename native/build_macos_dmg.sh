@@ -130,7 +130,7 @@ build_arch() {
   echo "    - staging the Rust binaries"
   ZAALIS_RUST_RELEASE_DIR="$ROOT/rust/target/$rust_target/release" \
     sh scripts/stage-rust-binaries.sh "$ROOT/$serverdist"
-  npx pkg cli.js --no-bytecode --public --targets "$pkg_target" --output "$serverdist/bin/zaalis"
+  npx pkg src/app/cli.js --no-bytecode --public --targets "$pkg_target" --output "$serverdist/bin/zaalis"
 
   echo "    - copying assets"
   cp -R interface "$serverdist/interface"

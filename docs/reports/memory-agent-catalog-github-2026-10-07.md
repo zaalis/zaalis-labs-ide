@@ -1,0 +1,9 @@
+# Correction memory, agent catalog, and GitHub connection — October 7, 2026
+
+Historical version: 1.0.16 on `main`; preexisting local changes were retained. The centered memory dialog gained consistent themes, checkboxes, empty states, and localized dates. Changing language updated controls without resetting unsaved fields. The agent catalog derived configured providers, live models, and manually entered models from Chat while preserving scrolling. Model and role menus supported keyboard access, reduced motion, and top-layer positioning outside clipping containers.
+
+The main GitHub action opened browser/device authorization and polled for completion without requiring a pasted token. At that time, the public OAuth Client ID came from integration settings or `ZAALIS_GITHUB_CLIENT_ID`; the registered app needed device flow enabled. Cancellation, expiry, polling slowdown, and late authorization races were handled.
+
+Historical checks: 119 of 120 Node tests passed, 1 skipped; 16 GitHub tests passed. Eighteen language screens were checked. Source, packaged, and installed UI smoke runs checked 20 simulated providers, Chat/Agents parity, model and role selection, scrolling, memory in both languages, three viewport widths, themes, and simulated GitHub polling. The real Rust engine and local test provider checked memory correction, verification, recall, CLI, and project disablement. The Windows shell and server were rebuilt, and selected installed files matched build SHA-256 values while ten persistent JSON/secret files remained unchanged.
+
+No Zaalis GitHub Client ID was supplied and no personal GitHub account was authorized. The OAuth path used simulated responses. Visual checks ran in Edge/Chromium with source and packaged servers; interactive native WebView2 behavior was not verified. Windows binaries were unsigned, and `pkg` reported nonfatal Electron and upstream-browser resource warnings.

@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('../terminal-manager');
+const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('../src/runtime/terminal-manager');
 
 // Le terminal intégré s'appuie sur node-pty, un module natif que le paquet
 // installe à côté du binaire plutôt que dans l'instantané pkg. Une machine sans

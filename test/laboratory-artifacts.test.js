@@ -1,5 +1,5 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),crypto=require('node:crypto');
-const {Laboratory,fingerprint}=require('../laboratory');const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+const {Laboratory,fingerprint}=require('../src/laboratory/laboratory');const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
 test('integration rejects stale project and corrupt artifacts; saves rollback bytes',()=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'lab-artifact-')),project=path.join(root,'project');fs.mkdirSync(project);const target=path.join(project,'a.txt');fs.writeFileSync(target,'old');const lab=new Laboratory({dataDir:root,vm:{}});
  const id=crypto.randomUUID(),artifactId=crypto.randomUUID(),artifact={id:artifactId,path:'a.txt',bytes:3,sha256:hash('new'),baseHash:hash('old')};

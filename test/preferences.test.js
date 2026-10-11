@@ -11,7 +11,7 @@ const PORT = 31957;
 const base = `http://localhost:${PORT}`;
 
 async function start(dataDir) {
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, ZAALIS_PORT: String(PORT), ZAALIS_DATA_DIR: dataDir, ZAALIS_RUST_CORE: 'off' },
     stdio: 'ignore', windowsHide: true,

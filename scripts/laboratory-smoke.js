@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const {VmManager}=require('../vm-manager');const {Laboratory}=require('../laboratory');
+const {VmManager}=require('../src/laboratory/vm-manager');const {Laboratory}=require('../src/laboratory/laboratory');
 const base=path.resolve(__dirname,'..'),data=path.join(base,'.tmp','laboratory-real-'+Date.now());fs.mkdirSync(data,{recursive:true});
 const vm=new VmManager({appDir:process.env.ZAALIS_VM_APP_DIR||base,dataDir:data}),lab=new Laboratory({dataDir:data,vm});
 async function main(){

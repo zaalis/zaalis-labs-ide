@@ -1,8 +1,8 @@
 'use strict';
 const path = require('path');
 const assert = require('node:assert/strict');
-const { VmManager } = require('../vm-manager');
-const { TerminalManager } = require('../terminal-manager');
+const { VmManager } = require('../src/laboratory/vm-manager');
+const { TerminalManager } = require('../src/runtime/terminal-manager');
 const v = new VmManager({ appDir: process.env.ZAALIS_VM_APP_DIR || path.resolve(__dirname, '..'), dataDir: path.resolve(__dirname, '../server-data/vm-smoke') });
 const terminals = new TerminalManager();
 async function main() {
@@ -21,7 +21,7 @@ async function main() {
       assert.throws(() => v.get(s.id, 'another-user'), /inconnue/);
       if (system === 'linux') { const terminal = await v.terminal(s, terminals); const live=terminals.get(terminal.id,'smoke'); terminals.write(live, 'printf PTY_INTERACTIVE_OK\\n\r'); await v.wait(s,()=>live.buffer.includes('PTY_INTERACTIVE_OK'),10000); console.log('LINUX_PTY_OK'); }
       console.log(system.toUpperCase() + '_SMOKE_OK');
-      if(system==='windows'&&process.env.ZAALIS_VM_TEST_WATCHDOG==='1') {clearInterval(s.heartbeatTimer);const {run}=require('../vm-manager');const end=Date.now()+65000;for(;;){const list=JSON.parse(await run('wsb.exe',['list','--raw']));if(!list.WindowsSandboxEnvironments.some(x=>x.Id===s.sandboxId))break;if(Date.now()>end)throw new Error('Guest watchdog failed');await new Promise(r=>setTimeout(r,2000));}console.log('WINDOWS_WATCHDOG_OK');}
+      if(system==='windows'&&process.env.ZAALIS_VM_TEST_WATCHDOG==='1') {clearInterval(s.heartbeatTimer);const {run}=require('../src/laboratory/vm-manager');const end=Date.now()+65000;for(;;){const list=JSON.parse(await run('wsb.exe',['list','--raw']));if(!list.WindowsSandboxEnvironments.some(x=>x.Id===s.sandboxId))break;if(Date.now()>end)throw new Error('Guest watchdog failed');await new Promise(r=>setTimeout(r,2000));}console.log('WINDOWS_WATCHDOG_OK');}
     } catch (error) { console.error(system.toUpperCase() + '_SMOKE_FAILED: ' + error.message + '\n' + s.output.slice(-4000)); throw error; }
     finally { await v.stop(s, terminals); }
   }

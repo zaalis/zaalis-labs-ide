@@ -38,18 +38,18 @@ On Windows, the application attempts to use AppContainer or Windows Sandbox. Whe
 
 Opale is a separate project: a standalone Markdown notes application (a vault is a folder of `.md` files linked with `[[…]]`). It does not live in this repository; by default its folder is `opale` on the Desktop.
 
-The two are linked by default. When Opale is present on the PC and running, the agent can read, write and reorganise the open vault through Opale's local MCP endpoint, with nothing to configure. **Settings → MCP → Opale** shows the state, starts Opale, or switches the link off. The IDE side of the link is `opale-connector.js`.
+The two are linked by default. When Opale is present on the PC and running, the agent can read, write and reorganise the open vault through Opale's local MCP endpoint, with nothing to configure. **Settings → MCP → Opale** shows the state, starts Opale, or switches the link off. The IDE side of the link is `src/integrations/opale-connector.js`.
 
 ## Personal MCP servers
 
-**Settings → MCP → MCP personnels** connects your own MCP servers, with the two transports Claude Desktop and Codex use:
+**Settings → MCP → Personal MCP servers** connects your own MCP servers, with the two transports Claude Desktop and Codex use:
 
 - **a local program (stdio)** — a command, its arguments and optional environment variables, started by the IDE (`npx …`, `uvx …`, or a full path);
 - **a Streamable HTTP URL** — HTTPS, or plain HTTP on loopback, with an optional bearer token.
 
-A Claude/Codex-style JSON file (`mcpServers`) can be imported, and **Tester la connexion** shows what a server answers before it is saved. Tokens and environment values are encrypted at rest and never sent back to the interface. The agent learns about each enabled server through a Skill generated from the server's own tool list; `allow` / `deny` restrict which tools it may call.
+A Claude/Codex-style JSON file (`mcpServers`) can be imported, and **Test connection** shows what a server answers before it is saved. Tokens and environment values are encrypted at rest and never sent back to the interface. The agent learns about each enabled server through a Skill generated from the server's own tool list; `allow` / `deny` restrict which tools it may call.
 
-The code is in `mcp-registry.js` (validation, both transports), `rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
+The code is in `src/agent/mcp-registry.js` (validation, both transports), `src/agent/rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
 
 ## Blender
 
@@ -57,7 +57,7 @@ The code is in `mcp-registry.js` (validation, both transports), `rust-agent-brid
 
 - the IDE detects Blender (5.1 or newer) and the state of Blender Lab's official **MCP** add-on;
 - **Installer** opens a window that checks the version, asks for Blender to be closed, lists what will change in Blender (the add-on shipped in `native/blender`, its automatic start, and Blender's "Allow Online Access" setting, which the add-on requires) and asks for consent. Nothing is changed in Blender without it;
-- the MCP server is the IDE itself (`blender-connector.js`, tools in `blender-tools.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876).
+- the MCP server is the IDE itself (`src/integrations/blender-connector.js`, tools in `src/integrations/blender-tools.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876).
 
 The 18 tools:
 
@@ -78,7 +78,7 @@ Tool results can carry pictures, which the Rust core sends to the model as image
 
 ## Desktop control
 
-With desktop control enabled, the agent drives Windows through the `computer` tool (`windows-computer.js` for the Windows side, `automation-manager.js` for sessions and safety):
+With desktop control enabled, the agent drives Windows through the `computer` tool (`src/runtime/windows-computer.js` for the Windows side, `src/runtime/automation-manager.js` for sessions and safety):
 
 - **inspect** returns a capture, the active window's controls from UI Automation (role, label, value, frame and center) and the text read by Windows' own OCR, all in the pixels of the image the model receives; after an action it says whether the screen actually changed (visual signature plus text and controls);
 - gestures: click (left, right, middle, with modifiers), double click, drag, scroll at a point (both directions), Unicode typing that leaves the clipboard alone, key chords with repeat, wait;
@@ -88,7 +88,7 @@ With desktop control enabled, the agent drives Windows through the `computer` to
 
 ## Voice dictation
 
-The microphone button records in the interface and the local server transcribes (`POST /api/stt`, `voice-stt.js`). Everything stays on the PC:
+The microphone button records in the interface and the local server transcribes (`POST /api/stt`, `src/runtime/voice-stt.js`). Everything stays on the PC:
 
 - **whisper.cpp** is the engine. Its Windows binaries are in `native/whisper` (see the README there for their origin and checksums) and are installed to `{app}\whisper`. The model, `ggml-small-q5_1.bin` (181 MB), is downloaded once into `%LOCALAPPDATA%\zaalis\server-data\voice` from the official `ggerganov/whisper.cpp` repository and checked against its sha256.
 - **Windows' own recognizer** stands in while the model is downloading, or if the engine cannot run. It is far less accurate and needs the language installed in Windows.
@@ -128,12 +128,12 @@ zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribu
 
 Accessing, cloning, using, modifying, or contributing to this repository does not transfer any ownership rights.
 
-## Une branche commune pour les trois plateformes
+## Source layout and platforms
 
-Les sources communes et les adaptateurs Windows, Linux et macOS sont réunis sur `main`.
+See [Source layout](docs/source-layout.md) for the JavaScript modules and entrypoints. Shared sources and the Windows, Linux, and macOS adapters are on `main`.
 
-- Windows : chaîne native C++/WebView2 décrite dans `native/README.md`.
-- Linux : `npm run build:linux` sur Linux ; voir `README_LINUX.md`.
-- macOS : `npm run build:macos` sur un Mac ; voir `README_MACOS.md`. Le workflow macOS utilise `main`.
+- Windows: the native C++/WebView2 build is described in [native/README.md](native/README.md).
+- Linux: run `npm run build:linux` on Linux; see [README_LINUX.md](README_LINUX.md).
+- macOS: run `npm run build:macos` on a Mac; see [README_MACOS.md](README_MACOS.md). The macOS workflow builds from `main`.
 
-Les installateurs sont des sorties locales ignorées par Git et des artefacts de distribution ; ils ne sont pas suivis dans les sources. Les builds natifs nécessitent le système hôte et les outils correspondants.
+Installers are generated distribution artifacts ignored by Git. Native builds require the corresponding host system and toolchain.

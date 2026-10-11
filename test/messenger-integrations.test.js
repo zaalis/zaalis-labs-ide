@@ -1,6 +1,6 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict'), { EventEmitter } = require('node:events');
-const { MessengerIntegrations } = require('../messenger-integrations');
+const { MessengerIntegrations } = require('../src/integrations/messenger-integrations');
 function fixture() {
  let users = [{ id: 'alice' }, { id: 'bob' }], calls = [], answers = [];
  const client = new EventEmitter(); client.info = { wid: { _serialized: 'self@c.us' }, pushname: 'Alice' };

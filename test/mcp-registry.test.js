@@ -7,8 +7,8 @@ const http = require('node:http');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
-const mcpRegistry = require('../mcp-registry');
-const { runtimeMcpEntry } = require('../rust-agent-bridge');
+const mcpRegistry = require('../src/agent/mcp-registry');
+const { runtimeMcpEntry } = require('../src/agent/rust-agent-bridge');
 
 const windows = process.platform === 'win32';
 

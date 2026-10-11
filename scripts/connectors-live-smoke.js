@@ -1,5 +1,5 @@
 'use strict';
-const fs=require('fs'),path=require('path'),os=require('os'),assert=require('node:assert/strict'),{spawn}=require('child_process'),{GitHubBrowserAuth}=require('../github-browser-auth');
+const fs=require('fs'),path=require('path'),os=require('os'),assert=require('node:assert/strict'),{spawn}=require('child_process'),{GitHubBrowserAuth}=require('../src/integrations/github-browser-auth');
 const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-connectors-live-')),port=37400+Math.floor(Math.random()*100),base='http://127.0.0.1:'+port;
 const installed=process.argv.includes('--installed'),appDir=installed?path.join(process.env.LOCALAPPDATA,'Programs','zaalis'):path.join(root,'native/dist');
 const child=spawn(path.join(appDir,'zaalis-server.exe'),[],{cwd:appDir,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});

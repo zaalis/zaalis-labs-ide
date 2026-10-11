@@ -32,7 +32,7 @@ async function waitForBridgeFile(file) {
 
 test('codestrale bridge answers on its secret and stays confined to agent turns', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-codestrale-'));
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, ZAALIS_PORT: String(PORT), ZAALIS_DATA_DIR: dataDir, ZAALIS_RUST_CORE: 'off' },
     stdio: 'ignore',

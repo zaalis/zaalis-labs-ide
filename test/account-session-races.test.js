@@ -8,7 +8,7 @@ const crypto = require('node:crypto');
 
 // Exercise the server's token lifecycle without starting listeners or using
 // real accounts. Storage and the upstream refresh are controlled boundaries.
-const source = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'app', 'server.js'), 'utf8');
 const start = source.indexOf('const accountRefreshes = new Map();');
 const end = source.indexOf('async function withAccountToken', start);
 assert.ok(start >= 0 && end > start);

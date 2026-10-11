@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { createArtifact } = require('../artifact-generator');
+const { createArtifact } = require('../src/artifacts/artifact-generator');
 
 test('PDF, Word, Excel et CSV sont de vrais fichiers locaux distincts', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-export-'));

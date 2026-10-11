@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { AutomationManager, SENSITIVE_TARGET, normalizeAction, isSensitive, visualChange } = require('../automation-manager');
+const { AutomationManager, SENSITIVE_TARGET, normalizeAction, isSensitive, visualChange } = require('../src/runtime/automation-manager');
 
 function onPlatform(platform, check) {
   const original = Object.getOwnPropertyDescriptor(process, 'platform');

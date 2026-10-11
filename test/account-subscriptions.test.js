@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const auth = require('../account-subscriptions');
+const auth = require('../src/accounts/account-subscriptions');
 
 const reply = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { 'Content-Type': 'application/json' },

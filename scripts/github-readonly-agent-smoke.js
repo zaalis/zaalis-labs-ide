@@ -13,7 +13,7 @@ const provider=http.createServer(async(req,res)=>{
 });
 async function main(){
  await new Promise(r=>provider.listen(0,'127.0.0.1',r));const port=36500+Math.floor(Math.random()*200),base=`http://127.0.0.1:${port}`;
- const packaged=process.argv.includes('--packaged');child=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:data}});
+ const packaged=process.argv.includes('--packaged');child=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['src/app/server.js'],{cwd:root,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:data}});
  for(let i=0;i<100;i++){try{if((await fetch(base)).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
  const registration=await fetch(base+'/api/auth/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'readonly@zaalis.local',password:'password123'})});assert.equal(registration.status,200);const headers={cookie:registration.headers.get('set-cookie').split(';')[0],'content-type':'application/json'};
  const users=JSON.parse(fs.readFileSync(path.join(data,'users.json')));users[0].github={login:'fixture',token:'',permissions:{'fixture/project':{mode:'read',root:fs.realpathSync(project).toLowerCase(),id:123}}};fs.writeFileSync(path.join(data,'users.json'),JSON.stringify(users));

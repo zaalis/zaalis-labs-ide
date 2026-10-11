@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GitHubIntegration, repository } = require('../github-integration');
+const { GitHubIntegration, repository } = require('../src/integrations/github-integration');
 function fixture() {
  let users = [{ id: 'u', github: { token: 'encrypted', login: 'alice', permissions: { 'alice/project': { mode: 'read', id: 12 } } } }];
  const calls = [];

@@ -1,84 +1,23 @@
-# zaalis IDE Linux
+# zaalis IDE for Linux
 
-Application Electron Linux x64 autonome, avec le coeur agent Rust
-`zaalis-agentd` embarque dans le bundle.
+The Linux x64 Electron application bundles the shared Rust agent (`zaalis-agentd`).
 
-Build sur Linux :
+Build on Linux with `sh native/build_linux.sh`, or from Windows through WSL with `native\build_linux.bat`. Prerequisites: Node.js 22+, Rust 1.90+, `dpkg-deb`, `tar`, `curl`, CMake, and a C/C++ compiler.
 
-```sh
-sh native/build_linux.sh
-```
+The build produces `native/installer/zaalis-linux-x64.deb` and `native/installer/zaalis-linux-x64.tar.gz`. Install the `.deb` with your distribution's software application or `sudo apt install ./zaalis-linux-x64.deb`. After installation, run `zaalis`, `zaalis ide`, or `zaalis-ide`. The desktop app bundles Chromium; it does not require a separate Chrome, Chromium, Edge, or Brave installation.
 
-Build depuis Windows (via WSL) :
-
-```bat
-native\build_linux.bat
-```
-
-Prerequis : Node.js 22+, Rust 1.90+, `dpkg-deb`, `tar`, `curl`, CMake et un compilateur C/C++.
-
-Sorties :
-
-```text
-native/installer/zaalis-linux-x64.deb
-native/installer/zaalis-linux-x64.tar.gz
-```
-
-Installation sur Linux :
-
-Double-cliquez sur `zaalis-linux-x64.deb`, puis installez avec l'application
-logiciels de votre distribution, ou :
-
-```sh
-sudo apt install ./zaalis-linux-x64.deb
-```
-
-Apres installation :
-
-```sh
-zaalis
-zaalis ide
-zaalis-ide
-```
-
-Le raccourci `zaalis IDE` ouvre une vraie application Electron locale avec
-Chromium embarque. Chrome, Chromium, Edge ou Brave ne sont pas requis.
-
-Lancement portable :
+For a portable installation:
 
 ```sh
 mkdir -p zaalis-linux
 tar -xzf zaalis-linux-x64.tar.gz -C zaalis-linux
 cd zaalis-linux
-chmod +x zaalis-ide \
-  resources/app/bundle/zaalis-server \
-  resources/app/bundle/zaalis-agentd \
-  resources/app/bundle/bin/zaalis
+chmod +x zaalis-ide resources/app/bundle/zaalis-server resources/app/bundle/zaalis-agentd resources/app/bundle/bin/zaalis
 ./zaalis-ide
 ```
 
-CLI :
+The CLI is `./resources/app/bundle/bin/zaalis`; pass a prompt as an argument for a noninteractive request.
 
-```sh
-./resources/app/bundle/bin/zaalis
-./resources/app/bundle/bin/zaalis "analyse le dossier"
-```
+The `.deb` declares desktop control dependencies for PTY, capture, OCR, and X11 input: `xdotool`, `gnome-screenshot`, `tesseract-ocr`, `python3-pyatspi`, `gir1.2-gtk-3.0`, and `zenity`. Desktop input injection uses X11; use an Xorg session for full desktop control under Wayland.
 
-Controle du bureau :
-
-Le `.deb` declare les dependances du terminal PTY, de la capture/OCR et du
-controle de bureau (`xdotool`, `gnome-screenshot`, `tesseract-ocr`,
-`python3-pyatspi`, `gir1.2-gtk-3.0`, `zenity`). L'injection d'evenements passe
-par X11 : sous Wayland, ouvrez une session Xorg pour que le controle de bureau
-fonctionne.
-
-Modeles locaux :
-
-Les modeles GGUF passent par llama.cpp, telecharge a la demande dans
-`~/.local/share/zaalis/engine`. La variante est choisie selon le GPU detecte :
-`rocm` sur AMD quand le runtime ROCm est installe, `vulkan` sinon (NVIDIA, Intel,
-AMD), `cpu` en dernier recours et en repli automatique. llama.cpp ne publie pas
-de binaire CUDA pour Linux : une variante `cuda` heritee d'une configuration
-Windows retombe sur Vulkan.
-
-Le paquet du 30 septembre 2026 a ete compile sur Ubuntu 24.04 x64 et demande glibc 2.39 minimum. Le controle de bureau utilise X11/XWayland et AT-SPI ; une session Wayland stricte doit etre validee separement.
+GGUF models use llama.cpp, downloaded on demand to `~/.local/share/zaalis/engine`. The runtime selects ROCm for AMD when installed, then Vulkan for supported GPUs, then CPU. A Windows CUDA setting falls back to Vulkan because llama.cpp does not provide that Linux CUDA binary. The package built on Ubuntu 24.04 x64 on September 30, 2026 required glibc 2.39 or newer; strict Wayland behavior needs separate validation.

@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const os=require('node:os');const path=require('node:path');
-const {Laboratory,validatePlan,fingerprint}=require('../laboratory');
+const {Laboratory,validatePlan,fingerprint}=require('../src/laboratory/laboratory');
 function fixture() {
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-lab-test-')),project=path.join(root,'project');fs.mkdirSync(project);fs.writeFileSync(path.join(project,'code.js'),'original');
  let id=0,active=0,maxActive=0;const sessions=new Map(),commands=[];

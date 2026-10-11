@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test'), assert = require('node:assert/strict'), fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-const { MessengerContinuation } = require('../messenger-continuation');
-const { MessengerIntegrations } = require('../messenger-integrations');
+const { MessengerContinuation } = require('../src/integrations/messenger-continuation');
+const { MessengerIntegrations } = require('../src/integrations/messenger-integrations');
 function fixture(t, run) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-continuation-test-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -77,7 +77,7 @@ test('plan feedback stays in the same run and a new approval emitted during the 
 });
 
 for (const mode of ['supervised', 'plan']) test(`real Rust ${mode} continuation routes approvals through Telegram before changing the project`, { timeout: 20000 }, async t => {
-  const http = require('node:http'), { RustAgentBridge } = require('../rust-agent-bridge');
+  const http = require('node:http'), { RustAgentBridge } = require('../src/agent/rust-agent-bridge');
   const seen = [];
   const provider = http.createServer(async (req, res) => {
     let raw = ''; for await (const chunk of req) raw += chunk;

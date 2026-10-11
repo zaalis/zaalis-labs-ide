@@ -3,11 +3,11 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const TARGETS = [
-  'rust-agent-bridge.js',
+  'src/agent/rust-agent-bridge.js',
   'rust',
-  'cli.js',
-  'server.js',
-  'model-catalog.js',
+  'src/app/cli.js',
+  'src/app/server.js',
+  'src/accounts/model-catalog.js',
   'README.md',
   'interface',
   path.join('scripts', 'stage-rust-binaries.ps1'),

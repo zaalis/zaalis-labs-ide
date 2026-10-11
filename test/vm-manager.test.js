@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { VmManager } = require('../vm-manager');
+const { VmManager } = require('../src/laboratory/vm-manager');
 test('VM ownership cannot be changed by an id or user supplied in tool arguments', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-vm-unit-'));
   try {

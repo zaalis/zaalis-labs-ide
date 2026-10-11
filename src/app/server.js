@@ -1,0 +1,4237 @@
+﻿const express = require('express');
+const fs = require('fs');
+const http = require('http');
+const os = require('os');
+const path = require('path');
+const crypto = require('crypto');
+const { exec, execFile, spawn } = require('child_process');
+const mcpRegistry = require('../agent/mcp-registry');
+const voiceStt = require('../runtime/voice-stt');
+const opale = require('../integrations/opale-connector');
+const blenderConnector = require('../integrations/blender-connector');
+const { AutomationManager } = require('../runtime/automation-manager');
+const { createWindowsComputerAction } = require('../runtime/windows-computer');
+const { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE } = require('../runtime/terminal-manager');
+const { RustAgentBridge } = require('../agent/rust-agent-bridge');
+const { mobileAllowed, tunnelRouteAllowed } = require('../agent/tunnel-policy');
+const { registerSecret } = require('../agent/secrets-mask');
+const modelCatalog = require('../accounts/model-catalog');
+const compatProviders = require('../accounts/compat-providers');
+const chatgptSubscription = require('../accounts/chatgpt-subscription');
+const accountSubscriptions = require('../accounts/account-subscriptions');
+const workspaceContext = require('../agent/workspace-context');
+const platformRuntime = require('../runtime/platform-runtime');
+const workspaceTokens = new Map();
+const { BrowserHost } = require('../../zaalis-browser/host');
+const { modelCapabilities, bindingCapabilities } = require('../accounts/model-capabilities');
+// QR generation for the phone remote-control pairing. Guarded so a missing
+// install never prevents the server from booting.
+let QRCode = null;
+try { QRCode = require('qrcode'); } catch {}
+
+const app = express();
+const PORT = Number(process.env.ZAALIS_PORT || process.env.PORT) || 3000;
+// Le pont de contrôle du bureau tourne dans ce processus (WPF + PowerShell).
+// L'overlay affiche un bouton « Arrêter le travail » qui rappelle le serveur sur
+// /api/automation/stop-bridge : il s'authentifie avec ce secret tiré au lancement,
+// jamais avec la session de l'utilisateur.
+const COMPUTER_STOP_SECRET = (process.platform === 'darwin' && process.env.ZAALIS_COMPUTER_BRIDGE_SECRET) || crypto.randomBytes(32).toString('hex');
+const desktopOptions = process.platform === 'darwin'
+  ? { bridgeUrl: process.env.ZAALIS_COMPUTER_BRIDGE_URL || '', bridgeSecret: COMPUTER_STOP_SECRET }
+  : { actionHandler: process.platform === 'linux' ? require('../runtime/linux-computer-control').createLinuxComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) : createWindowsComputerAction({ port: PORT, secret: COMPUTER_STOP_SECRET }) };
+const automationManager = new AutomationManager(desktopOptions);
+const computerRuns = new Map();
+const terminalManager = new TerminalManager();
+const TUNNEL_HEADER = 'x-zaalis-tunnel-origin';
+const TUNNEL_ORIGIN_TOKEN = crypto.randomBytes(32).toString('base64url');
+
+// Base directory for static assets and writable data.
+// When packaged into an .exe (pkg), __dirname points inside the read-only
+// snapshot, so we use the folder next to the executable instead.
+const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../..');
+let APP_VERSION = '0.0.0';
+try {
+  APP_VERSION = require('../../package.json').version || APP_VERSION;
+} catch {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf-8'));
+    APP_VERSION = pkg.version || APP_VERSION;
+  } catch {}
+}
+chatgptSubscription.setVersion(APP_VERSION);
+
+// ---------------------------------------------------------------------------
+// Local accounts + sessions (no external dependency)
+// ---------------------------------------------------------------------------
+// Accounts and per-user chats are stored as local files under server-data/.
+// Passwords are hashed with scrypt; sessions are signed HttpOnly cookies.
+// When packaged, the data lives in %LOCALAPPDATA%\zaalis\server-data — a
+// stable per-user location that survives app updates and reinstalls
+// (storing it next to the exe meant losing accounts/chats on every update).
+function resolveDataDir() { return platformRuntime.dataDir(APP_DIR, !!process.pkg); }
+const DATA_DIR = resolveDataDir();
+const { VmManager } = require('../laboratory/vm-manager');
+const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
+const { Laboratory } = require('../laboratory/laboratory');
+const laboratory = new Laboratory({ dataDir: DATA_DIR, vm: vmManager, terminals: terminalManager });
+const { CorrectionMemory } = require('../agent/correction-memory');
+const correctionMemory = new CorrectionMemory(DATA_DIR);
+const USERS_FILE = path.join(DATA_DIR, 'users.json');
+const CHATS_DIR = path.join(DATA_DIR, 'chats');
+const SECRET_FILE = path.join(DATA_DIR, 'secret');
+const COOKIE_NAME = 'zaalis_session';
+const rustAgentBridge = new RustAgentBridge({
+  baseDir: APP_DIR,
+  dataDir: DATA_DIR,
+  memory: correctionMemory, laboratory,
+  enabled: !/^(0|false|off)$/i.test(String(process.env.ZAALIS_RUST_CORE || 'on')),
+});
+
+// One-time migration: copy data from the old location (next to the exe)
+// so existing accounts and chats are kept.
+const LEGACY_DATA_DIR = path.join(APP_DIR, 'server-data');
+if (!process.env.ZAALIS_DATA_DIR && path.resolve(DATA_DIR) !== path.resolve(LEGACY_DATA_DIR) &&
+    !fs.existsSync(USERS_FILE) && fs.existsSync(path.join(LEGACY_DATA_DIR, 'users.json'))) {
+  try { fs.cpSync(LEGACY_DATA_DIR, DATA_DIR, { recursive: true, force: false }); } catch {}
+}
+
+fs.mkdirSync(CHATS_DIR, { recursive: true });
+
+// Persisted signing secret so sessions survive server restarts.
+let SESSION_SECRET;
+try {
+  SESSION_SECRET = fs.readFileSync(SECRET_FILE, 'utf-8');
+} catch {
+  SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+  fs.writeFileSync(SECRET_FILE, SESSION_SECRET);
+}
+
+// ---------------------------------------------------------------------------
+// API key vault — keys are encrypted at rest (AES-256-GCM) with a key derived
+// from the local install secret, stored per user and never sent back in clear.
+// ---------------------------------------------------------------------------
+const KEY_PROVIDERS = ['openai', 'anthropic', 'google', 'grok', 'mistral', 'moonshot'];
+const VAULT_KEY = crypto.scryptSync(SESSION_SECRET, 'zaalis-api-key-vault', 32);
+const { GitHubIntegration } = require('../integrations/github-integration');
+const { GitHubBrowserAuth } = require('../integrations/github-browser-auth');
+const { MessengerIntegrations } = require('../integrations/messenger-integrations');
+const githubBrowserAuth = new GitHubBrowserAuth({ appDir: APP_DIR, dataDir: DATA_DIR });
+const githubIntegration = new GitHubIntegration({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret, browserAuth: githubBrowserAuth });
+const { MessengerContinuation } = require('../integrations/messenger-continuation');
+const continuation = new MessengerContinuation({ file: chatsFile, run: async (id, input, onEvent) => {
+  const { EventEmitter } = require('node:events');
+  const req = new EventEmitter();
+  Object.assign(req, { user: loadUsers().find(u => u.id === id), body: { ...input, stream: true }, headers: {}, messengerContinuation: true });
+  // A subsequent IDE permission change also applies when continuing by phone.
+  req.body.permissionMode = req.user.permissionMode || input.permissionMode || 'supervised';
+  if (input.team) req.body.team = input.team.map(agent => ({ ...agent, permissions: { ...agent.permissions,
+    mode: agent.role?.mutating === false ? 'read-only' : req.body.permissionMode } }));
+  const res = new EventEmitter(); let result, failure;
+  Object.assign(res, { status: () => res, setHeader: () => {}, flushHeaders: () => {},
+    write: line => { const event = JSON.parse(line); if (event.type === 'done') result = event.result; else if (event.type === 'error') failure = event.error; else onEvent?.(event); },
+    end: () => { res.writableEnded = true; }, json: value => { result = value; } });
+  const abort = () => req.emit('aborted');
+  input.signal?.addEventListener('abort', abort, { once: true });
+  try { if (input.signal?.aborted) throw Error('Tour interrompu.'); await rustAgentHttp(req, res); if (failure || result?.error) throw Error(failure || result.error); return result; }
+  finally { input.signal?.removeEventListener('abort', abort); }
+} });
+const messengers = new MessengerIntegrations({ loadUsers, saveUsers, encrypt: encryptSecret, decrypt: decryptSecret,
+  appDir: APP_DIR, dataDir: DATA_DIR, continuation, decide: (id, body) => rustAgentBridge.decide(id, body) });
+
+function encryptSecret(plain) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', VAULT_KEY, iv);
+  const enc = Buffer.concat([cipher.update(String(plain), 'utf8'), cipher.final()]);
+  return iv.toString('base64') + '.' + enc.toString('base64') + '.' + cipher.getAuthTag().toString('base64');
+}
+function decryptSecret(blob) {
+  try {
+    const [iv, data, tag] = String(blob).split('.').map((s) => Buffer.from(s, 'base64'));
+    const d = crypto.createDecipheriv('aes-256-gcm', VAULT_KEY, iv);
+    d.setAuthTag(tag);
+    return Buffer.concat([d.update(data), d.final()]).toString('utf8');
+  } catch { return ''; }
+}
+// Decrypted keys for a user (used server-side only, never returned to a client).
+function userApiKeys(user) {
+  const out = {};
+  for (const p of KEY_PROVIDERS) {
+    const enc = user && user.apiKeys && user.apiKeys[p];
+    // Toute clé déchiffrée est aussi enregistrée pour le masquage de sortie :
+    // détenir la clé et savoir la masquer deviennent le même geste, donc un
+    // fournisseur ajouté plus tard ne peut pas oublier la seconde moitié.
+    if (enc) { const v = decryptSecret(enc); if (v) { registerSecret(`clé ${p}`, v); out[p] = v; } }
+  }
+  return out;
+}
+// Masked status, safe to send to the client: { set, last4 } per provider.
+function apiKeysStatus(user) {
+  const st = {};
+  for (const p of KEY_PROVIDERS) {
+    const enc = user && user.apiKeys && user.apiKeys[p];
+    const v = enc ? decryptSecret(enc) : '';
+    st[p] = { set: !!v, last4: v ? v.slice(-4) : '' };
+  }
+  return st;
+}
+
+// users.json is consulted on every authenticated request (currentUser), so it
+// is cached in memory and re-read only when the file actually changed on disk.
+let _usersCache = null;
+let _usersMtimeMs = -1;
+function loadUsers() {
+  try {
+    const st = fs.statSync(USERS_FILE);
+    if (_usersCache && st.mtimeMs === _usersMtimeMs) return _usersCache;
+    let raw = fs.readFileSync(USERS_FILE, 'utf-8');
+    if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1); // tolerate a UTF-8 BOM
+    const d = JSON.parse(raw);
+    _usersCache = Array.isArray(d) ? d : [d];             // tolerate a single object
+    _usersMtimeMs = st.mtimeMs;
+    return _usersCache;
+  } catch { return []; }
+}
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  _usersCache = users;
+  try { _usersMtimeMs = fs.statSync(USERS_FILE).mtimeMs; } catch { _usersMtimeMs = -1; }
+}
+function hashPassword(password, salt) {
+  return crypto.scryptSync(String(password), salt, 64).toString('hex');
+}
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+function makeToken(userId) {
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
+  return userId + '.' + sig;
+}
+function verifyToken(token) {
+  if (!token || !token.includes('.')) return null;
+  const idx = token.lastIndexOf('.');
+  const userId = token.slice(0, idx);
+  const sig = token.slice(idx + 1);
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
+  return safeEqual(sig, expected) ? userId : null;
+}
+function parseCookies(req) {
+  const out = {};
+  (req.headers.cookie || '').split(';').forEach((p) => {
+    const i = p.indexOf('=');
+    if (i > -1) out[p.slice(0, i).trim()] = decodeURIComponent(p.slice(i + 1).trim());
+  });
+  return out;
+}
+function setSessionCookie(res, token) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000`);
+}
+function clearSessionCookie(res) {
+  res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
+}
+function currentUser(req) {
+  const userId = verifyToken(parseCookies(req)[COOKIE_NAME]);
+  if (!userId) return null;
+  return loadUsers().find((u) => u.id === userId) || null;
+}
+
+// ---------------------------------------------------------------------------
+// BROWSER BRIDGE — restricted access for zaalis browser (same machine).
+// A shared secret is written to the stable per-user folder (the same one
+// DATA_DIR uses when packaged). zaalis browser reads it from disk and sends it
+// in the x-zaalis-browser header. Loopback only (already enforced by the global
+// middleware) and limited to chat — never files/exec/tunnel. Same trust model
+// as the `secret` file: any local process of this user can read it, so this
+// exposes nothing beyond what the local vault already allows.
+// ---------------------------------------------------------------------------
+function browserBridgeDir() {
+  if (process.env.ZAALIS_DATA_DIR) return DATA_DIR;
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis', 'server-data');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis', 'server-data');
+  }
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
+  return path.join(base, 'zaalis', 'server-data');
+}
+const BROWSER_SECRET_FILE = path.join(browserBridgeDir(), 'browser-secret');
+let BROWSER_SECRET;
+try {
+  BROWSER_SECRET = fs.readFileSync(BROWSER_SECRET_FILE, 'utf-8').trim();
+  if (!BROWSER_SECRET) throw new Error('empty');
+} catch {
+  BROWSER_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(BROWSER_SECRET_FILE, BROWSER_SECRET, { mode: 0o600 });
+  } catch {}
+}
+// Last account seen driving the IDE itself (valid session cookie). The browser
+// has no session of its own, so this is the most accurate answer to "whose
+// account is this machine using right now".
+let lastActiveUserId = '';
+function browserUser(req) {
+  const header = String(req.headers['x-zaalis-browser'] || '');
+  if (!header || !safeEqual(header, BROWSER_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  const active = users.find((u) => u.id === lastActiveUserId);
+  if (active) return active;
+  // No IDE session seen yet: fall back to the most recently used real account.
+  // Accounts with no API key and no recorded login (throwaway/test accounts)
+  // rank last — binding the browser to one of those means every request comes
+  // back "no API key configured" even though a configured account exists.
+  return users.slice().sort((a, b) => {
+    const ka = a.apiKeys && Object.keys(a.apiKeys).length ? 1 : 0;
+    const kb = b.apiKeys && Object.keys(b.apiKeys).length ? 1 : 0;
+    if (ka !== kb) return kb - ka;
+    return String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''));
+  })[0];
+}
+// The browser only reaches chat, the local model lists (to fill its menus) and
+// the local voice bricks — never files, exec or keys.
+function browserAllowed(p) {
+  return p === '/chat' || p === '/ollama-models' || p === '/gguf-models' ||
+         p === '/stt' || p === '/tts' || p === '/voice-status' || p === '/voice-options';
+}
+// ---------------------------------------------------------------------------
+// CODESTRALE BRIDGE — restricted access for the codestrale desktop app.
+// ---------------------------------------------------------------------------
+// codestrale is a separate Tauri app on the same machine: it syncs Git repos
+// between the user's devices and delegates every AI turn to this IDE, so the
+// account, the API keys and the Rust core all stay in one place.
+//
+// It cannot guess where we listen or how to authenticate, so on start-up we
+// publish a descriptor — `codestrale-bridge.json` { secret, port, version, pid,
+// updatedAt } — in the stable per-user folders codestrale looks into. It reads
+// the secret from disk and sends it in the x-zaalis-codestrale header.
+//
+// Same trust model as `browser-secret`: any local process of this user can
+// already read the vault, so this exposes nothing new. The reachable surface is
+// deliberately narrow — agent turns, their decisions, their cancellation, and
+// the two read-only descriptors. Never files, keys, exec or tunnel.
+const CODESTRALE_BRIDGE_FILE = 'codestrale-bridge.json';
+const CODESTRALE_HEADER = 'x-zaalis-codestrale';
+
+// The stable per-user `zaalis` root, independent of any ZAALIS_DATA_DIR
+// override: codestrale is a separate process and only ever looks here.
+function zaalisRootDir() {
+  if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+    return path.join(process.env.LOCALAPPDATA, 'zaalis');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'zaalis');
+  }
+  return path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share'), 'zaalis');
+}
+
+// Every folder codestrale probes: the `zaalis` root, its `server-data`
+// subfolder, and DATA_DIR — which adds nothing on a packaged install but is
+// where an unpackaged run actually lives.
+//
+// ZAALIS_DATA_DIR means "this instance is self-contained" (resolveDataDir and
+// browserBridgeDir already read it that way), so an isolated run must not
+// overwrite the descriptor of the real install. codestrale probes that same
+// variable first, so an override still pairs correctly.
+function codestraleBridgeDirs() {
+  if (process.env.ZAALIS_DATA_DIR) return [DATA_DIR];
+  const root = zaalisRootDir();
+  const seen = new Set();
+  return [root, path.join(root, 'server-data'), DATA_DIR].filter((dir) => {
+    const key = path.resolve(dir);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+const CODESTRALE_SECRET_FILE = path.join(browserBridgeDir(), 'codestrale-secret');
+let CODESTRALE_SECRET;
+try {
+  CODESTRALE_SECRET = fs.readFileSync(CODESTRALE_SECRET_FILE, 'utf-8').trim();
+  if (!CODESTRALE_SECRET) throw new Error('empty');
+} catch {
+  CODESTRALE_SECRET = crypto.randomBytes(32).toString('hex');
+  try {
+    fs.mkdirSync(browserBridgeDir(), { recursive: true });
+    fs.writeFileSync(CODESTRALE_SECRET_FILE, CODESTRALE_SECRET, { mode: 0o600 });
+  } catch {}
+}
+
+// Announce where we listen and how to talk to us. Called once the port is
+// actually bound, so the descriptor never advertises a port we failed to take.
+function publishCodestraleBridge(port) {
+  const payload = JSON.stringify({
+    secret: CODESTRALE_SECRET,
+    port,
+    version: APP_VERSION,
+    pid: process.pid,
+    updatedAt: new Date().toISOString(),
+  }, null, 2);
+  for (const dir of codestraleBridgeDirs()) {
+    try {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, CODESTRALE_BRIDGE_FILE), payload, { mode: 0o600 });
+    } catch {}
+  }
+}
+
+// Remove the descriptor on a clean exit so codestrale says "IDE fermé" instead
+// of trying a port nobody listens on. A crash leaves the file behind, which is
+// harmless: the connection simply fails and codestrale reports the same thing.
+function unpublishCodestraleBridge() {
+  for (const dir of codestraleBridgeDirs()) {
+    try { fs.unlinkSync(path.join(dir, CODESTRALE_BRIDGE_FILE)); } catch {}
+  }
+}
+
+// codestrale has no session of its own: like the browser bridge, it acts as the
+// account currently driving the IDE.
+function codestraleUser(req) {
+  const header = String(req.headers[CODESTRALE_HEADER] || '');
+  if (!header || !safeEqual(header, CODESTRALE_SECRET)) return null;
+  const users = loadUsers();
+  if (!users.length) return null;
+  const active = users.find((u) => u.id === lastActiveUserId);
+  if (active) return active;
+  return users.slice().sort((a, b) => {
+    const ka = a.apiKeys && Object.keys(a.apiKeys).length ? 1 : 0;
+    const kb = b.apiKeys && Object.keys(b.apiKeys).length ? 1 : 0;
+    if (ka !== kb) return kb - ka;
+    return String(b.lastLoginAt || b.createdAt || '').localeCompare(String(a.lastLoginAt || a.createdAt || ''));
+  })[0];
+}
+
+// An agent turn, the decisions it asks for, its cancellation, and the two
+// descriptors — nothing else. The Rust core's own status stays out: /ping
+// already reports it, so there is no reason to widen the surface.
+// `/agent-runs/<session>/cancel` is matched on shape, not on a fixed id.
+function codestraleAllowed(p) {
+  return p === '/codestrale/ping' || p === '/codestrale/models' ||
+         p === '/agent-chat' || p === '/rust-core/decision' ||
+         /^\/agent-runs\/[^/]+\/cancel$/.test(p);
+}
+
+function chatsFile(userId, kind) {
+  // kind: 'chat' (single chat) or 'agents' (multi-agent). Kept in separate files.
+  const k = kind === 'agents' ? 'agents' : 'chat';
+  return path.join(CHATS_DIR, `${userId}__${k}.json`);
+}
+
+const SHARED_CONFIG_DEFAULTS = {
+  ollamaUrl: 'http://127.0.0.1:11434',
+  ollamaModel: 'qwen3:8b',
+  ggufCtx: 16384,
+  ggufVariant: '',
+  ggufGpuLayers: '',
+  terminalProfile: DEFAULT_TERMINAL_PROFILE
+};
+// Variantes du moteur GGUF acceptees par la configuration. Elles dependent de
+// ce que llama.cpp publie pour la plateforme : Metal sur macOS, ROCm/Vulkan sur
+// Linux (pas de binaire CUDA publie), CUDA/Vulkan sur Windows.
+const GGUF_VARIANTS = new Set(process.platform === 'darwin'
+  ? ['', 'metal', 'cpu']
+  : process.platform === 'linux'
+    ? ['', 'rocm', 'vulkan', 'cpu']
+    : ['', 'cuda', 'vulkan', 'cpu']);
+const TERMINAL_PROFILES = new Set(TERMINAL_PROFILE_IDS);
+
+function clampSharedGgufCtx(value) {
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n)) return SHARED_CONFIG_DEFAULTS.ggufCtx;
+  return Math.max(512, Math.min(131072, n));
+}
+
+function sanitizeSharedConfig(input, base = SHARED_CONFIG_DEFAULTS) {
+  const src = input && typeof input === 'object' ? input : {};
+  const out = { ...SHARED_CONFIG_DEFAULTS, ...(base || {}) };
+  if ('ollamaUrl' in src) {
+    const v = String(src.ollamaUrl || '').trim();
+    out.ollamaUrl = v || SHARED_CONFIG_DEFAULTS.ollamaUrl;
+  }
+  if ('ollamaModel' in src) {
+    const v = String(src.ollamaModel || '').trim();
+    out.ollamaModel = v || SHARED_CONFIG_DEFAULTS.ollamaModel;
+  }
+  if ('ggufCtx' in src) out.ggufCtx = clampSharedGgufCtx(src.ggufCtx);
+  if ('ggufVariant' in src) {
+    const v = String(src.ggufVariant || '').trim().toLowerCase();
+    out.ggufVariant = GGUF_VARIANTS.has(v) ? v : '';
+  }
+  if ('terminalProfile' in src) {
+    const value = String(src.terminalProfile || '').trim().toLowerCase();
+    out.terminalProfile = TERMINAL_PROFILES.has(value) ? value : SHARED_CONFIG_DEFAULTS.terminalProfile;
+  }
+  if ('ggufGpuLayers' in src) {
+    const raw = src.ggufGpuLayers;
+    out.ggufGpuLayers = (raw === '' || raw === undefined || raw === null)
+      ? ''
+      : Math.max(0, Math.min(999, parseInt(raw, 10) || 0));
+  }
+  return out;
+}
+
+function sharedConfigForUser(user) {
+  return sanitizeSharedConfig(user && user.sharedConfig);
+}
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
+
+// Do not advertise the framework.
+app.disable('x-powered-by');
+
+// Loopback addresses allowed to reach the API. The server also binds to
+// 127.0.0.1 only (see app.listen below); this is defense in depth so that even
+// if it were ever exposed, only the local machine can read/write files, run
+// commands, or reach the endpoints that carry the user's API keys.
+const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
+
+app.use((req, res, next) => {
+  const remote = req.socket.remoteAddress;
+  if (!LOOPBACK.has(remote)) {
+    return res.status(403).json({ error: 'Forbidden: local access only' });
+  }
+  const tunnelMarker = String(req.headers[TUNNEL_HEADER] || '');
+  if (tunnelMarker && !safeEqual(tunnelMarker, TUNNEL_ORIGIN_TOKEN)) {
+    return res.status(403).json({ error: 'Forbidden: invalid tunnel origin' });
+  }
+  req.isTunnel = !!tunnelMarker;
+  if (req.isTunnel && !tunnelRouteAllowed(req.method, req.path)) {
+    return res.status(403).json({ error: 'Action indisponible via le tunnel.' });
+  }
+
+  // Never serve the accounts/secret/chats store as a static file.
+  if (req.path === '/server-data' || req.path.startsWith('/server-data/')) {
+    return res.status(404).json({ error: 'Not found' });
+  }
+
+  // Security headers. connect-src 'self' is the important one: even if a script
+  // were injected, it cannot exfiltrate the API keys to an external server.
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' https://fonts.gstatic.com",
+    "img-src 'self' data: blob:",
+    "connect-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+  ].join('; '));
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(self), camera=()');
+  // Never cache the app shell, so updates always load (no stale script.js).
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+app.use(express.json({ limit: '50mb' }));
+// The web interface (index.html, css, js) lives in the interface/ folder.
+app.use(express.static(path.join(APP_DIR, 'interface'), {
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  }
+}));
+
+// ---------------------------------------------------------------------------
+// AUTH API (public)
+// ---------------------------------------------------------------------------
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+app.post('/api/auth/register', (req, res) => {
+  const { email, password } = req.body || {};
+  const emailNorm = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(emailNorm)) return res.status(400).json({ error: 'Adresse email invalide.' });
+  if (String(password || '').length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caracteres minimum).' });
+
+  const users = loadUsers();
+  if (users.some((u) => u.email === emailNorm)) return res.status(409).json({ error: 'Un compte existe deja avec cet email.' });
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const user = {
+    id: crypto.randomUUID(),
+    email: emailNorm,
+    salt,
+    hash: hashPassword(password, salt),
+    createdAt: new Date().toISOString(),
+    profile: {
+      pseudo: emailNorm.split('@')[0],
+      photo: ''
+    }
+  };
+  users.push(user);
+  saveUsers(users);
+  setSessionCookie(res, makeToken(user.id));
+  res.json({ email: user.email, profile: user.profile });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  const { email, password } = req.body || {};
+  const emailNorm = String(email || '').trim().toLowerCase();
+  const user = loadUsers().find((u) => u.email === emailNorm);
+  // Always compute a hash to keep timing similar whether or not the user exists.
+  const candidate = hashPassword(password || '', user ? user.salt : 'x'.repeat(32));
+  if (!user || !safeEqual(candidate, user.hash)) {
+    return res.status(401).json({ error: 'Email ou mot de passe incorrect.' });
+  }
+  // Remember the last login (used by the zaalis browser bridge to pick which
+  // account to answer for when no IDE session has been seen yet).
+  try {
+    const users = loadUsers();
+    const i = users.findIndex((u) => u.id === user.id);
+    if (i >= 0) { users[i].lastLoginAt = new Date().toISOString(); saveUsers(users); }
+  } catch {}
+  lastActiveUserId = user.id;
+  setSessionCookie(res, makeToken(user.id));
+  res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  clearSessionCookie(res);
+  res.json({ success: true });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  // Status check: always 200 so the browser console isn't polluted with a 401.
+  const user = req.isTunnel ? mobileUser(req) : currentUser(req);
+  res.json({
+    authenticated: !!user,
+    email: user ? user.email : null,
+    profile: user ? (user.profile || { pseudo: user.email.split('@')[0], photo: '' }) : null
+  });
+});
+
+// Private loopback bridge used only by the Rust `computer` tool. Tokens are
+// random, per-run, memory-only, and never enter MCP or persisted config.
+app.post('/api/internal/rust-computer', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = computerRuns.get(raw);
+  if (!entry || raw.length < 32) return res.status(401).json({ error: 'Jeton computer invalide.' });
+  try {
+    return res.json(await automationManager.execute(entry.session, req.body || {}));
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// A desktop-only capability, scoped to this user's active agent. It exposes
+// project selection without granting arbitrary filesystem or terminal access.
+app.post('/api/internal/rust-workspace', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
+  try {
+    if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
+    if (req.body.action === 'create_artifact') {
+      const { createArtifact } = require('../artifacts/artifact-generator');
+      const artifact = createArtifact(context.root, req.body);
+      return res.json({ summary: `Fichier ${artifact.format.toUpperCase()} créé : ${artifact.path}`, ...artifact,
+        downloadUrl: `/api/artifact?root=${encodeURIComponent(context.root)}&path=${encodeURIComponent(artifact.path)}` });
+    }
+    const projects = workspaceContext.knownProjects(context.user, context.projectRoot);
+    if (req.body.action === 'list') return res.json({ summary: 'Projets connus', projects, root: context.root, terminal: context.terminal });
+    if (req.body.action !== 'open') return res.status(400).json({ error: 'Action workspace inconnue.' });
+    const root = workspaceContext.selectProject(projects, req.body.project);
+    const terminal = req.body.terminal === false ? null : terminalManager.snapshot(terminalManager.create({ userId: context.user.id, cwd: root, profileId: sharedConfigForUser(context.user).terminalProfile, origin: 'user' }));
+    context.selected = { root, terminalId: terminal?.id || null };
+    return res.json({ summary: 'Projet ouvert : ' + path.basename(root), ...context.selected, nextTurn: 'Le projet et le terminal seront affichés à la fin de cette réponse. Confirme cette ouverture puis termine le tour. Les outils de fichiers de ce tour restent liés à l’ancien dossier.' });
+  } catch (error) { return res.status(400).json({ error: error.message }); }
+});
+
+// Same per-agent capability as workspace, with a fixed VM-only action surface.
+// No activation/UAC, host executable, or arbitrary host path is exposed to AI.
+app.post('/api/internal/rust-lab', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte laboratoire invalide.' });
+  try { res.json(await laboratory.action(context.user.id, req.body || {}, context.projectRoot)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+app.post('/api/internal/rust-vm', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
+  const context = entry?.agents.get(String(req.body?.agent_id || ''));
+  if (!context) return res.status(401).json({ error: 'Contexte VM invalide.' });
+  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.projectRoot)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+
+// Blender's MCP server, served by this process for the Rust core only: the
+// agent's `mcp` calls to server "blender" arrive here and are relayed to the
+// add-on running inside Blender. The token is random, per launch, memory-only.
+app.post('/api/internal/blender-mcp', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BLENDER_MCP_TOKEN)) return res.status(401).json({ error: 'Jeton Blender invalide.' });
+  try {
+    // A notification has no reply; an empty JSON object keeps strict clients happy.
+    res.json((await blender.handleRpc(req.body)) || {});
+  } catch (error) {
+    res.status(500).json({ jsonrpc: '2.0', id: (req.body && req.body.id) || null, error: { code: -32603, message: error.message || String(error) } });
+  }
+});
+
+// Private loopback bridge used only by the Rust `browser` tool: the agent's
+// web actions happen in the integrated browser, visible to the user.
+app.post('/api/internal/rust-browser', async (req, res) => {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!raw || !safeEqual(raw, BROWSER_TOOL_TOKEN)) return res.status(401).json({ error: 'Jeton browser invalide.' });
+  const body = req.body || {};
+  const action = String(body.action || '');
+  try {
+    if (action === 'open_external') {
+      const ok = openInExternalBrowser(body.url);
+      return res.json({ summary: ok ? 'Ouvert dans le navigateur externe' : 'URL refusée', result: ok ? `Ouvert dans le navigateur par défaut : ${body.url}` : 'Seules les URL http(s) sont acceptées.' });
+    }
+    if (!browserHost.available()) return res.status(503).json({ error: 'Navigateur intégré indisponible (application zaalis IDE requise).' });
+    const args = { ...body };
+    delete args.action;
+    const result = await browserHost.agentTool(action, args);
+    // A screenshot travels as an image the agent runtime shows to the model.
+    if (result && typeof result === 'object' && result.image) {
+      return res.json({ summary: 'browser screenshot', result: String(result.text || ''), images: [{ mime: 'image/jpeg', data: String(result.image) }] });
+    }
+    return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// Private loopback adapter used only by the Rust core: it presents the user's
+// ChatGPT subscription as one more OpenAI-compatible endpoint. The core sends
+// chat-completions with a per-launch key; the OAuth tokens never leave this
+// process and are renewed here.
+app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
+  const refuse = (status, message) => res.status(status).json({ error: { message } });
+  const user = chatgptProxyUser(req);
+  if (!user) return refuse(401, 'Jeton ChatGPT interne invalide.');
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id });
+    const upstream = await withChatgptToken(user.id, (token) =>
+      chatgptSubscription.openResponseStream(token, request, { signal: controller.signal }));
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    const reader = chatgptSubscription.createSseReader();
+    const translator = chatgptSubscription.createChunkTranslator(request.model);
+    const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+    for await (const chunk of upstream.body) {
+      for (const event of reader.push(chunk)) write(translator.push(event));
+    }
+    for (const event of reader.finish()) write(translator.push(event));
+    write(translator.finish());
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    const message = error.message || String(error);
+    if (!res.headersSent) return refuse(error.status || 502, message);
+    try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch {}
+    return res.end();
+  }
+});
+
+app.post('/api/internal/subscription/:provider/v1/chat/completions', async (req, res) => {
+  const provider = req.params.provider;
+  if (!['xai-sub', 'minimax-sub'].includes(provider)) return res.status(404).json({ error: { message: 'Abonnement inconnu.' } });
+  const user = chatgptProxyUser(req);
+  if (!user) return res.status(401).json({ error: { message: 'Jeton interne invalide.' } });
+  const kind = provider === 'xai-sub' ? 'xai' : 'minimax';
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const upstream = await withAccountToken(user.id, kind, (token) =>
+      accountSubscriptions.openStream(kind, token, req.body, { signal: controller.signal }));
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    const reader = accountSubscriptions.createSseReader();
+    const translator = kind === 'xai'
+      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''))
+      : accountSubscriptions.miniMaxTranslator(String(req.body?.model || ''));
+    const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
+    for await (const chunk of upstream.body) for (const event of reader.push(chunk)) write(translator.push(event));
+    for (const event of reader.finish()) write(translator.push(event));
+    write(translator.finish());
+    res.write('data: [DONE]\n\n');
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    const message = error.message || String(error);
+    if (!res.headersSent) return res.status(error.status || 502).json({ error: { message } });
+    try { res.write(`data: ${JSON.stringify({ error: { message } })}\n\n`); } catch {}
+    return res.end();
+  }
+});
+
+// Bouton « Arrêter le travail » de l'overlay de contrôle du bureau. L'overlay
+// est un processus séparé, sans cookie de session : il s'authentifie avec le
+// secret tiré au lancement (COMPUTER_STOP_SECRET), partagé uniquement avec lui.
+// La seule chose que ce jeton permet est d'arrêter la tâche en cours, donc
+// l'exposer avant le garde d'authentification n'élargit aucune surface.
+app.post('/api/automation/stop-bridge', async (req, res) => {
+  const header = String(req.headers['x-zaalis-computer'] || '');
+  if (!COMPUTER_STOP_SECRET || !header || !safeEqual(header, COMPUTER_STOP_SECRET)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  try { return res.json(await automationManager.stop()); }
+  catch (error) { return res.status(500).json({ error: error.message || String(error) }); }
+});
+
+// ---------------------------------------------------------------------------
+// AUTH GUARD — every other /api/* route requires a valid session
+// ---------------------------------------------------------------------------
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
+  const user = req.isTunnel ? null : currentUser(req);
+  if (user) { lastActiveUserId = user.id; req.user = user; return next(); }
+  // Phone remote-control session: a signed pairing cookie, restricted to a safe
+  // subset of endpoints (chat only — never files/exec/tunnel-start).
+  const mUser = mobileUser(req);
+  if (mUser) {
+    if (!mobileAllowed(req.method, req.path)) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    req.user = mUser;
+    req.isMobile = true;
+    return next();
+  }
+  // zaalis browser bridge: shared local secret, chat endpoints only.
+  const bUser = browserUser(req);
+  if (bUser) {
+    if (!browserAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour le navigateur.' });
+    req.user = bUser;
+    req.isBrowser = true;
+    return next();
+  }
+  // codestrale bridge: shared local secret, agent endpoints only.
+  const cUser = codestraleUser(req);
+  if (cUser) {
+    if (!codestraleAllowed(req.path)) return res.status(403).json({ error: 'Action indisponible pour codestrale.' });
+    req.user = cUser;
+    req.isCodestrale = true;
+    return next();
+  }
+  return res.status(401).json({ error: 'Authentification requise.' });
+});
+
+// Per-account preference survives logout and application reinstalls because
+// users.json lives in the stable user data directory.
+const UI_PERMISSION_MODES = new Set(['plan', 'supervised', 'semi', 'auto']);
+app.get('/api/preferences', (req, res) => {
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
+});
+app.put('/api/preferences', (req, res) => {
+  const permissionMode = String(req.body?.permissionMode || '');
+  if (!UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === req.user.id);
+  if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+  user.permissionMode = permissionMode;
+  saveUsers(users);
+  res.json({ permissionMode });
+});
+
+// GitHub credentials stay in the encrypted server vault, never in agent prompts.
+app.get('/api/integrations/messengers/:provider', (req, res) => {
+  if (!['telegram', 'whatsapp'].includes(req.params.provider)) return res.status(404).json({ error: 'Intégration inconnue.' });
+  res.json(messengers.status(req.user.id, req.params.provider));
+});
+app.post('/api/integrations/messengers/:provider', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée à l’IDE sur ce PC.' });
+  const provider = req.params.provider, body = req.body || {};
+  if (!['telegram', 'whatsapp'].includes(provider)) return res.status(404).json({ error: 'Intégration inconnue.' });
+  try {
+    let result;
+    if (body.action === 'settings') result = messengers.settings(req.user.id, { ...body, provider });
+    else if (body.action === 'configure' && provider === 'telegram') result = await messengers.configureTelegram(req.user.id, body.token);
+    else if (body.action === 'disconnect') result = await messengers.stop(req.user.id, provider, true);
+    else if (body.action === 'test') result = await messengers.test(req.user.id, provider);
+    else if (body.action === 'reset' && provider === 'telegram') result = await messengers.resetTelegram(req.user.id);
+    else if (body.action === 'mode' && provider === 'whatsapp') result = await messengers.whatsappMode(req.user.id, body);
+    else if (body.action === 'start') {
+      result = provider === 'telegram' ? await messengers.startTelegram(req.user.id) : await messengers.startWhatsApp(req.user.id);
+      if (result.url) result.opened = openInExternalBrowser(result.url);
+    } else throw Error('Action invalide.');
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/integrations/github', (req, res) => res.json(githubIntegration.status(req.user.id)));
+app.get('/api/integrations/github/repos', async (req, res) => {
+  try { res.json(await githubIntegration.repos(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/integrations/github', async (req, res) => {
+  // Account and repository permissions are changed only from the IDE on this PC.
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée à l’IDE sur ce PC.' });
+  try {
+    const body = req.body || {};
+    let result;
+    if (body.action === 'connect') result = await githubIntegration.connect(req.user.id, body.token);
+    else if (body.action === 'disconnect') result = githubIntegration.disconnect(req.user.id);
+    else if (body.action === 'configure') result = githubIntegration.configure(req.user.id, body.clientId);
+    else if (body.action === 'cancel') result = githubIntegration.cancel(req.user.id);
+    else if (body.action === 'start') {
+      result = await githubIntegration.start(req.user.id);
+      result.opened = openInExternalBrowser(result.url);
+    }
+    else if (body.action === 'open') {
+      result = { opened: openInExternalBrowser('https://github.com/login/device') };
+    }
+    else if (body.action === 'poll') result = await githubIntegration.poll(req.user.id);
+    else if (body.action === 'permission') result = await githubIntegration.permission(req.user.id, body);
+    else throw Error('Action invalide.');
+    if (['connect', 'disconnect', 'permission'].includes(body.action) || (body.action === 'poll' && result.connected)) {
+      const active = rustAgentBridge.clients.get(req.user.id);
+      if (active) { await active.client.stop(); rustAgentBridge.clients.delete(req.user.id); }
+    }
+    res.json(result);
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+
+// Update profile
+app.post('/api/profile', (req, res) => {
+  const { pseudo, photo } = req.body || {};
+  const users = loadUsers();
+  const userIdx = users.findIndex((u) => u.id === req.user.id);
+  if (userIdx === -1) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+
+  const currentPseudo = String(pseudo || '').trim();
+  users[userIdx].profile = {
+    pseudo: currentPseudo || req.user.email.split('@')[0],
+    photo: String(photo || '')
+  };
+  saveUsers(users);
+  res.json({ success: true, profile: users[userIdx].profile });
+});
+
+// Shared local runtime settings used by both the desktop IDE and the CLI.
+// This intentionally covers hardware/local-model settings, not UI state.
+app.get('/api/config', (req, res) => {
+  res.json({
+    configured: !!(req.user && req.user.sharedConfig),
+    config: sharedConfigForUser(req.user),
+    terminalProfiles: terminalManager.profiles(),
+    defaultTerminalProfile: DEFAULT_TERMINAL_PROFILE
+  });
+});
+
+// ---------------------------------------------------------------------------
+// INTEGRATED TERMINAL — persistent interactive shell sessions
+// ---------------------------------------------------------------------------
+// Sessions are scoped to a logged-in user and bound to the project folder that
+// user selected.  Never exposed to the phone remote or the browser bridge.
+app.use('/api/vm', (req, res, next) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'VM réservées au desktop.' });
+  next();
+});
+// Persistent correction memory: account + project scope, desktop mutations only.
+app.get('/api/memory', (req, res) => {
+  try {
+    const root = workspaceContext.agentRoot({root:req.query.root}, req.user);
+    correctionMemory.importLaboratory(req.user.id, laboratory);
+    const offset = Math.max(0, Number(req.query.offset) || 0);
+    const records = correctionMemory.list(req.user.id, root, req.query.q);
+    res.json({ settings: correctionMemory.settings(req.user.id, root), total: records.length, records: records.slice(offset, offset + 50) });
+  } catch (error) { res.status(400).json({error:error.message}); }
+});
+app.post('/api/memory', (req, res) => {
+  if(req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({error:'Modification réservée au desktop.'});
+  try {
+    const root = workspaceContext.agentRoot({root:req.body.root}, req.user), input = req.body;
+    if(input.action === 'settings') return res.json({settings:correctionMemory.settings(req.user.id,root,input.settings)});
+    if(input.action === 'delete') {correctionMemory.remove(req.user.id,root,input.id);return res.json({ok:true});}
+    if(input.action !== 'save') return res.status(400).json({error:'Action mémoire inconnue.'});
+    // Manual edits cannot invent or upgrade a verification status.
+    const previous = input.id && correctionMemory.list(req.user.id,root).find(r=>r.id===input.id && r.sameProject);
+    if(input.id && !previous) return res.status(404).json({error:'Mémoire inconnue dans ce projet.'});
+    res.json({record:correctionMemory.save(req.user.id,root,{...input,status:previous?.status || 'note',source:previous?.source || 'manual',checks:previous?.checks || [],files:previous?.files || []})});
+  } catch(error) {res.status(400).json({error:error.message});}
+});
+
+app.get('/api/vm/laboratory', (req,res) => {
+  try { res.json({experiments:laboratory.list(req.user.id)}); } catch(e){res.status(400).json({error:e.message});}
+});
+app.post('/api/vm/laboratory', async (req,res) => {
+  try { const root=['run','recall','apply'].includes(req.body?.action) ? workspaceContext.agentRoot({root:req.body.root},req.user) : null;
+    res.json(await laboratory.action(req.user.id,req.body||{},root)); } catch(e){res.status(400).json({error:e.message});}
+});
+app.get('/api/vm/laboratory/:id/artifacts/:artifact', (req,res) => {
+  try {const a=laboratory.artifact(req.user.id,req.params.id,req.params.artifact);res.download(a.file,path.basename(a.artifact.path),{dotfiles:'allow'});}catch(e){res.status(404).json({error:e.message});}
+});
+app.get('/api/vm/laboratory/:id/evidence/:log', (req,res) => {
+  try {res.download(laboratory.evidence(req.user.id,req.params.id,req.params.log),req.params.log,{dotfiles:'allow'});} catch(e){res.status(404).json({error:e.message});}
+});
+app.get('/api/token-profile', (req,res) => res.json({profile:req.user.profile || {}, banner:req.user.usageBanner || ''}));
+app.post('/api/token-profile', (req,res) => {
+  const banner=req.body?.banner;
+  if(typeof banner !== 'string' || banner.length>2000000 || (banner && !/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(banner))) return res.status(400).json({error:'Image de bannière invalide ou trop grande.'});
+  const users=loadUsers(),user=users.find(u=>u.id===req.user.id);
+  if(!user)return res.status(404).json({error:'Compte introuvable.'});
+  user.usageBanner=banner;saveUsers(users);res.json({success:true});
+});
+app.get('/api/usage', async (req,res) => {
+  try { const from=Number(req.query.from),to=Number(req.query.to);
+    if(!Number.isSafeInteger(from)||!Number.isSafeInteger(to)||from<0||to<=from||to-from>367*86400000)throw new Error('Période invalide.');
+    // Local calendar: "ms:offsetMinutes" transitions computed by the client.
+    const zone=String(req.query.zone||'').split(',').filter(Boolean).slice(0,2000).map(item=>item.split(':').map(Number))
+      .filter(([at,offset])=>Number.isSafeInteger(at)&&Number.isInteger(offset)&&Math.abs(offset)<=18*60).map(([at,offset])=>[at,offset*60000]);
+    const value=await rustAgentBridge.usage(req.user.id,userApiKeys(req.user),from,to,zone);
+    value.comparison=require('../laboratory/engine-comparison').comparisonSummary(DATA_DIR,req.user.id,from,to);
+    res.json(value);
+  } catch(e){res.status(400).json({error:e.message});}
+});
+
+app.get('/api/vm', async (req, res) => {
+  try { res.json({ capabilities: await vmManager.capabilities(), machines: vmManager.list(req.user.id) }); }
+  catch (error) { res.status(500).json({ error: error.message }); }
+});
+app.post('/api/vm/action', async (req, res) => {
+  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, req.body?.action === 'import_project' ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/vm/activate-sandbox', async (req, res) => {
+  try { res.json(await vmManager.activate()); } catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.post('/api/vm/activate-linux', async (req,res) => {
+  try { res.json(await vmManager.activate('linux')); } catch(error){res.status(400).json({error:error.message});}
+});
+app.post('/api/vm/:id/terminal', async (req, res) => {
+  try { res.json(await vmManager.terminal(vmManager.get(req.params.id, req.user.id), terminalManager)); }
+  catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.get('/api/vm/:id/artifacts/:artifact', (req,res) => {
+  try { const session=vmManager.get(req.params.id,req.user.id); const artifact=session.artifacts?.find(item=>item.id===req.params.artifact); if(!artifact)return res.status(404).json({error:'Résultat inconnu.'}); res.download(artifact.path,artifact.name,{dotfiles:'allow'}); }
+  catch(error){res.status(400).json({error:error.message});}
+});
+app.post('/api/terminal/sessions', (req, res) => {
+  try {
+    if (req.isMobile || req.isBrowser) return res.status(403).json({ error: 'Terminal indisponible dans ce mode.' });
+    const cwd = workspaceContext.agentRoot({ root: req.body?.cwd || os.homedir() }, req.user);
+    const profileId = sharedConfigForUser(req.user).terminalProfile;
+    const session = terminalManager.create({ userId: req.user.id, cwd, profileId, origin: 'user' });
+    res.json(terminalManager.snapshot(session));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  res.json(terminalManager.snapshot(session));
+});
+
+app.get('/api/terminal/sessions/:id/stream', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).end();
+  res.setHeader('Content-Type', 'text/event-stream'); res.setHeader('Cache-Control', 'no-cache'); res.setHeader('Connection', 'keep-alive');
+  const write = (event, value) => { try { res.write(`event: ${event}\ndata: ${JSON.stringify(value)}\n\n`); } catch {} };
+  write('snapshot', terminalManager.snapshot(session));
+  const onData = (data) => write('data', data);
+  const onExit = (data) => { write('exit', data); try { res.end(); } catch {} };
+  session.events.on('data', onData); session.events.once('exit', onExit);
+  req.on('close', () => { session.events.removeListener('data', onData); session.events.removeListener('exit', onExit); });
+});
+
+app.post('/api/terminal/sessions/:id/input', (req, res) => {
+  try {
+    const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+    if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+    terminalManager.write(session, String(req.body && req.body.data || '').slice(0, 16000)); res.json({ ok: true });
+  } catch (err) { res.status(409).json({ error: err.message }); }
+});
+
+app.post('/api/terminal/sessions/:id/resize', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.resize(session, req.body && req.body.cols, req.body && req.body.rows); res.json({ ok: true });
+});
+
+app.delete('/api/terminal/sessions/:id', (req, res) => {
+  const session = terminalManager.get(String(req.params.id || ''), req.user.id);
+  if (!session) return res.status(404).json({ error: 'Terminal introuvable.' });
+  terminalManager.close(session); res.json({ ok: true });
+});
+
+app.put('/api/config', (req, res) => {
+  try {
+    if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+    const users = loadUsers();
+    const userIdx = users.findIndex((u) => u.id === req.user.id);
+    if (userIdx === -1) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    const current = sharedConfigForUser(users[userIdx]);
+    users[userIdx].sharedConfig = sanitizeSharedConfig((req.body && req.body.config) || {}, current);
+    saveUsers(users);
+    res.json({ success: true, config: users[userIdx].sharedConfig });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ---------------------------------------------------------------------------
+// API KEYS API (protected) — write-only vault with masked read-back
+// ---------------------------------------------------------------------------
+// GET  /api/keys -> { keys: { openai: { set, last4 }, ... } }   (never the key)
+app.get('/api/keys', (req, res) => {
+  res.json({ keys: apiKeysStatus(req.user) });
+});
+
+// PUT /api/keys  { keys: { openai: 'sk-...', anthropic: null, ... } }
+// Non-empty string = set/replace (encrypted). null = delete. Absent/'' = keep.
+app.put('/api/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) {
+    return res.status(403).json({ error: 'Modification des cles reservee au desktop.' });
+  }
+  try {
+    const incoming = (req.body && req.body.keys) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    for (const p of KEY_PROVIDERS) {
+      if (!(p in incoming)) continue;
+      const v = incoming[p];
+      if (v === null) delete user.apiKeys[p];
+      else if (typeof v === 'string' && v.trim()) user.apiKeys[p] = encryptSecret(v.trim());
+    }
+    saveUsers(users);
+    res.json({ keys: apiKeysStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// OpenAI-compatible providers: keys live in the same encrypted vault as the
+// built-in ones (`compat:<id>`), URLs of self-hosted entries in compatUrls.
+function compatBaseUrl(user, provider) {
+  const saved = user && user.compatUrls && user.compatUrls[provider.id];
+  return provider.editableUrl && saved ? saved : provider.baseUrl;
+}
+function compatKey(user, provider) {
+  const enc = user && user.apiKeys && user.apiKeys[compatProviders.vaultName(provider.id)];
+  const value = enc ? decryptSecret(enc) : '';
+  if (value) registerSecret(`clé ${provider.id}`, value);
+  return value;
+}
+function compatReady(user, provider) {
+  if (provider.oauth) return provider.oauth === 'chatgpt' ? !!chatgptSession(user) : !!accountSession(user, provider.oauth);
+  if (!compatBaseUrl(user, provider)) return false;
+  return provider.keyless ? true : !!compatKey(user, provider);
+}
+function compatStatus(user) {
+  return compatProviders.PROVIDERS.map((provider) => {
+    const key = compatKey(user, provider);
+    const status = {
+      id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
+      defaultUrl: provider.baseUrl, models: provider.models,
+      keyless: !!provider.keyless, editableUrl: !!provider.editableUrl, local: !!provider.local,
+      key: { set: !!key, last4: key ? key.slice(-4) : '' },
+      // Keyless local servers only count once the user saved them explicitly.
+      configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
+    };
+    if (provider.oauth) {
+      // Signed in with an account instead of a key.
+      status.oauth = provider.oauth;
+      status.configured = provider.oauth === 'chatgpt' ? !!chatgptSession(user) : !!accountSession(user, provider.oauth);
+    }
+    return status;
+  });
+}
+// Every configured endpoint goes to the daemon at once, so switching provider
+// does not restart it. The keys travel as separate environment variables.
+function compatEndpointsFor(user) {
+  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+    // The daemon reaches the subscription through the loopback adapter above.
+    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/${entry.oauth === 'chatgpt' ? 'chatgpt' : `subscription/${entry.id}`}/v1`, key: chatgptProxyKey(user.id) }
+    : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
+}
+
+// ---------------------------------------------------------------------------
+// CHATGPT SUBSCRIPTION — account session kept in the same encrypted vault
+// ---------------------------------------------------------------------------
+function chatgptSession(user) {
+  if (!user || !user.chatgptAuth) return null;
+  try {
+    const session = JSON.parse(decryptSecret(user.chatgptAuth));
+    if (!session || !session.accessToken) return null;
+    registerSecret('jeton ChatGPT', session.accessToken);
+    registerSecret('jeton de renouvellement ChatGPT', session.refreshToken);
+    return session;
+  } catch { return null; }
+}
+function storeChatgptSession(userId, session) {
+  const users = loadUsers();
+  const user = users.find((u) => u.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur non trouve.'), { status: 404 });
+  if (session) user.chatgptAuth = encryptSecret(JSON.stringify(session));
+  else delete user.chatgptAuth;
+  saveUsers(users);
+  return user;
+}
+function chatgptStatus(user) {
+  const session = chatgptSession(user);
+  return session
+    ? { connected: true, email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
+    : { connected: false };
+}
+
+// A valid access token for this user. Refresh tokens are single-use, so one
+// renewal at most runs per user and every concurrent caller waits for it.
+// `rejected` is a token the backend just refused: it is renewed unless another
+// request already did so.
+const chatgptRefreshes = new Map();
+async function chatgptAccessToken(userId, { rejected = '' } = {}) {
+  const session = chatgptSession(loadUsers().find((u) => u.id === userId));
+  if (!session) {
+    throw Object.assign(new Error('Abonnement ChatGPT non connecté. Connectez-le dans Paramètres › Clés API.'), { status: 401 });
+  }
+  const stale = rejected ? session.accessToken === rejected : chatgptSubscription.needsRefresh(session);
+  if (!stale) return session.accessToken;
+  let pending = chatgptRefreshes.get(userId);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const renewed = await chatgptSubscription.refreshSession(session);
+        storeChatgptSession(userId, renewed);
+        return renewed.accessToken;
+      } catch (error) {
+        // A revoked session cannot come back: forget it so Settings shows the truth.
+        if (error.relogin) storeChatgptSession(userId, null);
+        throw error;
+      } finally {
+        chatgptRefreshes.delete(userId);
+      }
+    })();
+    chatgptRefreshes.set(userId, pending);
+  }
+  return pending;
+}
+async function withChatgptToken(userId, call) {
+  const token = await chatgptAccessToken(userId);
+  try {
+    return await call(token);
+  } catch (error) {
+    if (error.status !== 401) throw error;
+    return call(await chatgptAccessToken(userId, { rejected: token }));
+  }
+}
+
+// Key the Rust core presents to the loopback adapter. Drawn at launch and
+// bound to one user: it opens nothing but that user's own subscription.
+const CHATGPT_PROXY_SECRET = crypto.randomBytes(32);
+function chatgptProxySignature(userId) {
+  return crypto.createHmac('sha256', CHATGPT_PROXY_SECRET).update(String(userId)).digest('base64url');
+}
+function chatgptProxyKey(userId) {
+  const key = `${userId}.${chatgptProxySignature(userId)}`;
+  registerSecret('clé interne ChatGPT', key);
+  return key;
+}
+function chatgptProxyUser(req) {
+  const raw = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const at = raw.lastIndexOf('.');
+  if (at <= 0) return null;
+  const userId = raw.slice(0, at);
+  if (!safeEqual(raw.slice(at + 1), chatgptProxySignature(userId))) return null;
+  return loadUsers().find((u) => u.id === userId) || null;
+}
+
+app.get('/api/chatgpt/status', (req, res) => res.json(chatgptStatus(req.user)));
+
+// Sign-in with a code typed on auth.openai.com. The device id stays here; the
+// interface only ever holds the code to show and an opaque flow id.
+const chatgptFlows = new Map();
+app.post('/api/chatgpt/device-start', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    const flow = await chatgptSubscription.requestDeviceCode();
+    for (const [id, entry] of chatgptFlows) {
+      if (entry.userId === req.user.id || entry.expiresAt < Date.now()) chatgptFlows.delete(id);
+    }
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    chatgptFlows.set(flowId, { ...flow, userId: req.user.id, nextPollAt: 0, polling: false });
+    res.json({ flowId, userCode: flow.userCode, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
+});
+
+// POST /api/chatgpt/device-poll { flowId } -> { status: pending | connected | expired }
+app.post('/api/chatgpt/device-poll', async (req, res) => {
+  const flowId = String((req.body && req.body.flowId) || '');
+  const flow = chatgptFlows.get(flowId);
+  if (!flow || flow.userId !== req.user.id) return res.json({ status: 'expired' });
+  if (Date.now() > flow.expiresAt) { chatgptFlows.delete(flowId); return res.json({ status: 'expired' }); }
+  // OpenAI sets the polling pace; a hurried interface is simply told to wait.
+  if (flow.polling || Date.now() < flow.nextPollAt) return res.json({ status: 'pending' });
+  flow.polling = true;
+  try {
+    const session = await chatgptSubscription.pollDeviceCode(flow);
+    flow.nextPollAt = Date.now() + flow.interval * 1000 - 500;
+    if (!session) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    const user = storeChatgptSession(req.user.id, session);
+    res.json({ status: 'connected', account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    // A network blip is not a refusal: the interface keeps waiting.
+    if (!error.status) return res.json({ status: 'pending' });
+    chatgptFlows.delete(flowId);
+    res.status(error.status).json({ status: 'error', error: error.message || String(error) });
+  } finally {
+    flow.polling = false;
+  }
+});
+
+app.delete('/api/chatgpt/session', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try {
+    for (const [id, entry] of chatgptFlows) if (entry.userId === req.user.id) chatgptFlows.delete(id);
+    const user = storeChatgptSession(req.user.id, null);
+    res.json({ account: chatgptStatus(user), providers: compatStatus(user) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+function accountSession(user, provider) {
+  const encrypted = user?.accountAuth?.[provider];
+  if (!encrypted) return null;
+  try {
+    const session = JSON.parse(decryptSecret(encrypted));
+    if (!session?.accessToken || session.provider !== provider) return null;
+    registerSecret(`jeton ${provider}`, session.accessToken);
+    registerSecret(`renouvellement ${provider}`, session.refreshToken);
+    return session;
+  } catch { return null; }
+}
+function storeAccountSession(userId, provider, session) {
+  const users = loadUsers();
+  const user = users.find(u => u.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.accountAuth = user.accountAuth || {};
+  if (session) user.accountAuth[provider] = encryptSecret(JSON.stringify(session));
+  else delete user.accountAuth[provider];
+  saveUsers(users);
+  return user;
+}
+const accountRefreshes = new Map();
+function isCurrentAccountSession(userId, provider, expected) {
+  const current = accountSession(loadUsers().find(u => u.id === userId), provider);
+  return !!current && current.accessToken === expected.accessToken && current.refreshToken === expected.refreshToken;
+}
+async function accountAccessToken(userId, provider, rejected = '') {
+  const session = accountSession(loadUsers().find(u => u.id === userId), provider);
+  if (!session) throw Object.assign(new Error('Compte non connecté. Ouvrez Paramètres › Abonnements.'), { status: 401 });
+  if (rejected ? session.accessToken !== rejected : !accountSubscriptions.needsRefresh(session)) return session.accessToken;
+  const key = `${userId}:${provider}:${crypto.createHash('sha256').update(session.accessToken).digest('hex')}`;
+  let pending = accountRefreshes.get(key);
+  if (!pending) {
+    pending = (async () => {
+      try {
+        const renewed = await accountSubscriptions.refresh(session);
+        if (!isCurrentAccountSession(userId, provider, session)) {
+          throw Object.assign(new Error('La connexion a changé pendant le renouvellement. Réessayez avec le compte actuellement connecté.'), { status: 401 });
+        }
+        storeAccountSession(userId, provider, renewed);
+        return renewed.accessToken;
+      } catch (error) {
+        if (error.relogin && isCurrentAccountSession(userId, provider, session)) storeAccountSession(userId, provider, null);
+        throw error;
+      } finally { accountRefreshes.delete(key); }
+    })();
+    accountRefreshes.set(key, pending);
+  }
+  return pending;
+}
+async function withAccountToken(userId, provider, call) {
+  const token = await accountAccessToken(userId, provider);
+  try { return await call(token); }
+  catch (error) {
+    if (error.status !== 401) throw error;
+    return call(await accountAccessToken(userId, provider, token));
+  }
+}
+function accountStatus(user, provider) {
+  const session = accountSession(user, provider);
+  return session ? { connected: true, connectedAt: session.connectedAt } : { connected: false };
+}
+const accountFlows = new Map();
+function accountKind(id) { return id === 'xai-sub' ? 'xai' : id === 'minimax-sub' ? 'minimax' : null; }
+app.get('/api/subscriptions/:provider/status', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  res.json(accountStatus(req.user, kind));
+});
+app.post('/api/subscriptions/:provider/start', async (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    const flow = await accountSubscriptions.start(kind);
+    for (const [id, entry] of accountFlows) if (entry.userId === req.user.id && entry.provider === kind || entry.expiresAt < Date.now()) accountFlows.delete(id);
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    accountFlows.set(flowId, { ...flow, userId: req.user.id, nextPollAt: 0, polling: false });
+    res.json({ flowId, userCode: flow.userCode, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (error) { res.status(error.status || 502).json({ error: error.message || String(error) }); }
+});
+app.post('/api/subscriptions/:provider/poll', async (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  const flow = accountFlows.get(String(req.body?.flowId || ''));
+  if (!flow || flow.userId !== req.user.id || flow.provider !== kind) return res.json({ status: 'expired' });
+  if (flow.expiresAt < Date.now()) { accountFlows.delete(req.body.flowId); return res.json({ status: 'expired' }); }
+  if (flow.polling || flow.nextPollAt > Date.now()) return res.json({ status: 'pending' });
+  flow.polling = true;
+  try {
+    const session = await accountSubscriptions.poll(flow);
+    if (accountFlows.get(String(req.body?.flowId || '')) !== flow) return res.json({ status: 'expired' });
+    flow.nextPollAt = Date.now() + flow.interval * 1000;
+    if (!session) return res.json({ status: 'pending', interval: flow.interval });
+    accountFlows.delete(req.body.flowId);
+    const user = storeAccountSession(req.user.id, kind, session);
+    return res.json({ status: 'connected', account: accountStatus(user, kind), providers: compatStatus(user) });
+  } catch (error) {
+    if (!error.status) return res.json({ status: 'pending' });
+    accountFlows.delete(req.body.flowId);
+    return res.status(error.status).json({ status: 'error', error: error.message || String(error) });
+  } finally { flow.polling = false; }
+});
+app.delete('/api/subscriptions/:provider/flows/:flowId', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  const flow = accountFlows.get(req.params.flowId);
+  if (flow && flow.userId === req.user.id && flow.provider === kind) accountFlows.delete(req.params.flowId);
+  res.json({ status: 'cancelled' });
+});
+app.delete('/api/subscriptions/:provider/session', (req, res) => {
+  const kind = accountKind(req.params.provider);
+  if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  for (const [id, flow] of accountFlows) if (flow.userId === req.user.id && flow.provider === kind) accountFlows.delete(id);
+  const user = storeAccountSession(req.user.id, kind, null);
+  res.json({ account: accountStatus(user, kind), providers: compatStatus(user) });
+});
+
+app.get('/api/compat/providers', (req, res) => res.json({ providers: compatStatus(req.user) }));
+
+// PUT /api/compat/keys { keys: { deepseek: 'sk-…' | null }, baseUrls: { lmstudio: 'http://…' | null } }
+app.put('/api/compat/keys', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Modification des clés réservée au desktop.' });
+  try {
+    const keys = (req.body && req.body.keys) || {};
+    const urls = (req.body && req.body.baseUrls) || {};
+    const users = loadUsers();
+    const user = users.find((u) => u.id === req.user.id);
+    if (!user) return res.status(401).json({ error: 'Authentification requise.' });
+    user.apiKeys = user.apiKeys || {};
+    user.compatUrls = user.compatUrls || {};
+    for (const provider of compatProviders.PROVIDERS) {
+      if (provider.oauth) continue;
+      if (provider.id in keys) {
+        const value = keys[provider.id];
+        if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
+        else if (typeof value === 'string' && value.trim()) user.apiKeys[compatProviders.vaultName(provider.id)] = encryptSecret(value.trim());
+      }
+      if (provider.editableUrl && provider.id in urls) {
+        if (urls[provider.id] === null || urls[provider.id] === '') { delete user.compatUrls[provider.id]; continue; }
+        const url = compatProviders.normalizeBaseUrl(urls[provider.id]);
+        if (!url) return res.status(400).json({ error: `URL invalide pour ${provider.label}.` });
+        user.compatUrls[provider.id] = url;
+      }
+    }
+    saveUsers(users);
+    res.json({ providers: compatStatus(user) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/compat/models?provider=deepseek -> live /models of that provider,
+// fetched from this PC with the user's own key.
+const compatModelCache = new Map();
+app.get('/api/compat/models', async (req, res) => {
+  const provider = compatProviders.get(req.query.provider);
+  if (!provider) return res.status(404).json({ error: 'Fournisseur inconnu.' });
+  const baseUrl = compatBaseUrl(req.user, provider);
+  const key = compatKey(req.user, provider);
+  // An account has its own catalogue: signing in again must not reuse the last one.
+  const session = provider.oauth === 'chatgpt' ? chatgptSession(req.user) : provider.oauth ? accountSession(req.user, provider.oauth) : null;
+  const cacheKey = crypto.createHash('sha256')
+    .update(`${req.user.id}|${provider.id}|${baseUrl}|${key}|${session ? session.connectedAt : ''}`).digest('hex');
+  const cached = compatModelCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  if (provider.oauth) {
+    if (!session) return res.json({ models: provider.models, live: false });
+    try {
+      if (provider.oauth === 'minimax') return res.json({ models: provider.models, live: false });
+      const live = provider.oauth === 'chatgpt'
+        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token))
+        : await withAccountToken(req.user.id, 'xai', async (token) => {
+          const answer = await fetch(`${accountSubscriptions.XAI_API}/models`, {
+            headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
+          });
+          if (answer.status === 401) throw Object.assign(new Error('session expirée'), { status: 401 });
+          if (!answer.ok) throw Object.assign(new Error(`HTTP ${answer.status}`), { status: answer.status });
+          const data = await answer.json();
+          return (data.data || []).map(item => item.id).filter(id => typeof id === 'string' && id.startsWith('grok-'));
+        });
+      if (!live.length) return res.json({ models: provider.models, live: false });
+      compatModelCache.set(cacheKey, { at: Date.now(), models: live });
+      return res.json({ models: live, live: true });
+    } catch (error) {
+      return res.json({ models: provider.models, live: false, error: error.status === 401 ? 'session expirée' : 'injoignable' });
+    }
+  }
+  if (!baseUrl || (!provider.keyless && !key)) return res.json({ models: provider.models, live: false });
+  try {
+    const answer = await fetch(`${baseUrl}/models`, {
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!answer.ok) return res.json({ models: provider.models, live: false, error: `HTTP ${answer.status}` });
+    const data = await answer.json();
+    const list = Array.isArray(data && data.data) ? data.data : Array.isArray(data && data.models) ? data.models : [];
+    const live = [...new Set(list.map((item) => (typeof item === 'string' ? item : item && (item.id || item.name))).filter(Boolean).map(String))];
+    const models = [...provider.models.filter((id) => live.includes(id)), ...live.filter((id) => !provider.models.includes(id)).sort()];
+    compatModelCache.set(cacheKey, { at: Date.now(), models });
+    res.json({ models: models.length ? models : provider.models, live: models.length > 0 });
+  } catch (error) {
+    res.json({ models: provider.models, live: false, error: error.name === 'TimeoutError' ? 'délai dépassé' : 'injoignable' });
+  }
+});
+
+
+// MCP configuration: personal servers, plus Opale when it is present (below).
+// A personal server is either an HTTP endpoint (optional bearer token) or a
+// local program (stdio) with its arguments and environment. The token and the
+// environment values are secrets: encrypted at rest, never sent back to a client.
+// (Blender is built in now: the entries its old preset created are left out.)
+const storedMcpServers = (user) => ((user && user.mcpServers) || []).filter((server) => server && typeof server === 'object' && !mcpRegistry.isBlenderPreset(server));
+function publicMcpServers(user) {
+  return storedMcpServers(user).map((stored) => {
+    const { token, env, ...server } = stored;
+    if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...server, transport: 'http', tokenConfigured: !!token };
+    const names = Object.keys(env || {});
+    return { ...server, transport: 'stdio', env: Object.fromEntries(names.map((name) => [name, ''])), envConfigured: names };
+  });
+}
+// The same entry with its secrets in clear, as a connection needs it.
+function runnableMcpServer(stored) {
+  if (mcpRegistry.transportOf(stored) !== 'stdio') return { ...stored, token: stored.token ? decryptSecret(stored.token) : '' };
+  const env = {};
+  for (const [name, value] of Object.entries(stored.env || {})) { const plain = value ? decryptSecret(value) : ''; if (plain) env[name] = plain; }
+  return { ...stored, env };
+}
+function rustMcpServersFor(user) { return storedMcpServers(user).filter((server) => server.enabled).map(runnableMcpServer); }
+// What is written to users.json for one submitted server. A secret left blank
+// keeps the value already stored under the same server id.
+function storeMcpServer(input, previous) {
+  const server = mcpRegistry.normaliseServer(input);
+  if (!server) throw new Error('Serveur MCP invalide : indiquez une URL (HTTPS, ou HTTP en local) ou une commande locale.');
+  const before = previous.get(server.id);
+  if (server.transport === 'stdio') {
+    const kept = before && mcpRegistry.transportOf(before) === 'stdio' ? before.env || {} : {};
+    const env = {};
+    for (const [name, value] of Object.entries(server.env)) { const secret = value ? encryptSecret(value) : kept[name] || ''; if (secret) env[name] = secret; }
+    return { ...server, env };
+  }
+  const token = String((input && input.token) || '') || (before && before.token && decryptSecret(before.token)) || '';
+  return { ...server, token: token ? encryptSecret(token) : '' };
+}
+
+// What each personal server announces (its tools and instructions), remembered
+// so a run does not pay a connection before it starts: a stale answer is served
+// while it is refreshed, a silent server is only retried after a short pause.
+const MCP_DESCRIBE_TTL_MS = 5 * 60_000;
+const MCP_DESCRIBE_RETRY_MS = 30_000;
+const MCP_DESCRIBE_TIMEOUT_MS = 8_000;
+const mcpDescriptions = new Map();
+function mcpDescriptionKey(server) {
+  return crypto.createHash('sha256').update(JSON.stringify([server.id, mcpRegistry.transportOf(server), server.endpoint, server.token, server.command, server.args, server.env])).digest('hex');
+}
+function rememberMcpDescription(server, info) {
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(mcpDescriptionKey(server), { at: Date.now(), info, pending: null });
+}
+function refreshMcpDescription(server) {
+  const key = mcpDescriptionKey(server);
+  const entry = mcpDescriptions.get(key) || { at: 0, info: null, pending: null };
+  if (entry.pending) return entry.pending;
+  if (mcpDescriptions.size > 128) mcpDescriptions.clear();
+  mcpDescriptions.set(key, entry);
+  entry.pending = mcpRegistry.describe(server, { timeoutMs: MCP_DESCRIBE_TIMEOUT_MS })
+    .then((info) => { entry.info = info; }, () => {})
+    .finally(() => { entry.at = Date.now(); entry.pending = null; });
+  return entry.pending;
+}
+async function mcpDescription(server) {
+  const entry = mcpDescriptions.get(mcpDescriptionKey(server));
+  const age = entry ? Date.now() - entry.at : Infinity;
+  if (!entry || (!entry.info && (entry.pending || age > MCP_DESCRIBE_RETRY_MS))) await refreshMcpDescription(server);
+  else if (entry.info && age > MCP_DESCRIBE_TTL_MS) refreshMcpDescription(server);
+  const known = mcpDescriptions.get(mcpDescriptionKey(server));
+  return (known && known.info) || null;
+}
+// A personal server with the Skill that tells the model it exists.
+async function withMcpSkill(server) {
+  const info = await mcpDescription(server).catch(() => null);
+  const skill = info && mcpRegistry.buildSkill(server, info);
+  return skill ? { ...server, skill } : server;
+}
+// Opale is a separate application, linked by default: when it is present and
+// running, the agent gets its vault unless the user switched the link off.
+const opaleLinked = (user) => !(user && user.opale && user.opale.connected === false);
+
+// Servers handed to the agent runtime for one run. Opale is resolved live from
+// its instance file: neither its port nor its token is stored here, so the
+// link survives Opale restarting on another port.
+async function agentMcpServersFor(user) {
+  let servers = await Promise.all(rustMcpServersFor(user).map(withMcpSkill));
+  const builtIn = await Promise.all([
+    opaleLinked(user) ? opale.mcpServer().catch(() => null) : null,
+    blenderLinked(user) ? blender.mcpServer({ endpoint: `http://127.0.0.1:${PORT}/api/internal/blender-mcp`, token: BLENDER_MCP_TOKEN }).catch(() => null) : null,
+  ]);
+  for (const entry of builtIn) if (entry) servers = [...servers.filter((server) => server.id !== entry.id), entry];
+  return servers;
+}
+
+// ---------------------------------------------------------------------------
+// BLENDER — driven through its MCP add-on (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/blender/status   Blender found? add-on installed? open right now?
+// POST   /api/blender/install  install the shipped add-on and enable what it needs
+// POST   /api/blender/connect  give the agent access to Blender
+// DELETE /api/blender/connect  take it away
+// POST   /api/blender/open     start Blender
+const blender = blenderConnector.create({ addonDirs: [path.join(APP_DIR, 'blender'), path.join(APP_DIR, 'native', 'blender')] });
+const BLENDER_MCP_TOKEN = crypto.randomBytes(32).toString('base64url');
+// Off until the user turns it on. An account that had the former "Blender MCP"
+// preset enabled keeps Blender connected without doing anything.
+function blenderLinked(user) {
+  if (user && user.blender) return user.blender.connected === true;
+  return ((user && user.mcpServers) || []).some((server) => mcpRegistry.isBlenderPreset(server) && server.enabled !== false);
+}
+function setBlenderConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.blender = { connected: !!connected };
+  saveUsers(users);
+}
+const blenderFailure = (res, error) => res.status(error.status || 500).json({ error: error.message || String(error), code: error.code || 'blender-error' });
+app.get('/api/blender/status', async (req, res) => {
+  try { res.json({ ...(await blender.status()), connected: blenderLinked(req.user) }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/install', async (req, res) => {
+  try {
+    // Installing changes Blender's own settings (it turns on "Allow Online
+    // Access"): it only happens on an explicit yes from the settings window.
+    if (!req.body || req.body.consent !== true) return res.status(400).json({ error: 'Consentement requis.', code: 'consent-required' });
+    const status = await blender.install();
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/connect', async (req, res) => {
+  try {
+    const status = await blender.status();
+    if (status.state !== 'ready') return res.status(409).json({ error: 'Blender n’est pas encore prêt : installez d’abord l’add-on MCP.', code: 'blender-not-ready' });
+    setBlenderConnected(req.user.id, true);
+    res.json({ ...status, connected: true });
+  } catch (error) { blenderFailure(res, error); }
+});
+app.delete('/api/blender/connect', async (req, res) => {
+  try { setBlenderConnected(req.user.id, false); res.json({ ...(await blender.status()), connected: false }); } catch (error) { blenderFailure(res, error); }
+});
+app.post('/api/blender/open', async (req, res) => {
+  try { await blender.open(); res.json({ ok: true }); } catch (error) { blenderFailure(res, error); }
+});
+
+// ---------------------------------------------------------------------------
+// OPALE — the notes application, a separate project (protected)
+// ---------------------------------------------------------------------------
+// GET    /api/opale/status   is Opale installed / running / linked
+// POST   /api/opale/connect  start it if needed and (re)enable the link
+// DELETE /api/opale/connect  stop giving the agent access to the vault
+// POST   /api/opale/open     bring the Opale window up
+function setOpaleConnected(userId, connected) {
+  const users = loadUsers();
+  const user = users.find((entry) => entry.id === userId);
+  if (!user) throw Object.assign(new Error('Utilisateur introuvable.'), { status: 404 });
+  user.opale = connected ? { connected: true, connectedAt: new Date().toISOString() } : { connected: false };
+  saveUsers(users);
+}
+const opaleReply = (user, status, extra = {}) => ({ ...status, connected: opaleLinked(user), ...extra });
+app.get('/api/opale/status', async (req, res) => {
+  try {
+    const status = await opale.status(APP_DIR);
+    // Linked by default: let the running Opale show who is there.
+    if (status.running && opaleLinked(req.user)) opale.greet().catch(() => {});
+    res.json(opaleReply(req.user, status));
+  } catch (error) { res.status(500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/opale/connect', async (req, res) => {
+  try {
+    const inst = await opale.launch(APP_DIR);
+    const greeting = await opale.hello(inst);
+    const tools = await opale.tools(inst);
+    setOpaleConnected(req.user.id, true);
+    res.json({ ...(await opale.status(APP_DIR)), connected: true, vault: greeting.vault || inst.vault, tools: tools.map((tool) => tool.name) });
+  } catch (error) {
+    res.status(error.status || 502).json({ error: error.message || String(error) });
+  }
+});
+app.delete('/api/opale/connect', async (req, res) => {
+  try {
+    setOpaleConnected(req.user.id, false);
+    const inst = await opale.running();
+    if (inst) await opale.bye(inst);
+    res.json({ ...(await opale.status(APP_DIR)), connected: false });
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/opale/open', async (req, res) => {
+  try { await opale.show(APP_DIR); res.json(opaleReply(req.user, await opale.status(APP_DIR))); }
+  catch (error) { res.status(error.status || 502).json({ error: error.message || String(error) }); }
+});
+
+app.get('/api/mcp', (req, res) => res.json({ servers: publicMcpServers(req.user) }));
+// POST /api/mcp/test { server } -> what that server answers right now. The
+// form is tested as typed, before it is saved.
+app.post('/api/mcp/test', async (req, res) => {
+  const started = Date.now();
+  try {
+    const previous = new Map(storedMcpServers(req.user).map((server) => [server.id, server]));
+    const server = runnableMcpServer(storeMcpServer(req.body && req.body.server, previous));
+    const [info, target] = await Promise.all([mcpRegistry.describe(server, { timeoutMs: 20_000 }), mcpRegistry.probe(server)]);
+    rememberMcpDescription(server, info);
+    const tools = info.tools.filter((tool) => tool && typeof tool.name === 'string').map((tool) => ({ name: tool.name.slice(0, 128), allowed: mcpRegistry.allowed(server, tool.name) }));
+    res.json({
+      ok: true, transport: mcpRegistry.transportOf(server), count: tools.length, tools: tools.slice(0, 200),
+      serverName: String((info.serverInfo && info.serverInfo.name) || '').slice(0, 120), serverVersion: String((info.serverInfo && info.serverInfo.version) || '').slice(0, 40),
+      executable: info.executable, target, ms: Date.now() - started,
+    });
+  } catch (error) {
+    res.json({ ok: false, error: String((error && error.message) || error).slice(0, 400), ms: Date.now() - started });
+  }
+});
+app.get('/api/automation/status', (req, res) => res.json(automationManager.snapshot()));
+app.post('/api/automation/stop', async (req, res) => res.json(await automationManager.stop()));
+app.post('/api/agent-runs/:id/cancel', async (req, res) => {
+  try {
+    res.json(await rustAgentBridge.cancel(req.user.id, req.params.id));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+app.put('/api/mcp', (req, res) => {
+  try {
+    const incoming = Array.isArray(req.body && req.body.servers) ? req.body.servers : null;
+    if (!incoming) return res.status(400).json({ error: 'Liste MCP invalide.' });
+    const users = loadUsers(), i = users.findIndex((u) => u.id === req.user.id);
+    const previous = new Map(storedMcpServers(users[i]).map((server) => [server.id, server]));
+    const servers = incoming.slice(0, 32).map((server) => storeMcpServer(server, previous));
+    if (new Set(servers.map((server) => server.id)).size !== servers.length) throw new Error('Deux serveurs MCP portent le même identifiant.');
+    users[i].mcpServers = servers;
+    saveUsers(users);
+    // Learn what the enabled servers offer now, not during the next message.
+    for (const server of rustMcpServersFor(users[i])) refreshMcpDescription(server);
+    res.json({ servers: publicMcpServers(users[i]) });
+  } catch (e) { res.status(400).json({ error: e.message }); }
+});
+// ---------------------------------------------------------------------------
+// VOICE — dictation button of the chat, voice search of the browser (protected)
+// ---------------------------------------------------------------------------
+// Transcription is local: whisper.cpp (shipped in `whisper\` beside the server)
+// with a model downloaded once into the data folder, Windows' own recognizer
+// until that model is there.
+// GET  /api/voice-status   which engine is ready; starts the model download
+// GET  /api/voice-options  speech synthesis voices (none on this edition)
+// POST /api/stt { audio: <base64 PCM WAV>, language? } -> { text, engine }
+const voice = voiceStt.create({
+  engineDirs: [path.join(APP_DIR, 'whisper'), path.join(APP_DIR, 'native', 'whisper'), path.join(DATA_DIR, 'voice')],
+  modelDir: path.join(DATA_DIR, 'voice'),
+});
+app.get('/api/voice-status', (req, res) => { voice.prepare(); res.json(voice.status()); });
+app.get('/api/voice-options', (req, res) => res.json({ voices: [] }));
+app.post('/api/stt', async (req, res) => {
+  try {
+    const encoded = String((req.body && req.body.audio) || '');
+    if (!encoded) return res.status(400).json({ error: 'audio requis' });
+    res.json(await voice.transcribe({ audio: Buffer.from(encoded, 'base64'), language: req.body.language }));
+  } catch (error) {
+    // `error` is the code the browser's voice search matches on; `hint` is the
+    // sentence shown to the user.
+    res.status(error.status || 500).json({ error: error.code || 'stt-failed', hint: String((error && error.message) || error).slice(0, 300) });
+  }
+});
+// ---------------------------------------------------------------------------
+// PER-USER CHATS API (protected)
+// ---------------------------------------------------------------------------
+app.get('/api/chats', (req, res) => {
+  const kind = req.query.kind === 'agents' ? 'agents' : 'chat';
+  let file = chatsFile(req.user.id, kind);
+  // Migration: older versions stored the single chat as "<id>.json".
+  if (kind === 'chat' && !fs.existsSync(file)) {
+    const legacy = path.join(CHATS_DIR, req.user.id + '.json');
+    if (fs.existsSync(legacy)) file = legacy;
+  }
+  try { res.json(JSON.parse(fs.readFileSync(file, 'utf-8'))); }
+  catch { res.json([]); }
+});
+
+app.put('/api/chats', (req, res) => {
+  try {
+    const conversations = (req.body && req.body.conversations) || [];
+    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(continuation.merge(req.user.id, req.body && req.body.kind === 'agents' ? 'agents' : 'chat', conversations), null, 2));
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// PER-USER RECENT PROJECTS (protected)
+// ---------------------------------------------------------------------------
+// Mirrored from the desktop so the mobile remote's "Projets" list shows the
+// same folders the user has opened on the PC. Read-only for mobile sessions.
+app.get('/api/recent-projects', (req, res) => {
+  res.json({ projects: Array.isArray(req.user.recentProjects) ? req.user.recentProjects : [] });
+});
+
+app.put('/api/recent-projects', (req, res) => {
+  if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+  try {
+    const list = (req.body && req.body.projects) || [];
+    const clean = Array.isArray(list)
+      ? list.filter((p) => typeof p === 'string' && p.trim()).slice(0, 12)
+      : [];
+    const users = loadUsers();
+    const u = users.find((x) => x.id === req.user.id);
+    if (!u) return res.status(404).json({ error: 'Utilisateur non trouve.' });
+    u.recentProjects = clean;
+    saveUsers(users);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+const FILTERED = new Set(['node_modules', '.git', '.env', '.DS_Store', 'server-data']);
+
+function resolveBase(root) {
+  return root ? path.resolve(root) : APP_DIR;
+}
+
+function isInsideBase(base, target) {
+  const rel = path.relative(base, target);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+async function fetchJSON(url, options) {
+  // A desktop-agent turn makes several ordered provider calls. Honour a
+  // provider's short 429 cooldown instead of failing the whole task after one
+  // desktop action. Retrying only 429 is safe: the provider rejected it before
+  // processing and the original request was not executed.
+  const wait = (ms) => new Promise((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
+    const signal = options && options.signal;
+    if (!signal) return;
+    const abort = () => { clearTimeout(timer); reject(signal.reason || new Error('Requete interrompue.')); };
+    if (signal.aborted) return abort();
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  let res;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    res = await fetch(url, options);
+    if (res.status !== 429 || attempt === 3) break;
+    const retryAfter = Number(res.headers.get('retry-after'));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? Math.min(retryAfter * 1000, 30000)
+      : Math.min(1000 * (2 ** attempt), 8000);
+    // Consume the rejected body before retrying so the connection can be reused.
+    try { await res.arrayBuffer(); } catch {}
+    await wait(delayMs);
+  }
+  // Read the body as text first: a non-JSON error (empty body, OOM, an HTML 500,
+  // an Ollama plain-text error) then surfaces the REAL message instead of
+  // throwing on res.json() and bubbling up as a generic "connection error".
+  const raw = await res.text();
+  let data;
+  try {
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${raw.slice(0, 300) || res.statusText}`);
+    throw new Error('Réponse non-JSON reçue du serveur distant.');
+  }
+  if (!res.ok) {
+    const errMsg =
+      data.error?.message || data.error?.type ||
+      (typeof data.error === 'string' ? data.error : '') ||
+      (data.error ? JSON.stringify(data.error) : '') || res.statusText;
+    throw new Error(errMsg);
+  }
+  return data;
+}
+
+// ---------------------------------------------------------------------------
+// FILE SYSTEM API
+// ---------------------------------------------------------------------------
+
+// GET /api/files?path=...&root=...
+app.get('/api/files', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    const relPath = req.query.path || '';
+    const fullPath = path.resolve(base, relPath);
+
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Prevent directory traversal outside the base when no root is given
+    if (!req.query.root && !isInsideBase(APP_DIR, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'Directory not found' });
+    }
+
+    const entries = fs.readdirSync(fullPath, { withFileTypes: true });
+    const items = entries
+      .filter((e) => !FILTERED.has(e.name))
+      .map((e) => ({
+        name: e.name,
+        isDirectory: e.isDirectory(),
+        path: path.join(relPath, e.name).replace(/\\/g, '/'),
+      }))
+      .sort((a, b) => {
+        if (a.isDirectory && !b.isDirectory) return -1;
+        if (!a.isDirectory && b.isDirectory) return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    res.json(items);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/file?path=...&root=...
+app.get('/api/file', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    const relPath = req.query.path || '';
+    const fullPath = path.resolve(base, relPath);
+
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!req.query.root && !isInsideBase(APP_DIR, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+
+    const content = fs.readFileSync(fullPath, 'utf-8');
+    res.json({ content });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Binary exports need a download route; /api/file intentionally reads text.
+app.get('/api/artifact', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Téléchargement desktop uniquement.' });
+  try {
+    const root = fs.realpathSync(String(req.query.root || ''));
+    const file = fs.realpathSync(String(req.query.path || ''));
+    const artifacts = path.join(root, 'artifacts');
+    const chatRoot = path.join(DATA_DIR, 'chat-workspaces', req.user.id);
+    const known = (req.user.recentProjects || []).some(project => {
+      try { return fs.realpathSync(project).toLowerCase() === root.toLowerCase(); } catch { return false; }
+    });
+    if (!known && !isInsideBase(chatRoot, root)) return res.status(403).json({ error: 'Projet inconnu.' });
+    if (path.dirname(file) !== artifacts || !fs.statSync(file).isFile() || fs.statSync(file).size > 20 * 1024 * 1024)
+      return res.status(403).json({ error: 'Artefact invalide.' });
+    return res.download(file, path.basename(file));
+  } catch { return res.status(404).json({ error: 'Artefact introuvable.' }); }
+});
+
+// GET /api/tree?root=...  -> { files: [relative paths], truncated }
+// Recursive, filtered, bounded listing used to give the AI project context.
+app.get('/api/tree', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    const out = [];
+    const MAX = 600;
+    const walk = (dir, rel, depth) => {
+      if (out.length >= MAX || depth > 7) return;
+      let entries;
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      entries.sort((a, b) => (a.isDirectory() === b.isDirectory()) ? a.name.localeCompare(b.name) : (a.isDirectory() ? -1 : 1));
+      for (const e of entries) {
+        if (out.length >= MAX) break;
+        if (FILTERED.has(e.name)) continue;
+        const r = rel ? rel + '/' + e.name : e.name;
+        if (e.isDirectory()) { out.push(r + '/'); walk(path.join(dir, e.name), r, depth + 1); }
+        else out.push(r);
+      }
+    };
+    walk(base, '', 0);
+    res.json({ files: out, truncated: out.length >= MAX });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/file  { root, path, content }
+app.post('/api/file', (req, res) => {
+  try {
+    const { root, path: relPath, content } = req.body;
+    if (!relPath) return res.status(400).json({ error: 'path is required' });
+
+    const base = resolveBase(root);
+    const fullPath = path.resolve(base, relPath);
+
+    if (!isInsideBase(base, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    if (!root && !isInsideBase(APP_DIR, fullPath)) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+
+    // Ensure parent directory exists
+    fs.mkdirSync(path.dirname(fullPath), { recursive: true });
+    fs.writeFileSync(fullPath, content, 'utf-8');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// EXEC API
+// ---------------------------------------------------------------------------
+
+// POST /api/exec  { command, cwd }
+// Use execFile with cmd.exe instead of exec() to reliably hide the console
+// window on Windows. exec() spawns an intermediate cmd.exe shell that can
+// flash a visible window even with windowsHide:true, especially from a
+// pkg-packaged .exe. execFile + explicit cmd.exe avoids the extra shell.
+app.post('/api/exec', (req, res) => {
+  try {
+    const { command, cwd } = req.body;
+    if (!command) return res.status(400).json({ error: 'command is required' });
+
+    const execCwd = cwd || APP_DIR;
+
+    execFile(process.platform === 'win32' ? 'cmd.exe' : '/bin/sh', [process.platform === 'win32' ? '/c' : '-lc', command], {
+      cwd: execCwd,
+      timeout: 30000,
+      maxBuffer: 1024 * 1024 * 5,
+      windowsHide: true, env: platformRuntime.environment()
+    }, (err, stdout, stderr) => {
+      if (err && !stdout && !stderr) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ stdout: stdout || '', stderr: stderr || '' });
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AGENT TOOLS — read-only search & diagnostics (Grep / Glob / GitDiff / Doctor)
+// ---------------------------------------------------------------------------
+// These power the slash commands (/grep, /glob, /diff, /review, /doctor). They
+// are strictly read-only, bounded in output, and path-guarded to the project.
+
+// Navigateur intégré : zaalis Browser (vendu dans zaalis-browser/) s'exécute
+// dans ce serveur et affiche ses vues WebView2 dans la fenêtre native de
+// l'IDE (bouton globe). Aucune installation séparée n'est nécessaire. Un
+// navigateur externe (celui par défaut du PC) n'est utilisé que sur demande
+// explicite (?external=1, /search --externe, outil browser open_external).
+const SEARCH_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 zaalis/1.0';
+const browserHost = new BrowserHost({
+  dataDir: process.env.ZAALIS_BROWSER_DATA_DIR ||
+    platformRuntime.browserDir(),
+  secretFile: BROWSER_SECRET_FILE,
+  idePort: PORT,
+  log: (line) => console.error(line),
+});
+browserHost.connect();
+// Jeton stable du processus pour l'outil Rust `browser` : il ne change pas
+// entre deux tours, donc le démon n'est pas relancé à chaque requête.
+const BROWSER_TOOL_TOKEN = crypto.randomBytes(32).toString('base64url');
+
+function integratedBrowserUnavailable() {
+  return {
+    ok: false, status: 503,
+    body: {
+      error: 'browser_unavailable',
+      message: 'Le navigateur intégré est disponible dans l\'application zaalis IDE (fenêtre native).',
+    },
+  };
+}
+
+function browserOffline() {
+  const core = browserHost.core;
+  return !!(core && core.settings && core.settings.offline);
+}
+
+async function openInIntegratedBrowser(targetUrl, { background = false } = {}) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return { ok: false, status: 400, body: { error: 'invalid_url' } };
+  if (!browserHost.available()) return integratedBrowserUnavailable();
+  try {
+    const opened = await browserHost.open(url, { background });
+    return { ok: true, status: 200, body: { ok: true, target: 'integrated', ...opened } };
+  } catch (error) {
+    return { ok: false, status: 502, body: { error: error.message || 'navigateur intégré indisponible' } };
+  }
+}
+
+// Navigateur externe = celui par défaut de Windows, seulement sur demande.
+function openInExternalBrowser(targetUrl) {
+  const url = safeHttpUrl(targetUrl);
+  if (!url) return false;
+  try {
+    if (process.platform !== 'win32') return platformRuntime.openExternal(url);
+    const child = spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], { detached: true, stdio: 'ignore', windowsHide: true });
+    child.unref();
+    return true;
+  } catch { return false; }
+}
+
+function decodeHtmlEntities(value) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return String(value || '').replace(/&(#x?[0-9a-f]+|[a-z]+);/gi, (m, ent) => {
+    const key = ent.toLowerCase();
+    if (key[0] === '#') {
+      const n = key[1] === 'x' ? parseInt(key.slice(2), 16) : parseInt(key.slice(1), 10);
+      return Number.isFinite(n) ? String.fromCodePoint(n) : m;
+    }
+    return Object.prototype.hasOwnProperty.call(named, key) ? named[key] : m;
+  });
+}
+
+function stripHtml(value) {
+  return decodeHtmlEntities(String(value || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<svg[\s\S]*?<\/svg>/gi, ' ')
+    .replace(/<\/(p|div|li|h[1-6]|tr|br)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' '))
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n\s+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+function safeHttpUrl(raw) {
+  try {
+    const u = new URL(String(raw || '').trim());
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isPrivateHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
+  if (/^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h)) return true;
+  const m = h.match(/^172\.(\d{1,2})\./);
+  if (m) {
+    const n = Number(m[1]);
+    if (n >= 16 && n <= 31) return true;
+  }
+  return h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe80:');
+}
+
+function publicHttpUrl(raw) {
+  const url = safeHttpUrl(raw);
+  if (!url) return null;
+  try {
+    const u = new URL(url);
+    if (isPrivateHost(u.hostname)) return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+function searchPageUrl(query) {
+  return `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+}
+
+function hostnameLabel(rawUrl) {
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./i, '');
+  } catch {
+    return '';
+  }
+}
+
+function faviconApiUrl(rawUrl) {
+  const host = hostnameLabel(rawUrl);
+  return host ? `/api/favicon?domain=${encodeURIComponent(host)}` : '';
+}
+
+function usefulQuote(text) {
+  const clean = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  const firstSentence = clean.match(/^.{80,260}?[.!?](?:\s|$)/);
+  const picked = firstSentence ? firstSentence[0] : clean.slice(0, 190);
+  return picked.length < clean.length ? picked.replace(/[.,;:\s]+$/, '') + '...' : picked;
+}
+
+function resolveDuckUrl(href) {
+  const cleaned = decodeHtmlEntities(href).trim();
+  try {
+    const u = new URL(cleaned, 'https://duckduckgo.com');
+    const uddg = u.searchParams.get('uddg');
+    return publicHttpUrl(uddg || u.toString());
+  } catch {
+    return null;
+  }
+}
+
+function extractSearchResults(html, sourceQuery, limit) {
+  const out = [];
+  const seen = new Set();
+  const re = /<a\b([^>]*\bclass=(["'])[^"']*(?:result__a|result-link)[^"']*\2[^>]*)>([\s\S]*?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html || '')) !== null && out.length < limit) {
+    const attrs = m[1] || '';
+    const hrefMatch = attrs.match(/\bhref=(["'])([^"']+)\1/i);
+    if (!hrefMatch) continue;
+    const url = resolveDuckUrl(hrefMatch[2]);
+    if (!url) continue;
+    const key = url.replace(/#.*$/, '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const tail = String(html || '').slice(re.lastIndex, re.lastIndex + 1800);
+    const sn = tail.match(/class=(["'])[^"']*(?:result__snippet|result-snippet)[^"']*\1[^>]*>([\s\S]*?)<\/(?:a|div|td)>/i);
+    out.push({
+      title: stripHtml(m[3]).slice(0, 180) || url,
+      url,
+      host: hostnameLabel(url),
+      favicon: faviconApiUrl(url),
+      snippet: sn ? stripHtml(sn[2]).slice(0, 500) : '',
+      sourceQuery,
+    });
+  }
+  return out;
+}
+
+async function fetchWithTimeout(url, timeoutMs, options = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  const { headers = {}, ...rest } = options;
+  try {
+    return await fetch(url, {
+      redirect: 'follow',
+      signal: ctrl.signal,
+      ...rest,
+      headers: {
+        'User-Agent': SEARCH_USER_AGENT,
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5',
+        ...headers,
+      },
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function webSearch(query, limit) {
+  const r = await fetchWithTimeout(searchPageUrl(query), 8000);
+  if (!r.ok) return [];
+  const html = await r.text();
+  return extractSearchResults(html, query, limit);
+}
+
+function pageTitle(html) {
+  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return m ? stripHtml(m[1]).slice(0, 180) : '';
+}
+
+function metaDescription(html) {
+  const re = /<meta\b([^>]+)>/gi;
+  let m;
+  while ((m = re.exec(html || '')) !== null) {
+    const attrs = m[1] || '';
+    if (!/\bname=(["'])description\1/i.test(attrs) && !/\bproperty=(["'])og:description\1/i.test(attrs)) continue;
+    const c = attrs.match(/\bcontent=(["'])([\s\S]*?)\1/i);
+    if (c) return stripHtml(c[2]).slice(0, 400);
+  }
+  return '';
+}
+
+async function fetchPageExcerpt(url) {
+  const safe = publicHttpUrl(url);
+  if (!safe) return { error: 'URL non publique ignoree.' };
+  try {
+    const r = await fetchWithTimeout(safe, 9000);
+    const ct = String(r.headers.get('content-type') || '').toLowerCase();
+    const len = Number(r.headers.get('content-length') || 0);
+    if (!r.ok) return { error: `HTTP ${r.status}` };
+    if (len && len > 3 * 1024 * 1024) return { error: 'Page trop lourde pour le resume.' };
+    if (ct && !/text\/html|text\/plain|application\/xhtml|application\/xml/.test(ct)) {
+      return { error: `Type non texte (${ct.split(';')[0]}).` };
+    }
+    const html = await r.text();
+    return {
+      title: pageTitle(html),
+      description: metaDescription(html),
+      excerpt: stripHtml(html).slice(0, 3200),
+    };
+  } catch (e) {
+    return { error: e && e.name === 'AbortError' ? 'Timeout' : ((e && e.message) || 'Erreur lecture page') };
+  }
+}
+
+function deepSearchQueries(query) {
+  const base = String(query || '').replace(/\s+/g, ' ').trim();
+  const out = [base, `${base} official source`, `${base} documentation`, `${base} analysis`];
+  return Array.from(new Set(out)).filter(Boolean).slice(0, 4);
+}
+
+app.get('/api/favicon', async (req, res) => {
+  const domain = String(req.query.domain || '').trim().toLowerCase();
+  if (!/^[a-z0-9.-]{1,253}$/i.test(domain) || isPrivateHost(domain)) {
+    return res.status(400).json({ error: 'invalid domain' });
+  }
+  try {
+    const url = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
+    const r = await fetchWithTimeout(url, 6000, { headers: { Accept: 'image/png,image/*;q=0.8,*/*;q=0.5' } });
+    if (!r.ok) return res.status(r.status).end();
+    const bytes = Buffer.from(await r.arrayBuffer());
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.end(bytes);
+  } catch (e) {
+    res.status(502).json({ error: 'favicon unavailable', detail: e && e.message });
+  }
+});
+
+app.get('/api/browser-search', async (req, res) => {
+  const q = String(req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'q is required' });
+  const mode = String(req.query.mode || 'newtab').toLowerCase();
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(q)}`;
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, query: q, target: 'external', url });
+  }
+  if (!browserHost.available()) {
+    const unavailable = integratedBrowserUnavailable();
+    return res.status(unavailable.status).json(unavailable.body);
+  }
+  try {
+    const opened = await browserHost.search(q, { newTab: mode !== 'active' });
+    res.json({ ok: true, query: q, mode, target: 'integrated', url: opened.url });
+  } catch (error) {
+    res.status(502).json({ error: error.message || 'navigateur intégré indisponible' });
+  }
+});
+
+app.get('/api/browser-open', async (req, res) => {
+  const url = safeHttpUrl(req.query.url);
+  if (!url) return res.status(400).json({ error: 'url is required' });
+  if (/^(1|true|yes)$/i.test(String(req.query.external || ''))) {
+    if (!openInExternalBrowser(url)) return res.status(502).json({ error: 'external_unavailable' });
+    return res.json({ ok: true, url, target: 'external' });
+  }
+  const background = /^(1|true|yes)$/i.test(String(req.query.background || ''));
+  const r = await openInIntegratedBrowser(url, { background });
+  if (!r.ok) return res.status(r.status).json(r.body);
+  res.json({ ok: true, url, target: 'integrated', browser: r.body });
+});
+
+app.get('/api/browser/status', (req, res) => {
+  res.json({ available: browserHost.available(), started: !!browserHost.core, tabs: browserHost.tabs() });
+});
+app.post('/api/browser/language', (req, res) => {
+  if (req.isMobile || req.isTunnel || req.isBrowser) return res.sendStatus(403);
+  browserHost.setLanguage(req.body.language);
+  res.json({ language: browserHost.language });
+});
+
+app.post('/api/deep-search', async (req, res) => {
+  const query = String(req.body && req.body.query || '').trim();
+  if (!query) return res.status(400).json({ error: 'query is required' });
+
+  const maxResults = Math.max(3, Math.min(12, Number(req.body.maxResults || 8)));
+  const maxPages = Math.max(1, Math.min(8, Number(req.body.maxPages || 5)));
+  const openTabs = Math.max(0, Math.min(8, Number(req.body.openTabs || 5)));
+
+  // The search opens first in the integrated browser, so the user sees it
+  // happen. If its secure local mode is on, no web request is made at all.
+  if (browserOffline()) {
+    return res.status(409).json({ error: 'offline_mode', message: 'Mode local sécurisé actif : recherche impossible.' });
+  }
+  let searchTab = null;
+  if (browserHost.available()) {
+    try { searchTab = await browserHost.search(query, { newTab: true }); } catch {}
+  }
+
+  const searchedQueries = deepSearchQueries(query);
+  const all = [];
+  const seen = new Set();
+  for (const q of searchedQueries) {
+    try {
+      const results = await webSearch(q, Math.ceil(maxResults / 2) + 2);
+      for (const r of results) {
+        const key = r.url.replace(/#.*$/, '');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        all.push(r);
+        if (all.length >= maxResults) break;
+      }
+    } catch {}
+    if (all.length >= maxResults) break;
+  }
+
+  for (const result of all.slice(0, maxPages)) {
+    const page = await fetchPageExcerpt(result.url);
+    Object.assign(result, page);
+    result.host = result.host || hostnameLabel(result.url);
+    result.favicon = result.favicon || faviconApiUrl(result.url);
+    result.quote = usefulQuote(result.excerpt || result.description || result.snippet);
+  }
+
+  const opened = searchTab ? [{ url: searchTab.url, kind: 'search', foreground: true, target: 'integrated' }] : [];
+  if (searchTab) {
+    for (const result of all.slice(0, openTabs)) {
+      const openedTab = await openInIntegratedBrowser(result.url, { background: true });
+      if (openedTab.ok) opened.push({ url: result.url, kind: 'source', foreground: false, target: 'integrated' });
+    }
+  }
+
+  res.json({ ok: true, query, searchedQueries, results: all, opened });
+});
+
+// Detect a CLI tool once (node/npm/git/rg). Cached promise so /doctor and the
+// grep fallback don't re-spawn the same probe repeatedly.
+const _cliCache = new Map();
+function detectCli(name) {
+  if (_cliCache.has(name)) return _cliCache.get(name);
+  const p = new Promise((resolve) => {
+    const done = (err, stdout) => {
+      if (err || !stdout) return resolve({ available: false, version: '' });
+      resolve({ available: true, version: String(stdout).split(/\r?\n/)[0].trim() });
+    };
+    try {
+      if (process.platform === 'win32') {
+        execFile('cmd.exe', ['/c', `${name} --version`], { timeout: 5000, windowsHide: true }, done);
+      } else {
+        execFile(name, ['--version'], { timeout: 5000 }, done);
+      }
+    } catch { resolve({ available: false, version: '' }); }
+  });
+  _cliCache.set(name, p);
+  return p;
+}
+
+function clampInt(v, lo, hi, def) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+// Directories never walked by Grep/Glob (heavy / irrelevant). FILTERED already
+// covers node_modules/.git/.env/server-data; add common build output folders.
+const WALK_IGNORE = new Set([...FILTERED, 'dist', 'build', '.next', 'out', '.cache', 'coverage', '.nuxt', '.svelte-kit']);
+
+// Collect relative file paths under base, bounded. Returns { list, truncated }.
+function collectFiles(base, opts) {
+  const max = (opts && opts.max) || 20000;
+  const list = [];
+  let truncated = false;
+  const walk = (dir, rel, depth) => {
+    if (truncated || depth > 12) return;
+    let entries;
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (WALK_IGNORE.has(e.name)) continue;
+      const r = rel ? rel + '/' + e.name : e.name;
+      if (e.isDirectory()) walk(path.join(dir, e.name), r, depth + 1);
+      else {
+        if (list.length >= max) { truncated = true; return; }
+        list.push(r);
+      }
+    }
+  };
+  walk(base, '', 0);
+  return { list, truncated };
+}
+
+// Convert a glob (**, *, ?) into an anchored, case-insensitive RegExp.
+function globToRe(glob) {
+  const g = String(glob || '**/*').replace(/\\/g, '/').trim();
+  let re = '';
+  for (let i = 0; i < g.length; i++) {
+    const c = g[i];
+    if (c === '*' && g[i + 1] === '*') {
+      if (g[i + 2] === '/') { re += '(?:.*/)?'; i += 2; }
+      else { re += '.*'; i += 1; }
+    } else if (c === '*') re += '[^/]*';
+    else if (c === '?') re += '[^/]';
+    else if ('.+^${}()|[]'.indexOf(c) >= 0) re += '\\' + c;
+    else re += c;
+  }
+  return new RegExp('^' + re + '$', 'i');
+}
+
+// Parse ripgrep "relpath:line:text" output into bounded structured results.
+function parseRgOutput(stdout, max) {
+  const list = [];
+  let truncated = false;
+  const lines = String(stdout || '').split(/\r?\n/);
+  for (const ln of lines) {
+    if (!ln) continue;
+    const m = ln.match(/^(.*?):(\d+):(.*)$/);
+    if (!m) continue;
+    if (list.length >= max) { truncated = true; break; }
+    list.push({ file: m[1].replace(/\\/g, '/'), line: parseInt(m[2], 10), text: m[3].slice(0, 240) });
+  }
+  return { list, truncated };
+}
+
+// Pure-JS grep fallback when ripgrep is not installed. Bounded everywhere.
+// `searchAbs` may be the project root, a sub-directory, or a single file.
+function jsGrep(searchAbs, base, pattern, ignoreCase, glob, max) {
+  let re;
+  try { re = new RegExp(pattern, ignoreCase ? 'i' : ''); }
+  catch { const esc = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); re = new RegExp(esc, ignoreCase ? 'i' : ''); }
+  const globRe = glob ? globToRe(glob) : null;
+
+  // Build the list of target files (abs + project-relative path) for either a
+  // single-file target or a directory walk.
+  const targets = [];
+  let st;
+  try { st = fs.statSync(searchAbs); } catch { return { list: [], truncated: false }; }
+  if (st.isFile()) {
+    targets.push({ abs: searchAbs, rel: path.relative(base, searchAbs).replace(/\\/g, '/') });
+  } else {
+    const prefix = path.relative(base, searchAbs).replace(/\\/g, '/');
+    for (const r of collectFiles(searchAbs, { max: 8000 }).list) {
+      targets.push({ abs: path.join(searchAbs, r), rel: prefix ? prefix + '/' + r : r });
+    }
+  }
+
+  const list = [];
+  let truncated = false, scanned = 0;
+  for (const t of targets) {
+    if (truncated) break;
+    if (globRe && !globRe.test(t.rel)) continue;
+    if (scanned++ > 6000) { truncated = true; break; }
+    let buf;
+    try {
+      const s = fs.statSync(t.abs);
+      if (s.size > 512 * 1024) continue;             // skip large files
+      buf = fs.readFileSync(t.abs);
+    } catch { continue; }
+    if (buf.includes(0)) continue;                   // skip binary
+    const rows = buf.toString('utf-8').split('\n');
+    for (let i = 0; i < rows.length; i++) {
+      if (re.test(rows[i])) {
+        if (list.length >= max) { truncated = true; break; }
+        list.push({ file: t.rel, line: i + 1, text: rows[i].trim().slice(0, 240) });
+      }
+    }
+  }
+  return { list, truncated };
+}
+
+// POST /api/grep  { root, pattern, path?, glob?, ignoreCase?, maxResults }
+app.post('/api/grep', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const pat = String(b.pattern || '');
+    if (!pat || pat.length > 1000) return res.status(400).json({ error: 'pattern requis' });
+    const base = resolveBase(b.root);
+    if (!b.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+
+    const rel = String(b.path || '').replace(/\\/g, '/').replace(/^\/+/, '');
+    let searchAbs = base;
+    if (rel) {
+      searchAbs = path.resolve(base, rel);
+      if (!isInsideBase(base, searchAbs)) return res.status(403).json({ error: 'Access denied' });
+    }
+    const glob = String(b.glob || '').trim();
+    const ic = !!b.ignoreCase;
+    const maxResults = clampInt(b.maxResults, 1, 500, 200);
+
+    const rg = await detectCli('rg');
+    if (rg.available) {
+      const args = ['--line-number', '--no-heading', '--color', 'never', '--max-columns', '300', '--max-count', '30',
+        '-g', '!node_modules', '-g', '!.git', '-g', '!dist', '-g', '!build', '-g', '!.next'];
+      if (ic) args.push('-i');
+      if (glob) args.push('-g', glob);
+      args.push('--regexp', pat, rel || '.');
+      execFile('rg', args, { cwd: base, timeout: 15000, maxBuffer: 1024 * 1024 * 8, windowsHide: true }, (err, stdout, stderr) => {
+        if (err && err.code === 1 && !stdout) return res.json({ tool: 'ripgrep', pattern: pat, results: [], count: 0, truncated: false });
+        if (err && err.code !== 1 && !stdout) return res.status(500).json({ error: String(stderr || err.message || 'ripgrep error').slice(0, 300) });
+        const r = parseRgOutput(stdout, maxResults);
+        res.json({ tool: 'ripgrep', pattern: pat, results: r.list, count: r.list.length, truncated: r.truncated });
+      });
+      return;
+    }
+    const r = jsGrep(searchAbs, base, pat, ic, glob, maxResults);
+    res.json({ tool: 'js', pattern: pat, results: r.list, count: r.list.length, truncated: r.truncated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/glob?root=...&pattern=**/*.js&maxResults=...
+app.get('/api/glob', (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+    const pattern = String(req.query.pattern || '**/*');
+    const max = clampInt(req.query.maxResults, 1, 2000, 500);
+    let re;
+    try { re = globToRe(pattern); } catch { return res.status(400).json({ error: 'pattern invalide' }); }
+    const all = collectFiles(base, { max: 20000 });
+    const files = [];
+    let truncated = false;
+    for (const f of all.list) {
+      if (re.test(f)) {
+        if (files.length >= max) { truncated = true; break; }
+        files.push(f);
+      }
+    }
+    res.json({ pattern, files, count: files.length, truncated: truncated || all.truncated });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gitdiff?root=...  -> { available, repo, branch, status, unstaged, staged }
+app.get('/api/gitdiff', async (req, res) => {
+  try {
+    const base = resolveBase(req.query.root);
+    if (!req.query.root && !base.startsWith(APP_DIR)) return res.status(403).json({ error: 'Access denied' });
+    const git = await detectCli('git');
+    if (!git.available) return res.json({ available: false, error: 'git introuvable' });
+    const run = (args) => new Promise((resolve) => {
+      execFile('git', ['-C', base, ...args], { timeout: 15000, maxBuffer: 1024 * 1024 * 16, windowsHide: true },
+        (e, so) => resolve(e && !so ? '' : String(so || '')));
+    });
+    const inside = (await run(['rev-parse', '--is-inside-work-tree'])).trim();
+    if (inside !== 'true') return res.json({ available: true, repo: false });
+    const branch = (await run(['rev-parse', '--abbrev-ref', 'HEAD'])).trim();
+    const status = await run(['status', '--porcelain=v1']);
+    const unstaged = await run(['diff']);
+    const staged = await run(['diff', '--staged']);
+    const cap = (s) => (s.length > 60000 ? s.slice(0, 60000) + '\n... (tronqué)' : s);
+    res.json({ available: true, repo: true, branch, status: cap(status), unstaged: cap(unstaged), staged: cap(staged) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/version -> { version }
+app.get('/api/version', (req, res) => res.json({ version: APP_VERSION }));
+
+// GET /api/doctor?root=...  -> environment diagnostics (never exposes API keys)
+app.get('/api/doctor', async (req, res) => {
+  try {
+    const base = req.query.root ? resolveBase(req.query.root) : null;
+    const [npm, git, rg] = await Promise.all([detectCli('npm'), detectCli('git'), detectCli('rg')]);
+
+    let ollama = { reachable: false, models: 0 };
+    try {
+      const url = String(req.query.ollama || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 1500);
+      const r = await fetch(`${url}/api/tags`, { signal: ctrl.signal });
+      clearTimeout(t);
+      if (r.ok) { const d = await r.json().catch(() => ({})); ollama = { reachable: true, models: (d.models || []).length }; }
+    } catch {}
+
+    let gguf = { variant: '', installed: false };
+    try { const v = detectEngineVariant(); gguf = { variant: v, installed: !!findExeRecursive(path.join(ENGINE_DIR, v), platformRuntime.engineBinary()) }; } catch {}
+
+    const installerPaths = [
+      path.join(APP_DIR, 'native', 'installer', 'zaalis-setup.exe'),
+      path.join(process.cwd(), 'native', 'installer', 'zaalis-setup.exe'),
+    ];
+    const installer = installerPaths.some((p) => { try { return fs.existsSync(p); } catch { return false; } });
+
+    let scripts = [];
+    try { const pj = JSON.parse(fs.readFileSync(path.join(APP_DIR, 'package.json'), 'utf-8')); scripts = Object.keys(pj.scripts || {}); } catch {}
+
+    let projectGit = null;
+    if (base && git.available) {
+      projectGit = await new Promise((resolve) => {
+        execFile('git', ['-C', base, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 8000, windowsHide: true },
+          (e, so) => resolve(e ? null : String(so || '').trim()));
+      });
+    }
+
+    res.json({
+      version: APP_VERSION,
+      node: process.version,
+      npm, git, rg, ollama, gguf, installer,
+      scripts, projectGit,
+      platform: process.platform,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ---------------------------------------------------------------------------
+// FOLDER PICKER — opens the native OS folder dialog (local app)
+// ---------------------------------------------------------------------------
+// POST /api/pick-folder  -> { path } | { cancelled: true }
+app.post('/api/pick-folder', (req, res) => {
+  if (process.platform !== 'win32') {
+    return platformRuntime.pickFolder(res);
+  }
+
+  // Prefer the bundled modern Explorer-style picker (pickfolder.exe).
+  const picker = path.join(APP_DIR, 'pickfolder.exe');
+  if (fs.existsSync(picker)) {
+    execFile(picker, { timeout: 180000, windowsHide: true }, (err, stdout) => {
+      if (err) return res.status(500).json({ error: err.message });
+      const selected = (stdout || '').trim();
+      if (!selected) return res.json({ cancelled: true });
+      res.json({ path: selected });
+    });
+    return;
+  }
+
+  // Fallback (dev): old FolderBrowserDialog via PowerShell.
+  const ps = [
+    'Add-Type -AssemblyName System.Windows.Forms;',
+    '$d = New-Object System.Windows.Forms.FolderBrowserDialog;',
+    "$d.Description = 'Choisissez le dossier du projet';",
+    '$d.ShowNewFolderButton = $true;',
+    '$null = $d.ShowDialog();',
+    '[Console]::Out.Write($d.SelectedPath)',
+  ].join(' ');
+  // Use execFile to launch PowerShell directly (no intermediate cmd.exe shell)
+  // with windowsHide:true so no console window flashes.
+  const psArgs = ['-NoProfile', '-STA', '-Command', ps];
+
+  execFile('powershell.exe', psArgs, { timeout: 120000, windowsHide: true }, (err, stdout) => {
+    if (err) return res.status(500).json({ error: err.message });
+    const selected = (stdout || '').trim();
+    if (!selected) return res.json({ cancelled: true });
+    res.json({ path: selected });
+  });
+});
+
+// GET /api/ollama-models?url=...  -> { models: [names] }
+app.get('/api/ollama-models', async (req, res) => {
+  try {
+    const configured = sharedConfigForUser(req.user).ollamaUrl || 'http://127.0.0.1:11434';
+    const url = (req.isMobile ? configured : (req.query.url || configured)).replace(/\/+$/, '');
+    const r = await fetch(`${url}/api/tags`);
+    const data = await r.json();
+    const models = (data.models || []).map((m) => m.name).filter(Boolean);
+    res.json({ models });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/ollama-delete  { name, url }  -> uninstall a model from Ollama
+app.post('/api/ollama-delete', async (req, res) => {
+  try {
+    const name = req.body && req.body.name;
+    const url = ((req.body && req.body.url) || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+    if (!name) return res.status(400).json({ error: 'name required' });
+    const r = await fetch(`${url}/api/delete`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!r.ok) {
+      const t = await r.text().catch(() => '');
+      return res.status(500).json({ error: t || ('HTTP ' + r.status) });
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/hf-search?q=...  -> search GGUF models on Hugging Face (proxied)
+app.get('/api/hf-search', async (req, res) => {
+  try {
+    const q = (req.query.q || '').toString().trim();
+    const sort = ['downloads', 'likes', 'trendingScore', 'lastModified'].includes(req.query.sort) ? req.query.sort : 'downloads';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 40, 50);
+    const searchParam = q ? `search=${encodeURIComponent(q)}&` : '';
+    const u = `https://huggingface.co/api/models?${searchParam}filter=gguf&sort=${sort}&direction=-1&limit=${limit}&full=true`;
+    const r = await fetch(u, { headers: { 'User-Agent': 'zaalis-ide' } });
+    const data = await r.json();
+    const NOISE = new Set(['gguf', 'text-generation', 'transformers', 'region:us', 'endpoints_compatible', 'autotrain_compatible', 'conversational']);
+    const models = (Array.isArray(data) ? data : []).map((m) => ({
+      id: m.id || m.modelId,
+      downloads: m.downloads || 0,
+      likes: m.likes || 0,
+      pipeline: m.pipeline_tag || '',
+      // a few meaningful tags (languages, base model, size...) without the noise
+      tags: (m.tags || []).filter((t) => !NOISE.has(t) && !t.includes(':') && t.length < 22).slice(0, 5),
+    })).filter((m) => m.id);
+    res.json({ models });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/hf-files?id=<repo>  -> available GGUF quantizations with sizes
+app.get('/api/hf-files', async (req, res) => {
+  try {
+    const id = (req.query.id || '').toString();
+    if (!id) return res.status(400).json({ error: 'id required' });
+    const r = await fetch(`https://huggingface.co/api/models/${id}?blobs=true`, { headers: { 'User-Agent': 'zaalis-ide' } });
+    const d = await r.json();
+    const groups = {};
+    for (const s of (d.siblings || [])) {
+      const f = s.rfilename || '';
+      if (!/\.gguf$/i.test(f)) continue;
+      const m = f.match(/(IQ\d[A-Z0-9_]*|Q\d[A-Z0-9_]*K[A-Z0-9_]*|Q\d_\d|Q\d[A-Z0-9_]*|BF16|F16|F32)/i);
+      const quant = (m ? m[1] : 'default').toUpperCase();
+      if (!groups[quant]) groups[quant] = { size: 0, files: [], file: '' };
+      const size = s.size || 0;
+      groups[quant].size += size;
+      groups[quant].files.push({ file: f, size });
+      if (!groups[quant].file || size > (groups[quant]._bestSize || 0)) {
+        groups[quant].file = f;
+        groups[quant]._bestSize = size;
+      }
+    }
+    let quants = Object.entries(groups).map(([quant, info]) => ({
+      quant,
+      size: info.size,
+      file: info.file,
+      files: info.files,
+    })).filter((x) => x.size > 0);
+    // Drop the unlabelled (fp16/full) group when real quantizations exist.
+    if (quants.some((x) => x.quant !== 'DEFAULT')) quants = quants.filter((x) => x.quant !== 'DEFAULT');
+    quants.sort((a, b) => a.size - b.size);
+    res.json({ quants });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/ollama-pull?name=...&url=...  -> streams Ollama's pull progress (NDJSON)
+app.get('/api/ollama-pull', async (req, res) => {
+  const name = req.query.name;
+  const url = (req.query.url || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+  if (!name) return res.status(400).json({ error: 'name required' });
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  res.setHeader('Cache-Control', 'no-store');
+  // If the client cancels (closes the request), abort the pull to Ollama.
+  const ac = new AbortController();
+  req.on('close', () => ac.abort());
+  try {
+    const r = await fetch(`${url}/api/pull`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, stream: true }),
+      signal: ac.signal,
+    });
+    if (!r.body) { res.end(); return; }
+    const reader = r.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(Buffer.from(value));
+    }
+    res.end();
+  } catch (err) {
+    if (!ac.signal.aborted) {
+      try { res.write(JSON.stringify({ error: err.message }) + '\n'); } catch {}
+    }
+    try { res.end(); } catch {}
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LOCAL GGUF ENGINE (llama.cpp) — run GGUF models directly, NO Ollama needed.
+// We download the official llama.cpp `llama-server.exe` build that matches the
+// machine (CUDA / Vulkan / CPU) into %LOCALAPPDATA%\zaalis\engine, spawn it as a
+// child process, and proxy chat to its OpenAI-compatible /v1/chat/completions.
+// This is exactly how LM Studio / Jan work, but fully self-contained.
+// ---------------------------------------------------------------------------
+const MODELS_DIR = path.join(DATA_DIR, 'models');   // installed *.gguf files
+const ENGINE_DIR = path.join(DATA_DIR, 'engine');   // extracted llama.cpp builds
+const LLAMA_TAG = 'b9690';                          // pinned llama.cpp release
+const ENGINE_PORT = 8091;
+function ggufModelPath(name) {
+  const value = String(name || '');
+  if (!value || path.basename(value) !== value || !value.toLowerCase().endsWith('.gguf')) throw new Error('Nom GGUF invalide.');
+  return path.join(MODELS_DIR, value);
+}
+
+function ensureDir(d) { try { fs.mkdirSync(d, { recursive: true }); } catch {} }
+ensureDir(MODELS_DIR);
+
+// Detect the fastest engine variant available on this machine.
+let _gpuVariant = null;
+function detectEngineVariant() {
+  if (_gpuVariant) return _gpuVariant;
+  if (process.platform !== 'win32') { _gpuVariant = platformRuntime.detectPosixEngine(); return _gpuVariant; }
+  let names = '';
+  try {
+    names = execSyncSafe('powershell -NoProfile -Command "(Get-CimInstance Win32_VideoController).Name -join \';\'"');
+  } catch {}
+  if (!names) { try { names = execSyncSafe('wmic path win32_VideoController get name'); } catch {} }
+  names = (names || '').toLowerCase();
+  if (/nvidia|geforce|rtx|quadro|tesla/.test(names)) _gpuVariant = 'cuda';
+  else if (/amd|radeon|intel|arc|iris/.test(names)) _gpuVariant = 'vulkan';
+  else _gpuVariant = 'cpu';
+  return _gpuVariant;
+}
+function execSyncSafe(cmd) {
+  const { execSync } = require('child_process');
+  return execSync(cmd, { timeout: 9000, windowsHide: true }).toString();
+}
+
+function engineAssetUrls(variant) {
+  if (process.platform !== 'win32') return platformRuntime.engineAssets(LLAMA_TAG, platformRuntime.normalizeEngine(variant));
+  const base = `https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_TAG}/`;
+  if (variant === 'cuda') return [
+    base + `llama-${LLAMA_TAG}-bin-win-cuda-12.4-x64.zip`,
+    base + `cudart-llama-bin-win-cuda-12.4-x64.zip`,   // CUDA runtime DLLs
+  ];
+  if (variant === 'vulkan') return [base + `llama-${LLAMA_TAG}-bin-win-vulkan-x64.zip`];
+  return [base + `llama-${LLAMA_TAG}-bin-win-cpu-x64.zip`];
+}
+
+function findExeRecursive(dir, name) {
+  let found = null;
+  const walk = (d) => {
+    if (found) return;
+    let entries = [];
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk(fp);
+      else if (e.name.toLowerCase() === name) { found = fp; return; }
+    }
+  };
+  walk(dir);
+  return found;
+}
+
+function terminalGgufPullStatus(status) {
+  return status === 'success' || status === 'error' || status === 'canceled';
+}
+
+function ggufPullSnapshot(task) {
+  return {
+    id: task.id,
+    status: task.status,
+    name: task.name,
+    repo: task.repo,
+    file: task.file,
+    completed: task.completed || 0,
+    total: task.total || 0,
+    error: task.error || '',
+    startedAt: task.startedAt,
+    updatedAt: task.updatedAt,
+    doneAt: task.doneAt || 0,
+  };
+}
+
+// Stream a URL to a file; calls onProgress(received, total). Abortable.
+async function downloadTo(url, dest, onProgress, signal) {
+  const res = await fetch(url, { redirect: 'follow', signal });
+  if (!res.ok || !res.body) throw new Error(`Téléchargement échoué (HTTP ${res.status})`);
+  const total = Number(res.headers.get('content-length')) || 0;
+  ensureDir(path.dirname(dest));
+  const out = fs.createWriteStream(dest);
+  let received = 0;
+  const reader = res.body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      received += value.length;
+      if (!out.write(Buffer.from(value))) await new Promise((r) => out.once('drain', r));
+      if (onProgress) onProgress(received, total);
+    }
+  } finally {
+    await new Promise((r) => out.end(r));
+  }
+}
+
+const ggufPullTasks = new Map();
+
+function sweepGgufPullTasks() {
+  const cutoff = Date.now() - 60 * 60 * 1000;
+  for (const [id, task] of ggufPullTasks) {
+    if (task.doneAt && task.doneAt < cutoff) ggufPullTasks.delete(id);
+  }
+}
+
+function startGgufPullTask({ repo, file, url }) {
+  sweepGgufPullTasks();
+  if (!url && repo && file) url = `https://huggingface.co/${repo}/resolve/main/${file.split('/').map(encodeURIComponent).join('/')}?download=true`;
+  if (!url) throw new Error('url, ou repo+file requis');
+
+  let base = path.basename((file || url).split('?')[0]) || `model-${Date.now()}.gguf`;
+  if (!base.toLowerCase().endsWith('.gguf')) base += '.gguf';
+  const dest = path.join(MODELS_DIR, base);
+  const tmp = dest + '.part';
+
+  for (const task of ggufPullTasks.values()) {
+    if (!terminalGgufPullStatus(task.status) && task.dest === dest) return task;
+  }
+
+  const ac = new AbortController();
+  const task = {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    repo,
+    file,
+    url,
+    name: base,
+    dest,
+    tmp,
+    status: 'queued',
+    completed: 0,
+    total: 0,
+    error: '',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    doneAt: 0,
+    ac,
+  };
+  ggufPullTasks.set(task.id, task);
+
+  task.promise = (async () => {
+    try {
+      ensureDir(MODELS_DIR);
+      if (fs.existsSync(dest)) {
+        const size = fs.statSync(dest).size;
+        task.completed = size;
+        task.total = size;
+        task.status = 'success';
+        return;
+      }
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = 'downloading';
+      await downloadTo(url, tmp, (rec, tot) => {
+        task.completed = rec;
+        task.total = tot || task.total || 0;
+        task.status = 'downloading';
+        task.updatedAt = Date.now();
+      }, ac.signal);
+      fs.renameSync(tmp, dest);
+      task.completed = task.total || task.completed;
+      task.status = 'success';
+    } catch (e) {
+      try { fs.unlinkSync(tmp); } catch {}
+      task.status = ac.signal.aborted ? 'canceled' : 'error';
+      task.error = ac.signal.aborted ? 'Téléchargement annulé.' : ((e && e.message) || String(e));
+    } finally {
+      task.updatedAt = Date.now();
+      task.doneAt = Date.now();
+    }
+  })();
+
+  return task;
+}
+
+// Extract a .zip. Tricky on Windows:
+//  - the SYSTEM tar (C:\Windows\System32\tar.exe = bsdtar) reads zip, but a bare
+//    "tar" may resolve to Git's GNU tar (no zip support), so we call it by full
+//    path. bsdtar also reads "C:\path" as host:path, so we cd into the folder
+//    and pass a relative name (no colon).
+//  - if that fails, fall back to PowerShell's Expand-Archive (always present).
+function extractZip(zipPath, destDir) {
+  ensureDir(destDir);
+  if (process.platform !== 'win32') return platformRuntime.extractPosix(zipPath, destDir);
+  const { execSync } = require('child_process');
+  const sysTar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe');
+  if (fs.existsSync(sysTar)) {
+    try {
+      execSync(`"${sysTar}" -xf "${path.basename(zipPath)}" -C .`, {
+        cwd: path.dirname(zipPath), timeout: 180000, windowsHide: true,
+      });
+      return;
+    } catch { /* fall through to PowerShell */ }
+  }
+  const q = (s) => s.replace(/'/g, "''");
+  const ps = `Expand-Archive -LiteralPath '${q(zipPath)}' -DestinationPath '${q(destDir)}' -Force`;
+  execSync(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${ps}"`, { timeout: 300000, windowsHide: true });
+}
+
+// Ensure the engine binary for `variant` exists; returns the llama-server.exe path.
+// Downloads + extracts on first use, reporting progress via onLog({stage, pct}).
+const engineExePaths = {};
+async function ensureEngineBinary(variant, onLog) {
+  variant = platformRuntime.normalizeEngine(variant, process.platform, detectEngineVariant());
+  if (engineExePaths[variant] && fs.existsSync(engineExePaths[variant])) return platformRuntime.executable(engineExePaths[variant]);
+  const vdir = path.join(ENGINE_DIR, variant);
+  let exe = findExeRecursive(vdir, platformRuntime.engineBinary());
+  if (exe) { engineExePaths[variant] = exe; return platformRuntime.executable(exe); }
+  ensureDir(vdir);
+  const urls = engineAssetUrls(variant);
+  for (let i = 0; i < urls.length; i++) {
+    const url = urls[i];
+    const zip = path.join(vdir, path.basename(url));
+    if (onLog) onLog({ stage: 'engine', pct: 0, part: i + 1, parts: urls.length });
+    await downloadTo(url, zip, (rec, tot) => {
+      if (onLog && tot) onLog({ stage: 'engine', pct: Math.round((rec / tot) * 100), part: i + 1, parts: urls.length });
+    });
+    if (onLog) onLog({ stage: 'extract', pct: 100, part: i + 1, parts: urls.length });
+    extractZip(zip, vdir);
+    try { fs.unlinkSync(zip); } catch {}
+  }
+  exe = findExeRecursive(vdir, platformRuntime.engineBinary());
+  if (!exe) throw new Error('llama-server.exe introuvable après extraction.');
+  engineExePaths[variant] = exe;
+  return platformRuntime.executable(exe);
+}
+
+// --- Engine process lifecycle (one model loaded at a time, swapped on demand) ---
+let engineProc = null, engineModelFile = null, engineVariant = null, engineStarting = null;
+
+function stopEngine() {
+  return new Promise((resolve) => {
+    if (!engineProc) return resolve();
+    const p = engineProc; engineProc = null; engineModelFile = null;
+    let done = false;
+    const fin = () => { if (!done) { done = true; resolve(); } };
+    try { p.once('exit', fin); p.kill(); setTimeout(fin, 2000); } catch { fin(); }
+  });
+}
+
+async function waitForHealth(port, timeoutMs) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/health`);
+      if (r.ok) { const j = await r.json().catch(() => ({})); if (!j.status || j.status === 'ok') return; }
+    } catch {}
+    if (Date.now() - t0 > timeoutMs) throw new Error("Le moteur GGUF n'a pas démarré à temps (modèle trop lourd ?).");
+    await new Promise((r) => setTimeout(r, 600));
+  }
+}
+
+// Track the engine options the running process was started with, so a change in
+// context size / GPU layers forces a restart even when the model is unchanged.
+let engineOpts = '';
+
+// Make sure the engine is running and serving `modelFile`. Swaps model if needed.
+// `opts` = { ctx, gpuLayers } let the user tune context window and VRAM usage.
+async function ensureEngine(modelFile, preferredVariant, opts) {
+  opts = opts || {};
+  const modelPath = ggufModelPath(modelFile);
+  if (!fs.existsSync(modelPath)) throw new Error('Modèle GGUF introuvable : ' + modelFile);
+  // Normalize options: context (clamped) and GPU layers ('' = all -> 999).
+  let ctx = parseInt(opts.ctx, 10); if (!Number.isFinite(ctx) || ctx <= 0) ctx = SHARED_CONFIG_DEFAULTS.ggufCtx;
+  ctx = Math.max(512, Math.min(131072, ctx));
+  const nglRaw = opts.gpuLayers;
+  const ngl = (nglRaw === '' || nglRaw === undefined || nglRaw === null) ? 999 : (parseInt(nglRaw, 10) || 0);
+  const desiredVariant = platformRuntime.normalizeEngine(preferredVariant || detectEngineVariant(), process.platform, detectEngineVariant());
+  const optsKey = `${ctx}|${ngl}`;
+  if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return;
+  if (engineStarting) { try { await engineStarting; } catch {} if (engineProc && engineModelFile === modelFile && engineOpts === optsKey && engineVariant === desiredVariant) return; }
+  engineStarting = (async () => {
+    await stopEngine();
+    let variant = desiredVariant;
+    let exe;
+    try { exe = await ensureEngineBinary(variant); }
+    catch (e) { if (variant !== 'cpu') { variant = 'cpu'; exe = await ensureEngineBinary('cpu'); } else throw e; }
+    const args = ['-m', modelPath, '--host', '127.0.0.1', '--port', String(ENGINE_PORT), '--ctx-size', String(ctx)];
+    // Offload layers to the GPU unless we're on the CPU build or the user capped it at 0.
+    if (variant !== 'cpu' && ngl > 0) args.push('-ngl', String(ngl));
+    else if (process.platform !== 'win32') args.push('-ngl', '0');
+    engineOpts = optsKey;
+    const proc = spawn(exe, args, { windowsHide: true, stdio: 'ignore', cwd: path.dirname(exe) });
+    proc.on('error', () => {});
+    engineProc = proc; engineModelFile = modelFile; engineVariant = variant;
+    proc.once('exit', () => { if (engineProc === proc) { engineProc = null; engineModelFile = null; } });
+    await waitForHealth(ENGINE_PORT, 180000);
+  })();
+  try { await engineStarting; } finally { engineStarting = null; }
+}
+
+// GET /api/gguf-models -> installed models + engine status
+app.get('/api/gguf-models', (req, res) => {
+  try {
+    ensureDir(MODELS_DIR);
+    const files = fs.readdirSync(MODELS_DIR).filter((f) => f.toLowerCase().endsWith('.gguf'));
+    const models = files.map((f) => {
+      let size = 0; try { size = fs.statSync(path.join(MODELS_DIR, f)).size; } catch {}
+      return { name: f, size };
+    });
+    res.json({ models, variant: detectEngineVariant(), running: !!engineProc, current: engineModelFile });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gguf-engine -> which variant this machine will use + whether installed
+app.get('/api/gguf-engine', (req, res) => {
+  const variant = detectEngineVariant();
+  res.json({
+    variant,
+    installed: !!findExeRecursive(path.join(ENGINE_DIR, variant), platformRuntime.engineBinary()),
+    running: !!engineProc, current: engineModelFile,
+  });
+});
+
+// POST /api/gguf-load { name, ctx, gpuLayers, variant } -> explicitly load a
+// model into memory (LM Studio style). Streams NDJSON: loading -> ready/error.
+app.post('/api/gguf-load', async (req, res) => {
+  const b = req.body || {};
+  const name = String(b.name || '');
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  try { ggufModelPath(name); } catch {
+    try { res.write(JSON.stringify({ status: 'error', error: 'Nom de modèle invalide.' }) + '\n'); } catch {}
+    return res.end();
+  }
+  // Heartbeat so the client can show progress while the engine boots.
+  try { res.write(JSON.stringify({ status: 'loading', name }) + '\n'); } catch {}
+  const hb = setInterval(() => { try { res.write(JSON.stringify({ status: 'loading', name }) + '\n'); } catch {} }, 1500);
+  try {
+    await ensureEngine(name, b.variant || undefined, { ctx: b.ctx, gpuLayers: b.gpuLayers });
+    clearInterval(hb);
+    try { res.write(JSON.stringify({ status: 'ready', name, variant: engineVariant, ctx: engineOpts.split('|')[0] }) + '\n'); } catch {}
+    res.end();
+  } catch (e) {
+    clearInterval(hb);
+    try { res.write(JSON.stringify({ status: 'error', error: (e && e.message) || String(e) }) + '\n'); } catch {}
+    res.end();
+  }
+});
+
+// POST /api/gguf-unload -> eject the model currently held in memory.
+app.post('/api/gguf-unload', async (req, res) => {
+  try { await stopEngine(); res.json({ success: true }); }
+  catch (e) { res.status(500).json({ error: (e && e.message) || String(e) }); }
+});
+
+// POST /api/gguf-delete { name }
+app.post('/api/gguf-delete', async (req, res) => {
+  try {
+    const name = String((req.body && req.body.name) || '');
+    let target;
+    try { target = ggufModelPath(name); } catch { return res.status(400).json({ error: 'Nom invalide.' }); }
+    if (engineModelFile === name) await stopEngine();
+    fs.unlinkSync(target);
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/gguf-pull?repo=owner/name&file=x.gguf  (or url=<direct>) -> NDJSON progress.
+// The download is owned by the server, not by the browser request. Closing the
+// catalog/model window only detaches this progress stream; it does not cancel.
+app.get('/api/gguf-pull', async (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  let task;
+  try {
+    task = startGgufPullTask({
+      repo: String(req.query.repo || '').trim(),
+      file: String(req.query.file || '').trim(),
+      url: String(req.query.url || '').trim(),
+    });
+  } catch (e) {
+    try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {}
+    try { res.end(); } catch {}
+    return;
+  }
+
+  let closed = false;
+  let lastPayload = '';
+  const writeSnapshot = () => {
+    if (closed) return;
+    const payload = JSON.stringify(ggufPullSnapshot(task));
+    if (payload === lastPayload && !terminalGgufPullStatus(task.status)) return;
+    lastPayload = payload;
+    try { res.write(payload + '\n'); } catch { closed = true; }
+    if (terminalGgufPullStatus(task.status)) {
+      closed = true;
+      clearInterval(timer);
+      try { res.end(); } catch {}
+    }
+  };
+  const timer = setInterval(writeSnapshot, 300);
+  req.on('close', () => { closed = true; clearInterval(timer); });
+  writeSnapshot();
+});
+
+app.get('/api/gguf-pulls', (req, res) => {
+  sweepGgufPullTasks();
+  res.json({ tasks: Array.from(ggufPullTasks.values()).map(ggufPullSnapshot) });
+});
+
+app.post('/api/gguf-pull-cancel', (req, res) => {
+  const id = String((req.body && req.body.id) || req.query.id || '').trim();
+  const task = ggufPullTasks.get(id);
+  if (!task) return res.status(404).json({ error: 'Téléchargement introuvable.' });
+  if (!terminalGgufPullStatus(task.status)) task.ac.abort();
+  res.json({ success: true, task: ggufPullSnapshot(task) });
+});
+
+// GET /api/gguf-engine-pull?variant=cpu|cuda|vulkan -> download the engine, NDJSON progress
+app.get('/api/gguf-engine-pull', async (req, res) => {
+  res.setHeader('Content-Type', 'application/x-ndjson');
+  try {
+    const variant = String(req.query.variant || detectEngineVariant());
+    await ensureEngineBinary(variant, (p) => { try { res.write(JSON.stringify({ status: p.stage, pct: p.pct, part: p.part, parts: p.parts }) + '\n'); } catch {} });
+    res.write(JSON.stringify({ status: 'success', variant }) + '\n');
+    res.end();
+  } catch (e) {
+    try { res.write(JSON.stringify({ status: 'error', error: e.message }) + '\n'); } catch {}
+    try { res.end(); } catch {}
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AI CHAT API
+// ---------------------------------------------------------------------------
+
+app.get('/api/rust-core/status', (req, res) => res.json(rustAgentBridge.status()));
+
+async function capabilitiesForUser(user, provider, model) {
+  const id = String(provider || '').trim().toLowerCase();
+  if (compatProviders.isCompat(id)) {
+    const provider = compatProviders.get(id);
+    if (!provider) throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+    return compatProviders.capabilities(id, model, compatReady(user, provider));
+  }
+  if (!modelCatalog.PROVIDERS.some((entry) => entry.id === id)) {
+    throw Object.assign(new Error('Fournisseur de modèle inconnu.'), { status: 400 });
+  }
+  const name = String(model || modelCatalog.SUBMODELS[id]?.[0] || '').trim();
+  if (!name) throw Object.assign(new Error('Modèle requis.'), { status: 400 });
+  const shared = sharedConfigForUser(user);
+  const info = { ready: true };
+  if (id === 'local') {
+    info.ready = false;
+    try {
+      const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+      const answer = await fetch(`${url}/api/show`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }), signal: AbortSignal.timeout(2500),
+      });
+      if (answer.ok) {
+        const show = await answer.json();
+        info.ready = true;
+        info.localCapabilities = show.capabilities || [];
+        const contextEntry = Object.entries(show.model_info || {}).find(([key, value]) =>
+          key.endsWith('.context_length') && Number.isFinite(Number(value)) && Number(value) >= 512);
+        if (contextEntry) info.contextWindow = Number(contextEntry[1]);
+      }
+    } catch {}
+  } else if (id === 'gguf') {
+    try { info.ready = fs.existsSync(ggufModelPath(name)); } catch { info.ready = false; }
+    info.contextWindow = shared.ggufCtx;
+  } else {
+    const providerInfo = modelCatalog.PROVIDERS.find((entry) => entry.id === id);
+    info.ready = !!userApiKeys(user)[providerInfo.keyName];
+  }
+  return modelCapabilities(id, name, info);
+}
+
+app.get('/api/model-capabilities', async (req, res) => {
+  try { res.json(await capabilitiesForUser(req.user, req.query.provider, req.query.model)); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
+app.post('/api/rust-core/cancel', async (req, res) => {
+  try {
+    const sessionId = String(req.body && req.body.sessionId || '');
+    if (!sessionId) return res.status(400).json({ error: 'sessionId requis.' });
+    res.json(await rustAgentBridge.cancel(req.user.id, sessionId, req.body && req.body.agentId));
+  } catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
+// ---------------------------------------------------------------------------
+// CODESTRALE BRIDGE — the two descriptors the companion app reads.
+// ---------------------------------------------------------------------------
+// Reaching either of these already proves the secret was valid and an account
+// exists (the auth guard answers 401 otherwise), which is exactly how
+// codestrale tells "IDE closed" from "IDE open, nobody logged in".
+
+// GET /api/codestrale/ping -> is the bridge alive, and can models actually answer
+app.get('/api/codestrale/ping', (req, res) => {
+  const core = rustAgentBridge.status();
+  res.json({
+    ok: true,
+    version: APP_VERSION,
+    account: req.user ? req.user.email : null,
+    // codestrale greys out the composer unless both are true: without the Rust
+    // core there is no agent runtime, so no model can answer.
+    rustCore: { available: !!core.available, enabled: !!core.enabled },
+  });
+});
+
+// GET /api/codestrale/models -> provider -> exact models, with readiness
+app.get('/api/codestrale/models', async (req, res) => {
+  const shared = sharedConfigForUser(req.user);
+  // Both local runtimes are optional: a missing Ollama or an empty models
+  // folder must leave the cloud providers perfectly usable, so each lookup
+  // degrades to an empty list instead of failing the whole catalogue.
+  let ollama = [];
+  try {
+    const url = String(shared.ollamaUrl || 'http://127.0.0.1:11434').replace(/\/+$/, '');
+    const answer = await fetch(`${url}/api/tags`, { signal: AbortSignal.timeout(2500) });
+    const data = await answer.json();
+    ollama = (data.models || []).map((m) => m.name).filter(Boolean);
+  } catch {}
+  let gguf = [];
+  try {
+    ensureDir(MODELS_DIR);
+    gguf = fs.readdirSync(MODELS_DIR).filter((f) => f.toLowerCase().endsWith('.gguf'));
+  } catch {}
+  res.json(modelCatalog.buildCatalog({
+    keys: userApiKeys(req.user),
+    ollama,
+    gguf,
+    ggufCtx: shared.ggufCtx,
+  }));
+});
+
+app.post('/api/rust-core/decision', async (req, res) => {
+  try {
+    const result = await rustAgentBridge.decide(req.user.id, req.body || {});
+    res.json(result || { resolved: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+});
+
+// The agent's browser tool exists only where the integrated browser does: in
+// the desktop app, never for the phone remote.
+function browserToolConfig(req) {
+  if (req.isMobile || req.isBrowser || req.isTunnel || !browserHost.available()) return {};
+  return { browserEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-browser`, browserToken: BROWSER_TOOL_TOKEN };
+}
+
+// Web searches made by the agent's server-side tools are replayed in the
+// integrated browser so the user sees them happen (desktop only).
+function mirrorWebTools(req, emit) {
+  if (req.isMobile || req.isTunnel) return emit;
+  let opened = 0;
+  return (event) => {
+    try {
+      if (event && event.type === 'tool_started' && browserHost.available()) {
+        const input = event.input || {};
+        if ((event.tool === 'web_search' || event.tool === 'deep_search') && input.query) {
+          browserHost.search(String(input.query), { newTab: true }).catch(() => {});
+        } else if (event.tool === 'web_fetch' && input.url && opened < 6) {
+          opened++;
+          openInIntegratedBrowser(String(input.url), { background: true }).catch(() => {});
+        }
+      }
+    } catch {}
+    return emit(event);
+  };
+}
+
+async function rustAgentHttp(req, res, next) {
+  const status = rustAgentBridge.status();
+  if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
+  if (!status.available) {
+    return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
+  }
+  let streamOpen = false;
+  const wantsStream = req.body && req.body.stream === true || /\bapplication\/x-ndjson\b/i.test(String(req.headers.accept || ''));
+  const openStream = (statusCode = 200) => {
+    if (streamOpen) return;
+    streamOpen = true;
+    res.status(statusCode);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+  };
+  const emit = (event) => {
+    if (!wantsStream) return;
+    try { openStream(); res.write(JSON.stringify(event) + '\n'); } catch {}
+  };
+  const controller = new AbortController();
+  let computerToken = '';
+  let computerSession = null;
+  let workspaceEntry = null;
+  let workspaceRun = null;
+  let conversationLock;
+  req.once('aborted', () => controller.abort());
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const body = req.body || {};
+    const kind = body.kind === 'agents' || Array.isArray(body.team) ? 'agents' : 'chat';
+    if (body.conversationId) {
+      conversationLock = continuation.key(req.user.id, kind, body.conversationId);
+      if (!req.messengerContinuation) {
+        if (continuation.active.has(conversationLock)) { conversationLock = null; throw Object.assign(Error('Cette conversation travaille déjà dans une messagerie ou dans l’IDE.'), { status: 409 }); }
+        continuation.active.add(conversationLock);
+      }
+      continuation.capture(req.user.id, kind, body.conversationId, { model: body.model, submodel: body.submodel, team: body.team,
+        language: body.language || 'fr', permissionMode: body.permissionMode || 'supervised', reasoningLevel: body.reasoningLevel, systemPrompt: body.systemPrompt });
+    }
+    let savedConversations = [];
+    if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
+    const conversation = savedConversations.find(item => item.id === body.conversationId);
+    const root = workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id), conversation);
+    const githubReadOnly = await githubIntegration.readOnly(req.user.id, root);
+    let workspaceConfig = {};
+    if (!req.isMobile && !req.isTunnel && !req.isBrowser) {
+      workspaceEntry = workspaceTokens.get(req.user.id);
+      if (!workspaceEntry) { workspaceEntry = { token: crypto.randomBytes(32).toString('base64url'), agents: new Map() }; workspaceTokens.set(req.user.id, workspaceEntry); }
+      const terminal = terminalManager.get(String(body.terminalSessionId || ''), req.user.id);
+      workspaceRun = { user: req.user, root, projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
+      workspaceConfig = { workspaceEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-workspace`, workspaceToken: workspaceEntry.token };
+    }
+    const model = String(body.model || '');
+    const message = String(body.message || '');
+    if ((!model && !Array.isArray(body.team)) || !message.trim()) {
+      if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
+      return res.status(400).json({ error: 'model/team and message are required' });
+    }
+    if (body.computerControl === true) {
+      if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
+      computerSession = await automationManager.start({ userId: req.user.id, permissionMode: body.permissionMode || 'supervised' });
+      computerToken = crypto.randomBytes(32).toString('base64url');
+      computerRuns.set(computerToken, { session: computerSession, userId: req.user.id });
+    }
+    const selectedTeam = Array.isArray(body.team) ? body.team : null;
+    const ggufNames = selectedTeam
+      ? [...new Set(selectedTeam.filter((agent) => agent.model?.provider === 'gguf').map((agent) => agent.model.model).filter(Boolean))]
+      : model === 'gguf' ? [body.submodel] : [];
+    if (ggufNames.length > 1) throw Object.assign(new Error('Une équipe ne peut charger qu’un modèle GGUF à la fois.'), { status: 400 });
+    if (model === 'gguf' && !body.submodel) throw Object.assign(new Error('Aucun modèle GGUF sélectionné.'), { status: 400 });
+    if (ggufNames.length) {
+      const shared = sharedConfigForUser(req.user);
+      await ensureEngine(ggufNames[0], (body.config && body.config.ggufVariant) || shared.ggufVariant, {
+        ctx: (body.config && body.config.ggufCtx) || shared.ggufCtx,
+        gpuLayers: (body.config && body.config.ggufGpuLayers) !== undefined ? body.config.ggufGpuLayers : shared.ggufGpuLayers,
+      });
+    }
+    const modelFacts = selectedTeam ? null : await capabilitiesForUser(req.user, model, body.submodel);
+    const team = selectedTeam ? await Promise.all(selectedTeam.map(async (agent) => ({
+      ...agent,
+      ...(githubReadOnly ? { permissions: { ...agent.permissions, mode: 'read-only' } } : {}),
+      model: {
+        ...agent.model,
+        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
+        capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
+      },
+    }))) : null;
+    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
+    const result = await rustAgentBridge.run({
+      userId: req.user.id,
+      keys: userApiKeys(req.user),
+      root,
+      model: lead.provider,
+      submodel: lead.model,
+      modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
+      message,
+      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
+      permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
+      language: body.language || 'fr',
+      reasoningLevel: body.reasoningLevel,
+      images: Array.isArray(body.images) ? body.images : [],
+      history: Array.isArray(body.history) ? body.history : [],
+      team,
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
+      mcpServers: await agentMcpServersFor(req.user),
+      runtimeConfig: {
+        githubReadOnly,
+        ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
+        ...workspaceConfig,
+        ...(computerToken ? {
+        computerEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-computer`,
+        computerToken,
+        } : {}),
+      },
+      signal: controller.signal,
+    }, mirrorWebTools(req, event => {
+      if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) {
+        const agent=event.event.agent, isolated=agent.workspace?.path;
+        workspaceEntry.agents.set(String(agent.id),isolated ? {...workspaceRun,projectRoot:isolated,root:isolated,run:workspaceRun} : workspaceRun);
+      }
+      emit(event);
+    }));
+    if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
+    if (wantsStream) {
+      emit({ type: 'done', result });
+      return res.end();
+    }
+    return res.json(result);
+  } catch (error) {
+    if (wantsStream) {
+      openStream(res.headersSent ? 200 : (error.status || 500));
+      try { res.write(JSON.stringify({ type: 'error', error: error.message || String(error) }) + '\n'); } catch {}
+      return res.end();
+    }
+    return res.status(error.status || 500).json({ error: error.message || String(error) });
+  } finally {
+    if (conversationLock && !req.messengerContinuation) continuation.active.delete(conversationLock);
+    if (workspaceEntry && workspaceRun) for (const [id, context] of workspaceEntry.agents) if (context === workspaceRun || context.run === workspaceRun) workspaceEntry.agents.delete(id);
+    if (computerToken) computerRuns.delete(computerToken);
+    if (computerSession) {
+      try { await automationManager.complete(computerSession); } catch { try { await automationManager.stop(computerSession, 'Tache interrompue.'); } catch {} }
+    }
+  }
+}
+
+app.post('/api/agent-chat', rustAgentHttp);
+app.post('/api/rust-agent-team', rustAgentHttp);
+
+// POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
+// images: [{ mime, data(base64) }]  — sent to vision-capable models only.
+async function rustChatHttp(req, res, next) {
+  const status = rustAgentBridge.status();
+  const body = req.body || {};
+  const grokImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
+  if (grokImage) return next();
+  if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
+  if (!status.available) {
+    return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
+  }
+  try {
+    if (!body.model || !String(body.message || '').trim()) return res.status(400).json({ error: 'model and message are required' });
+    if (body.model === 'gguf') {
+      if (!body.submodel) return res.status(400).json({ error: 'Aucun modèle GGUF sélectionné.' });
+      await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
+    }
+    const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
+    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
+    const result = await rustAgentBridge.run({
+      userId: req.user.id,
+      keys: userApiKeys(req.user),
+      root: workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id)),
+      model: target.provider,
+      submodel: target.model,
+      modelCapabilities: bindingCapabilities(modelFacts),
+      sessionId: body.sessionId,
+      conversationId: body.conversationId,
+      message: String(body.message),
+      systemPrompt: body.systemPrompt,
+      permissionMode: 'read-only',
+      language: body.language || 'fr',
+      reasoningLevel: body.reasoningLevel,
+      images: Array.isArray(body.images) ? body.images : [],
+      history: Array.isArray(body.history) ? body.history : [],
+      mcpServers: await agentMcpServersFor(req.user),
+      runtimeConfig: {
+        ollamaUrl: req.isMobile
+          ? sharedConfigForUser(req.user).ollamaUrl
+          : body.config && body.config.ollamaUrl,
+        ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
+        compatEndpoints: compatEndpointsFor(req.user),
+        ...browserToolConfig(req),
+      },
+      signal: (() => {
+        const controller = new AbortController();
+        req.once('aborted', () => controller.abort());
+        res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+        return controller.signal;
+      })(),
+    }, mirrorWebTools(req, () => {}));
+    return res.json({
+      response: result.response || '',
+      thinking: result.thinking || undefined,
+      usage: result.usage || undefined,
+      ...(result.error ? { error: result.error } : {}),
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({ error: error.message || String(error) });
+  }
+}
+app.post('/api/chat', rustChatHttp);
+
+// Image generation is intentionally separate from the conversational core:
+// xAI's image endpoint has no agent/tool loop to migrate.
+app.post('/api/chat', async (req, res) => {
+  const body = req.body || {};
+  const isImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
+  if (!isImage) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
+  try {
+    const key = userApiKeys(req.user).grok || (body.config && body.config.keys && body.config.keys.grok);
+    if (!key) return res.json({ response: '[Grok] Aucune cle API configuree.' });
+    const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: JSON.stringify({ prompt: String(body.message || ''), model: body.submodel, n: 1, response_format: 'b64_json' }),
+    });
+    const b64 = data.data && data.data[0] && data.data[0].b64_json;
+    if (!b64) return res.json({ response: "Erreur: Aucune image n'a ete generee par l'API." });
+    const title = String(body.message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
+    return res.json({ response: `![${title}](data:image/png;base64,${b64})` });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || String(error) });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CHAT HISTORY API
+// ---------------------------------------------------------------------------
+
+// GET /api/history?project=...
+app.get('/api/history', (req, res) => {
+  try {
+    const project = req.query.project;
+    if (!project) return res.status(400).json({ error: 'project query param is required' });
+
+    const historyPath = path.join(project, '.zaalis', 'history.json');
+
+    if (!fs.existsSync(historyPath)) {
+      return res.json([]);
+    }
+
+    const raw = fs.readFileSync(historyPath, 'utf-8');
+    const data = JSON.parse(raw);
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/history  { project, conversations }
+app.post('/api/history', (req, res) => {
+  try {
+    const { project, conversations } = req.body;
+    if (!project) return res.status(400).json({ error: 'project is required' });
+
+    const dirPath = path.join(project, '.zaalis');
+    fs.mkdirSync(dirPath, { recursive: true });
+
+    const historyPath = path.join(dirPath, 'history.json');
+    fs.writeFileSync(historyPath, JSON.stringify(conversations, null, 2), 'utf-8');
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Auto-Updater API
+// ---------------------------------------------------------------------------
+const https = require('https');
+
+function parseVersionTag(tag) {
+  const match = String(tag || '').trim().match(/v?(\d+)\.(\d+)\.(\d+)/i);
+  if (!match) return null;
+  return match.slice(1).map(n => parseInt(n, 10));
+}
+
+function compareVersionTags(a, b) {
+  const va = parseVersionTag(a);
+  const vb = parseVersionTag(b);
+  if (!va || !vb) return String(a || '').toLowerCase().localeCompare(String(b || '').toLowerCase());
+  for (let i = 0; i < 3; i++) {
+    if (va[i] !== vb[i]) return va[i] - vb[i];
+  }
+  return 0;
+}
+
+// Proxy endpoint: check GitHub releases server-side (no CSP/CORS issues)
+app.get('/api/check-update', async (req, res) => {
+  try {
+    const ghRes = await fetch('https://api.github.com/repos/zaalis/zaalis-labs-ide/releases/latest', {
+      headers: { 'User-Agent': 'zaalis-ide-updater', Accept: 'application/vnd.github.v3+json' }
+    });
+    if (!ghRes.ok) return res.status(502).json({ error: 'GitHub API error ' + ghRes.status });
+    const release = await ghRes.json();
+    const asset = (release.assets || []).find(a => platformRuntime.updateAsset(a.name));
+    const latestVersion = release.tag_name || null;
+    const updateAvailable = latestVersion ? compareVersionTags(latestVersion, APP_VERSION) > 0 : false;
+    // We already installed this exact tag, yet we still report an older version:
+    // the published zaalis-setup.exe was built from a different version than the
+    // tag claims. Without saying so, the app just re-offers the same update
+    // forever and the update looks broken when it actually succeeded.
+    res.json({
+      tag_name: latestVersion,
+      name: release.name || latestVersion || null,
+      currentVersion: APP_VERSION,
+      updateAvailable,
+      tagMismatch: updateAvailable && !!latestVersion && readLastUpdateTag() === latestVersion,
+      downloadUrl: asset ? asset.browser_download_url : null
+    });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+let downloadProgress = 0;
+let downloadedInstallerPath = null;
+let pendingUpdateTag = null;
+
+// Remember which release tag we last installed, so /api/check-update can tell a
+// genuine new version from a tag whose asset was built at another version.
+const LAST_UPDATE_TAG_FILE = path.join(DATA_DIR, 'last-update-tag');
+function tagFromUpdateUrl(raw) {
+  const m = String(raw || '').match(/\/releases\/download\/([^/]+)\//);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function readLastUpdateTag() {
+  try { return fs.readFileSync(LAST_UPDATE_TAG_FILE, 'utf8').trim() || null; } catch { return null; }
+}
+
+// Only accept installer URLs from GitHub (where releases are published) so the
+// endpoint can't be used to download and launch an arbitrary binary.
+function isTrustedUpdateUrl(raw) {
+  try {
+    const u = new URL(String(raw || ''));
+    if (u.protocol !== 'https:') return false;
+    const h = u.hostname.toLowerCase();
+    return h === 'github.com' || h.endsWith('.github.com') || h.endsWith('.githubusercontent.com');
+  } catch { return false; }
+}
+
+app.post('/api/update/download', (req, res) => {
+  try {
+    const dlUrl = req.body.url;
+    if (!dlUrl) return res.status(400).json({ error: 'Missing URL' });
+    if (!isTrustedUpdateUrl(dlUrl)) return res.status(400).json({ error: 'URL de mise a jour non autorisee.' });
+    pendingUpdateTag = tagFromUpdateUrl(dlUrl);
+
+    const downloadsDir = path.join(os.homedir(), 'Downloads');
+    const dest = path.join(fs.existsSync(downloadsDir) ? downloadsDir : os.tmpdir(), 'zaalis-update' + platformRuntime.updateExtension(dlUrl));
+    downloadProgress = 0;
+    downloadedInstallerPath = null;
+    try { fs.unlinkSync(dest); } catch {}
+
+    // Use plain https with manual redirect following (most compatible with pkg).
+    function doDownload(fileUrl, redirects) {
+      if (redirects > 10) { downloadProgress = -1; return; }
+      const mod = fileUrl.startsWith('https') ? https : require('http');
+      mod.get(fileUrl, { headers: { 'User-Agent': 'zaalis-updater' } }, (response) => {
+        if (response.statusCode === 301 || response.statusCode === 302 || response.statusCode === 307) {
+          return doDownload(response.headers.location, redirects + 1);
+        }
+        if (response.statusCode !== 200) {
+          downloadProgress = -1;
+          return;
+        }
+        const totalSize = parseInt(response.headers['content-length'] || '0', 10);
+        let downloadedSize = 0;
+        const file = fs.createWriteStream(dest);
+        response.on('data', (chunk) => {
+          downloadedSize += chunk.length;
+          if (totalSize > 0) downloadProgress = Math.round((downloadedSize / totalSize) * 100);
+        });
+        response.pipe(file);
+        file.on('finish', () => {
+          file.close();
+          downloadedInstallerPath = dest;
+          downloadProgress = 100;
+        });
+      }).on('error', () => { downloadProgress = -1; fs.unlink(dest, () => {}); });
+    }
+
+    doDownload(dlUrl, 0);
+    res.json({ success: true, dest });
+  } catch (err) {
+    downloadProgress = -1;
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/update/progress', (req, res) => {
+  res.json({ progress: downloadProgress, dest: downloadedInstallerPath });
+});
+
+// Silent in-place update: replace every installed file and bring the IDE back
+// up, without a single wizard page — the way a desktop app is expected to
+// update itself. The installer already does the hard part (it reinstalls over
+// {app} with `ignoreversion`); we only drive it with /VERYSILENT.
+app.post('/api/update/install', (req, res) => {
+  try {
+    if (process.platform !== 'win32') {
+      const result = platformRuntime.installPosixUpdate(downloadedInstallerPath, APP_DIR);
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+      res.json(result);
+      if (result.silent) setTimeout(() => { try { if (engineProc) engineProc.kill(); } catch {} process.exit(0); }, 600);
+      return;
+    }
+    const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.exe');
+    if (!fs.existsSync(installerPath)) {
+      return res.status(409).json({ error: 'Installer not downloaded yet.' });
+    }
+
+    // The update can't be driven from here: the installer has to overwrite
+    // zaalis-server.exe, which is *this* process. So we hand the job to a
+    // detached script that outlives us.
+    //
+    // The script kills the zaalis processes itself instead of letting the
+    // installer do it: installer.iss runs `taskkill /F /T`, and /T walks the
+    // process tree — this script is spawned from zaalis-server.exe, so it
+    // would be killed along with its parent, mid-update.
+    const appExe = path.join(APP_DIR, 'zaalis.exe');
+    // Setup writes its own install log here. Nothing reads it at runtime, but
+    // it is the only trace left if a silent update goes wrong (the UI is gone
+    // by then), so it is what to look at when diagnosing a failed update.
+    const updateLog = path.join(os.tmpdir(), 'zaalis-update.log');
+    const scriptPath = path.join(os.tmpdir(), 'zaalis-update-runner.bat');
+    const vbsPath = path.join(os.tmpdir(), 'zaalis-update-runner.vbs');
+    const script = [
+      '@echo off',
+      'rem Generated by zaalis IDE to install an update. Deletes itself when done.',
+      // Let the HTTP response reach the UI before the app goes down.
+      'ping -n 2 127.0.0.1 >nul',
+      'taskkill /F /IM zaalis.exe >nul 2>nul',
+      'taskkill /F /IM zaalis-server.exe >nul 2>nul',
+      // zaalis-agentd.exe keeps a lock on its own file, and installer.iss does
+      // not close it — without this the silent install fails to overwrite it.
+      'taskkill /F /IM zaalis-agentd.exe >nul 2>nul',
+      // Give Windows time to release the file handles on the exes.
+      'ping -n 4 127.0.0.1 >nul',
+      // `start /wait` matters: Setup can hand control back before it is done
+      // copying (it re-launches a copy of itself). Without waiting we would
+      // relaunch the IDE mid-install, and Setup would kill it right after.
+      `start /wait "" "${installerPath}" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG="${updateLog}"`,
+      'if not "%ERRORLEVEL%"=="0" goto fallback',
+      fs.existsSync(appExe) ? `start "" "${appExe}"` : 'rem no GUI shell installed to relaunch',
+      'goto done',
+      ':fallback',
+      // Silent install refused (SmartScreen, antivirus, a leftover lock...).
+      // Open the normal wizard so the user is never stranded with a closed app
+      // that was never updated. Its own [Run] entry offers to relaunch.
+      `start "" "${installerPath}"`,
+      ':done',
+      `del "${vbsPath}"`,
+      'del "%~f0"',
+      ''
+    ].join('\r\n');
+
+    fs.writeFileSync(scriptPath, script, 'ascii');
+
+    // Record the tag we are installing. If the next check still offers it, the
+    // published asset does not match its tag (see /api/check-update).
+    try {
+      if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');
+    } catch {}
+
+    // Launching that script needs two things at once, and cmd.exe cannot give
+    // both:
+    //   - it must outlive this server (it is about to kill us), which needs
+    //     `detached`;
+    //   - it must stay invisible — but Windows IGNORES CREATE_NO_WINDOW when
+    //     DETACHED_PROCESS is set, so cmd.exe would run with no console and
+    //     every console command inside (ping, taskkill) would allocate its own
+    //     VISIBLE window. That is what opened a burst of terminals.
+    //
+    // WScript.Shell.Run with window style 0 gives the script a real console
+    // that is merely hidden, which its children inherit. Detached wscript.exe
+    // then survives our death. Verified: silent AND surviving.
+    fs.writeFileSync(vbsPath,
+      `CreateObject("WScript.Shell").Run "cmd /c ""${scriptPath}""", 0, False\r\n`, 'ascii');
+
+    const child = spawn('wscript.exe', ['//B', '//Nologo', vbsPath], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true
+    });
+    child.unref();
+
+    res.json({ success: true, installerPath, silent: true, log: updateLog });
+
+    // Shut ourselves down cleanly so the GGUF engine stops with us. Closing the
+    // GUI shell is left to the script: it kills zaalis.exe a moment later, and
+    // doing it here too would only add a second, redundant taskkill.
+    setTimeout(() => {
+      try { if (engineProc) engineProc.kill(); } catch {}
+      process.exit(0);
+    }, 600);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// REMOTE CONTROL — pair a phone to this PC over a Cloudflare quick tunnel
+// ---------------------------------------------------------------------------
+// The desktop user starts it -> we boot `cloudflared`, which opens a public
+// HTTPS URL forwarding to this local server. A signed pairing token in the QR
+// lets the phone authenticate. The mobile session is restricted to chat
+// endpoints only (never files/exec). Stopping (from PC or phone) kills the
+// tunnel and bumps an epoch so every outstanding mobile token is invalid.
+const MOBILE_COOKIE = 'zaalis_mobile';
+let cfProc = null;        // cloudflared child process
+let cfUrl = null;         // https://xxx.trycloudflare.com (null when down)
+let cfStartedAt = 0;
+let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
+let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
+let tunnelProxy = null;
+let tunnelProxyPort = 0;
+
+function cloudflaredPath() {
+  if (process.platform !== 'win32') {
+    for (const file of [path.join(APP_DIR, 'cloudflared'), path.join(APP_DIR, 'native', 'cloudflared'), '/usr/local/bin/cloudflared', '/usr/bin/cloudflared']) if (fs.existsSync(file)) return platformRuntime.executable(file);
+    return 'cloudflared';
+  }
+  const candidates = [
+    path.join(APP_DIR, 'cloudflared.exe'),          // next to the packaged app
+    path.join(APP_DIR, 'native', 'cloudflared.exe'), // dev (repo root)
+  ];
+  for (const p of candidates) { try { if (fs.existsSync(p)) return p; } catch {} }
+  return 'cloudflared'; // last resort: rely on PATH
+}
+
+function makeMobileToken(userId) {
+  const payload = userId + '|' + mobileEpoch;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update('mobile:' + payload).digest('hex');
+  return Buffer.from(payload).toString('base64url') + '.' + sig;
+}
+function verifyMobileToken(token) {
+  if (!token || !token.includes('.')) return null;
+  const idx = token.lastIndexOf('.');
+  const payloadB64 = token.slice(0, idx), sig = token.slice(idx + 1);
+  let payload;
+  try { payload = Buffer.from(payloadB64, 'base64url').toString('utf8'); } catch { return null; }
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update('mobile:' + payload).digest('hex');
+  if (!safeEqual(sig, expected)) return null;
+  const [uid, epoch] = payload.split('|');
+  if (parseInt(epoch, 10) !== mobileEpoch) return null; // revoked by a stop
+  return uid;
+}
+function mobileUser(req) {
+  const uid = verifyMobileToken(parseCookies(req)[MOBILE_COOKIE]);
+  if (!uid) return null;
+  return loadUsers().find((u) => u.id === uid) || null;
+}
+// Endpoints an internet-facing mobile session may call. Everything else
+// (files, exec, grep, glob, gitdiff, tunnel start, profile…) stays desktop-only.
+function ensureTunnelProxy() {
+  if (tunnelProxy && tunnelProxyPort) return Promise.resolve(tunnelProxyPort);
+  return new Promise((resolve, reject) => {
+    const proxy = http.createServer((incoming, outgoing) => {
+      let parsed;
+      try { parsed = new URL(incoming.url || '/', 'http://tunnel.invalid'); }
+      catch { outgoing.writeHead(400).end(); return; }
+      if (!tunnelRouteAllowed(incoming.method, parsed.pathname)) {
+        outgoing.writeHead(403, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify({ error: 'Action indisponible via le tunnel.' }));
+        return;
+      }
+      const headers = {
+        ...incoming.headers,
+        host: `127.0.0.1:${PORT}`,
+        [TUNNEL_HEADER]: TUNNEL_ORIGIN_TOKEN,
+      };
+      delete headers.connection;
+      const upstream = http.request({
+        host: '127.0.0.1', port: PORT, method: incoming.method,
+        path: incoming.url, headers,
+      }, (response) => {
+        outgoing.writeHead(response.statusCode || 502, response.headers);
+        response.pipe(outgoing);
+      });
+      upstream.on('error', () => {
+        if (!outgoing.headersSent) outgoing.writeHead(502, { 'content-type': 'application/json' });
+        outgoing.end(JSON.stringify({ error: 'Tunnel local indisponible.' }));
+      });
+      incoming.pipe(upstream);
+    });
+    proxy.once('error', reject);
+    proxy.listen(0, '127.0.0.1', () => {
+      const address = proxy.address();
+      if (!address || typeof address === 'string') {
+        proxy.close();
+        reject(new Error('Port proxy tunnel invalide.'));
+        return;
+      }
+      tunnelProxy = proxy;
+      tunnelProxyPort = address.port;
+      resolve(tunnelProxyPort);
+    });
+  });
+}
+
+function stopTunnel() {
+  mobileEpoch++;                       // every paired phone is now logged out
+  if (cfProc) { try { cfProc.kill(); } catch {} }
+  if (tunnelProxy) { try { tunnelProxy.close(); } catch {} }
+  tunnelProxy = null; tunnelProxyPort = 0;
+  cfProc = null; cfUrl = null; cfStartedAt = 0; cfStarting = null;
+}
+
+function startTunnel() {
+  if (cfUrl) return Promise.resolve(cfUrl);
+  if (cfStarting) return cfStarting;
+  cfStarting = ensureTunnelProxy().then((proxyPort) => new Promise((resolve, reject) => {
+    let settled = false, proc;
+    try {
+      proc = spawn(cloudflaredPath(),
+        ['tunnel', '--no-autoupdate', '--url', `http://127.0.0.1:${proxyPort}`],
+        { windowsHide: true });
+    } catch (e) { cfStarting = null; return reject(e); }
+    cfProc = proc;
+    const onData = (buf) => {
+      const m = String(buf).match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/i);
+      if (m && !settled) { settled = true; cfUrl = m[0]; cfStartedAt = Date.now(); resolve(cfUrl); }
+    };
+    proc.stdout && proc.stdout.on('data', onData);
+    proc.stderr && proc.stderr.on('data', onData);
+    proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
+    proc.on('exit', () => {
+      if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
+      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+    });
+    setTimeout(() => {
+      if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
+    }, 30000);
+  }));
+  return cfStarting;
+}
+
+// POST /api/remote/start (desktop only) -> { url, qr, since }
+app.post('/api/remote/start', async (req, res) => {
+  if (req.isMobile) return res.status(403).json({ error: 'Indisponible en mode mobile.' });
+  if (!QRCode) return res.status(500).json({ error: 'Module QR indisponible (npm install qrcode).' });
+  try {
+    const url = await startTunnel();
+    const token = makeMobileToken(req.user.id);
+    const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;
+    const qr = await QRCode.toDataURL(pairUrl, { margin: 4, width: 320, color: { dark: '#0a0a0c', light: '#ffffff' } });
+    res.json({ url: pairUrl, qr, since: cfStartedAt });
+  } catch (e) {
+    stopTunnel();
+    res.status(500).json({ error: e.message || 'Échec du démarrage du tunnel.' });
+  }
+});
+
+// POST /api/remote/stop (desktop or phone) — kills the tunnel + revokes tokens.
+// Reply FIRST, then tear the tunnel down a moment later, so a phone stopping its
+// own session still receives the confirmation before its link drops.
+app.post('/api/remote/stop', (req, res) => {
+  res.json({ success: true });
+  setTimeout(stopTunnel, 400);
+});
+
+// GET /api/remote/status -> { active, since }
+app.get('/api/remote/status', (req, res) => { res.json({ active: !!cfUrl, since: cfStartedAt }); });
+
+// GET /m — pairing entry + mobile app shell (public; not under the /api gate).
+// With ?t=<token>: validate, drop the mobile cookie, redirect to a clean /m.
+app.get('/m', (req, res) => {
+  const t = req.query.t;
+  if (t) {
+    const uid = verifyMobileToken(String(t));
+    if (uid) {
+      const secure = (req.headers['x-forwarded-proto'] === 'https') ? ' Secure;' : '';
+      res.setHeader('Set-Cookie', `${MOBILE_COOKIE}=${String(t)}; HttpOnly; SameSite=Lax; Path=/;${secure} Max-Age=604800`);
+      return res.redirect('/m');
+    }
+    // invalid/expired -> fall through; the app shows a "not paired" screen
+  }
+  res.sendFile(path.join(APP_DIR, 'interface', 'mobile', 'index.html'));
+});
+
+// Kill the tunnel when the server exits.
+process.on('exit', () => { try { if (cfProc) cfProc.kill(); } catch {} });
+
+// Ferme totalement l'IDE : on tue le shell WebView (zaalis.exe) puis ce serveur.
+// Utilise par le bouton "Fermer l'IDE" du modal de mise a jour, pour liberer les
+// fichiers avant que l'utilisateur lance l'installateur manuellement.
+app.post('/api/app/close', (req, res) => {
+  res.json({ success: true });
+  setTimeout(() => {
+    try { if (engineProc) engineProc.kill(); } catch {}
+    try {
+      if (process.platform !== 'win32') { const pid = Number(process.env.ZAALIS_SHELL_PID); if (Number.isSafeInteger(pid) && pid > 1) process.kill(pid, 'SIGTERM'); }
+      else spawn('taskkill', ['/f', '/im', 'zaalis.exe'], {
+        detached: true, stdio: 'ignore', windowsHide: true
+      }).unref();
+    } catch {}
+    process.exit(0);
+  }, 300);
+});
+
+// Don't leave the GGUF engine running after the server dies.
+process.on('exit', () => { try { if (engineProc) engineProc.kill(); } catch {} });
+
+// ---------------------------------------------------------------------------
+// Auto-start Ollama in the background (only if it isn't already running).
+// We never stop it on exit — if it was already up, we leave it untouched.
+// ---------------------------------------------------------------------------
+async function startOllamaIfNeeded() {
+  if (process.platform !== 'win32') { try { await fetch('http://127.0.0.1:11434/api/tags'); } catch { platformRuntime.startPosixOllama(); } return; }
+  try {
+    await fetch('http://127.0.0.1:11434/api/tags');
+    return; // already running -> do nothing
+  } catch {}
+  const candidates = [
+    path.join(process.env.LOCALAPPDATA || '', 'Programs', 'Ollama', 'ollama.exe'),
+    'ollama',
+  ];
+  // Prefer the standard install path; otherwise fall back to `ollama` on the
+  // PATH (the 'error' handler below makes a missing binary harmless).
+  const exe = candidates.find((p) => p !== 'ollama' && p && fs.existsSync(p)) || 'ollama';
+  try {
+    const child = spawn(exe, ['serve'], {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+      // CREATE_NO_WINDOW (0x08000000) prevents any console window from
+      // flashing when Ollama starts in the background.
+      ...(process.platform === 'win32' ? { shell: false } : {})
+    });
+    // CRITICAL: listen for 'error' so Node doesn't crash on ENOENT / EACCES.
+    child.on('error', () => { /* Ollama failed to start -> ignore */ });
+    child.unref();
+  } catch { /* Ollama not installed -> ignore */ }
+}
+
+// ---------------------------------------------------------------------------
+// START
+// ---------------------------------------------------------------------------
+// Listen on the default (dual-stack) interface so both http://localhost
+// (IPv6 ::1) and http://127.0.0.1 (IPv4) work. Network exposure is still
+// blocked at the application layer: the loopback guard above returns 403 to
+// any request whose remote address is not a loopback address.
+const server = app.listen(PORT, () => {
+  const address = server.address();
+  // The bound port, not the requested one, is what codestrale must dial.
+  const bound = (address && typeof address === 'object' && address.port) || PORT;
+  console.log(`Server running on http://localhost:${bound} (local access only)`);
+  publishCodestraleBridge(bound);
+  startOllamaIfNeeded();
+  messengers.restore();
+});
+
+// Stop advertising a bridge that is going away. `exit` covers the normal path;
+// the signals cover the IDE shell closing the server — Node's default handler
+// is replaced once we listen, so each one has to terminate explicitly.
+process.on('exit', unpublishCodestraleBridge);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
+  process.on(signal, async () => {
+    unpublishCodestraleBridge();
+    for (const id of githubBrowserAuth.flows.keys()) githubBrowserAuth.cancel(id);
+    await messengers.shutdown();
+    await laboratory.shutdown();
+    await vmManager.shutdown(terminalManager);
+    process.exit(0);
+  });
+}

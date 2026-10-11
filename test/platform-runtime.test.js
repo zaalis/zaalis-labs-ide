@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict');
-const runtime=require('../platform-runtime');
+const runtime=require('../src/runtime/platform-runtime');
 test('packaged data paths preserve Windows and isolate macOS/Linux user stores',()=>{
  assert.equal(runtime.dataDir('C:\\app',true,'win32',{LOCALAPPDATA:'C:\\Users\\sample\\AppData\\Local'},'C:\\Users\\sample'),'C:\\Users\\sample\\AppData\\Local\\zaalis\\server-data');
  assert.equal(runtime.dataDir('/app',true,'darwin',{},'/Users/sample'),'/Users/sample/Library/Application Support/zaalis/server-data');

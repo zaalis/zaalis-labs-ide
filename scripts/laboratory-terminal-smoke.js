@@ -1,5 +1,5 @@
 'use strict';
-const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');const {VmManager}=require('../vm-manager'),{TerminalManager}=require('../terminal-manager');
+const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');const {VmManager}=require('../src/laboratory/vm-manager'),{TerminalManager}=require('../src/runtime/terminal-manager');
 async function main(){const root=path.resolve('.tmp/laboratory-terminal-'+Date.now()),vm=new VmManager({appDir:path.resolve(__dirname,'..'),dataDir:root}),terminals=new TerminalManager();let s;
  try{const made=await vm.create('terminal-smoke',{system:'linux',network:'isolated'});s=vm.get(made.id,'terminal-smoke');await vm.wait(s,()=>s.status==='ready',200000);const t=await vm.terminal(s,terminals),session=terminals.get(t.id,'terminal-smoke');assert.equal(terminals.get(t.id,'other'),null);
   terminals.resize(session,120,30);terminals.write(session,"touch /tmp/user-terminal-proof; printf 'VM_%s_%s\\n' PTY PROOF; uname -s\r");const end=Date.now()+30000;

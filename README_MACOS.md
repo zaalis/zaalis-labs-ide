@@ -1,52 +1,11 @@
-# zaalis IDE macOS
+# zaalis IDE for macOS
 
-Application Electron macOS, en x64 (Intel) et arm64 (Apple Silicon), avec le
-coeur agent Rust `zaalis-agentd` embarque dans le bundle.
+The Electron application is built for Intel x64 and Apple Silicon arm64 and bundles the shared Rust agent (`zaalis-agentd`).
 
-Build sur un Mac :
+Build on a Mac with `sh native/build_macos_dmg.sh`. Prerequisites: Node.js 22+, Rust 1.90+ with the `aarch64-apple-darwin` and `x86_64-apple-darwin` targets, Xcode command-line tools (`swiftc`, `codesign`, `hdiutil`), CMake, and a C/C++ compiler for whisper.cpp.
 
-```sh
-sh native/build_macos_dmg.sh
-```
+The build produces `native/installer/zaalis-macos-arm64.dmg` and `native/installer/zaalis-macos-x64.dmg`. Open the image for your Mac and drag `zaalis IDE` to Applications. The package installs the Rust CLI binary `zaalis` inside the application bundle; use its packaged path or the launcher provided by the installed application.
 
-Prerequis : Node.js 22+, Rust 1.90+ (cibles `aarch64-apple-darwin` et
-`x86_64-apple-darwin`), les outils en ligne de commande Xcode (`swiftc`,
-`codesign`, `hdiutil`), CMake et un compilateur C/C++ pour whisper.cpp.
+Desktop control relies on macOS Screen Recording and Accessibility permissions. Grant both permissions to the application before using capture or input automation.
 
-Sorties :
-
-```text
-native/installer/zaalis-macos-arm64.dmg
-native/installer/zaalis-macos-x64.dmg
-```
-
-Installation sur macOS :
-
-Ouvrez le `.dmg` correspondant a votre Mac, puis glissez `zaalis IDE` dans le
-dossier Applications.
-
-CLI :
-
-Le paquet installe le binaire Rust `zaalis` dans le bundle. Depuis une
-installation portable :
-
-```sh
-./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis
-./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis "analyse le dossier"
-```
-
-Controle du bureau :
-
-La premiere activation demande deux autorisations dans Reglages Systeme >
-Confidentialite et securite : **Accessibilite** et **Enregistrement de l'ecran**.
-Elles sont accordees au bundle signe. Definissez `ZAALIS_CODESIGN_ID` sur une
-identite de signature persistante : une signature ad-hoc change d'empreinte a
-chaque build et revoque silencieusement ces deux autorisations.
-
-Modeles locaux :
-
-Les modeles GGUF passent par llama.cpp, telecharge a la demande dans
-`~/Library/Application Support/zaalis/engine`. Le binaire macOS embarque Metal :
-la variante `metal` utilise le GPU, la variante `cpu` force le calcul processeur
-(`-ngl 0`) et sert de repli automatique quand un modele ne tient pas en memoire
-unifiee.
+GGUF models use llama.cpp, downloaded on demand to `~/Library/Application Support/zaalis/engine`. The Metal variant uses the GPU. The CPU variant sets `-ngl 0` and is the fallback if a model cannot fit in unified memory.
