@@ -16,7 +16,7 @@ class AssistantTools {
     if(['discord','spotify','feishu','homeassistant','a2a','yuanbao','execution'].includes(d.family)) {if(d.name==='terminal_backend_manage')return 'ready';try{this.connections.get(user,d.family);return 'configured_unverified';}catch{return 'connection_required';}}
     if(d.family==='browser')return this.options.browserAvailable()? 'ready': (()=>{try{this.connections.get(user,'cdp');return 'configured_unverified';}catch{return 'service_unavailable';}})();
     if(d.family==='media'&&!['vision_analyze','video_analyze','text_to_speech'].includes(d.name)){try{this.connections.get(user,'media');return 'configured_unverified';}catch{return 'connection_required';}}
-    if(d.name==='video_analyze')return 'requires_ffmpeg_and_vision';if(d.name==='vision_analyze')return 'requires_vision_model';if(d.name==='text_to_speech')return process.platform==='win32'?'ready':'connection_required';return 'ready';
+    if(d.name==='video_analyze')return 'requires_ffmpeg_and_vision';if(d.name==='vision_analyze')return 'requires_vision_model';if(d.name==='text_to_speech')return process.platform==='win32'||(process.platform==='linux'&&require('./media').speechEngine())?'ready':'connection_required';return 'ready';
   }
   async execute(name,input,context){
     const d=definitions.find(d=>d.name===name);if(!d)throw fail('Unknown assistant tool.','not_found',404);

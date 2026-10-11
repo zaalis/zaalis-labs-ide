@@ -98,6 +98,18 @@ async function main() {
   const sandbox = path.join(sourceDist, 'zaalis-sandbox');
   if (fs.existsSync(sandbox)) copyFile(sandbox, path.join(bundleDir, 'zaalis-sandbox'));
 
+  // Connecteurs (equivalent des dossiers github/ et messenger-runtime/ et de
+  // cloudflared.exe de l'installateur Windows), si la build les a prepares.
+  for (const dir of ['messenger-runtime', 'github']) {
+    if (fs.existsSync(path.join(sourceDist, dir))) copyDir(path.join(sourceDist, dir), path.join(bundleDir, dir));
+  }
+  for (const file of ['cloudflared', path.join('messenger-runtime', 'node'), path.join('github', 'gh')]) {
+    const source = path.join(sourceDist, file);
+    if (!fs.existsSync(source)) continue;
+    if (file === 'cloudflared') copyFile(source, path.join(bundleDir, file));
+    fs.chmodSync(path.join(bundleDir, file), 0o755);
+  }
+
   if (fs.existsSync(path.join(sourceDist, 'node_modules'))) {
     copyDir(path.join(sourceDist, 'node_modules'), path.join(bundleDir, 'node_modules'));
   }

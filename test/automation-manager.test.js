@@ -24,10 +24,12 @@ test('activate_app conserve les applications Windows admises', () => {
 
 test('activate_app limite les lanceurs Linux', () => {
   onPlatform('linux', () => {
-    for (const path of ['chrome', 'gedit.desktop', '/usr/share/applications/firefox.desktop', '/usr/local/share/applications/code.desktop', '~/.local/share/applications/local.desktop', '/var/lib/flatpak/exports/share/applications/org.example.App.desktop']) {
+    // Known launchers, allowed .desktop files and, as on Windows, the name the
+    // applications menu shows (looked up there only, never on PATH).
+    for (const path of ['chrome', 'gedit.desktop', '/usr/share/applications/firefox.desktop', '/usr/local/share/applications/code.desktop', '~/.local/share/applications/local.desktop', '/var/lib/flatpak/exports/share/applications/org.example.App.desktop', 'Blender', 'Éditeur de texte', 'notepad']) {
       assert.equal(normalizeAction({ action: 'activate_app', path })?.path, path);
     }
-    for (const path of ['/bin/sh', '/tmp/x.sh', '/tmp/x.desktop', '/usr/share/applications/../x.desktop', 'notepad', 'explorer', 'edge', 'msedge']) {
+    for (const path of ['/bin/sh', '/tmp/x.sh', '/tmp/x.desktop', '/usr/share/applications/../x.desktop', 'rm -rf /', '$(reboot)', '../bin/sh']) {
       assert.equal(normalizeAction({ action: 'activate_app', path }), null);
     }
   });

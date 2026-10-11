@@ -51,6 +51,8 @@ native/.electron-cache/
 native/.whisper-build/
 native/linux-node-runtime/
 native/linux-node-pty/
+native/linux-gh/
+native/linux-cloudflared/
 native/package-linux/
 native/whisper/whisper-cli
 native/macos-computer-bridge

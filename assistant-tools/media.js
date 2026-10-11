@@ -19,7 +19,8 @@ class MediaTools {
       } finally { if (temporary) for (const f of fs.readdirSync(temporary)) if (/^frame-\d+\.jpg$/.test(f)) fs.unlinkSync(path.join(temporary,f)); if (temporary) fs.rmdirSync(temporary); }
     }
     if (name === 'text_to_speech' && (i.provider || 'local') === 'local') {
-      if (process.platform !== 'win32') throw fail('Local speech requires Windows; configure an API speech provider.', 'service_unavailable', 503);
+      if (process.platform === 'linux') return linuxSpeech(i, ctx);
+      if (process.platform !== 'win32') throw fail('Local speech requires Windows or Linux; configure an API speech provider.', 'service_unavailable', 503);
       const output = outputFile(ctx, i.output, 'wav'), script = path.join(path.dirname(output), crypto.randomUUID()+'.ps1');
       const quote = value => "'" + String(value).replace(/'/g,"''") + "'";
       fs.writeFileSync(script, `Add-Type -AssemblyName System.Speech\n$speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer\ntry { ${i.voice ? '$speaker.SelectVoice('+quote(i.voice)+')' : ''}\n$speaker.SetOutputToWaveFile(${quote(output)})\n$speaker.Speak(${quote(text(i.text,'text',16000))})\n} finally { $speaker.Dispose() }`, 'utf8');
@@ -64,5 +65,17 @@ function outputFile(ctx,relative,extension){ const target=within(ctx.root,relati
 async function api(fetcher,connection,route,body,ctx,method='POST') { const base=new URL(connection.baseUrl.replace(/\/$/,'')+'/'),url=new URL(route.replace(/^\//,''),base);if(url.origin!==base.origin||!url.pathname.startsWith(base.pathname))throw fail('Invalid media route.'); const form=body instanceof FormData;
   const response=await fetcher(url,{method,redirect:'error',signal:ctx.signal?AbortSignal.any([ctx.signal,AbortSignal.timeout(180000)]):AbortSignal.timeout(180000),headers:{Authorization:'Bearer '+(connection.token||connection.apiKey||''),...(!form&&body?{'Content-Type':'application/json'}:{})},...(body?{body:form?body:JSON.stringify(body)}:{})});if(!response.ok)throw fail('Media provider HTTP '+response.status,'provider_error',502);return response; }
 async function boundedBytes(response,limit){const chunks=[];let size=0;for await(const chunk of response.body){size+=chunk.length;if(size>limit)throw fail('Media response too large.');chunks.push(chunk);}return Buffer.concat(chunks);}
-function program(command,args,ctx){return new Promise((resolve,reject)=>{const env={};for(const key of ['PATH','SystemRoot','WINDIR','TEMP','TMP','COMSPEC','PATHEXT'])if(process.env[key])env[key]=process.env[key];const child=spawn(command,args,{cwd:ctx.root,env,windowsHide:true,stdio:['ignore','ignore','pipe']});let error='';child.stderr.on('data',v=>{error=(error+v).slice(-4000)});const abort=()=>child.kill(),timer=setTimeout(abort,120000);ctx.signal?.addEventListener('abort',abort,{once:true});child.once('error',done);child.once('close',code=>done(code===0?null:fail('Media helper failed: '+error,'service_unavailable',503)));function done(err){clearTimeout(timer);ctx.signal?.removeEventListener('abort',abort);err?reject(err):resolve();}});}
-module.exports={MediaTools,loadImage,program};
+// Linux: espeak-ng, the distribution's offline synthesizer, writes the WAV.
+// The text goes through a file so it is never parsed as an option.
+async function linuxSpeech(i,ctx){
+  if(!speechEngine())throw fail('Local speech requires espeak-ng (sudo apt install espeak-ng) or an API speech provider.','service_unavailable',503);
+  const output=outputFile(ctx,i.output,'wav'),input=path.join(path.dirname(output),crypto.randomUUID()+'.txt');
+  const voice=String(i.voice||String(process.env.LANG||'').slice(0,2)||'en');
+  if(!/^[A-Za-z0-9_+-]{1,64}$/.test(voice))throw fail('Invalid voice.');
+  fs.writeFileSync(input,text(i.text,'text',16000),'utf8');
+  try { await program(speechEngine(),['-v',voice,'-w',output,'-f',input],ctx); } finally { fs.unlinkSync(input); }
+  return { path:output, format:'wav', bytes:fs.statSync(output).size, provider:'espeak-ng' };
+}
+function speechEngine(){return ['/usr/bin/espeak-ng','/usr/local/bin/espeak-ng','/usr/bin/espeak'].find(file=>fs.existsSync(file))||null;}
+function program(command,args,ctx){return new Promise((resolve,reject)=>{const env={};for(const key of ['PATH','SystemRoot','WINDIR','TEMP','TMP','COMSPEC','PATHEXT',...(process.platform==='win32'?[]:['HOME','LANG','LC_ALL','XDG_RUNTIME_DIR'])])if(process.env[key])env[key]=process.env[key];const child=spawn(command,args,{cwd:ctx.root,env,windowsHide:true,stdio:['ignore','ignore','pipe']});let error='';child.stderr.on('data',v=>{error=(error+v).slice(-4000)});const abort=()=>child.kill(),timer=setTimeout(abort,120000);ctx.signal?.addEventListener('abort',abort,{once:true});child.once('error',done);child.once('close',code=>done(code===0?null:fail('Media helper failed: '+error,'service_unavailable',503)));function done(err){clearTimeout(timer);ctx.signal?.removeEventListener('abort',abort);err?reject(err):resolve();}});}
+module.exports={MediaTools,loadImage,program,speechEngine};

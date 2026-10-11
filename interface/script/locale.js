@@ -979,3 +979,18 @@ window.HELP_TOPICS_EN = [
     "a": "Permission mode controls when zaalis asks you to approve an action. Agents mode distributes a task across several models. For sensitive projects, specify which files to preserve and review proposed actions before approving them."
   }
 ];
+// Host-specific wording (Linux and macOS shells beside Windows).
+Object.assign(UI_EN, {
+  'La connexion s’ouvre dans votre navigateur par défaut. Aucun jeton à copier.': 'Sign-in opens in your default browser. No token to copy.',
+  'Microphone bloqué : vérifiez l’entrée audio dans les paramètres Son du système et qu’aucune règle de confidentialité ne bloque le micro.': 'Microphone blocked: check the audio input in the system Sound settings and that no privacy rule blocks the microphone.',
+  'Pack manquant.': 'Package missing.',
+  'Accélération WHPX requise.': 'WHPX acceleration required.',
+  'Accélération KVM requise.': 'KVM acceleration required.',
+  'Jusqu’à trois VM ; disque logique de 24 Go, espace utilisé progressivement.': 'Up to three VMs; 24 GB logical disk, using space as needed.',
+  'Accélération KVM :': 'KVM acceleration:',
+  'client SSH :': 'SSH client:',
+  'absent': 'missing',
+  'Autorisez la demande administrateur, puis patientez pendant le téléchargement de l’image Debian…': 'Approve the administrator prompt, then wait while the Debian image downloads…',
+  'Fermez puis rouvrez votre session pour activer l’accélération KVM.': 'Log out and back in to enable KVM acceleration.',
+  'Les VM sont autonomes. Le projet est copié sur demande ; vos fichiers locaux restent séparés. Aucun dossier personnel ni presse-papiers n’est partagé.': 'VMs are self-contained. The project is copied on request; your local files stay separate. No personal folder or clipboard is shared.'
+});

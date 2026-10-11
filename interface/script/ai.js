@@ -3185,7 +3185,8 @@ function setupVoiceRecognition(btnId, textareaId) {
             setPhase('idle');
             const name = error && error.name;
             notify(name === 'NotFoundError' || name === 'OverconstrainedError' ? say(uiText('Aucun microphone détecté sur ce PC.'), 'No microphone found on this PC.')
-                : name === 'NotAllowedError' || name === 'SecurityError' ? say(uiText('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).'), 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                : name === 'NotAllowedError' || name === 'SecurityError' ? (HOST_IS_WINDOWS ? say(uiText('Microphone bloqué : autorisez l’accès au micro pour les applications de bureau (Paramètres Windows › Confidentialité et sécurité › Microphone).'), 'Microphone blocked: allow microphone access for desktop apps (Windows Settings › Privacy & security › Microphone).')
+                    : say(uiText('Microphone bloqué : vérifiez l’entrée audio dans les paramètres Son du système et qu’aucune règle de confidentialité ne bloque le micro.'), 'Microphone blocked: check the audio input in the system Sound settings and that no privacy rule blocks the microphone.'))
                 : say(uiText('Le microphone est inutilisable pour le moment (déjà pris par une autre application ?).'), 'The microphone cannot be used right now (in use by another app?).'));
             return;
         }

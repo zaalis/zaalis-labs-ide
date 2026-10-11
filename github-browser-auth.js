@@ -5,11 +5,18 @@ const { spawn, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 const run = promisify(execFile);
 
+// The bundled official client first, then a system-wide installation.
+function ghCandidates(appDir, platform = process.platform, env = process.env) {
+  if (platform === 'win32') return [path.join(appDir, 'github', 'gh.exe'), path.join(env.ProgramFiles || '', 'GitHub CLI', 'gh.exe')];
+  return [path.join(appDir, 'github', 'gh'), '/usr/bin/gh', '/usr/local/bin/gh', '/opt/homebrew/bin/gh', '/snap/bin/gh',
+    ...String(env.PATH || '').split(path.delimiter).filter(Boolean).map(dir => path.join(dir, 'gh'))];
+}
+
 // Delegate OAuth to the official client, with an isolated ephemeral config.
 // Existing gh sessions, credentials, Git helpers and configuration are untouched.
 class GitHubBrowserAuth {
   constructor({ appDir, dataDir, binary, spawnImpl = spawn, runImpl = run }) {
-    this.binary = binary || [path.join(appDir, 'github', 'gh.exe'), path.join(process.env.ProgramFiles || '', 'GitHub CLI', 'gh.exe')].find(p => fs.existsSync(p)) || '';
+    this.binary = binary || ghCandidates(appDir).find(p => fs.existsSync(p)) || '';
     this.dir = path.join(dataDir, 'github-signin');
     this.spawn = spawnImpl; this.run = runImpl; this.flows = new Map();
   }

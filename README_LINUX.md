@@ -72,6 +72,23 @@ controle de bureau (`xdotool`, `gnome-screenshot`, `tesseract-ocr`,
 par X11 : sous Wayland, ouvrez une session Xorg pour que le controle de bureau
 fonctionne.
 
+Connecteurs et outils embarques :
+
+Comme l'installateur Windows, le paquet contient le pont WhatsApp (avec son
+runtime Node), le client GitHub officiel `gh` pour la connexion par navigateur
+et `cloudflared` pour l'acces a distance. Le `.deb` recommande aussi `git`,
+`espeak-ng` (synthese vocale locale de l'agent), `ffmpeg` (analyse video),
+`qemu-system-x86`, `qemu-utils` et `openssh-client` (machines virtuelles).
+
+Machines virtuelles :
+
+Les VM Debian utilisent QEMU avec KVM. Le bouton « Activer les composants Linux »
+des parametres Machines virtuelles installe ce qui manque via `pkexec`, ajoute
+l'utilisateur au groupe `kvm` (reconnexion requise) et telecharge l'image
+officielle Debian 12, verifiee par SHA-512, dans
+`~/.local/share/zaalis/server-data/virtual-machines/images`. Windows Sandbox
+reste propre a Windows.
+
 Modeles locaux :
 
 Les modeles GGUF passent par llama.cpp, telecharge a la demande dans

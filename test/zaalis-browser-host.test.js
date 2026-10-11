@@ -25,7 +25,11 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
   const secretFile = path.join(temp, 'browser-secret');
   fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'));
 
-  const pipePath = `\\\\.\\pipe\\zaalis-browser-test-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  // Windows: named pipe of the WebView2 shell. Linux/macOS: Unix socket of the
+  // Electron bridge (native/electron/browser-bridge.js), same protocol.
+  const pipePath = process.platform === 'win32'
+    ? `\\\\.\\pipe\\zaalis-browser-test-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
+    : path.join(temp, 'browser.sock');
   const token = crypto.randomBytes(32).toString('hex');
   const received = [];
   const views = new Map();
