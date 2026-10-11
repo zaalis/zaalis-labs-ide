@@ -134,6 +134,9 @@ impl Message {
 /// Everything needed for one model call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TurnRequest {
+    /// Internal per-agent turn identity; never sent to a provider.
+    #[serde(skip)]
+    pub composition_key: Option<String>,
     pub binding: ModelBinding,
     pub system: String,
     pub messages: Vec<Message>,
@@ -151,6 +154,7 @@ impl TurnRequest {
     pub fn new(binding: ModelBinding, system: impl Into<String>, messages: Vec<Message>) -> Self {
         Self {
             binding,
+            composition_key: None,
             system: system.into(),
             messages,
             tools: Vec::new(),
@@ -185,6 +189,10 @@ pub enum TurnEvent {
     ToolCallDelta { id: String, arguments: String },
     /// A tool call is fully parsed.
     ToolCallCompleted { call: ToolInvocation },
+    /// A model without native tool calling tried to call a tool, but its
+    /// answer is not a call that can be trusted. Nothing was run; `reason`
+    /// says what to correct so the runtime can ask the model to try again.
+    InvalidToolCall { reason: String },
     /// Token accounting, when the provider reports it.
     Usage { usage: Usage },
     /// Opaque assistant state to retain for the next native-tool round.

@@ -1,0 +1,78 @@
+{
+  "status": "passed",
+  "before": {
+    "longConversationWidth": 1943.5,
+    "menuRight": 1951.5,
+    "collapsedSwitchY": 363
+  },
+  "after": {
+    "rows": [
+      {
+        "labelScroll": 1888,
+        "labelWidth": 167,
+        "menuRight": 231.33334350585935,
+        "overflow": "ellipsis",
+        "width": 223
+      }
+    ],
+    "sidebar": {
+      "bottom": 720,
+      "height": 680,
+      "left": 0,
+      "right": 240,
+      "top": 40,
+      "width": 240,
+      "x": 0,
+      "y": 40
+    },
+    "switchY": 639.3333740234375,
+    "collapsed": {
+      "profileY": 675.3333740234375,
+      "sidebarWidth": 51,
+      "switchY": 639.3333740234375
+    }
+  },
+  "sharedSetting": {
+    "savedInModels": 400,
+    "readByCompiledTerminal": 400,
+    "restored": 500
+  },
+  "modelsSection": {
+    "fr": "Modèles",
+    "en": "Models",
+    "controlsRemovedFromIntegrations": true
+  },
+  "checks": [
+    "project and chat truncation",
+    "three-dot menu opened",
+    "stable switch in files and chats",
+    "French and English model section",
+    "IDE save read by compiled terminal"
+  ],
+  "packagedVerification": {
+    "status": "passed",
+    "open": {
+      "labelScroll": 1888,
+      "labelWidth": 167,
+      "menuRight": 191.33334350585935,
+      "rowWidth": 191.33334350585935,
+      "sidebarRight": 240,
+      "switchY": 639.3333740234375
+    },
+    "menu": {
+      "right": 231.33334350585935,
+      "width": 28
+    },
+    "collapsed": {
+      "sidebarWidth": 52,
+      "switchY": 639.3333740234375
+    },
+    "threeDotMenuOpened": true,
+    "modelsLimits": [
+      500,
+      10,
+      250
+    ],
+    "controlsRemovedFromIntegrations": true
+  }
+}

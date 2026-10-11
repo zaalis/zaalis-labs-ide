@@ -121,6 +121,8 @@ pub enum AccessKind {
     Spawn,
     /// Drive the desktop (Windows computer control).
     Computer,
+    /// Execute only in an IDE-owned VM, through the scoped VM capability.
+    Sandbox,
     /// Bookkeeping with no side effect outside the session (todo, plan writes).
     Session,
 }
@@ -136,6 +138,7 @@ impl AccessKind {
                 | AccessKind::Execute
                 | AccessKind::Spawn
                 | AccessKind::Computer
+                | AccessKind::Sandbox
         )
     }
 
@@ -152,12 +155,13 @@ impl AccessKind {
             AccessKind::Mcp => "Mcp",
             AccessKind::Spawn => "Spawn",
             AccessKind::Computer => "Computer",
+            AccessKind::Sandbox => "Sandbox",
             AccessKind::Session => "Session",
         }
     }
 
     pub fn parse_prefix(value: &str) -> Option<Self> {
-        const ALL: [AccessKind; 11] = [
+        const ALL: [AccessKind; 12] = [
             AccessKind::Read,
             AccessKind::Search,
             AccessKind::Write,
@@ -168,6 +172,7 @@ impl AccessKind {
             AccessKind::Mcp,
             AccessKind::Spawn,
             AccessKind::Computer,
+            AccessKind::Sandbox,
             AccessKind::Session,
         ];
         ALL.into_iter()

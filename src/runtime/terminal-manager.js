@@ -1,0 +1,206 @@
+'use strict';
+
+const crypto = require('crypto');
+const { EventEmitter } = require('events');
+const path = require('path');
+const fs = require('fs');
+const { sanitize } = require('../agent/secrets-mask');
+
+// A native PTY addon must never prevent the IDE from starting.  In a packaged
+// build it is loaded only when the user opens the integrated terminal, so a
+// damaged/mismatched optional addon degrades that feature instead of taking
+// down the local server (and therefore Electron) at boot.
+let pty = null;
+let ptyLoadError = null;
+// Resolved at runtime so the packager never tries to bundle node-pty: its
+// prebuilds weigh ~64 MB and a .node addon cannot run from inside a snapshot
+// anyway.  The installer ships it on disk next to zaalis-server.exe instead.
+//
+// For the same reason node-pty is declared in devDependencies, not
+// dependencies: pkg bundles every declared dependency, which added ~65 MB to
+// each .exe for a file that could never be loaded from there.  Moving it back
+// to dependencies silently doubles both binaries.
+const dynamicRequire = eval('require');
+function ptyModule() {
+  if (pty || ptyLoadError) return pty;
+  try {
+    // pkg keeps JS in its snapshot but a .node addon must live on disk. The
+    // Windows packager places the matching architecture beside zaalis-server.
+    // Never use pkg's cache extraction: it may contain a different Node ABI.
+    const packagedModule = process.pkg && path.join(path.dirname(process.execPath), 'node_modules', 'node-pty');
+    pty = packagedModule ? dynamicRequire(packagedModule) : dynamicRequire('node-pty');
+  }
+  catch (error) {
+    if (!process.pkg && process.platform === 'linux') { try { pty = dynamicRequire(path.resolve(__dirname, '../..', 'native', 'dist-linux-server', 'node_modules', 'node-pty')); } catch (nativeError) { ptyLoadError = nativeError; } }
+    else ptyLoadError = error;
+  }
+  return pty;
+}
+
+const MAX_BUFFER = 512 * 1024;
+
+function executableOnPath(name) {
+  if (path.isAbsolute(name)) return fs.existsSync(name) ? name : '';
+  const pathValue = process.env.Path || process.env.PATH || '';
+  for (const dir of pathValue.split(path.delimiter)) {
+    const fullPath = path.join(dir, name);
+    if (dir && fs.existsSync(fullPath)) return fullPath;
+  }
+  return '';
+}
+
+function windowsTerminalProfiles() {
+  const systemRoot = process.env.SystemRoot || 'C:\\Windows';
+  const cmd = process.env.ComSpec || path.join(systemRoot, 'System32', 'cmd.exe');
+  const powershell = executableOnPath('powershell.exe') || path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const pwsh = executableOnPath('pwsh.exe');
+  const gitRoot = process.env.ProgramFiles || 'C:\\Program Files';
+  const gitBashCandidates = [path.join(gitRoot, 'Git', 'bin', 'bash.exe'), path.join(gitRoot, 'Git', 'usr', 'bin', 'bash.exe')];
+  const gitBash = gitBashCandidates.find((candidate) => fs.existsSync(candidate)) || '';
+  return [
+    { id: 'cmd', label: 'Invite de commandes (cmd)', shell: cmd, args: [], available: fs.existsSync(cmd) || !!executableOnPath('cmd.exe') },
+    { id: 'powershell', label: 'Windows PowerShell', shell: powershell, args: ['-NoLogo'], available: fs.existsSync(powershell) },
+    { id: 'pwsh', label: 'PowerShell 7', shell: pwsh, args: ['-NoLogo'], available: !!pwsh },
+    { id: 'git-bash', label: 'Git Bash', shell: gitBash, args: ['--login', '-i'], available: !!gitBash }
+  ];
+}
+
+// Profils POSIX (Linux et macOS).  L'ordre porte le sens : le premier est le
+// shell par défaut de la plateforme, donc celui retenu quand la configuration
+// utilisateur ne désigne rien de disponible.  On résout chaque shell en chemin
+// absolu (chemin usuel puis PATH) pour ne jamais dépendre du PATH du service.
+function unixTerminalProfiles() {
+  const darwin = process.platform === 'darwin';
+  const candidates = [
+    { id: 'zsh', label: 'zsh', paths: ['/bin/zsh', '/usr/bin/zsh'], args: ['-il'] },
+    { id: 'bash', label: 'bash', paths: ['/bin/bash', '/usr/bin/bash', '/opt/homebrew/bin/bash'], args: ['-il'] },
+    { id: 'fish', label: 'fish', paths: ['/usr/bin/fish', '/usr/local/bin/fish', '/opt/homebrew/bin/fish'], args: ['-i'] },
+    { id: 'sh', label: 'sh', paths: ['/bin/sh', '/usr/bin/sh'], args: ['-i'] },
+  ];
+  // macOS livre zsh par défaut depuis Catalina, les distributions Linux bash.
+  const order = darwin ? ['zsh', 'bash', 'fish', 'sh'] : ['bash', 'zsh', 'fish', 'sh'];
+  const resolved = order.map((id) => {
+    const entry = candidates.find((candidate) => candidate.id === id);
+    const shell = entry.paths.find((p) => { try { return fs.existsSync(p); } catch { return false; } })
+      || executableOnPath(entry.id);
+    return { id: entry.id, label: entry.label, shell, args: entry.args, available: !!shell };
+  });
+  // « Shell de connexion » suit $SHELL : c'est ce que l'utilisateur a choisi
+  // pour sa session, et il peut pointer ailleurs que les quatre ci-dessus.
+  const login = String(process.env.SHELL || '');
+  const loginAvailable = !!login && (() => { try { return fs.existsSync(login); } catch { return false; } })();
+  resolved.push({
+    id: 'login-shell',
+    label: loginAvailable ? `Shell de connexion (${path.basename(login)})` : 'Shell de connexion',
+    shell: loginAvailable ? login : '',
+    args: ['-il'],
+    available: loginAvailable,
+  });
+  return resolved;
+}
+
+function platformTerminalProfiles() {
+  return process.platform === 'win32' ? windowsTerminalProfiles() : unixTerminalProfiles();
+}
+
+// Identifiants acceptés par l'API de configuration et profil retenu par défaut.
+// Exportés pour que server.js n'ait pas à redéclarer une liste par plateforme.
+const TERMINAL_PROFILE_IDS = platformTerminalProfiles().map((profile) => profile.id);
+const DEFAULT_TERMINAL_PROFILE = process.platform === 'win32'
+  ? 'cmd'
+  : (process.platform === 'darwin' ? 'zsh' : 'bash');
+
+class TerminalManager {
+  constructor() { this.sessions = new Map(); }
+
+  profiles() {
+    return platformTerminalProfiles().map(({ id, label, available }) => ({ id, label, available }));
+  }
+
+  profile(profileId) {
+    const profiles = platformTerminalProfiles();
+    return profiles.find((profile) => profile.id === profileId && profile.available)
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE && profile.available)
+      || profiles.find((profile) => profile.available)
+      || profiles.find((profile) => profile.id === DEFAULT_TERMINAL_PROFILE);
+  }
+
+  create({ userId, cwd, profileId, origin = 'agent' }) {
+    const profile = this.profile(profileId);
+    return this.createExternal({ userId, cwd, shell: profile.shell, args: profile.args, label: profile.id, origin });
+  }
+
+  // Only trusted server-side backends may supply an executable. No HTTP route
+  // exposes these arguments; VM terminals use a fixed SSH client command.
+  createExternal({ userId, cwd, shell, args, label, origin = 'vm' }) {
+    const ptyRuntime = ptyModule();
+    if (!ptyRuntime) throw new Error(`Terminal intégré indisponible : ${ptyLoadError && ptyLoadError.message ? ptyLoadError.message : 'module natif non chargé'}`);
+    const id = crypto.randomUUID();
+    const profile = { id: label, shell, args };
+    // The bundled ConPTY closes SSH terminals without the legacy console-list
+    // helper racing a VM shutdown and logging AttachConsole failures.
+    const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, ...(process.platform==='win32'&&origin==='vm'?{useConptyDll:true}:{}), env: { ...process.env, TERM: 'xterm-256color' } });
+    let readyResolve = null;
+    const session = { id, userId, cwd, proc, profile, origin, buffer: '', events: new EventEmitter(), closed: false, ready: new Promise((resolve) => { readyResolve = resolve; }) };
+    proc.onData((data) => {
+      session.buffer = (session.buffer + data).slice(-MAX_BUFFER);
+      session.events.emit('data', data);
+      if (readyResolve) { readyResolve(); readyResolve = null; }
+    });
+    proc.onExit(({ exitCode, signal }) => { session.closed = true; session.events.emit('exit', { exitCode, signal }); });
+    this.sessions.set(id, session);
+    return session;
+  }
+
+  get(id, userId) {
+    const session = this.sessions.get(id);
+    return session && session.userId === userId ? session : null;
+  }
+
+  latest(userId, cwd) {
+    for (const session of Array.from(this.sessions.values()).reverse()) if (!session.closed && session.userId === userId && session.cwd === cwd) return session;
+    return this.create({ userId, cwd });
+  }
+
+  // Le masquage s'applique ici et dans `runCommand`, pas sur l'événement
+  // `data` : un chunk PTY coupe un jeton en plein milieu et découpe les
+  // séquences ANSI, donc masquer par chunk raterait la moitié des secrets tout
+  // en cassant le rendu.  Ces deux points-là voient toujours un texte complet.
+  snapshot(session) { return { id: session.id, cwd: session.cwd, closed: session.closed, output: sanitize(session.buffer), profile: session.profile.id, origin: session.origin }; }
+
+  write(session, data) { if (session.closed) throw new Error('Terminal fermé.'); session.proc.write(String(data || '')); }
+  resize(session, cols, rows) { if (!session.closed) session.proc.resize(Math.max(20, Math.min(320, Number(cols) || 100)), Math.max(5, Math.min(120, Number(rows) || 26))); }
+  close(session) {
+    if (!session) return;
+    session.closed = true;
+    this.sessions.delete(session.id);
+    // onExit marks a session closed before the PTY addon has necessarily
+    // disposed its pipes. Always release the native PTY handle as well.
+    try { session.proc.kill(); } catch {}
+  }
+
+  async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
+    const session = this.latest(userId, cwd);
+    await Promise.race([session.ready, new Promise((resolve) => setTimeout(resolve, 1200))]);
+    const before = session.buffer.length;
+    const marker = `__ZAALIS_DONE_${crypto.randomUUID().replace(/-/g, '')}`;
+    const resultPattern = new RegExp(`${marker}:(\\d+)`);
+    const completion = process.platform === 'win32'
+      ? `\r@echo ${marker}:%errorlevel%\r`
+      : `\rprintf '\\n${marker}:%s\\n' "$?"\r`;
+    this.write(session, `${command}${completion}`);
+    await new Promise((resolve) => {
+      let timer = null;
+      const done = () => { session.events.removeListener('data', onData); resolve(); };
+      const onData = () => { if (resultPattern.test(session.buffer.slice(before))) { if (timer) clearTimeout(timer); done(); } };
+      timer = setTimeout(done, waitMs);
+      session.events.on('data', onData);
+    });
+    const raw = session.buffer.slice(before);
+    const match = raw.match(new RegExp(`${marker}:(\\d+)`));
+    const output = raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024);
+    return { session, output: sanitize(output), exitCode: match ? Number(match[1]) : 124, timedOut: !match };
+  }
+}
+
+module.exports = { TerminalManager, TERMINAL_PROFILE_IDS, DEFAULT_TERMINAL_PROFILE };

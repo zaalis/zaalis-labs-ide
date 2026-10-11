@@ -6,7 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
-const { agentRoot, knownProjects, selectProject } = require('../workspace-context');
+const { agentRoot, knownProjects, selectProject } = require('../src/agent/workspace-context');
 
 test('project context survives missing UI root; no-project chat uses a separate workspace', () => {
   assert.equal(agentRoot({}, {}, __dirname), __dirname);
@@ -52,7 +52,7 @@ test('real agent opens a known project and terminal, then resumes in the correct
   await new Promise(resolve => provider.listen(0, '127.0.0.1', resolve));
   const port = 34900 + Math.floor(Math.random() * 500);
   const executable = process.env.ZAALIS_TEST_PACKAGED ? path.resolve(__dirname, '..', 'native', 'dist', 'zaalis-server.exe') : process.execPath;
-  const child = spawn(executable, process.env.ZAALIS_TEST_PACKAGED ? [] : ['server.js'], { cwd: path.resolve(__dirname, '..'), windowsHide: true, stdio: 'ignore',
+  const child = spawn(executable, process.env.ZAALIS_TEST_PACKAGED ? [] : ['src/app/server.js'], { cwd: path.resolve(__dirname, '..'), windowsHide: true, stdio: 'ignore',
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: path.join(temp, 'data'), ZAALIS_RUST_CORE: 'on' } });
   const base = `http://127.0.0.1:${port}`;
   try {

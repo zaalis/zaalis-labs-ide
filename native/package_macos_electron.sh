@@ -115,6 +115,11 @@ chmod +x "$APP/Contents/MacOS/zaalis-ide" \
   "$APP/Contents/Resources/app/bundle/bin/zaalis" 2>/dev/null || true
 # Bac a sable strict (Seatbelt) : optionnel, absent d'une build sans cargo.
 chmod +x "$APP/Contents/Resources/app/bundle/zaalis-sandbox" 2>/dev/null || true
+# Connecteurs (pont WhatsApp, client GitHub, tunnel), comme sous Windows.
+CONNECTOR_BINARIES="messenger-runtime/node github/gh cloudflared"
+for helper in $CONNECTOR_BINARIES; do
+  if [ -f "$BUNDLE/$helper" ]; then chmod 755 "$BUNDLE/$helper"; fi
+done
 
 # Sign only after every bundled resource has been copied.  Signing earlier
 # leaves Electron's resource seal stale and macOS rejects the application.
@@ -133,6 +138,13 @@ if command -v codesign >/dev/null 2>&1; then
   if [ -f "$APP/Contents/Resources/app/bundle/zaalis-sandbox" ]; then
     codesign --force --identifier fr.zaalis.ide.sandbox --sign "$CODESIGN_ID" "$APP/Contents/Resources/app/bundle/zaalis-sandbox"
   fi
+  # Executables outside the standard bundle locations are not reached by
+  # --deep: sign the bundled connectors explicitly with the same identity.
+  for helper in $CONNECTOR_BINARIES; do
+    if [ -f "$BUNDLE/$helper" ]; then
+      codesign --force --identifier "fr.zaalis.ide.$(basename "$helper")" --sign "$CODESIGN_ID" "$BUNDLE/$helper"
+    fi
+  done
   codesign --force --deep --sign "$CODESIGN_ID" "$APP"
 fi
 

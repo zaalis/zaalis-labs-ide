@@ -2,9 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const packagerModule = require('@electron/packager');
-
-const packager = packagerModule.packager || packagerModule.default || packagerModule;
 const PRODUCT_NAME = 'zaalis IDE';
 const EXECUTABLE_NAME = 'zaalis-ide';
 
@@ -25,6 +22,8 @@ function copyFile(src, dest) {
 }
 
 async function main() {
+  const packagerModule = await import('@electron/packager');
+  const packager = packagerModule.packager || packagerModule.default || packagerModule;
   const [platform, arch, sourceDistArg, finalDistArg] = process.argv.slice(2);
   if (!platform || !arch || !sourceDistArg || !finalDistArg) usage();
 
@@ -88,6 +87,32 @@ async function main() {
 
   copyFile(path.join(sourceDist, 'zaalis-server'), path.join(bundleDir, 'zaalis-server'));
   copyFile(path.join(sourceDist, 'bin', 'zaalis'), path.join(bundleDir, 'bin', 'zaalis'));
+  // Coeur Rust : zaalis-agentd est requis (server.js le lance pour Chat, Agents
+  // et le CLI), zaalis-sandbox est optionnel — son absence degrade le
+  // confinement des commandes sans empecher leur execution.
+  const agentd = path.join(sourceDist, 'zaalis-agentd');
+  if (!fs.existsSync(agentd)) {
+    throw new Error(`Coeur Rust manquant : ${agentd}\nLancez « npm run build:cli » (cargo) avant l'empaquetage.`);
+  }
+  copyFile(agentd, path.join(bundleDir, 'zaalis-agentd'));
+  const sandbox = path.join(sourceDist, 'zaalis-sandbox');
+  if (fs.existsSync(sandbox)) copyFile(sandbox, path.join(bundleDir, 'zaalis-sandbox'));
+
+  // Connecteurs (equivalent des dossiers github/ et messenger-runtime/ et de
+  // cloudflared.exe de l'installateur Windows), si la build les a prepares.
+  for (const dir of ['messenger-runtime', 'github']) {
+    if (fs.existsSync(path.join(sourceDist, dir))) copyDir(path.join(sourceDist, dir), path.join(bundleDir, dir));
+  }
+  for (const file of ['cloudflared', path.join('messenger-runtime', 'node'), path.join('github', 'gh')]) {
+    const source = path.join(sourceDist, file);
+    if (!fs.existsSync(source)) continue;
+    if (file === 'cloudflared') copyFile(source, path.join(bundleDir, file));
+    fs.chmodSync(path.join(bundleDir, file), 0o755);
+  }
+
+  if (fs.existsSync(path.join(sourceDist, 'node_modules'))) {
+    copyDir(path.join(sourceDist, 'node_modules'), path.join(bundleDir, 'node_modules'));
+  }
   copyDir(path.join(sourceDist, 'interface'), path.join(bundleDir, 'interface'));
   if (fs.existsSync(path.join(sourceDist, 'image'))) {
     copyDir(path.join(sourceDist, 'image'), path.join(bundleDir, 'image'));
@@ -98,11 +123,8 @@ async function main() {
   copyDir(path.join(root, 'native', 'whisper'), path.join(bundleDir, 'whisper'));
   fs.chmodSync(path.join(bundleDir, 'whisper', 'whisper-cli'), 0o755);
 
-  if (fs.existsSync(path.join(root, 'README_LINUX.md'))) {
-    copyFile(path.join(root, 'README_LINUX.md'), path.join(bundleDir, 'README.txt'));
-  } else if (fs.existsSync(path.join(root, 'README_MACOS.md'))) {
-    copyFile(path.join(root, 'README_MACOS.md'), path.join(bundleDir, 'README.txt'));
-  }
+  const readme = path.join(root, platform === 'darwin' ? 'README_MACOS.md' : 'README_LINUX.md');
+  if (fs.existsSync(readme)) copyFile(readme, path.join(bundleDir, 'README.txt'));
 
   const pngIcon = path.join(root, 'native', 'image', 'logo-zaalis.png');
   const icnsIcon = path.join(root, 'native', 'image', 'logo-zaalis.icns');

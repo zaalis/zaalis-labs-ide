@@ -107,6 +107,8 @@ impl Tool for NativeSpawnTool {
         if cancel.is_cancelled() || session.cancel.is_cancelled() {
             return Err(ZaalisError::cancelled());
         }
+        let _child_slot = Arc::clone(&session.child_concurrency).try_acquire_owned()
+            .map_err(|_| ZaalisError::invalid("limite de sous-agents concurrents atteinte"))?;
         let parent = session
             .tree
             .lock()
@@ -129,9 +131,10 @@ impl Tool for NativeSpawnTool {
         let permissions = args
             .permissions
             .unwrap_or_else(|| parent.permissions.clone());
-        let budget = args
+        let mut budget = args
             .budget
             .unwrap_or_else(|| Budget::default_child(&parent.budget));
+        budget.max_rounds = Some(budget.max_rounds.unwrap_or(250).min(session.config.subagent_turns));
         let mut child = AgentNode::new(
             session.config.session_id.clone(),
             role,

@@ -1,0 +1,308 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const net = require('net');
+const { spawn, execFile } = require('child_process');
+const { seedIso } = require('./vm-seed');
+const { sanitize } = require('../agent/secrets-mask');
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+function run(exe, args, options = {}) {
+  return new Promise((resolve, reject) => execFile(exe, args, { windowsHide: true, timeout: 120000, maxBuffer: 2 * 1024 * 1024, ...options }, (error, stdout, stderr) => {
+    if (error) { error.message = sanitize(String(stderr || stdout || error.message)); reject(error); }
+    else resolve(String(stdout));
+  }));
+}
+const ps = script => run('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script]);
+// Host tools: Windows ships them as .exe (QEMU bundled, OpenSSH/tar from the
+// system); a Linux host uses KVM, its own QEMU and OpenSSH from the distribution;
+// a macOS host uses Hypervisor.framework (HVF), QEMU from Homebrew and the
+// system OpenSSH. Apple Silicon runs the arm64 Debian image natively.
+const WINDOWS = process.platform === 'win32', MACOS = process.platform === 'darwin';
+const tool = name => WINDOWS ? name + '.exe' : name;
+const ACCELERATOR = WINDOWS ? 'whpx' : MACOS ? 'hvf' : 'kvm';
+const GUEST_ARM64 = MACOS && process.arch === 'arm64';
+const QEMU_SYSTEM = GUEST_ARM64 ? 'qemu-system-aarch64' : 'qemu-system-x86_64';
+const DEBIAN_IMAGE = GUEST_ARM64
+  ? { url: 'https://cloud.debian.org/images/cloud/bookworm/20260923-2610/debian-12-genericcloud-arm64-20260923-2610.qcow2', sha512: '89a752d5c7d8e88bee39a57d88d496cca574f7d1e8df5df7a169825435f99feb11ed13ab27ec7bee96fe1584be4ff9479358fbca6cc859efa109f4aba18724c8' }
+  : { url: 'https://cloud.debian.org/images/cloud/bookworm/20260923-2610/debian-12-genericcloud-amd64-20260923-2610.qcow2', sha512: '3d94c9dd66d8a283fde060b8810373b7ae04038b956ee00d553d1ae564f6fbdeaa2fd6e7404e87e53348b5a9509170f3ea7c0731ba737590c5c4cb8d559a47f8' };
+const HOST_TOOL_DIRS = ['/usr/bin', '/usr/local/bin', '/usr/sbin', ...(MACOS ? ['/opt/homebrew/bin', '/opt/local/bin'] : [])];
+function onPath(name) { return String(process.env.PATH || '').split(path.delimiter).concat(HOST_TOOL_DIRS).filter(Boolean).map(dir => path.join(dir, name)).find(file => { try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; } }) || null; }
+function kvmUsable() { try { fs.accessSync('/dev/kvm', fs.constants.R_OK | fs.constants.W_OK); return true; } catch { return false; } }
+function hvfUsable() { try { return require('child_process').execFileSync('/usr/sbin/sysctl', ['-n', 'kern.hv_support'], { timeout: 5000 }).toString().trim() === '1'; } catch { return false; } }
+// UEFI firmware for the arm64 "virt" machine, shipped with Homebrew's QEMU.
+function aarch64Firmware(qemuBinary) {
+  const prefixes = [path.resolve(path.dirname(qemuBinary), '..'), '/opt/homebrew', '/usr/local', '/opt/local'];
+  return prefixes.map(prefix => path.join(prefix, 'share', 'qemu', 'edk2-aarch64-code.fd')).find(file => fs.existsSync(file)) || null;
+}
+function brewBinary() { return ['/opt/homebrew/bin/brew', '/usr/local/bin/brew'].find(file => fs.existsSync(file)) || null; }
+const quote = value => "'" + String(value).replace(/'/g, "''") + "'";
+const shQuote = value => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+class VmManager {
+  constructor({ appDir, dataDir }) { this.assets = path.join(appDir, 'vm'); if (!fs.existsSync(this.assets)) this.assets = path.join(appDir, 'native', 'vm'); this.root = path.join(dataDir, 'virtual-machines'); fs.mkdirSync(this.root, { recursive: true }); this.sessions = new Map(); this.windowsStarting = false; this.templates = new (require("./vm-templates").VmTemplates)(this.root); }
+  qemu(name) { const bundled = path.join(this.assets, 'qemu', tool(name)); return WINDOWS || fs.existsSync(bundled) ? bundled : onPath(name) || name; }
+  baseImage() { const bundled = path.join(this.assets, 'images', 'debian.qcow2'); return WINDOWS || fs.existsSync(bundled) ? bundled : path.join(this.root, 'images', 'debian.qcow2'); }
+  async capabilities() {
+    let windows = { compatible: false, enabled: false, cli: false, reason: WINDOWS ? 'Windows Sandbox nécessite Windows Pro, Enterprise ou Education.' : 'Windows Sandbox nécessite un hôte Windows.' };
+    let linuxHost={compatible:((WINDOWS||process.platform==='linux')&&process.arch==='x64')||(MACOS&&['x64','arm64'].includes(process.arch)),accelerationEnabled:false,sshAvailable:false,accelerator:ACCELERATOR.toUpperCase(),host:process.platform};
+    if (process.platform === 'linux' || MACOS) {
+      linuxHost.accelerationEnabled = MACOS ? hvfUsable() : kvmUsable(); linuxHost.sshAvailable = ['ssh', 'scp', 'ssh-keygen'].every(onPath);
+      linuxHost.qemuAvailable = [QEMU_SYSTEM, 'qemu-img'].every(name => fs.existsSync(this.qemu(name))) && (!GUEST_ARM64 || !!aarch64Firmware(this.qemu(QEMU_SYSTEM)));
+      if (MACOS) linuxHost.brewAvailable = !!brewBinary();
+    }
+    if (process.platform === 'win32') {
+      try {
+        const info = JSON.parse(await ps("$v=Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion'; $f=Get-CimInstance Win32_OptionalFeature -Filter \"Name='Containers-DisposableClientVM'\"; $h=Get-CimInstance Win32_OptionalFeature -Filter \"Name='HypervisorPlatform'\"; @{edition=$v.EditionID; build=$v.CurrentBuild; state=$f.InstallState; cli=[bool](Get-Command wsb.exe -ErrorAction SilentlyContinue);whpx=($h.InstallState -eq 1);ssh=[bool](Get-Command ssh.exe -ErrorAction SilentlyContinue)} | ConvertTo-Json -Compress"));
+        linuxHost.accelerationEnabled=info.whpx;linuxHost.sshAvailable=info.ssh;
+        windows = { ...windows, ...info, compatible: /Professional|Enterprise|Education/.test(info.edition), enabled: info.state === 1, cli: info.cli };
+        windows.reason = !windows.compatible ? windows.reason : !windows.enabled ? 'Windows Sandbox est désactivé. Son activation peut nécessiter un redémarrage.' : !windows.cli ? 'Sandbox activé, mais son API wsb est absente. Mettez Windows Sandbox à jour.' : 'Prêt · Windows Sandbox';
+      } catch (error) { windows.reason = error.message; }
+    }
+    const image = this.baseImage(), bundled=(WINDOWS ? fs.existsSync(this.qemu(QEMU_SYSTEM)) : linuxHost.qemuAvailable === true) && fs.existsSync(image);
+    return { windows, linux: { ...linuxHost,bundled,available:bundled&&linuxHost.compatible&&linuxHost.accelerationEnabled&&linuxHost.sshAvailable, image: GUEST_ARM64 ? 'Debian 12 · serveur arm64' : 'Debian 12 · serveur', imageBytes: fs.existsSync(image) ? fs.statSync(image).size : 0 }, mode: 'autonomous', maxLinux: 3 };
+  }
+  snapshot(s) { return { id: s.id, system: s.system, name: s.name, status: s.status, memoryMB: s.memoryMB, cpus: s.cpus, network: s.network, output: sanitize(s.output), error: s.error || null, terminalId: s.terminalId || null, artifacts: (s.artifacts || []).map(({id,name,bytes}) => ({id,name,bytes})) }; }
+  list(userId) { return [...this.sessions.values()].filter(s => s.userId === userId).map(s => this.snapshot(s)); }
+  get(id, userId) { const s = this.sessions.get(id); if (!s || s.userId !== userId) throw new Error('Machine virtuelle inconnue.'); return s; }
+  log(s, data) { s.output = (s.output + data).slice(-512 * 1024); }
+  async create(userId, input = {}) {
+    const system = input.system === 'windows' ? 'windows' : input.system === 'linux' ? 'linux' : null;
+    if (!system) throw new Error('Système inconnu.');
+    const caps = await this.capabilities();
+    if (system === 'windows' && (!caps.windows.compatible || !caps.windows.enabled || !caps.windows.cli)) throw new Error(caps.windows.reason);
+    if (system === 'linux' && !caps.linux.available) throw new Error(WINDOWS ? (!caps.linux.bundled?'Le pack Linux intégré est absent.':'Activez les composants Windows pour Linux dans les paramètres Machines virtuelles.') : MACOS ? 'Activez les composants Linux (QEMU, HVF, image Debian) dans les paramètres Machines virtuelles.' : 'Activez les composants Linux (QEMU, KVM, SSH, image Debian) dans les paramètres Machines virtuelles.');
+    if (system === 'windows' && (this.windowsStarting || [...this.sessions.values()].some(s => s.system === 'windows' && !['stopped', 'error'].includes(s.status)))) throw new Error('Une session Windows Sandbox est déjà gérée par l’IDE.');
+    if (system === 'linux' && [...this.sessions.values()].filter(s => s.system === 'linux' && !['stopped', 'error'].includes(s.status)).length >= 3) throw new Error('Limite de trois VM Linux simultanées atteinte.');
+    const memoryMB = Math.max(1024, Math.min(8192, Number(input.memoryMB) || 2048));
+    const cpus = Math.max(1, Math.min(4, Math.floor(Number(input.cpus) || 2)));
+    if ([...this.sessions.values()].filter(s => !['stopped', 'error'].includes(s.status)).reduce((n, s) => n + s.memoryMB, memoryMB) > os.totalmem() / 1024 / 1024 * .65) throw new Error('Mémoire disponible insuffisante pour cette VM.');
+    const template = input.templateId ? this.templates.get(userId, input.templateId) : null;
+    if (template && system !== 'linux') throw new Error('Un environnement figé requiert Linux.');
+    const s = { templateId: template?.id, image: template?.image, id: crypto.randomUUID(), userId, system, name: String(input.name || (system === 'linux' ? 'Debian' : 'Windows Sandbox')).slice(0, 80), memoryMB, cpus, network: input.network === 'internet' ? 'internet' : 'isolated', status: 'starting', output: '', queue: Promise.resolve() };
+    s.dir = path.join(this.root, s.id); fs.mkdirSync(s.dir); this.sessions.set(s.id, s);
+    s.startTask=this.start(s).catch(async error => { const cancelled=s.stopRequested; try { await this.stop(s,undefined,true); } catch {} if(cancelled)return; s.error = error.message; s.status = 'error'; this.log(s, '\r\n' + error.message); });
+    return this.snapshot(s);
+  }
+  async start(s) {
+    const check=()=>{if(s.stopRequested)throw new Error('Démarrage interrompu.');};check();
+    if (s.system === 'windows') {
+      this.windowsStarting = true;
+      try {
+        // Do not adopt or stop a Sandbox belonging to another application.
+        const existing = JSON.parse(await run('wsb.exe', ['list', '--raw']));
+        check();
+        if ((existing.WindowsSandboxEnvironments || []).length) throw new Error('Un Sandbox externe est ouvert. Fermez-le avant de démarrer celui de l’IDE.');
+        s.inputDir=path.join(s.dir,'input');s.outputDir=path.join(s.dir,'output');fs.mkdirSync(s.inputDir);fs.mkdirSync(s.outputDir);
+        for(const name of ['guest-bridge.ps1','watchdog.ps1'])fs.copyFileSync(path.join(this.assets,name),path.join(s.inputDir,name));
+        // Read-only Sandbox mappings enumerate files at launch. Keep fixed
+        // slots and update their contents instead of adding/renaming files.
+        fs.writeFileSync(path.join(s.inputDir,'request.json'),'{}');fs.writeFileSync(path.join(s.inputDir,'project.tar'),Buffer.alloc(0));
+        const heartbeat=()=>{try{fs.writeFileSync(path.join(s.inputDir,'heartbeat'),String(Date.now()));}catch{}};heartbeat();s.heartbeatTimer=setInterval(heartbeat,3000);s.heartbeatTimer.unref();
+        const xml = value => String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const config = `<Configuration><MemoryInMB>${s.memoryMB}</MemoryInMB><Networking>${s.network === 'internet' ? 'Enable' : 'Disable'}</Networking><ClipboardRedirection>Disable</ClipboardRedirection><VGpu>Disable</VGpu><MappedFolders><MappedFolder><HostFolder>${xml(s.inputDir)}</HostFolder><SandboxFolder>C:\\ZaalisInput</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder><MappedFolder><HostFolder>${xml(s.outputDir)}</HostFolder><SandboxFolder>C:\\ZaalisBridge</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder></MappedFolders></Configuration>`;
+        const result = JSON.parse(await run('wsb.exe', ['start', '--raw', '--config', config])); s.sandboxId = result.Id;
+        if (!/^[0-9a-f-]{36}$/i.test(s.sandboxId || '')) throw new Error('ID Sandbox invalide.');
+        check();
+        // wsb exec waits for its guest process. The bridge is intentionally
+        // persistent, so readiness comes from the dedicated mapped directory.
+        s.bridgeProc = spawn('wsb.exe', ['exec', '--id', s.sandboxId, '-r', 'System', '-c', 'powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File C:\\ZaalisInput\\guest-bridge.ps1'], { windowsHide: true });
+        s.bridgeProc.on('error', error => { s.error = error.message; s.status = 'error'; });
+        s.bridgeProc.stderr.on('data', data => this.log(s, data.toString()));
+        s.bridgeProc.on('exit', code => { if (code && s.status !== 'stopped') { s.error = 'Le pont Sandbox a échoué (' + code + ').'; s.status = 'error'; } });
+        await this.wait(s, () => fs.existsSync(path.join(s.outputDir, 'ready')), 120000);
+        this.log(s, 'Windows Sandbox · PowerShell\r\nPS C:\\> ');
+      } finally { this.windowsStarting = false; this.templates = new (require("./vm-templates").VmTemplates)(this.root); }
+    } else {
+      const key = path.join(s.dir, 'id_ed25519'); s.key = key;
+      await run(tool('ssh-keygen'), ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
+      check();
+      const pub = fs.readFileSync(key + '.pub', 'utf8').trim();
+      fs.writeFileSync(path.join(s.dir, 'seed.iso'), seedIso({ 'meta-data': `instance-id: ${s.id}\nlocal-hostname: zaalis-vm\n`, 'user-data': `#cloud-config\nusers:\n  - name: zaalis\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    shell: /bin/bash\n    ssh_authorized_keys:\n      - ${pub}\nssh_pwauth: false\ndisable_root: true\n` }));
+      await run(this.qemu('qemu-img'), ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', s.image || this.baseImage(), path.join(s.dir, 'disk.qcow2'), '24G']);
+      check();
+      s.port = await new Promise((resolve, reject) => { const server = net.createServer(); server.on('error', reject); server.listen(0, '127.0.0.1', () => { const port = server.address().port; server.close(() => resolve(port)); }); });
+      check();
+      // The arm64 "virt" machine has no IDE bus: the cloud-init seed is a
+      // read-only virtio disk (found by its cidata label) and UEFI boots it.
+      const firmware = GUEST_ARM64 ? aarch64Firmware(this.qemu(QEMU_SYSTEM)) : null;
+      if (GUEST_ARM64 && !firmware) throw new Error('Micrologiciel UEFI QEMU (edk2-aarch64-code.fd) introuvable. Réinstallez QEMU avec Homebrew.');
+      const machine = GUEST_ARM64 ? ['-machine', 'virt', '-cpu', 'host', '-bios', firmware] : [];
+      const seed = GUEST_ARM64 ? `file=${path.join(s.dir, 'seed.iso')},format=raw,if=virtio,readonly=on` : `file=${path.join(s.dir, 'seed.iso')},media=cdrom,readonly=on`;
+      const args = [...machine, '-accel', ACCELERATOR, '-m', String(s.memoryMB), '-smp', String(s.cpus), '-display', 'none', '-monitor', 'none', '-serial', 'stdio', '-drive', `file=${path.join(s.dir, 'disk.qcow2')},format=qcow2,if=virtio`, '-drive', seed, '-netdev', `user,id=net0,restrict=${s.network === 'isolated' ? 'on' : 'off'},hostfwd=tcp:127.0.0.1:${s.port}-:22`, '-device', 'virtio-net-pci,netdev=net0'];
+      s.proc = spawn(this.qemu(QEMU_SYSTEM), args, { windowsHide: true });
+      s.proc.on('error', error => { s.error = error.message; s.status = 'error'; });
+      s.proc.stdout.on('data', data => this.log(s, data.toString())); s.proc.stderr.on('data', data => this.log(s, data.toString()));
+      s.proc.on('exit', code => { if (s.status !== 'stopped') { s.status = 'error'; s.error = 'QEMU arrêté (' + code + '). ' + s.output.slice(-600); } });
+      await this.wait(s, async () => { try { await run(tool('ssh'), [...this.sshArgs(s), 'true'], { timeout: 8000 }); return true; } catch { return false; } }, 180000);
+      this.log(s, '\r\nDebian prêt · SSH\r\n');
+    }
+    if (s.status === 'starting') s.status = 'ready';
+  }
+  sshArgs(s) { return ['-i', s.key, '-p', String(s.port), '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=3', '-o', 'StrictHostKeyChecking=accept-new', '-o', 'UserKnownHostsFile=' + path.join(s.dir, 'known_hosts'), 'zaalis@127.0.0.1']; }
+  async wait(s, test, timeout) { const end = Date.now() + timeout; while (Date.now() < end) { if (s.stopRequested||['stopping','stopped', 'error'].includes(s.status)) throw new Error(s.error || 'VM arrêtée.'); if (await test()) return; await delay(500); } throw new Error('Délai de démarrage ou de commande dépassé.'); }
+  exec(s, command, options = {}) {
+    const timeoutMs = Math.max(100, Math.min(120000, options.timeoutMs || 120000));
+    if (s.status !== 'ready') return Promise.reject(new Error('La VM n’est pas prête.'));
+    if (typeof command !== 'string' || !command.trim() || command.length > 32000) return Promise.reject(new Error('Commande invalide.'));
+    const task = s.queue.catch(() => {}).then(async () => {
+      if (s.status !== 'ready') throw new Error('VM arrêtée.');
+      this.log(s, '\r\n$ ' + command + '\r\n');
+      let result;
+      if (s.system === 'linux') {
+        const guestCommand = `timeout --signal=TERM --kill-after=2s ${Math.max(0.1,timeoutMs / 1000)}s sh -c ${shQuote(command)}`;
+        result = await new Promise(resolve => { s.activeExec=execFile(tool('ssh'), [...this.sshArgs(s), guestCommand], { windowsHide: true, timeout: timeoutMs + 8000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => { s.activeExec=null; resolve({ output: String(stdout || '') + String(stderr || ''), exitCode: error ? (Number.isInteger(error.code) ? error.code : 1) : 0, timedOut: !!error && (error.killed || error.code === 124), transportError: !!error && (error.code === 255 || error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') }); }); });
+      } else {
+        const id = crypto.randomUUID(), outputBase=path.join(s.outputDir,id);
+        let published=false;for(let attempt=0;attempt<50;attempt++){try{fs.writeFileSync(path.join(s.inputDir,'request.json'),JSON.stringify({id,command}));published=true;break;}catch(error){if(!['EBUSY','EPERM'].includes(error.code))throw error;await delay(40);}}if(!published)throw new Error('Canal Sandbox occupé.');
+        try { await this.wait(s, () => fs.existsSync(outputBase + '.result.json'), timeoutMs); } catch(error){await this.stop(s);throw error;}
+        const file = outputBase + '.result.json';
+        if (fs.lstatSync(file).isSymbolicLink() || fs.statSync(file).size > 1024 * 1024) throw new Error('Résultat Sandbox invalide.');
+        result = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));try{fs.unlinkSync(file);}catch{}
+      }
+      result.output = sanitize(String(result.output || '')); this.log(s, result.output + '\r\n' + (result.cwd ? `PS ${result.cwd}> ` : '')); return result;
+    }); s.queue = task; return task;
+  }
+  async terminal(s, terminalManager) {
+    if (s.system !== 'linux') throw new Error('Windows utilise la console PowerShell persistante, sans PTY.');
+    if (s.status !== 'ready') throw new Error('VM non prête.');
+    const existing = s.terminalId && terminalManager.get(s.terminalId, s.userId); if (existing && !existing.closed) return terminalManager.snapshot(existing);
+    const session = terminalManager.createExternal({ userId: s.userId, cwd: s.dir, shell: tool('ssh'), args: ['-tt', ...this.sshArgs(s)], label: 'vm-linux', origin: 'vm' }); s.terminalId = session.id; return terminalManager.snapshot(session);
+  }
+  async importProject(s, root) {
+    if (s.status !== 'ready') throw new Error('VM non prête.');
+    if (!root || !fs.statSync(root).isDirectory()) throw new Error('Aucun projet actif.');
+    const dest = path.join(s.system==='windows'?(s.inputDir||s.dir):s.dir, 'project-copy'); fs.mkdirSync(dest, { recursive: true });
+    // Clear only this session's staging copy so repeated imports do not retain old files.
+    const expected=path.resolve(s.dir)+path.sep;
+    if(!path.resolve(dest).startsWith(expected)||fs.lstatSync(dest).isSymbolicLink())throw new Error('Dossier de copie non sûr.');
+    for(const name of fs.readdirSync(dest)) fs.rmSync(path.join(dest,name),{recursive:true,force:true});
+    let bytes = 0, count = 0;
+    const copy = (from, to) => {
+      for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+        if (require('./laboratory').excluded(entry.name) || entry.isSymbolicLink()) continue;
+        const src = path.join(from, entry.name), dst = path.join(to, entry.name);
+        if (entry.isDirectory()) { fs.mkdirSync(dst, { recursive: true }); copy(src, dst); }
+        else if (entry.isFile()) { const size = fs.statSync(src).size; bytes += size; if (bytes > 256 * 1024 * 1024 || ++count > 12000) throw new Error('Projet trop volumineux : limite 256 Mo / 12 000 fichiers.'); fs.copyFileSync(src, dst); }
+      }
+    };
+    copy(root, dest);
+    const projectFingerprint = require('./laboratory').fingerprint(dest).hash;
+    if (s.system === 'windows') {
+      await run(tool('tar'),['-cf',path.join(s.inputDir||s.dir,'project.tar'),'-C',dest,'.']);
+      await this.exec(s, "if (Test-Path -LiteralPath C:\\workspace) { Remove-Item -LiteralPath C:\\workspace -Recurse -Force }; New-Item -ItemType Directory -Force C:\\workspace | Out-Null; tar.exe -xf C:\\ZaalisInput\\project.tar -C C:\\workspace; if ($LASTEXITCODE -ne 0) { throw 'Import du projet impossible' }");
+    } else {
+      const archive = path.join(s.dir, 'project.tar'); await run(tool('tar'), ['-cf', archive, '-C', dest, '.']);
+      const args = this.sshArgs(s); const host = args.pop(); const p = args.indexOf('-p'); args[p] = '-P';
+      await run(tool('scp'), [...args, archive, host + ':/tmp/zaalis-project.tar']);
+      await this.exec(s, 'rm -rf -- /home/zaalis/workspace && mkdir -p ~/workspace && tar -xf /tmp/zaalis-project.tar -C ~/workspace && rm /tmp/zaalis-project.tar');
+    }
+    return { summary: 'Copie du projet importée. Les fichiers sensibles et dépendances locales sont exclus.', files: count, bytes, fingerprint: projectFingerprint, guestPath: s.system === 'linux' ? '/home/zaalis/workspace' : 'C:\\workspace' };
+  }
+  async exportFile(s, guestPath) {
+    if (s.status !== 'ready') throw new Error('VM non prête.');
+    if (typeof guestPath !== 'string' || !guestPath || guestPath.length > 1024 || /[\r\n\0]/.test(guestPath)) throw new Error('Chemin invité invalide.');
+    const id=crypto.randomUUID(), name=guestPath.split(/[\\/]/).pop().replace(/[^a-zA-Z0-9._-]/g,'_') || 'result.bin';
+    const artifactRoot=path.join(this.root,'artifacts'); fs.mkdirSync(artifactRoot,{recursive:true}); const dest=path.join(artifactRoot,id);
+    if (s.system === 'linux') {
+      await new Promise((resolve,reject)=>execFile(tool('ssh'),[...this.sshArgs(s),`cat -- ${shQuote(guestPath)}`],{windowsHide:true,encoding:'buffer',timeout:120000,maxBuffer:32*1024*1024},(error,stdout)=>{if(error)return reject(error);fs.writeFileSync(dest,stdout);resolve();}));
+    } else {
+      const staging=path.join(s.outputDir,id+'.export');
+      await this.exec(s,`$f=Get-Item -LiteralPath ${quote(guestPath)}; if ($f.PSIsContainer -or $f.Length -gt 33554432) { throw 'Export limité à un fichier de 32 Mo' }; Copy-Item -LiteralPath $f.FullName -Destination 'C:\\ZaalisBridge\\${id}.export'`);
+      if(!fs.existsSync(staging)||fs.lstatSync(staging).isSymbolicLink()||fs.statSync(staging).size>32*1024*1024)throw new Error('Export invalide.');
+      fs.copyFileSync(staging,dest);fs.unlinkSync(staging);
+    }
+    const artifact={id,name,bytes:fs.statSync(dest).size,path:dest};(s.artifacts ||= []).push(artifact);
+    return {summary:'Fichier récupéré depuis la VM',artifact:{id,name,bytes:artifact.bytes,url:`/api/vm/${s.id}/artifacts/${id}`}};
+  }
+  async stop(s, terminalManager,skipStart=false) {
+    s.stopRequested=true;s.status='stopping';
+    if(!skipStart&&s.startTask)await s.startTask;
+    s.activeExec?.kill();
+    clearInterval(s.heartbeatTimer);
+    if(s.terminalId&&terminalManager)terminalManager.close(terminalManager.get(s.terminalId,s.userId));
+    if(s.sandboxId){const list=JSON.parse(await run('wsb.exe',['list','--raw']));if((list.WindowsSandboxEnvironments||[]).some(item=>item.Id===s.sandboxId))await run('wsb.exe',['stop','--id',s.sandboxId]);}
+    if(s.proc&&s.proc.exitCode===null){s.proc.kill();await Promise.race([new Promise(resolve=>s.proc.once('exit',resolve)),delay(5000)]);if(s.proc.exitCode===null&&s.proc.signalCode===null)throw new Error('QEMU n’a pas confirmé son arrêt.');}
+    if(s.bridgeProc)s.bridgeProc.kill();s.status='stopped';return this.snapshot(s);
+  }
+  async convertDisk(source,target) { return run(this.qemu('qemu-img'),['convert','-c','-O','qcow2',source,target],{timeout:300000}); }
+  async discard(s) {
+    if(this.sessions.get(s.id)!==s||s.status!=='stopped')throw new Error('Arrêtez la VM avant de libérer son disque.');
+    const expected=path.resolve(this.root,s.id),target=path.resolve(s.dir);
+    if(!/^[0-9a-f-]{36}$/.test(s.id)||target!==expected||!target.startsWith(path.resolve(this.root)+path.sep)||fs.lstatSync(target).isSymbolicLink())throw new Error('Dossier de VM non sûr.');
+    fs.rmSync(target,{recursive:true});this.sessions.delete(s.id);
+  }
+  async shutdown(terminals) { await Promise.allSettled([...this.sessions.values()].filter(s => s.status !== 'stopped').map(s => this.stop(s, terminals))); }
+  async activate(system = 'windows') {
+    const caps = await this.capabilities(); if(system==='windows'){if (!caps.windows.compatible) throw new Error(caps.windows.reason); if (caps.windows.enabled) return { enabled: true };}else if(!caps.linux.compatible)throw new Error('Linux intégré requiert un hôte Windows ou Linux x64, ou un Mac.');
+    if (process.platform === 'linux') return this.activateLinuxHost(caps.linux);
+    if (MACOS) return this.activateMacHost(caps.linux);
+    const file = path.join(this.root, 'activation-' + crypto.randomUUID() + '.json');
+    const commands=system==='windows'?"$r=Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart":"$r=Enable-WindowsOptionalFeature -Online -FeatureName HypervisorPlatform -All -NoRestart; if (!(Get-Command ssh.exe -ErrorAction SilentlyContinue)) { Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0 | Out-Null }";
+    const script = `$ErrorActionPreference='Stop'; try { ${commands}; @{ok=$true;restartNeeded=$r.RestartNeeded} | ConvertTo-Json | Set-Content -LiteralPath ${quote(file)} } catch { @{ok=$false;error=$_.Exception.Message} | ConvertTo-Json | Set-Content -LiteralPath ${quote(file)} }`;
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    await ps(`Start-Process -FilePath powershell.exe -Verb RunAs -WindowStyle Hidden -Wait -ArgumentList '-NoProfile -EncodedCommand ${encoded}'`);
+    const result = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); fs.unlinkSync(file); if (!result.ok) throw new Error(result.error); return result;
+  }
+  // Linux host: missing packages and KVM access through a graphical pkexec
+  // prompt (the UAC equivalent), then the official Debian image, verified.
+  async activateLinuxHost(caps) {
+    let restartNeeded = false;
+    const user = os.userInfo().username;
+    if (!caps.qemuAvailable || !caps.sshAvailable || !caps.accelerationEnabled) {
+      if (!/^[a-z_][a-z0-9_-]*\$?$/i.test(user)) throw new Error('Nom d’utilisateur inattendu.');
+      const install = 'if command -v apt-get >/dev/null 2>&1; then apt-get install -y qemu-system-x86 qemu-utils openssh-client; elif command -v dnf >/dev/null 2>&1; then dnf install -y qemu-system-x86 qemu-img openssh-clients; elif command -v pacman >/dev/null 2>&1; then pacman -S --needed --noconfirm qemu-base openssh; elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install qemu-x86 qemu-tools openssh-clients; else echo "Gestionnaire de paquets non pris en charge" >&2; exit 3; fi';
+      const kvm = `if [ -e /dev/kvm ]; then getent group kvm >/dev/null || groupadd -r kvm; usermod -aG kvm ${user}; else echo "KVM absent : activez la virtualisation (VT-x/AMD-V) dans le firmware" >&2; exit 4; fi`;
+      const script = ['set -e', 'export DEBIAN_FRONTEND=noninteractive', !caps.qemuAvailable || !caps.sshAvailable ? install : '', !caps.accelerationEnabled ? kvm : ''].filter(Boolean).join('\n');
+      await run('pkexec', ['sh', '-c', script], { timeout: 900000 });
+      restartNeeded = !caps.accelerationEnabled;
+    }
+    const image = this.baseImage();
+    if (!fs.existsSync(image)) await this.downloadImage(image);
+    return { ok: true, restartNeeded };
+  }
+  // macOS host: HVF is built in and OpenSSH ships with the system; QEMU comes
+  // from Homebrew (user install, no administrator prompt), then the verified image.
+  async activateMacHost(caps) {
+    if (!caps.accelerationEnabled) throw new Error('Hypervisor.framework est indisponible sur ce Mac (kern.hv_support = 0).');
+    if (!caps.sshAvailable) throw new Error('Client OpenSSH du système introuvable (ssh, scp, ssh-keygen).');
+    if (!caps.qemuAvailable) {
+      const brew = brewBinary();
+      if (!brew) throw new Error('QEMU est requis : installez Homebrew (https://brew.sh), puis relancez l’activation, ou exécutez « brew install qemu ».');
+      await run(brew, ['install', 'qemu'], { timeout: 1800000, env: { ...process.env, HOMEBREW_NO_AUTO_UPDATE: '1', HOMEBREW_NO_INSTALL_CLEANUP: '1', PATH: [path.dirname(brew), '/usr/bin', '/bin', '/usr/sbin', '/sbin', process.env.PATH || ''].join(':') } });
+      if (![QEMU_SYSTEM, 'qemu-img'].every(name => fs.existsSync(this.qemu(name)))) throw new Error('QEMU installé, mais ' + QEMU_SYSTEM + ' reste introuvable.');
+    }
+    const image = this.baseImage();
+    if (!fs.existsSync(image)) await this.downloadImage(image);
+    return { ok: true, restartNeeded: false };
+  }
+  async downloadImage(target) {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const temp = target + '.part', hash = crypto.createHash('sha512');
+    const response = await fetch(DEBIAN_IMAGE.url, { redirect: 'follow', signal: AbortSignal.timeout(3600000) });
+    if (!response.ok || !response.body) throw new Error('Téléchargement de l’image Debian impossible (' + response.status + ').');
+    const out = fs.createWriteStream(temp);
+    try {
+      for await (const chunk of response.body) { hash.update(chunk); if (!out.write(chunk)) await new Promise(resolve => out.once('drain', resolve)); }
+      await new Promise((resolve, reject) => out.end(error => error ? reject(error) : resolve()));
+      if (hash.digest('hex') !== DEBIAN_IMAGE.sha512) throw new Error('Empreinte de l’image Debian invalide.');
+      fs.renameSync(temp, target);
+    } catch (error) { out.destroy(); try { fs.unlinkSync(temp); } catch {} throw error; }
+  }
+  async action(userId, input, terminals, projectRoot) {
+    switch (input.action) {
+      case 'templates': return {summary:'Environnements Linux réutilisables',templates:this.templates.list(userId)};
+      case 'save_template': return {summary:'Environnement Linux figé, VM arrêtée',template:await this.templates.save(userId,this.get(input.id,userId),this)};
+      case 'list': return { summary: 'Machines virtuelles', capabilities: await this.capabilities(), machines: this.list(userId).map(({output, ...machine}) => machine) };
+      case 'create': return { summary: 'Démarrage en cours ; utiliser status avant exec', machine: await this.create(userId, input) };
+      case 'status': { const machine = this.snapshot(this.get(input.id, userId)); machine.output = machine.output.slice(-4000); return { summary: 'État de la VM', machine }; }
+      case 'exec': { const result = await this.exec(this.get(input.id, userId), input.command); return { summary: 'Commande exécutée dans la VM', ...result, output: result.output.slice(-32000), truncated: result.output.length > 32000 }; }
+      case 'import_project': return this.importProject(this.get(input.id, userId), projectRoot);
+      case 'export_file': return this.exportFile(this.get(input.id,userId),input.path);
+      case 'reset': { const old=this.get(input.id,userId); if(old.status!=='stopped')await this.stop(old,terminals); return {summary:'Nouvel environnement propre',machine:await this.create(userId,{system:old.system,name:old.name,network:old.network,memoryMB:old.memoryMB,cpus:old.cpus})}; }
+      case 'stop': return { summary: 'VM arrêtée', machine: await this.stop(this.get(input.id, userId), terminals) };
+      default: throw new Error('Action VM inconnue.');
+    }
+  }
+}
+module.exports = { VmManager, run };

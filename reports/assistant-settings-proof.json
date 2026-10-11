@@ -1,0 +1,48 @@
+{
+  "status": "passed",
+  "packaged": true,
+  "limits": {
+    "maxSteps": 500,
+    "maxSubagents": 10,
+    "subagentTurns": 250
+  },
+  "integrations": 33,
+  "checks": [
+    "shared persisted settings",
+    "resumed session budget refreshed",
+    "subscription model slots",
+    "real Rust MoA composition and usage",
+    "real Rust setup fallback",
+    "compiled terminal settings and catalogue"
+  ],
+  "moaUsage": {
+    "input": 40,
+    "output": 10,
+    "cached": 0,
+    "reasoning": 0,
+    "toolCalls": 0,
+    "rounds": 1,
+    "webQueries": 0,
+    "webResults": 0,
+    "webPagesRead": 0,
+    "contextCompactions": 0,
+    "context": 50,
+    "turnInput": 40,
+    "turnOutput": 10
+  },
+  "plainUsage": {
+    "input": 20,
+    "output": 5,
+    "cached": 0,
+    "reasoning": 0,
+    "toolCalls": 0,
+    "rounds": 1,
+    "webQueries": 0,
+    "webResults": 0,
+    "webPagesRead": 0,
+    "contextCompactions": 0,
+    "context": 25,
+    "turnInput": 20,
+    "turnOutput": 5
+  }
+}

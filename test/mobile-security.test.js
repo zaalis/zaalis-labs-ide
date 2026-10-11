@@ -25,7 +25,7 @@ async function waitForServer(child) {
 
 test('tunnel and mobile identities cannot acquire desktop capabilities', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-mobile-security-'));
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, ZAALIS_PORT: String(PORT), ZAALIS_DATA_DIR: dataDir, ZAALIS_RUST_CORE: 'off' },
     stdio: 'ignore',

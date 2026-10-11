@@ -25,9 +25,9 @@ fs.mkdirSync(vaultRoot, { recursive: true });
 fs.writeFileSync(path.join(vaultRoot, 'Accueil.md'), '# Accueil\nVoir [[Brouillon]].\n');
 fs.writeFileSync(path.join(vaultRoot, 'Brouillon.md'), 'Un brouillon.\n');
 
-const connector = require('../opale-connector');
-const mcpRegistry = require('../mcp-registry');
-const { syncManagedSkills, findAgentd } = require('../rust-agent-bridge');
+const connector = require('../src/integrations/opale-connector');
+const mcpRegistry = require('../src/agent/mcp-registry');
+const { syncManagedSkills, findAgentd } = require('../src/agent/rust-agent-bridge');
 const { createOpale } = require(path.join(opaleDir, 'server.js'));
 
 let opale;
@@ -156,7 +156,7 @@ test('a present Opale is linked by default: the real agent gets the vault, until
   // The agent's own project: separate from its data folder and from the vault.
   const project = path.join(temp, 'projet');
   fs.mkdirSync(project);
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.resolve(__dirname, '..'), windowsHide: true, stdio: 'ignore',
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: path.join(temp, 'ide-data'), ZAALIS_RUST_CORE: 'on' },
   });

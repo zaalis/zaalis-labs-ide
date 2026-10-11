@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { AgentdClient, findAgentd } = require('../rust-agent-bridge');
+const { AgentdClient, findAgentd } = require('../src/agent/rust-agent-bridge');
 
 test('findAgentd selects an existing native or Cargo binary only', () => {
   const found = findAgentd(path.resolve(__dirname, '..'));

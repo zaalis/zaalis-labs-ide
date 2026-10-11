@@ -18,6 +18,7 @@ const path = require('path');
 const Module = require('module');
 const { EventEmitter } = require('events');
 const { createElectron } = require('./electron-shim');
+const browserLocale = require('./locale');
 
 const APP_DIR = path.join(__dirname, 'app');
 const DATA_FILES = [
@@ -34,6 +35,7 @@ class BrowserHost extends EventEmitter {
     this.dataDir = options.dataDir || '';
     this.secretFile = options.secretFile || '';
     this.idePort = options.idePort || 3000;
+    this.language = 'fr';
     this.log = options.log || ((line) => console.error(line));
     this.socket = null;
     this.buffer = '';
@@ -45,7 +47,10 @@ class BrowserHost extends EventEmitter {
     this.starting = null;
     this.lastTabs = [];
     this.agentBorderTimer = null;
+    const browserHost = this;
     this.shim = createElectron({
+      get language() { return browserHost.language; },
+      translate: (value) => this.translate(value),
       command: (op, params) => this.command(op, params),
       send: (op, params) => this.send(op, params),
       log: (line) => this.log(line),
@@ -225,6 +230,16 @@ class BrowserHost extends EventEmitter {
   // ----- IDE-facing API ------------------------------------------------------------
   reveal() { this.send('reveal', {}); }
 
+  setLanguage(language) {
+    this.language = language === 'en' ? 'en' : 'fr';
+    if (this.shim) for (const view of this.shim.views.values()) {
+      const wc = view.webContents;
+      if (wc.getURL().startsWith('zaalis://home/')) wc.executeJavaScript(browserLocale.client(this.language));
+    }
+  }
+
+  translate(value) { return browserLocale.translate(value, this.language); }
+
   async open(url, { background = false, reveal = true } = {}) {
     const core = await this.ensureStarted();
     const target = core.resolveQuery(String(url || ''));
@@ -304,6 +319,20 @@ class BrowserHost extends EventEmitter {
     }
     const tab = core.activeTab();
     if (!tab) return 'Aucune page web active.';
+    if (tool === 'cdp') {
+      if (!require('../assistant-tools/browser').SAFE_CDP.test(String(args.method || ''))) throw new Error('Méthode CDP refusée.');
+      return tab.view.webContents.cdp(args.method, args.params || {});
+    }
+    if (tool === 'press') {
+      const key=String(args.key||'Enter'),codes={Enter:13,Tab:9,Escape:27,Backspace:8,ArrowUp:38,ArrowDown:40,ArrowLeft:37,ArrowRight:39,Space:32};
+      await tab.view.webContents.cdp('Input.dispatchKeyEvent',{type:'keyDown',key,windowsVirtualKeyCode:codes[key]||0});
+      await tab.view.webContents.cdp('Input.dispatchKeyEvent',{type:'keyUp',key,windowsVirtualKeyCode:codes[key]||0});return 'Key sent: '+key;
+    }
+    if (tool === 'scroll') {
+      const d=args.direction||'down',amount=Math.max(1,Math.min(5000,Number(args.amount)||600));
+      await tab.view.webContents.cdp('Input.dispatchMouseEvent',{type:'mouseWheel',x:200,y:200,deltaX:d==='right'?amount:d==='left'?-amount:0,deltaY:d==='up'?-amount:d==='down'?amount:0});return 'Page scrolled';
+    }
+    if (tool === 'back') return core.runAgentTool(tab,'execute_js',{code:"history.back();return 'back';"});
     clearTimeout(this.agentBorderTimer);
     try {
       await core.setAiControlBorder(tab, true);

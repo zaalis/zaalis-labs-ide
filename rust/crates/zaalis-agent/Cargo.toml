@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 zaalis-core = { workspace = true }
+zaalis-store = { workspace = true }
 zaalis-fs = { workspace = true }
 zaalis-protocol = { workspace = true }
 zaalis-providers = { path = "../zaalis-providers" }
@@ -16,6 +17,7 @@ zaalis-tools = { path = "../zaalis-tools" }
 zaalis-extensions = { workspace = true }
 zaalis-git = { workspace = true }
 zaalis-guard = { workspace = true }
+zaalis-exec = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

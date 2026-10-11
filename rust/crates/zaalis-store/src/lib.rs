@@ -6,6 +6,7 @@
 
 mod import;
 mod secret;
+mod usage;
 
 pub use import::{ImportReport, ImportWarning, LegacyImporter};
 pub use secret::{MemorySecretStore, OsSecretStore, SecretRef, SecretStore, SecretValue};
@@ -18,7 +19,7 @@ use std::time::Duration;
 use zaalis_core::{now_ms, Result, SessionId, ZaalisError};
 use zaalis_protocol::EventFrame;
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Debug)]
 pub struct Store {
@@ -408,6 +409,9 @@ fn migrate(connection: &Connection) -> Result<()> {
                  COMMIT;",
             )
             .map_err(sql_error)?;
+    }
+    if version < 2 {
+        connection.execute_batch("BEGIN IMMEDIATE; CREATE TABLE IF NOT EXISTS usage_calls(id TEXT PRIMARY KEY,session_id TEXT NOT NULL,provider TEXT NOT NULL,model TEXT NOT NULL,started_ms INTEGER NOT NULL,status TEXT NOT NULL,measured INTEGER NOT NULL,input INTEGER NOT NULL,output INTEGER NOT NULL,cached INTEGER NOT NULL,reasoning INTEGER NOT NULL); CREATE INDEX IF NOT EXISTS usage_period ON usage_calls(started_ms); PRAGMA user_version=2; COMMIT;").map_err(sql_error)?;
     }
     Ok(())
 }

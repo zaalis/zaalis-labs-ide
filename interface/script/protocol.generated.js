@@ -23,6 +23,7 @@ const METHODS = Object.freeze({
   CHECKPOINT_RESTORE: 'checkpoint.restore',
   TOOLS_LIST: 'tools.list',
   MODELS_LIST: 'models.list',
+  USAGE_QUERY: 'usage.query',
   HEALTH: 'health',
 });
 

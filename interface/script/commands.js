@@ -340,7 +340,7 @@ SLASH_HANDLERS.context = async (arg, out, lang) => {
         [lang === 'en' ? 'Model' : 'Modèle', `${modelSelect.value} / ${submodelSelect.value}`],
         [lang === 'en' ? 'Permission' : 'Permission', permissionLabel(state.permissionMode, lang)],
         [lang === 'en' ? 'Style' : 'Style', state.responseStyle || 'normal'],
-        [lang === 'en' ? 'Est. context' : 'Contexte est.', `${fmtTokens(state.contextTokens || 0)} / ${fmtTokens(contextWindow(modelSelect.value, submodelSelect.value))} tokens`],
+        [lang === 'en' ? 'Measured context' : 'Contexte mesuré', measuredContextLabel(lang)],
         [lang === 'en' ? 'Language' : 'Langue', state.language]
     ];
     _sysHTML(out, _toolCard(lang === 'en' ? 'Context' : 'Contexte', null, _kvRows(rows)));
@@ -589,11 +589,22 @@ SLASH_HANDLERS.status = async (arg, out, lang) => {
     _sysHTML(out, _toolCard(lang === 'en' ? 'Status' : 'État', null, _kvRows(rows)));
 };
 
+// Only provider-reported numbers: the last call's context and the last turn.
+function measuredContextLabel(lang) {
+    const win = fmtTokens(contextWindow(modelSelect.value, submodelSelect.value));
+    return state.contextMeasured
+        ? `${fmtTokens(state.contextTokens)} / ${win} tokens`
+        : (lang === 'en' ? `not measured yet / ${win} (exact after the next reply)` : `pas encore mesuré / ${win} (exact après la prochaine réponse)`);
+}
+
 SLASH_HANDLERS.cost = async (arg, out, lang) => {
     const isLocal = modelSelect.value === 'local' || modelSelect.value === 'gguf';
+    const turn = state.lastTurnUsage;
     const rows = [
         [lang === 'en' ? 'Model' : 'Modèle', `${modelSelect.value} / ${submodelSelect.value}`],
-        [lang === 'en' ? 'Est. tokens' : 'Tokens est.', `${fmtTokens(state.contextTokens || 0)} / ${fmtTokens(contextWindow(modelSelect.value, submodelSelect.value))}`],
+        [lang === 'en' ? 'Measured context' : 'Contexte mesuré', measuredContextLabel(lang)],
+        [lang === 'en' ? 'Last turn' : 'Dernier tour', turn ? `${fmtTokens(turn.input)} ${lang === 'en' ? 'in' : 'entrée'} / ${fmtTokens(turn.output)} ${lang === 'en' ? 'out' : 'sortie'}` : '—'],
+        [lang === 'en' ? 'History' : 'Historique', lang === 'en' ? 'Settings → Tokens' : 'Paramètres → Tokens'],
         [lang === 'en' ? 'Cost' : 'Coût', isLocal ? (lang === 'en' ? '0 (local)' : '0 (local)') : (lang === 'en' ? 'n/a (provider billing)' : 'n/d (facturé par le fournisseur)')]
     ];
     _sysHTML(out, _toolCard(lang === 'en' ? 'Usage' : 'Utilisation', null, _kvRows(rows)));

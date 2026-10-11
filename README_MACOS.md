@@ -1,52 +1,17 @@
-# zaalis IDE macOS
+# zaalis IDE for macOS
 
-Application Electron macOS, en x64 (Intel) et arm64 (Apple Silicon), avec le
-coeur agent Rust `zaalis-agentd` embarque dans le bundle.
+The Electron application is built for Intel x64 and Apple Silicon arm64 and bundles the shared Rust agent (`zaalis-agentd`). It offers the same features as the Windows IDE: chat, agents and assistant tools, the terminal client, plugins and MCP servers, messengers, GitHub, the laboratory and virtual machines.
 
-Build sur un Mac :
+Build on a Mac with `sh native/build_macos_dmg.sh`. Prerequisites: Node.js 22+, Rust 1.90+ with the `aarch64-apple-darwin` and `x86_64-apple-darwin` targets, Xcode command-line tools (`swiftc`, `codesign`, `hdiutil`), CMake, a C/C++ compiler for whisper.cpp, and network access (the build downloads the Node runtime, the GitHub client and `cloudflared` for each architecture).
 
-```sh
-sh native/build_macos_dmg.sh
-```
+The build produces `native/installer/zaalis-macos-arm64.dmg` and `native/installer/zaalis-macos-x64.dmg`. Open the image for your Mac and drag `zaalis IDE` to Applications. The terminal client is `zaalis IDE.app/Contents/Resources/app/bundle/bin/zaalis` (the packaged `src/app/cli.js`, as `bin\zaalis.exe` on Windows); pass a prompt as an argument for a noninteractive request.
 
-Prerequis : Node.js 22+, Rust 1.90+ (cibles `aarch64-apple-darwin` et
-`x86_64-apple-darwin`), les outils en ligne de commande Xcode (`swiftc`,
-`codesign`, `hdiutil`), CMake et un compilateur C/C++ pour whisper.cpp.
+Like the Windows installer, each package ships the WhatsApp bridge (with a Node runtime of the same architecture), the official GitHub client `gh` for browser sign-in, and `cloudflared` for remote access. Set `ZAALIS_CODESIGN_ID` (or `MACOS_CODESIGN_IDENTITY` in CI) to a persistent signing identity: an ad-hoc signature changes on every build and silently revokes the macOS permissions below.
 
-Sorties :
+Desktop control relies on macOS Screen Recording and Accessibility permissions. Grant both permissions to the application before using capture or input automation. `activate_app` accepts an `.app` path or the name shown in Applications or Launchpad (for example `Blender`), as Windows accepts a Start menu name. Voice dictation asks for the Microphone permission.
 
-```text
-native/installer/zaalis-macos-arm64.dmg
-native/installer/zaalis-macos-x64.dmg
-```
+The agent's local `text_to_speech` uses the system voices through `say`. Video analysis uses `ffmpeg` when it is installed (`brew install ffmpeg`).
 
-Installation sur macOS :
+Debian VMs use QEMU with Hypervisor.framework (HVF). **Enable Linux components** in the Virtual machines settings installs QEMU with Homebrew (`brew install qemu`, no administrator prompt) and downloads the official Debian 12 image, verified by SHA-512, to `~/Library/Application Support/zaalis/server-data/virtual-machines/images`. Apple Silicon runs the arm64 image natively; Intel Macs run the amd64 image. OpenSSH is part of macOS. Windows Sandbox remains Windows-only.
 
-Ouvrez le `.dmg` correspondant a votre Mac, puis glissez `zaalis IDE` dans le
-dossier Applications.
-
-CLI :
-
-Le paquet installe le binaire Rust `zaalis` dans le bundle. Depuis une
-installation portable :
-
-```sh
-./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis
-./zaalis\ IDE.app/Contents/Resources/app/bundle/bin/zaalis "analyse le dossier"
-```
-
-Controle du bureau :
-
-La premiere activation demande deux autorisations dans Reglages Systeme >
-Confidentialite et securite : **Accessibilite** et **Enregistrement de l'ecran**.
-Elles sont accordees au bundle signe. Definissez `ZAALIS_CODESIGN_ID` sur une
-identite de signature persistante : une signature ad-hoc change d'empreinte a
-chaque build et revoque silencieusement ces deux autorisations.
-
-Modeles locaux :
-
-Les modeles GGUF passent par llama.cpp, telecharge a la demande dans
-`~/Library/Application Support/zaalis/engine`. Le binaire macOS embarque Metal :
-la variante `metal` utilise le GPU, la variante `cpu` force le calcul processeur
-(`-ngl 0`) et sert de repli automatique quand un modele ne tient pas en memoire
-unifiee.
+GGUF models use llama.cpp, downloaded on demand to `~/Library/Application Support/zaalis/engine`. The Metal variant uses the GPU. The CPU variant sets `-ngl 0` and is the fallback if a model cannot fit in unified memory.

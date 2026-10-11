@@ -54,6 +54,8 @@ pub struct SessionConfig {
     /// They are rendered as lower-priority project guidance by the prompt composer.
     pub project_guidance: String,
     pub max_concurrency: usize,
+    pub subagent_turns: u32,
+    pub usage_store: Option<Arc<zaalis_store::Store>>,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
 
@@ -68,7 +70,9 @@ impl SessionConfig {
                 "Tu es un agent Zaalis. Utilise les outils typés, vérifie ton travail, et rapporte au passé ce que tu as réellement fait."
                     .into(),
             project_guidance,
-            max_concurrency: 8,
+            max_concurrency: 11,
+            subagent_turns: 250,
+            usage_store: None,
             extensions: None,
         }
     }
@@ -86,9 +90,11 @@ pub(crate) struct SessionInner {
     pub events: Arc<EventBus>,
     pub cancel: CancellationToken,
     pub concurrency: Arc<Semaphore>,
+    pub child_concurrency: Arc<Semaphore>,
     pub agent_cancels: Mutex<HashMap<AgentId, CancellationToken>>,
     pub hook_agents: Mutex<HashSet<AgentId>>,
     pub plan_mode: AtomicBool,
+    pub envelope: Mutex<crate::envelope::Envelope>,
     hook_session_started: AtomicBool,
     hook_stopped: AtomicBool,
     hook_session_ended: AtomicBool,
@@ -120,9 +126,11 @@ impl AgentSession {
             events,
             cancel: CancellationToken::new(),
             concurrency: Arc::new(Semaphore::new(max_concurrency)),
+            child_concurrency: Arc::new(Semaphore::new(max_concurrency.saturating_sub(1).max(1))),
             agent_cancels: Mutex::new(HashMap::new()),
             hook_agents: Mutex::new(HashSet::new()),
             plan_mode: AtomicBool::new(initial_plan),
+            envelope: Mutex::new(crate::envelope::Envelope::default()),
             hook_session_started: AtomicBool::new(false),
             hook_stopped: AtomicBool::new(false),
             hook_session_ended: AtomicBool::new(false),
@@ -144,6 +152,8 @@ impl AgentSession {
             .tools
             .register(NativePlanTool::new(Arc::downgrade(&inner), false))
             .expect("register exit_plan_mode tool");
+        crate::discovery::register(&inner);
+        inner.tools.register_deferred(crate::code::CodeTool::new(Arc::downgrade(&inner))).expect("code tool");
         Self { inner }
     }
 
@@ -350,6 +360,8 @@ impl AgentSession {
             prompt: prompt.clone(),
         });
         self.prepare_turn(&prompt, images, target).await?;
+        { let spent=self.inner.tree.lock().await.total_usage().total_tokens();
+          let mut e=self.inner.envelope.lock().await;e.spent=e.spent.max(spent); }
 
         let hook_root = {
             let tree = self.inner.tree.lock().await;

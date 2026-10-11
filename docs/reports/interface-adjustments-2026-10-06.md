@@ -1,0 +1,7 @@
+# Interface adjustments — October 6, 2026
+
+The Integrations view gained a GitHub card for account connection and repository permissions, with a back action. Duplicate MCP, Blender, Opale, and VM cards were replaced by a short upcoming-integrations note. Ten token-related badge illustrations were added; their prompts and criteria are in `badge-artwork-2026-10-06.md`.
+
+Project collapse, conversation menus, avatar placement, profile transitions, and reduced-motion behavior were refined. The redundant header Terminal button was removed while the tools-panel terminal remained. Correction memory appears immediately before the version. Project discussion is a separate in-session conversation for each account, project, and task, using the existing read-only chat route; it is not stored in central history. Welcome greetings use the account name and local time.
+
+Historical validation: 116 of 117 JavaScript tests passed, 1 skipped, 0 failed. The known `node-pty` AttachConsole diagnostic did not fail the suite. Edge checks covered navigation, animations, badges, themes, five viewport sizes, discussion draft retention, and server-backed profile actions. AI replies and usage figures in the visual fixture were simulated. The Windows server, Rust/CLI, terminal, shell, and installer were rebuilt. A compiled-server agent check confirmed that GitHub read-only mode allowed reading and rejected writing, commands, artifacts, and push.

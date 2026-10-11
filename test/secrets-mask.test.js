@@ -5,7 +5,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert');
-const { sanitize, detectsSecret, registerSecret, clearRegisteredSecrets } = require('../secrets-mask');
+const { sanitize, detectsSecret, registerSecret, clearRegisteredSecrets } = require('../src/agent/secrets-mask');
 
 test('une sortie ordinaire traverse sans modification', () => {
   const text = 'Compiling zaalis-core v1.0.15\n    Finished in 4.21s\n';

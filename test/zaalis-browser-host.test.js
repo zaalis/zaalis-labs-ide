@@ -25,7 +25,11 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
   const secretFile = path.join(temp, 'browser-secret');
   fs.writeFileSync(secretFile, crypto.randomBytes(32).toString('hex'));
 
-  const pipePath = process.platform !== 'win32' ? path.join(temp, 'browser.sock') : `\\\\.\\pipe\\zaalis-browser-test-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  // Windows: named pipe of the WebView2 shell. Linux/macOS: Unix socket of the
+  // Electron bridge (native/electron/browser-bridge.js), same protocol.
+  const pipePath = process.platform === 'win32'
+    ? `\\\\.\\pipe\\zaalis-browser-test-${process.pid}-${crypto.randomBytes(4).toString('hex')}`
+    : path.join(temp, 'browser.sock');
   const token = crypto.randomBytes(32).toString('hex');
   const received = [];
   const views = new Map();
@@ -94,10 +98,14 @@ test('zaalis Browser runs inside the IDE server through the native channel', asy
     assert.equal(home.inPrivate, false);
 
     // Its own pages come from the vendored copy, through zaalis://.
+    host.setLanguage('en');
+    assert.equal(host.translate('Fermer'), 'Close');
     sendEvent({ ev: 'resource', req: 7, view: chrome.view, url: 'zaalis://home/chrome.html', method: 'GET' });
     const page = await waitFor((m) => m.op === 'resourceReply' && m.req === 7, 'page chrome.html servie');
     assert.equal(page.status, 200);
     assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /zaalisBridge/);
+    assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /__zaalisBrowserLocale/);
+    assert.match(Buffer.from(page.body, 'base64').toString('utf8'), /,"en"\);<\/script>/);
     sendEvent({ ev: 'resource', req: 8, view: chrome.view, url: 'zaalis://home/../main.js', method: 'GET' });
     const traversal = await waitFor((m) => m.op === 'resourceReply' && m.req === 8, 'refus hors interface');
     assert.notEqual(Buffer.from(traversal.body || '', 'base64').toString('utf8').includes('module.exports'), true);

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "macos"
+      - "main"
     tags:
       - "v*"
 

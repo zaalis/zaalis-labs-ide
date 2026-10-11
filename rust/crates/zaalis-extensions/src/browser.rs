@@ -16,9 +16,9 @@ use zaalis_guard::AccessRequest;
 use zaalis_store::SecretValue;
 use zaalis_tools::{Tool, ToolContext, ToolDefinition, ToolResult};
 
-const ACTIONS: [&str; 15] = [
+const ACTIONS: [&str; 18] = [
     "tabs", "search", "open", "navigate", "select_tab", "close_tab", "page_text", "read_page",
-    "screenshot", "read_console", "read_network", "click", "fill", "execute_js", "open_external",
+    "screenshot", "read_console", "read_network", "click", "fill", "execute_js", "open_external", "press", "scroll", "back",
 ];
 
 pub struct BrowserTool {
@@ -80,7 +80,7 @@ fn access_for(action: &str, input: &Value) -> (AccessKind, String) {
     match action {
         "search" => (AccessKind::Network, text("query")),
         "open" | "navigate" if !text("url").is_empty() => (AccessKind::Network, text("url")),
-        "click" | "fill" | "execute_js" => (
+        "click" | "fill" | "execute_js" | "press" | "scroll" => (
             AccessKind::Computer,
             format!("navigateur intégré — {action}"),
         ),
@@ -119,6 +119,7 @@ open_external ouvre une URL dans le navigateur externe du PC : UNIQUEMENT si l'u
                     "value": { "type": "string" },
                     "enter": { "type": "boolean" },
                     "code": { "type": "string" }
+                    ,"key":{"type":"string"},"direction":{"type":"string"},"amount":{"type":"integer"}
                 },
                 "required": ["action"],
                 "additionalProperties": false

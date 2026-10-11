@@ -1,41 +1,139 @@
-# zaalis labs IDE pour macOS
+# zaalis labs IDE for Windows
 
-IDE local de zaalis labs avec le cœur agent Rust, un serveur Node.js local et une application Electron pour macOS. Cette branche reprend les fonctions communes de `main` et fournit les intégrations natives macOS : navigateur intégré, terminal, dictée, contrôle du bureau et mises à jour par DMG.
+Local IDE by zaalis labs, built on a shared Rust agent core, a local Node.js HTTP adapter, and a native Windows application powered by WebView2.
 
-## Installer l'application
+## Install the Windows application
 
-Téléchargez le DMG adapté à votre Mac depuis la [dernière version publiée](https://github.com/zaalis/zaalis-labs-ide/releases/latest) :
+Download and run:
 
-- `zaalis-macos-arm64.dmg` pour les Mac Apple Silicon ;
-- `zaalis-macos-x64.dmg` pour les Mac Intel.
+[zaalis-setup.exe](https://github.com/zaalis/zaalis-labs-ide/raw/main/native/installer/zaalis-setup.exe)
 
-Ouvrez le DMG et glissez **zaalis IDE** dans Applications. Les données de l'application sont conservées dans `~/Library/Application Support/zaalis`.
+The installer adds the application to Windows and creates launch shortcuts.
 
-## Démarrer depuis les sources
+## Run the development server
 
-Prérequis : Node.js 22 ou plus récent et Rust 1.90 ou plus récent.
+Prerequisites: Node.js and Rust 1.90 or later.
 
-```sh
+```powershell
 npm install
-npm run build:cli
+cargo build --manifest-path rust/Cargo.toml -p zaalis-agentd
 npm start
 ```
 
-Ouvrez ensuite `http://localhost:3000`. Ce mode sert au développement de l'interface et du serveur ; les fonctions nécessitant le shell Electron demandent une application empaquetée.
+Then open:
 
-## Reconstruire les applications macOS
-
-Installez les outils de ligne de commande Xcode (`swiftc`, `codesign`, `hdiutil`) et les cibles Rust `aarch64-apple-darwin` et `x86_64-apple-darwin`, puis lancez :
-
-```sh
-npm install
-npm run build:macos
+```text
+http://localhost:3000
 ```
 
-Les résultats sont `native/installer/zaalis-macos-arm64.dmg` et `native/installer/zaalis-macos-x64.dmg`. La construction inclut le serveur, le CLI et l'agent Rust, le module natif du terminal, Electron, les assistants Swift et le navigateur intégré.
+This mode opens the local web interface for development; it does not launch the native Windows desktop application.
 
-Le contrôle du bureau demande les autorisations **Accessibilité** et **Enregistrement de l'écran** dans Réglages Système › Confidentialité et sécurité. Pour conserver ces autorisations après une mise à jour, signez les versions distribuées avec la même identité de signature. Voir [README_MACOS.md](README_MACOS.md).
+## Command isolation on Windows
 
-## Licence
+Commands run by agents use a reduced environment and process-tree cleanup. Set `ZAALIS_SANDBOX_MODE=strict` to require native filesystem and network isolation: startup fails when the required strict-isolation mechanism is unavailable.
 
-Copyright © 2026 Bryan Boquel / zaalis. Tous droits réservés. Les conditions d'utilisation et de contribution figurent dans [LICENSE](LICENSE) et [NOTICE](NOTICE).
+On Windows, the application attempts to use AppContainer or Windows Sandbox. When neither mechanism is available, it retains standard Job Object containment and does not claim strict isolation.
+
+## Opale (notes application)
+
+Opale is a separate project: a standalone Markdown notes application (a vault is a folder of `.md` files linked with `[[…]]`). It does not live in this repository; by default its folder is `opale` on the Desktop.
+
+The two are linked by default. When Opale is present on the PC and running, the agent can read, write and reorganise the open vault through Opale's local MCP endpoint, with nothing to configure. **Settings → MCP → Opale** shows the state, starts Opale, or switches the link off. The IDE side of the link is `src/integrations/opale-connector.js`.
+
+## Personal MCP servers
+
+**Settings → MCP → Personal MCP servers** connects your own MCP servers, with the two transports Claude Desktop and Codex use:
+
+- **a local program (stdio)** — a command, its arguments and optional environment variables, started by the IDE (`npx …`, `uvx …`, or a full path);
+- **a Streamable HTTP URL** — HTTPS, or plain HTTP on loopback, with an optional bearer token.
+
+A Claude/Codex-style JSON file (`mcpServers`) can be imported, and **Test connection** shows what a server answers before it is saved. Tokens and environment values are encrypted at rest and never sent back to the interface. The agent learns about each enabled server through a Skill generated from the server's own tool list; `allow` / `deny` restrict which tools it may call.
+
+The code is in `src/agent/mcp-registry.js` (validation, both transports), `src/agent/rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
+
+## Blender
+
+**Settings → MCP → Blender** links the agent to Blender, with nothing to install outside the IDE:
+
+- the IDE detects Blender (5.1 or newer) and the state of Blender Lab's official **MCP** add-on;
+- **Installer** opens a window that checks the version, asks for Blender to be closed, lists what will change in Blender (the add-on shipped in `native/blender`, its automatic start, and Blender's "Allow Online Access" setting, which the add-on requires) and asks for consent. Nothing is changed in Blender without it;
+- the MCP server is the IDE itself (`src/integrations/blender-connector.js`, tools in `src/integrations/blender-tools.js`): the agent's `mcp` calls to server `blender` are turned into the add-on's socket protocol (port 9876).
+
+The 18 tools:
+
+| Area | Tools |
+| --- | --- |
+| Scene | `scene_summary`, `list_objects`, `object_details`, `node_tree` |
+| Seeing | `screenshot` (3D viewport or the whole Blender window), `render` (viewport, optionally from the scene camera, or the scene's render engine) — returned as images the model looks at |
+| File | `file_info`, `missing_files`, `linked_libraries`, `datablocks`, `inspect_blend_file` (another `.blend`, read by a windowless Blender without opening it) |
+| Python API | `api_search`, `api_docs` (from Blender's own introspection, so always matching the installed version) |
+| Interface | `focus_object`, `switch_workspace`, `show_properties` |
+| Acting | `execute_python`, `undo` — each `execute_python` call is one step of Blender's undo history |
+
+Once linked, the agent can run Python in Blender without a confirmation prompt, like any MCP call. The add-on itself is GPL-3.0-or-later and redistributed unmodified (see `native/blender/README.md`).
+
+## Images for the model
+
+Tool results can carry pictures, which the Rust core sends to the model as images (never as text): desktop captures, Blender screenshots and renders, any MCP server's `image` content, image files read with `read` (PNG, JPEG, GIF, WebP) and the integrated browser's `screenshot`. Up to 4 images per call and 8 per round reach the model, in one message labelled with the tools they come from. A model without vision is told the image was not sent and works from the text of the result.
+
+## Desktop control
+
+With desktop control enabled, the agent drives Windows through the `computer` tool (`src/runtime/windows-computer.js` for the Windows side, `src/runtime/automation-manager.js` for sessions and safety):
+
+- **inspect** returns a capture, the active window's controls from UI Automation (role, label, value, frame and center) and the text read by Windows' own OCR, all in the pixels of the image the model receives; after an action it says whether the screen actually changed (visual signature plus text and controls);
+- gestures: click (left, right, middle, with modifiers), double click, drag, scroll at a point (both directions), Unicode typing that leaves the clipboard alone, key chords with repeat, wait;
+- `activate_app` takes a full `.exe` path or the name shown in the Start menu, and brings an already open window to the front instead of starting a second copy; `display_index` picks a screen;
+- the agent never types into a password field (UI Automation and the Win32 `ES_PASSWORD` style), and a click or Enter on a button whose label means deleting, sending or paying is refused;
+- MCP servers and Skills stay available in this mode, so Blender is driven through its MCP server rather than with the mouse.
+
+## Voice dictation
+
+The microphone button records in the interface and the local server transcribes (`POST /api/stt`, `src/runtime/voice-stt.js`). Everything stays on the PC:
+
+- **whisper.cpp** is the engine. Its Windows binaries are in `native/whisper` (see the README there for their origin and checksums) and are installed to `{app}\whisper`. The model, `ggml-small-q5_1.bin` (181 MB), is downloaded once into `%LOCALAPPDATA%\zaalis\server-data\voice` from the official `ggerganov/whisper.cpp` repository and checked against its sha256.
+- **Windows' own recognizer** stands in while the model is downloading, or if the engine cannot run. It is far less accurate and needs the language installed in Windows.
+
+The same endpoint serves the integrated browser's voice search.
+
+## Rebuild the Windows application
+
+Prerequisites:
+
+- Node.js
+- Rust 1.90 or later
+- Visual Studio with the **Desktop development with C++** workload
+- Inno Setup 6
+
+In PowerShell, run:
+
+```powershell
+npm run build:rust
+cmd /c native\build_server.bat
+cmd /c native\build_cli.bat
+cmd /c native\build_shell.bat
+cmd /c native\build_installer.bat
+```
+
+The generated installer is located at:
+
+```text
+native\installer\zaalis-setup.exe
+```
+
+## License and copyright
+
+Copyright © 2026 Bryan Boquel / zaalis. All rights reserved.
+
+zaalis Labs IDE is owned by Bryan Boquel / zaalis. Usage, modification, contribution, redistribution, commercial use, and branding rights are governed by the [LICENSE](LICENSE) and [NOTICE](NOTICE) files included in this repository.
+
+Accessing, cloning, using, modifying, or contributing to this repository does not transfer any ownership rights.
+
+## Source layout and platforms
+
+See [Source layout](docs/source-layout.md) for the JavaScript modules and entrypoints. Shared sources and the Windows, Linux, and macOS adapters are on `main`.
+
+- Windows: the native C++/WebView2 build is described in [native/README.md](native/README.md).
+- Linux: run `npm run build:linux` on Linux; see [README_LINUX.md](README_LINUX.md).
+- macOS: run `npm run build:macos` on a Mac; see [README_MACOS.md](README_MACOS.md). The macOS workflow builds from `main`.
+
+Installers are generated distribution artifacts ignored by Git. Native builds require the corresponding host system and toolchain.

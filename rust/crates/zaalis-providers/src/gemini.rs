@@ -259,7 +259,7 @@ impl GeminiParser {
         }
         if let Some(usage) = value.get("usageMetadata") {
             self.usage.input_tokens = number(usage, "promptTokenCount");
-            self.usage.output_tokens = number(usage, "candidatesTokenCount");
+            self.usage.output_tokens = number(usage, "candidatesTokenCount") + number(usage, "thoughtsTokenCount");
             self.usage.cached_tokens = number(usage, "cachedContentTokenCount");
             self.usage.reasoning_tokens = number(usage, "thoughtsTokenCount");
         }
@@ -381,6 +381,16 @@ fn number(value: &Value, field: &str) -> u64 {
 mod tests {
     use super::*;
     use zaalis_core::{ModelBinding, ReasoningLevel};
+
+    #[test]
+    fn thoughts_are_in_total_output_once_and_cache_is_an_input_subset() {
+        let mut parser=GeminiParser::default();
+        parser.handle(&json!({"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":20,"thoughtsTokenCount":40,"cachedContentTokenCount":80}}),&mut Vec::new());
+        assert_eq!(parser.usage.total_tokens(),160);
+        assert_eq!(parser.usage.output_tokens,60);
+        assert_eq!(parser.usage.reasoning_tokens,40);
+        assert_eq!(parser.usage.cached_tokens,80);
+    }
 
     fn request() -> TurnRequest {
         TurnRequest::new(

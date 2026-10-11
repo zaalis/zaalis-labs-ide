@@ -10,9 +10,9 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
-const { findAgentd } = require('../rust-agent-bridge');
-const compat = require('../compat-providers');
-const chatgpt = require('../chatgpt-subscription');
+const { findAgentd } = require('../src/agent/rust-agent-bridge');
+const compat = require('../src/accounts/compat-providers');
+const chatgpt = require('../src/accounts/chatgpt-subscription');
 
 test('a chat-completions request becomes a Responses request the backend accepts', () => {
   const request = chatgpt.toResponsesRequest({
@@ -204,7 +204,7 @@ test('sign-in with a code, encrypted session, renewal and chat through the Rust 
   const fake = await fakeOpenAi();
   const port = 34000 + Math.floor(Math.random() * 1000);
   const fakeUrl = `http://127.0.0.1:${fake.port}`;
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'), stdio: 'ignore', windowsHide: true,
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: data, ZAALIS_RUST_CORE: 'on',
       ZAALIS_CHATGPT_ISSUER: fakeUrl, ZAALIS_CHATGPT_BASE_URL: fakeUrl },
