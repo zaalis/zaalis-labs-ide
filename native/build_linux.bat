@@ -55,6 +55,9 @@ if errorlevel 1 goto :nocargo
 echo [6/9] Staging the Rust binaries -^> %SERVERDIST% ...
 wsl -e sh "%WSL_ROOT%/scripts/stage-rust-binaries.sh" "%WSL_ROOT%/native/dist-linux-server"
 if errorlevel 1 goto :failed
+REM Same terminal client as Windows (bin\zaalis.exe = packaged cli.js).
+call npx pkg cli.js --no-bytecode --public --targets node22-linux-x64 --output "%SERVERDIST%\bin\zaalis"
+if errorlevel 1 goto :failed
 
 echo [7/9] Copying interface and metadata...
 robocopy interface "%SERVERDIST%\interface" /E /NFL /NDL /NJH /NJS /NC /NS >nul
@@ -66,7 +69,8 @@ copy /Y README_LINUX.md "%SERVERDIST%\README.txt" >nul
 
 echo [8/9] Packaging Electron app -^> %DIST% ...
 node native\package_electron.js linux x64 "%SERVERDIST%" "%DIST%"
-if errorlevel 1 goto :failed
+REM A crashed node exits with a negative code, which "if errorlevel 1" misses.
+if not "%errorlevel%"=="0" goto :failed
 
 echo [9/9] Creating portable archive and Debian double-click installer...
 tar -czf "%INSTALLER%\zaalis-linux-x64.tar.gz" -C "%DIST%" .

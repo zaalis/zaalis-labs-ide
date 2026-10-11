@@ -25,6 +25,9 @@ const npm = [process.env.npm_execpath, path.join(path.dirname(process.execPath),
   .find(p => p && /npm-cli\.js$/.test(p) && fs.existsSync(p));
 if (!npm) throw Error('npm runtime unavailable');
 execFileSync(process.execPath, [npm, 'ci', '--prefix', runtime, '--omit=dev', '--ignore-scripts', '--no-fund', '--no-audit'], { windowsHide: true, stdio: 'inherit' });
+// The bridge runs launcher.mjs directly. npm's .bin symlinks are unused and,
+// when the Linux build runs from Windows through WSL, unreadable by Windows.
+if (!windows) fs.rmSync(path.join(runtime, 'node_modules', '.bin'), { recursive: true, force: true });
 const ghDir = path.join(dist, 'github'); fs.mkdirSync(ghDir, { recursive: true });
 const ghName = windows ? 'gh.exe' : 'gh', ghTarget = path.join(ghDir, ghName);
 if (windows) {
