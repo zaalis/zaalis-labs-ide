@@ -315,10 +315,13 @@
         mobileMenu.setAttribute('aria-expanded', 'false');
     }
     const allConversations = () => [
-        ...(state.conversations || []).map(conv => ({ conv, kind: 'chat' })),
-        ...(state.agentConversations || []).map(conv => ({ conv, kind: 'agents' })),
+        ...(state.conversations || []).filter(conv => !conv.archived).map(conv => ({ conv, kind: 'chat' })),
+        ...(state.agentConversations || []).filter(conv => !conv.archived).map(conv => ({ conv, kind: 'agents' })),
     ];
     const currentConversation = (kind = activeKind()) => (state[kind === 'agents' ? 'agentConversations' : 'conversations'] || []).find(c => c.id === state[kind === 'agents' ? 'currentAgentConvId' : 'currentConvId']);
+    function createConversationMenu(kind, conv) {
+        return button(text('Actions de conversation', 'Conversation actions'), 'menu', () => window.ZaalisConversations?.open(conv.title || ''), 'ws-icon-button');
+    }
     function renderNavigation() {
         const focusKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
         const scrollTop = navigation.scrollTop;
@@ -333,7 +336,7 @@
         for (const item of allConversations()) {
             const path = item.conv.projectPath || (item.conv.project ? recentPathByName(item.conv.project) : null);
             const key = path ? normalizeProjectPath(path) : (item.conv.project || '');
-            if (!groups.has(key)) groups.set(key, { label: item.conv.project || text('Sans projet', 'Without project'), path, items: [] });
+            if (!groups.has(key)) groups.set(key, { label: item.conv.project || (path ? path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : text('Sans projet', 'Without project')), path, items: [] });
             groups.get(key).items.push(item);
         }
         const allCollapsed = [...groups.keys()].every(key => expanded.get(key) === false);
@@ -444,7 +447,7 @@
     // its own computed display already reflects visibility).
     // The top bar's model loader drops its panel over the page as well.
     function browserOccluded() {
-        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel')].some(node => {
+        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel, dialog[open]')].some(node => {
             const style = getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && node.getBoundingClientRect().height > 0;
         });
     }
@@ -500,7 +503,7 @@
     // funnels into the same one-frame-coalesced scheduler so a burst produces
     // at most one bounds read and one native postMessage, never a flood.
     new ResizeObserver(scheduleBrowserSync).observe(browserHost);
-    new MutationObserver(scheduleBrowserSync).observe(document.body, { attributes: true, attributeFilter: ['class', 'style'], subtree: true });
+    new MutationObserver(scheduleBrowserSync).observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'open'], subtree: true });
     document.addEventListener('visibilitychange', scheduleBrowserSync);
     window.addEventListener('resize', scheduleBrowserSync);
 
@@ -573,20 +576,12 @@
         if (!frame) return;
         if (conv) {
             const agents = (conv.agentRuns ||= []);
-            const id = String(frame.agent_id || frame.agentId || frame.agent?.id || '');
-            let agent = id ? agents.find(item => item.id === id && item.sessionId === activeRun) : null;
-            if (id && !agent && ['agent_spawned', 'agent_state_changed', 'agent_state'].includes(frame.type)) {
-                agent = { id, sessionId: activeRun, label: frame.agent?.role?.label || frame.agent?.role?.name || text('Agent', 'Agent'), state: 'queued', startedAt: new Date().toISOString(), report: '' };
-                agents.push(agent);
-            }
-            if (agent) {
-                if (frame.state) agent.state = typeof frame.state === 'string' ? frame.state : frame.state.state || agent.state;
-                if (frame.type === 'agent_spawned') { agent.label = frame.agent?.role?.label || frame.agent?.role?.name || agent.label; agent.parentId = frame.agent?.parent_id || null; }
-                if (frame.type === 'text_delta') agent.report = (agent.report + (frame.text || '')).slice(-100000);
-                if (frame.type === 'agent_failed') { agent.state = 'failed'; agent.error = frame.error || frame.message; }
-            }
+            window.ZaalisAgentActivity.update(agents, frame, event.sessionId || activeRun);
             if (event.type === 'done' || event.type === 'error') {
-                for (const agent of agents.filter(item => item.sessionId === activeRun)) if (!['done', 'failed', 'cancelled'].includes(agent.state)) agent.state = event.type === 'error' || event.result?.error ? 'failed' : 'done';
+                for (const agent of agents.filter(item => item.sessionId === activeRun)) if (!window.ZaalisAgentActivity.terminal(agent.state)) {
+                    agent.state = event.type === 'error' || event.result?.error ? 'failed' : 'done';
+                    agent.finishedAt = new Date().toISOString();
+                }
                 if (event.result?.sessionId) conv.sessionId = event.result.sessionId;
             }
             if (!['text_delta', 'reasoning_delta'].includes(frame.type)) persistChats(kind);
@@ -609,28 +604,18 @@
     function renderAgents() {
         const pane = panes.agents;
         const agents = currentConversation()?.agentRuns || [];
-        if (!agents.length) { emptyPane(pane, text('Les agents au travail', 'Agents at work'), text('Demandez une délégation dans le chat ou lancez une équipe dans l’onglet Agents. Leur progression et leurs résultats apparaîtront ici.', 'Ask for delegation in chat or start a team in the Agents tab. Their progress and results will appear here.')); return; }
-        pane.replaceChildren();
-        const labels = { queued: text('En attente', 'Queued'), running: text('En cours', 'Running'), done: text('Terminé', 'Done'), failed: text('Échec', 'Failed'), cancelled: text('Arrêté', 'Stopped'), blocked: text('En attente', 'Waiting') };
-        for (const agent of [...agents].reverse()) {
-            const card = el('details', 'ws-agent-run');
-            const summary = el('summary');
-            summary.append(el('strong', '', agent.label), el('span', `ws-agent-status ws-status-${agent.state}`, labels[agent.state] || agent.state));
-            card.append(summary);
-            card.append(el('p', 'ws-meta', agent.parentId ? text('Sous-agent délégué', 'Delegated subagent') : text('Agent de la session', 'Session agent')));
-            if (agent.report) card.append(el('pre', 'ws-agent-report', agent.report));
-            if (agent.error) card.append(el('p', 'ws-error', String(agent.error)));
-            if (['running', 'queued'].includes(agent.state)) card.append(button(agent.parentId ? text('Arrêter cet agent', 'Stop this agent') : text('Arrêter la session', 'Stop session'), null, async () => {
+        window.ZaalisAgentActivity.render(pane, agents, { el, text, stop: async agent => {
                 try {
                     const response = await fetch('/api/rust-core/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: agent.sessionId, agentId: agent.parentId ? agent.id : undefined }) });
                     const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Annulation impossible');
-                    for (const sibling of agents.filter(item => item.sessionId === agent.sessionId && (!agent.parentId || item.id === agent.id || item.parentId === agent.id))) if (['running', 'queued'].includes(sibling.state)) sibling.state = 'cancelled';
+                    for (const sibling of agents.filter(item => item.sessionId === agent.sessionId && (!agent.parentId || item.id === agent.id || item.parentId === agent.id))) if (!window.ZaalisAgentActivity.terminal(sibling.state)) {
+                        sibling.state = 'cancelled'; sibling.finishedAt = new Date().toISOString();
+                    }
                     renderAgents(); persistChats(activeKind());
                 } catch (error) { showError(error); }
-            }));
-            pane.append(card);
-        }
+            } });
     }
+    setInterval(() => { if (panel === 'agents' && !document.hidden) renderAgents(); }, 60000);
     // Independent discussion for the current project/task; the central run keeps working.
     const discussions=new Map();let discussionKey=null;
     function renderOtherChat() {

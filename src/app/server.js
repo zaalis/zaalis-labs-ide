@@ -24,6 +24,13 @@ const platformRuntime = require('../runtime/platform-runtime');
 const workspaceTokens = new Map();
 const { BrowserHost } = require('../../zaalis-browser/host');
 const { modelCapabilities, bindingCapabilities } = require('../accounts/model-capabilities');
+const { ConversationStore } = require('../services/conversation-store');
+const { ConversationEvents } = require('../services/conversation-events');
+const { MemoryStore } = require('../services/memory-store');
+const { TaskService } = require('../services/task-service');
+const { registerParityRoutes } = require('../services/parity-routes');
+const { runAgentRequest } = require('../services/agent-request');
+const { workspaceServiceAction } = require('../services/workspace-services');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -80,6 +87,21 @@ const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
 const COOKIE_NAME = 'zaalis_session';
+const conversationStore = new ConversationStore({ directory: CHATS_DIR, file: chatsFile });
+const conversationEvents = new ConversationEvents(path.join(DATA_DIR, 'conversation-events'));
+const generalMemory = new MemoryStore(path.join(DATA_DIR, 'memory'));
+const taskService = new TaskService({ directory: path.join(DATA_DIR, 'tasks'), run: async (userId, task, onEvent, signal) => {
+  const user = loadUsers().find(item => item.id === userId);
+  let conversation;
+  if (task.conversationId) conversation = conversationStore.find(userId, task.conversationId, 'chat');
+  else {
+    conversation = conversationStore.create(userId, { title: task.title, root: task.root, model: task.model, submodel: task.submodel, source: 'task' });
+    taskService.mutate(userId, task.id, current => { current.conversationId = conversation.id; });
+  }
+  return runAgentRequest(rustAgentHttp, user, { message: task.prompt, root: task.root, model: task.model,
+    submodel: task.submodel, permissionMode: task.permissionMode, kind: 'chat', conversationId: conversation.id,
+    sessionId: conversation.sessionId, history: conversation.apiHistory || [], signal }, onEvent);
+} });
 const rustAgentBridge = new RustAgentBridge({
   baseDir: APP_DIR,
   dataDir: DATA_DIR,
@@ -96,6 +118,7 @@ if (!process.env.ZAALIS_DATA_DIR && path.resolve(DATA_DIR) !== path.resolve(LEGA
 }
 
 fs.mkdirSync(CHATS_DIR, { recursive: true });
+conversationStore.recoverInterrupted();
 
 // Persisted signing secret so sessions survive server restarts.
 let SESSION_SECRET;
@@ -630,6 +653,8 @@ app.post('/api/internal/rust-workspace', async (req, res) => {
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
   try {
+    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService });
+    if (serviceResult) return res.json(serviceResult);
     if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
     if (req.body.action === 'create_artifact') {
       const { createArtifact } = require('../artifacts/artifact-generator');
@@ -1795,11 +1820,21 @@ app.get('/api/chats', (req, res) => {
 app.put('/api/chats', (req, res) => {
   try {
     const conversations = (req.body && req.body.conversations) || [];
-    fs.writeFileSync(chatsFile(req.user.id, req.body && req.body.kind), JSON.stringify(continuation.merge(req.user.id, req.body && req.body.kind === 'agents' ? 'agents' : 'chat', conversations), null, 2));
-    res.json({ success: true });
+    const kind = req.body && req.body.kind === 'agents' ? 'agents' : 'chat';
+    const merged = conversationStore.mergeLegacy(req.user.id, kind, continuation.merge(req.user.id, kind, conversations));
+    res.json({ success: true, conversations: merged });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
+});
+
+registerParityRoutes(app, { conversations: conversationStore, events: conversationEvents, memory: generalMemory, tasks: taskService,
+  tools: async (user, query) => {
+    const root = workspaceContext.agentRoot(query, user, path.join(DATA_DIR, 'chat-workspaces', user.id));
+    const tools = await rustAgentBridge.toolInventory(user.id, userApiKeys(user), root, await agentMcpServersFor(user));
+    const needle = String(query.q || '').trim().toLowerCase();
+    return tools.filter(tool => !needle || `${tool.name} ${tool.description}`.toLowerCase().includes(needle));
+  },
 });
 
 // ---------------------------------------------------------------------------
@@ -3420,6 +3455,7 @@ app.get('/api/codestrale/models', async (req, res) => {
 app.post('/api/rust-core/decision', async (req, res) => {
   try {
     const result = await rustAgentBridge.decide(req.user.id, req.body || {});
+    taskService.clearPending(req.user.id, req.body?.requestId);
     res.json(result || { resolved: true });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || String(error) });
@@ -3481,12 +3517,15 @@ async function rustAgentHttp(req, res, next) {
   let workspaceEntry = null;
   let workspaceRun = null;
   let conversationLock;
+  let recordedTurn;
   req.once('aborted', () => controller.abort());
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
   try {
     const body = req.body || {};
     const kind = body.kind === 'agents' || Array.isArray(body.team) ? 'agents' : 'chat';
     if (body.conversationId) {
+      conversationStore.ensure(req.user.id, body.conversationId, { kind, title: String(body.message || 'Conversation').slice(0, 80),
+        projectPath: body.root || body.projectRoot, model: body.model, submodel: body.submodel });
       conversationLock = continuation.key(req.user.id, kind, body.conversationId);
       if (!req.messengerContinuation) {
         if (continuation.active.has(conversationLock)) { conversationLock = null; throw Object.assign(Error('Cette conversation travaille déjà dans une messagerie ou dans l’IDE.'), { status: 409 }); }
@@ -3498,6 +3537,8 @@ async function rustAgentHttp(req, res, next) {
     let savedConversations = [];
     if (body.conversationId) { try { savedConversations = JSON.parse(fs.readFileSync(chatsFile(req.user.id, body.kind || (Array.isArray(body.team) ? 'agents' : 'chat')), 'utf8')); } catch {} }
     const conversation = savedConversations.find(item => item.id === body.conversationId);
+    if (conversation && !body.sessionId) body.sessionId = conversation.sessionId;
+    if (conversation && (!Array.isArray(body.history) || !body.history.length)) body.history = conversation.apiHistory || [];
     const root = workspaceContext.agentRoot(body, req.user, path.join(DATA_DIR, 'chat-workspaces', req.user.id), conversation);
     const githubReadOnly = await githubIntegration.readOnly(req.user.id, root);
     let workspaceConfig = {};
@@ -3505,7 +3546,7 @@ async function rustAgentHttp(req, res, next) {
       workspaceEntry = workspaceTokens.get(req.user.id);
       if (!workspaceEntry) { workspaceEntry = { token: crypto.randomBytes(32).toString('base64url'), agents: new Map() }; workspaceTokens.set(req.user.id, workspaceEntry); }
       const terminal = terminalManager.get(String(body.terminalSessionId || ''), req.user.id);
-      workspaceRun = { user: req.user, root, projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
+      workspaceRun = { user: req.user, root, permissionMode: body.permissionMode || 'supervised', projectRoot: body.root || body.projectRoot || conversation?.projectPath, terminal: terminal ? { id: terminal.id, cwd: terminal.cwd, closed: terminal.closed } : null, selected: null };
       workspaceConfig = { workspaceEndpoint: `http://127.0.0.1:${PORT}/api/internal/rust-workspace`, workspaceToken: workspaceEntry.token };
     }
     const model = String(body.model || '');
@@ -3544,6 +3585,11 @@ async function rustAgentHttp(req, res, next) {
       },
     }))) : null;
     const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
+    if (conversation) {
+      recordedTurn = { user: req.user.id, id: conversation.id, kind, body, turnId: crypto.randomUUID() };
+      conversationStore.beginTurn(req.user.id, conversation.id, kind, body, recordedTurn.turnId);
+    }
+    const remembered = generalMemory.recall(req.user.id, root, message);
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -3551,7 +3597,7 @@ async function rustAgentHttp(req, res, next) {
       model: lead.provider,
       submodel: lead.model,
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
-      message,
+      message: remembered ? `${remembered}\n\nDEMANDE ACTUELLE :\n${message}` : message,
       systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
@@ -3576,12 +3622,20 @@ async function rustAgentHttp(req, res, next) {
       },
       signal: controller.signal,
     }, mirrorWebTools(req, event => {
+      if (recordedTurn) {
+        conversationEvents.append(recordedTurn.user, kind, conversation.id, recordedTurn.turnId, event);
+        if (event.type === 'run_started') conversationStore.mutate(req.user.id, conversation.id, kind, saved => { saved.sessionId = event.sessionId; });
+      }
       if (workspaceRun && event.type === 'rust_event' && event.event?.agent?.id) {
         const agent=event.event.agent, isolated=agent.workspace?.path;
         workspaceEntry.agents.set(String(agent.id),isolated ? {...workspaceRun,projectRoot:isolated,root:isolated,run:workspaceRun} : workspaceRun);
       }
       emit(event);
     }));
+    if (recordedTurn) {
+      conversationStore.finishTurn(req.user.id, conversation.id, kind, body, result, result.error || null);
+      recordedTurn.finished = true;
+    }
     if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
     if (wantsStream) {
       emit({ type: 'done', result });
@@ -3589,6 +3643,9 @@ async function rustAgentHttp(req, res, next) {
     }
     return res.json(result);
   } catch (error) {
+    if (recordedTurn && !recordedTurn.finished) {
+      try { conversationStore.finishTurn(recordedTurn.user, recordedTurn.id, recordedTurn.kind, recordedTurn.body, null, error.message); } catch {}
+    }
     if (wantsStream) {
       openStream(res.headersSent ? 200 : (error.status || 500));
       try { res.write(JSON.stringify({ type: 'error', error: error.message || String(error) }) + '\n'); } catch {}
@@ -4219,6 +4276,7 @@ const server = app.listen(PORT, () => {
   publishCodestraleBridge(bound);
   startOllamaIfNeeded();
   messengers.restore();
+  taskService.start();
 });
 
 // Stop advertising a bridge that is going away. `exit` covers the normal path;
@@ -4228,6 +4286,7 @@ process.on('exit', unpublishCodestraleBridge);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK']) {
   process.on(signal, async () => {
     unpublishCodestraleBridge();
+    await taskService.shutdown();
     for (const id of githubBrowserAuth.flows.keys()) githubBrowserAuth.cancel(id);
     await messengers.shutdown();
     await laboratory.shutdown();

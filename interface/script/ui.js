@@ -730,7 +730,7 @@ function renderNoProjectConversations(container) {
     const curId = state[curIdKey];
     
     const convs = (state[storeKey] || [])
-        .filter(c => !c.project)
+        .filter(c => !c.project && !c.archived)
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
 
     container.innerHTML = '';
@@ -806,7 +806,7 @@ function renderSidebarConversations() {
         renderNoProjectConversations(container);
         return;
     }
-    const convs = projectPath ? conversationsForProject(projectPath, folderName, kind) : [];
+    const convs = projectPath ? conversationsForProject(projectPath, folderName, kind).filter(c => !c.archived) : [];
 
     container.innerHTML = '';
 
@@ -1443,6 +1443,28 @@ function openSavedProject() {
     if (state.projectRoot) openProject(state.projectRoot, false, { preserveConversation: true });
 }
 
+// All authenticated entry points use the same initialization. A guest load
+// cannot cache a failed provider list and leave it missing after signing in.
+let authenticatedInit = null;
+function initializeAuthenticatedApp(data) {
+    if (authenticatedInit) return authenticatedInit;
+    authenticatedInit = (async () => {
+        showApp(data.email);
+        applyServerProfile(data.profile);
+        await Promise.allSettled([
+            loadPermissionPreference(), loadSharedHardwareConfig(),
+            loadUserChats(), loadCompatProviders()
+        ]);
+        migrateRetiredModelState();
+        restoreConfiguredModelSelection();
+        window.ZaalisWorkspace?.refreshCapabilities(true);
+        openSavedProject();
+        syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
+        if (typeof loadGgufModels === 'function') loadGgufModels();
+    })().finally(() => { authenticatedInit = null; });
+    return authenticatedInit;
+}
+
 function setupAuth() {
     // Toggle between login and register forms.
     $('#show-register').addEventListener('click', e => {
@@ -1472,15 +1494,7 @@ function setupAuth() {
             });
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || uiText('Connexion impossible.'));
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadSharedHardwareConfig();
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
         } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
     });
 
@@ -1503,15 +1517,7 @@ function setupAuth() {
             });
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || uiText('Création de compte impossible.'));
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadSharedHardwareConfig();
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
         } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
     });
 
@@ -1528,20 +1534,15 @@ async function checkAuthAndInit() {
         const res = await fetch('/api/auth/me');
         const data = await res.json();
         if (data && data.authenticated) {
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
+            return true;
         } else {
             showAuthOverlay();
         }
     } catch {
         showAuthOverlay();
     }
+    return false;
 }
 
 // ==========================================================

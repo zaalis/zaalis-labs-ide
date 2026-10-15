@@ -46,14 +46,25 @@ impl Tool for WorkspaceTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "workspace".into(),
-            description: "Projets connus de l'IDE, terminal visible et création locale de fichiers. GitHub : action github avec input.action (repos, files, read, pulls, push, create_pull, merge), input.repo owner/name ; utilisez repos pour découvrir les dépôts autorisés. Les push et merge exigent le projet associé vérifié ; ne déduisez jamais le dépôt de son seul nom. list donne les projets connus. open sélectionne un projet connu et ouvre éventuellement son terminal. create_artifact crée un vrai PDF, DOCX, XLSX ou CSV dans artifacts/ du projet actif (ou de l'espace de chat) ; fournir format, name, title et content pour PDF/DOCX, ou rows/sheets pour XLSX, ou rows pour CSV. N'annonce le fichier créé qu'après le résultat de l'outil. Après open, confirme puis termine le tour : les outils restent dans l'ancien dossier jusqu'au prochain tour. Aucun chemin hôte arbitraire n'est accepté.".into(),
-            input_schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","open","create_artifact","github"]},"input":{"type":"object","description":"GitHub : action repos, files, read (path), pulls, push (branch), create_pull (title, head, branch base, body), merge (number, sha exact). repo=owner/name. Toujours vérifier le dépôt et le projet ; les droits sont imposés par le serveur."},"project":{"type":"string"},"terminal":{"type":"boolean"},"format":{"type":"string","enum":["pdf","docx","xlsx","csv"]},"name":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}},"sheets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}}},"required":["rows"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}),
+            description: "Projets connus de l'IDE, terminal visible et création locale de fichiers. memory : input.action list/search/save/delete ; tasks : input.action list/create/update/run/cancel/delete ; session_search : recherche dans les conversations du projet actif. GitHub : action github avec input.action (repos, files, read, pulls, push, create_pull, merge), input.repo owner/name ; utilisez repos pour découvrir les dépôts autorisés. Les push et merge exigent le projet associé vérifié ; ne déduisez jamais le dépôt de son seul nom. list donne les projets connus. open sélectionne un projet connu et ouvre éventuellement son terminal. create_artifact crée un vrai PDF, DOCX, XLSX ou CSV dans artifacts/ du projet actif (ou de l'espace de chat) ; fournir format, name, title et content pour PDF/DOCX, ou rows/sheets pour XLSX, ou rows pour CSV. N'annonce le fichier créé qu'après le résultat de l'outil. Après open, confirme puis termine le tour : les outils restent dans l'ancien dossier jusqu'au prochain tour. Aucun chemin hôte arbitraire n'est accepté.".into(),
+            input_schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","open","create_artifact","github","memory","tasks","session_search"]},"input":{"type":"object","description":"GitHub : action repos, files, read (path), pulls, push (branch), create_pull (title, head, branch base, body), merge (number, sha exact). repo=owner/name. Toujours vérifier le dépôt et le projet ; les droits sont imposés par le serveur."},"project":{"type":"string"},"terminal":{"type":"boolean"},"format":{"type":"string","enum":["pdf","docx","xlsx","csv"]},"name":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}},"sheets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}}},"required":["rows"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}),
         }
     }
     fn access(&self, input: &Value, context: &ToolContext) -> Result<AccessRequest> {
         let action = input.get("action").and_then(Value::as_str).unwrap_or("");
         let kind = match action { "list" => AccessKind::Read, "open" => AccessKind::Computer,
             "create_artifact" => AccessKind::Write,
+            "session_search" => AccessKind::Read,
+            "memory" => match input.get("input").and_then(|i|i.get("action")).and_then(Value::as_str) {
+                Some("list" | "search") => AccessKind::Read,
+                Some("save" | "delete") => AccessKind::Write,
+                _ => return Err(ZaalisError::invalid("action mémoire inconnue")),
+            },
+            "tasks" => match input.get("input").and_then(|i|i.get("action")).and_then(Value::as_str) {
+                Some("list") => AccessKind::Read,
+                Some("create" | "update" | "run" | "cancel" | "delete") => AccessKind::Write,
+                _ => return Err(ZaalisError::invalid("action tâche inconnue")),
+            },
             "github" => match input.get("input").and_then(|i| i.get("action")).and_then(Value::as_str) {
                 Some("repos" | "files" | "read" | "pulls") => AccessKind::Read,
                 Some("push" | "create_pull" | "merge") => AccessKind::Write,

@@ -122,6 +122,12 @@ pub enum Event {
     },
 
     // ── Interaction (core asks, client answers) ──────────────────────────
+    ClarificationRequested {
+        request_id: RequestId,
+        agent_id: AgentId,
+        questions: Vec<crate::ClarificationQuestion>,
+    },
+    ClarificationResolved { request_id: RequestId, answers: crate::ClarificationAnswers },
     /// The guard needs a decision. The client answers with `permission.decide`.
     PermissionRequested {
         request_id: RequestId,
@@ -214,6 +220,7 @@ impl Event {
             | Event::AgentFailed { agent_id, .. }
             | Event::AgentCancelled { agent_id }
             | Event::PermissionRequested { agent_id, .. }
+            | Event::ClarificationRequested { agent_id, .. }
             | Event::DiffAvailable { agent_id, .. } => Some(agent_id.clone()),
             Event::SegmentStarted { segment } => Some(segment.agent_id.clone()),
             Event::BudgetExhausted { agent_id, .. }
@@ -241,6 +248,8 @@ impl Event {
             Event::ToolProgress { .. } => "tool_progress",
             Event::ToolCompleted { .. } => "tool_completed",
             Event::PermissionRequested { .. } => "permission_requested",
+            Event::ClarificationRequested { .. } => "clarification_requested",
+            Event::ClarificationResolved { .. } => "clarification_resolved",
             Event::PermissionResolved { .. } => "permission_resolved",
             Event::BudgetExhausted { .. } => "budget_exhausted",
             Event::PlanUpdated { .. } => "plan_updated",
@@ -526,6 +535,8 @@ mod tests {
                 allowed: true,
                 reason: "user_prompt".into(),
             },
+            Event::ClarificationRequested { request_id:RequestId::from_raw("req_question"), agent_id:AgentId::from_raw("agt_a"), questions:vec![crate::ClarificationQuestion {id:"choice".into(),prompt:"Choix ?".into(),options:vec![],allow_free_text:true}] },
+            Event::ClarificationResolved { request_id:RequestId::from_raw("req_question"), answers:[("choice".into(),"oui".into())].into_iter().collect() },
             Event::BudgetExhausted {
                 request_id: RequestId::from_raw("req_2"),
                 agent_id: None,

@@ -1,0 +1,41 @@
+/* =============================================
+   Launch splash: short brand animation shown while the app boots.
+   Markup is built by script/splash.js; variants share this frame.
+   ============================================= */
+.zs-root{
+    position:fixed;inset:0;z-index:5000;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:22px;
+    background:radial-gradient(circle at 50% 42%,#16161d 0%,#0b0b0f 55%,#09090b 100%);
+    color:#fafafa;font-family:'Inter',-apple-system,system-ui,sans-serif;
+    user-select:none;cursor:default;overflow:hidden;
+}
+.zs-root.leaving{animation:zs-leave .34s cubic-bezier(.4,0,.2,1) forwards;pointer-events:none;}
+.zs-root.leaving .zs-stage{animation:zs-stage-leave .34s cubic-bezier(.4,0,.2,1) forwards;}
+@keyframes zs-leave{to{opacity:0;}}
+@keyframes zs-stage-leave{to{transform:scale(1.08);filter:blur(4px);}}
+
+.zs-stage{position:relative;width:132px;height:132px;}
+.zs-stage svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible;}
+/* Soft indigo halo behind the mark, lit once the mark is assembled. */
+.zs-halo{position:absolute;inset:-40%;border-radius:50%;
+    background:radial-gradient(circle,rgba(99,102,241,.38) 0%,rgba(99,102,241,.10) 38%,transparent 66%);
+    opacity:0;transform:scale(.6);}
+.zs-mark{filter:drop-shadow(0 0 0 rgba(129,140,248,0));}
+
+.zs-word{display:flex;align-items:baseline;gap:8px;font-size:15px;font-weight:600;letter-spacing:.32em;
+    opacity:0;transform:translateY(8px);}
+.zs-word b{font-weight:600;color:#fafafa;}
+.zs-word span{font-weight:400;color:#a1a1aa;}
+
+/* Thin indeterminate bar, only revealed when boot outlasts the intro. */
+.zs-wait{position:absolute;left:50%;bottom:16%;width:120px;height:2px;margin-left:-60px;border-radius:2px;
+    background:rgba(255,255,255,.06);overflow:hidden;opacity:0;transition:opacity .25s;}
+.zs-wait::after{content:'';position:absolute;top:0;bottom:0;width:40%;border-radius:2px;
+    background:linear-gradient(90deg,transparent,#818cf8,transparent);animation:zs-wait 1s ease-in-out infinite;}
+.zs-root.waiting .zs-wait{opacity:1;}
+@keyframes zs-wait{from{left:-40%;}to{left:100%;}}
+
+@media (prefers-reduced-motion:reduce){
+    .zs-word,.zs-halo{opacity:1;transform:none;}
+    .zs-wait::after{animation:none;left:30%;}
+}

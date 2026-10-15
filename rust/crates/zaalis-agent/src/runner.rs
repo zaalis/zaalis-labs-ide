@@ -28,12 +28,14 @@ const TOOL_IMAGES_PROMPT_PREFIX: &str = "[Images renvoyées par les outils";
 const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
 /// The tools a desktop-control turn keeps.
-const DESKTOP_TOOLS: [&str; 3] = ["computer", "mcp", "skill"];
+const DESKTOP_TOOLS: [&str; 7] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call", "request_user_input"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
-const ESSENTIAL_TOOLS: [&str; 14] = [
+const ESSENTIAL_TOOLS: [&str; 22] = [
     "read", "list", "tree", "glob", "grep", "code_search", "edit", "write", "apply_patch", "run",
     "todo", "workspace", "enter_plan_mode", "exit_plan_mode",
+    "tool_search", "tool_describe", "tool_call", "request_user_input",
+    "spawn_agent", "agent_status", "agent_wait", "agent_cancel",
 ];
 const REDUCED_TOOLS_NOTE: &str = "\n\nCONTEXTE RÉDUIT : la fenêtre de contexte du modèle est petite, seuls les outils essentiels sont proposés pour ce tour.";
 /// Corrections a model without native tools may get, in a row, for an
@@ -282,6 +284,7 @@ pub(crate) async fn run_agent(
             .map_err(ZaalisError::from)?;
 
         let mut text = String::new();
+        let mut preview = crate::progress::ProgressPreview::default();
         let mut reasoning = String::new();
         let mut calls = Vec::new();
         let mut state: Option<ProviderState> = None;
@@ -295,10 +298,10 @@ pub(crate) async fn run_agent(
                     let segment_id =
                         ensure_segment(&session, &node, &mut timeline, SegmentKind::Text);
                     text.push_str(&delta);
-                    session.events.emit(Event::TextDelta {
-                        segment_id,
-                        text: delta,
-                    });
+                    let shown = preview.push(&delta);
+                    if !shown.is_empty() {
+                        session.events.emit(Event::TextDelta { segment_id, text: shown });
+                    }
                 }
                 TurnEvent::ReasoningDelta { text: delta } => {
                     let segment_id =
@@ -333,6 +336,14 @@ pub(crate) async fn run_agent(
         }
         reservation.settle(usage_reported.then_some(round_usage)).await;
         telemetry.complete();
+        let pending_action = fallback_protocol && calls.is_empty() && !planning
+            && !action_nudged && stop_reason != StopReason::MaxTokens
+            && announces_pending_action(&text);
+        let tail = preview.finish(&text, calls.is_empty() && invalid_call.is_none() && !pending_action);
+        if !tail.is_empty() {
+            let segment_id = ensure_segment(&session, &node, &mut timeline, SegmentKind::Text);
+            session.events.emit(Event::TextDelta { segment_id, text: tail });
+        }
         close_stream_segments(&session, &mut timeline);
         round_usage.rounds = 0;
         round_usage.context_tokens = if usage_reported {
@@ -393,7 +404,10 @@ pub(crate) async fn run_agent(
             let mut round_images: Vec<(String, Vec<zaalis_providers::ImagePart>)> = Vec::new();
             for call in calls {
                 usage.tool_calls = usage.tool_calls.saturating_add(1);
-                tools_used.push(call.name.clone());
+                let effective_name = if call.name == "tool_call" {
+                    call.arguments.get("name").and_then(serde_json::Value::as_str).unwrap_or("tool_call").to_owned()
+                } else { call.name.clone() };
+                tools_used.push(effective_name.clone());
                 let execution =
                     execute_tool(&session, &node, &mut timeline, call.clone(), cancel.clone())
                         .await?;
@@ -412,15 +426,15 @@ pub(crate) async fn run_agent(
                     );
                     images.clear();
                 }
-                collect_web_usage(&call.name, &outcome, &mut usage);
+                collect_web_usage(&effective_name, &outcome, &mut usage);
                 // Only a write, edit or patch changes files; a read result
                 // also lists paths and must not be reported as a change.
-                if matches!(tool_category(&call.name), ToolCategory::Mutate) {
+                if matches!(tool_category(&effective_name), ToolCategory::Mutate) {
                     collect_changed_files(&outcome, &mut files_changed);
                 }
                 let is_error = !outcome.is_ok();
                 if !is_error {
-                    match tool_category(&call.name) {
+                    match tool_category(&effective_name) {
                         ToolCategory::Mutate => {
                             file_mutations = file_mutations.saturating_add(1);
                             verified_since_mutation = false;
@@ -429,7 +443,7 @@ pub(crate) async fn run_agent(
                         ToolCategory::Other => {}
                     }
                 }
-                let call_name = call.name.clone();
+                let call_name = effective_name;
                 history.push(Message::Tool {
                     call_id: call.id,
                     name: call.name,
@@ -546,12 +560,16 @@ async fn execute_tool(
     call: ProviderToolInvocation,
     cancel: CancellationToken,
 ) -> Result<ToolExecution> {
+    let hook_tool = if call.name == "tool_call" {
+        call.arguments.get("name").and_then(serde_json::Value::as_str).unwrap_or(&call.name)
+    } else { &call.name };
+    let hook_input = if call.name == "tool_call" { call.arguments.get("arguments").unwrap_or(&call.arguments) } else { &call.arguments };
     execute_hooks(
         session,
         node,
         timeline,
         HookEvent::PreToolUse,
-        serde_json::json!({"tool":call.name.clone(),"input":call.arguments.clone()}),
+        serde_json::json!({"tool":hook_tool,"input":hook_input}),
         cancel.clone(),
     )
     .await?;
@@ -561,7 +579,7 @@ async fn execute_tool(
         node,
         timeline,
         HookEvent::PostToolUse,
-        serde_json::json!({"tool":call.name,"input":call.arguments,"outcome":outcome.outcome.clone()}),
+        serde_json::json!({"tool":hook_tool,"input":hook_input,"outcome":outcome.outcome.clone()}),
         cancel,
     )
     .await?;
@@ -601,9 +619,14 @@ async fn execute_tool_raw(
         permissions: node.permissions.clone(),
         workspace: workspace_for_node(session, node)?,
     };
+    // Desktop schema reduction predates discovery and is an optimisation, not
+    // a new permission policy for direct calls. Discovery stays inside that
+    // advertised catalogue; target permissions still run in the shared guard.
+    let scoped_discovery = matches!(call.name.as_str(), "tool_search" | "tool_describe" | "tool_call")
+        && session.tools.definitions().iter().any(|tool| tool.name == "computer");
     let dispatch = session
         .tools
-        .invoke(
+        .invoke_scoped(
             ToolInvocation {
                 call_id: call_id.clone(),
                 name: call.name,
@@ -611,6 +634,7 @@ async fn execute_tool_raw(
             },
             context,
             cancel.clone(),
+            scoped_discovery.then_some(DESKTOP_TOOLS.as_slice()),
         )
         .await;
     let dispatch = match dispatch {

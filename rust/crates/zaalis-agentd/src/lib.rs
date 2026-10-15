@@ -148,6 +148,11 @@ impl Daemon {
             ClientMethod::AgentUpdate => self.agent_update(params(request)?).await,
             ClientMethod::AgentRemove => self.agent_remove(params(request)?).await,
             ClientMethod::PermissionDecide => self.permission(params(request)?).await,
+            ClientMethod::ClarificationDecide => {
+                let input: zaalis_protocol::ClarificationDecideParams = params(request)?;
+                self.managed(&input.session_id).await?.runtime.decide_clarification(&input.request_id,input.answers).map_err(RpcError::from)?;
+                Ok((json!({"resolved":true}),Vec::new()))
+            },
             ClientMethod::PlanApprove => self.plan(params(request)?, true).await,
             ClientMethod::PlanReject => self.plan(params(request)?, false).await,
             ClientMethod::BudgetExtend => self.budget(params(request)?).await,

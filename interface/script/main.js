@@ -1246,8 +1246,8 @@ if (pickFolderBtn) pickFolderBtn.addEventListener('click', async () => {
 // ----- Privacy: delete history / keys / full reset -----
 async function clearLocalHistory() {
     try {
-        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'chat', conversations: [] }) });
-        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'agents', conversations: [] }) });
+        await fetch('/api/conversations?kind=chat', { method: 'DELETE' });
+        await fetch('/api/conversations?kind=agents', { method: 'DELETE' });
     } catch {}
     state.conversations = []; state.currentConvId = null; state.chatHistory = [];
     state.agentConversations = []; state.currentAgentConvId = null; resetContextMeasure();
@@ -2463,6 +2463,29 @@ function migrateRetiredModelState() {
     if (changed) saveState();
 }
 
+function restoreConfiguredModelSelection() {
+    if (modelSelect) {
+        const savedSubmodel = state.config.aiSubmodel;
+        modelSelect.value = state.config.aiModel || 'codex';
+        if (!modelSelect.value) modelSelect.value = 'codex';
+        modelSelect.dispatchEvent(new Event('change'));
+        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
+            submodelSelect.value = savedSubmodel;
+        } else {
+            // Default to newest submodel (first in the list) if saved one not found
+            const subs = SUBMODELS[modelSelect.value] || [];
+            if (subs.length) {
+                submodelSelect.value = subs[0]; // newest = first
+            }
+        }
+        submodelSelect.dispatchEvent(new Event('change'));
+        if (typeof createCustomSelect === 'function') {
+            createCustomSelect('ai-model');
+            createCustomSelect('ai-submodel');
+        }
+    }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     loadState();
 
@@ -2485,10 +2508,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    // The app (or the login overlay) is on screen: let the launch splash go.
+    window.dispatchEvent(new Event('zaalis:ready'));
     fetch('/api/browser/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language:state.language}) }).catch(() => {});
-    await loadCompatProviders();
-    migrateRetiredModelState();
-    await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
@@ -2505,27 +2527,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Restore Ollama URL in settings modal
     const _set = (sel, val) => { const el = $(sel); if (el) el.value = val; };
-    if (modelSelect) {
-        const savedSubmodel = state.config.aiSubmodel;
-        modelSelect.value = state.config.aiModel || 'codex';
-        if (!modelSelect.value) modelSelect.value = 'codex';
-        modelSelect.dispatchEvent(new Event('change'));
-        
-        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
-            submodelSelect.value = savedSubmodel;
-        } else {
-            // Default to newest submodel (first in the list) if saved one not found
-            const subs = SUBMODELS[modelSelect.value] || [];
-            if (subs.length) {
-                submodelSelect.value = subs[0]; // newest = first
-            }
-        }
-        submodelSelect.dispatchEvent(new Event('change'));
-        if (typeof createCustomSelect === 'function') {
-            createCustomSelect('ai-model');
-            createCustomSelect('ai-submodel');
-        }
-    }
     // Maintenant que le modele est restaure : evaluer la compatibilite de
     // l'effort de reflexion et la disponibilite des pieces jointes.
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();

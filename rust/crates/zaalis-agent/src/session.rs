@@ -89,6 +89,7 @@ pub(crate) struct SessionInner {
     pub cancel: CancellationToken,
     pub concurrency: Arc<Semaphore>,
     pub agent_cancels: Mutex<HashMap<AgentId, CancellationToken>>,
+    pub background_wakeup: tokio::sync::Notify,
     pub hook_agents: Mutex<HashSet<AgentId>>,
     pub plan_mode: AtomicBool,
     pub envelope: Mutex<crate::envelope::Envelope>,
@@ -124,6 +125,7 @@ impl AgentSession {
             cancel: CancellationToken::new(),
             concurrency: Arc::new(Semaphore::new(max_concurrency)),
             agent_cancels: Mutex::new(HashMap::new()),
+            background_wakeup: tokio::sync::Notify::new(),
             hook_agents: Mutex::new(HashSet::new()),
             plan_mode: AtomicBool::new(initial_plan),
             envelope: Mutex::new(crate::envelope::Envelope::default()),
@@ -136,6 +138,10 @@ impl AgentSession {
             .tools
             .register(NativeSpawnTool::new(Arc::downgrade(&inner)))
             .expect("register native spawn_agent tool");
+        inner.tools.register(crate::clarify::ClarifyTool(Arc::downgrade(&inner))).expect("register user input tool");
+        for action in ["agent_status", "agent_wait", "agent_cancel"] {
+            inner.tools.register(crate::agent_control::AgentControlTool::new(Arc::downgrade(&inner),action)).expect("register agent control tool");
+        }
         inner
             .tools
             .register(NativeMergeTool::new(Arc::downgrade(&inner)))
@@ -439,6 +445,13 @@ impl AgentSession {
                 if self.inner.tree.lock().await.is_settled() {
                     break;
                 }
+                if !self.inner.agent_cancels.lock().await.is_empty() {
+                    tokio::select! {
+                        _ = self.inner.background_wakeup.notified() => {},
+                        _ = self.inner.cancel.cancelled() => return Err(ZaalisError::cancelled()),
+                    }
+                    continue;
+                }
                 return Err(ZaalisError::internal(
                     "ordonnanceur bloqué sans agent exécutable",
                 ));
@@ -472,6 +485,9 @@ impl AgentSession {
 
     pub fn decide_plan(&self, id: &zaalis_core::RequestId, answer: PlanAnswer) -> Result<()> {
         self.inner.interactions.decide_plan(id, answer)
+    }
+    pub fn decide_clarification(&self, id: &zaalis_core::RequestId, answers: zaalis_protocol::ClarificationAnswers) -> Result<()> {
+        self.inner.interactions.decide_clarification(id, answers)
     }
 
     pub fn decide_budget(&self, id: &zaalis_core::RequestId, answer: BudgetAnswer) -> Result<()> {

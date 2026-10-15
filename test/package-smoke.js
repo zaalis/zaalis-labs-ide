@@ -40,6 +40,35 @@ async function main() {
   assert.equal(register.status, 200);
   const cookie = register.headers.get('set-cookie');
   const headers = { cookie, 'content-type': 'application/json' };
+  // Verify that the new modules are included in the actual packaged binary.
+  for (const asset of ['collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
+    assert.equal((await fetch(`${base}/${asset}`)).status, 200, asset);
+  }
+  const canonical = await (await fetch(`${base}/api/conversations`, { method: 'POST', headers,
+    body: JSON.stringify({ title: 'Packaged canonical chat', projectPath: dataDir }) })).json();
+  assert.ok(canonical.conversation?.id);
+  const fork = await (await fetch(`${base}/api/conversations/${canonical.conversation.id}/fork`, { method: 'POST', headers, body: '{}' })).json();
+  assert.notEqual(fork.conversation.id, canonical.conversation.id);
+  assert.equal(fork.conversation.parentId, canonical.conversation.id);
+  const knowledge = await (await fetch(`${base}/api/knowledge`, { method: 'POST', headers,
+    body: JSON.stringify({ title: 'Package fixture', content: 'Knowledge modules are packaged.', root: dataDir }) })).json();
+  assert.ok(knowledge.record?.id);
+  const task = await (await fetch(`${base}/api/tasks`, { method: 'POST', headers,
+    body: JSON.stringify({ title: 'Package task', prompt: 'Read the project.', root: dataDir, enabled: false }) })).json();
+  assert.equal(task.task?.enabled, false);
+  const terminalResponse = await fetch(`${base}/api/terminal/sessions`, { method: 'POST', headers, body: JSON.stringify({ cwd: dataDir }) });
+  assert.equal(terminalResponse.status, 200);
+  const terminal = await terminalResponse.json();
+  await fetch(`${base}/api/terminal/sessions/${terminal.id}/input`, { method: 'POST', headers,
+    body: JSON.stringify({ data: 'echo ZAALIS_PACKAGE_PTY_OK\r' }) });
+  let terminalOutput = '';
+  for (let attempt = 0; attempt < 80; attempt++) {
+    terminalOutput = (await (await fetch(`${base}/api/terminal/sessions/${terminal.id}`, { headers })).json()).output || '';
+    if (terminalOutput.includes('ZAALIS_PACKAGE_PTY_OK')) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.match(terminalOutput, /ZAALIS_PACKAGE_PTY_OK/);
+  assert.equal((await fetch(`${base}/api/terminal/sessions/${terminal.id}`, { method: 'DELETE', headers })).status, 200);
   const caps = await (await fetch(`${base}/api/model-capabilities?provider=codex&model=gpt-5.6-sol`, { headers })).json();
   assert.equal(caps.reasoning.supported, true);
   assert.equal(caps.reasoning.levels.length, 5);
@@ -84,7 +113,7 @@ async function main() {
   const heard = await (await fetch(`${base}/api/stt`, { method: 'POST', headers,
     body: JSON.stringify({ audio: silence.toString('base64'), language: 'fr' }) })).json();
   assert.deepEqual(heard, { text: '', engine: 'none', silent: true });
-  process.stdout.write('Packaged Windows server: static UI, reasoning, GGUF, preferences, ChatGPT sign-in, MCP stdio, Blender, dictation OK\n');
+  process.stdout.write('Packaged Windows server: canonical conversations, knowledge, tasks, real PTY, static UI, reasoning, GGUF, preferences, ChatGPT sign-in, MCP stdio, Blender, dictation OK\n');
 }
 
 main().catch(error => { process.stderr.write(`${error.stack || error}\n`); process.exitCode = 1; })
