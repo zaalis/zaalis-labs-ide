@@ -20,7 +20,8 @@ const child = spawn(exe, [], {
 });
 
 async function main() {
-  for (let i = 0; i < 100; i++) {
+  // A cold macOS launch may wait for executable assessment before listening.
+  for (let i = 0; i < 600; i++) {
     if (child.exitCode !== null) throw new Error(`packaged server exited: ${child.exitCode}`);
     try { if ((await fetch(base)).ok) break; } catch {}
     await new Promise(resolve => setTimeout(resolve, 50));

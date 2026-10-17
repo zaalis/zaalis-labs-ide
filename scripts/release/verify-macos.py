@@ -39,6 +39,7 @@ def verify(arch):
             resources = app / 'Contents/Resources/app'
             bundle = resources / 'bundle'
             payloads = [app / 'Contents/MacOS/zaalis-ide',
+                        app / 'Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework',
                         resources / 'macos-computer-bridge', resources / 'macos-speech-transcriber']
             payloads += [bundle / name for name in [
                 'zaalis-server', 'zaalis-agentd', 'zaalis-sandbox', 'bin/zaalis', 'bin/zaalis-cli',

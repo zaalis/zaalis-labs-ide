@@ -80,7 +80,7 @@ test('tools and memory use shared APIs, and failed calls stay visible', async ()
   await assert.rejects(workspaceCommand('memory', 'list', { ...options, request: async () => ({ status: 401, json: { error: 'Session expirée' } }) }), /Session expirée/);
 });
 
-test('real CLI process prints before done and continues the shared runtime session', { timeout: 15000 }, async () => {
+test('real CLI process prints before done and continues the shared runtime session', { timeout: process.env.ZAALIS_TEST_CLI_EXE ? 60000 : 15000 }, async () => {
   const http = require('node:http');
   const fs = require('node:fs');
   const os = require('node:os');
