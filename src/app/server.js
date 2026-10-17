@@ -24,6 +24,7 @@ const platformRuntime = require('../runtime/platform-runtime');
 const workspaceTokens = new Map();
 const { BrowserHost } = require('../../zaalis-browser/host');
 const { modelCapabilities, bindingCapabilities } = require('../accounts/model-capabilities');
+const { launchMacosUpdater, resolveMacosAppBundle } = require('../../macos-updater');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -831,6 +832,12 @@ app.post('/api/automation/stop-bridge', async (req, res) => {
 // ---------------------------------------------------------------------------
 // AUTH GUARD — every other /api/* route requires a valid session
 // ---------------------------------------------------------------------------
+// Electron waits for this loopback-only check before showing the window. It
+// reveals no user data and must stay available before a session exists.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, apiRevision: 'desktop-launcher-v2' });
+});
+
 app.use('/api', (req, res, next) => {
   if (req.path.startsWith('/auth/') || req.path === '/check-update') return next();
   const user = req.isTunnel ? null : currentUser(req);
@@ -3922,6 +3929,36 @@ app.get('/api/update/progress', (req, res) => {
 // {app} with `ignoreversion`); we only drive it with /VERYSILENT.
 app.post('/api/update/install', (req, res) => {
   try {
+    if (process.platform === 'darwin') {
+      if (!process.pkg) {
+        return res.status(409).json({ error: 'La mise a jour automatique est disponible depuis l application macOS installee.' });
+      }
+      const installerPath = downloadedInstallerPath || path.join(os.homedir(), 'Downloads', 'zaalis-update.dmg');
+      if (!fs.existsSync(installerPath)) {
+        return res.status(409).json({ error: 'Installer not downloaded yet.' });
+      }
+
+      const appBundlePath = resolveMacosAppBundle(process.env.ZAALIS_APP_BUNDLE_PATH, APP_DIR);
+      if (!appBundlePath) {
+        return res.status(409).json({ error: 'Le bundle macOS installe est introuvable.' });
+      }
+
+      const parsedTag = parseVersionTag(pendingUpdateTag);
+      const updateLog = path.join(os.homedir(), 'Library', 'Logs', 'zaalis', 'zaalis-update.log');
+      const runner = launchMacosUpdater({
+        installerPath,
+        appBundlePath,
+        logPath: updateLog,
+        lastTagFile: LAST_UPDATE_TAG_FILE,
+        expectedVersion: parsedTag ? parsedTag.join('.') : '',
+        expectedArch: process.arch,
+        serverPid: process.pid,
+        shellPid: process.env.ZAALIS_SHELL_PID,
+      });
+
+      res.json({ success: true, installerPath, automatic: true, log: updateLog, runnerPid: runner.pid });
+      return;
+    }
     if (process.platform !== 'win32') {
       const result = platformRuntime.installPosixUpdate(downloadedInstallerPath, APP_DIR);
       if (pendingUpdateTag) fs.writeFileSync(LAST_UPDATE_TAG_FILE, pendingUpdateTag, 'utf8');

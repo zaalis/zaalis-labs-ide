@@ -23,7 +23,7 @@ async function waitForHealth(child) {
 
 test('le contrôle de disponibilité Electron reste public et minimal', async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-health-'));
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, [require('../package.json').main], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, ZAALIS_PORT: String(PORT), ZAALIS_DATA_DIR: dataDir, ZAALIS_RUST_CORE: 'off' },
     stdio: 'ignore',
@@ -33,8 +33,11 @@ test('le contrôle de disponibilité Electron reste public et minimal', async ()
     const response = await waitForHealth(child);
     assert.deepEqual(await response.json(), { ok: true, apiRevision: 'desktop-launcher-v2' });
   } finally {
+    const exited = child.exitCode !== null
+      ? Promise.resolve()
+      : new Promise((resolve) => child.once('exit', resolve));
     child.kill();
-    await new Promise((resolve) => child.once('exit', resolve));
+    await exited;
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
