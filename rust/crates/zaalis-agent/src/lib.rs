@@ -5,11 +5,14 @@
 //! protocol event, and the same loop serves all eight providers.
 
 mod context;
+mod clarify;
+mod agent_control;
 mod control;
 mod event_bus;
 pub mod guardian;
 mod interaction;
 mod prompt;
+mod progress;
 mod runner;
 mod session;
 mod spawn;
@@ -27,6 +30,7 @@ pub use session::{AgentSession, AgentSessionSnapshot, SessionConfig, SessionRunM
 
 #[cfg(test)]
 mod tests {
+    include!("runtime_feature_tests.rs");
     use super::*;
     use async_trait::async_trait;
     use futures_util::stream::{self, StreamExt};
@@ -874,7 +878,7 @@ mod tests {
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
         offered.sort_unstable();
-        assert_eq!(offered, ["computer", "mcp", "tool_call", "tool_describe", "tool_search"]);
+        assert_eq!(offered, ["computer", "mcp", "request_user_input", "tool_call", "tool_describe", "tool_search"]);
         assert!(requests[0]
             .system
             .contains("outils disponibles : computer, mcp."));

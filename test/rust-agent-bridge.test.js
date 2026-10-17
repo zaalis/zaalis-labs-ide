@@ -15,6 +15,12 @@ test('findAgentd selects an existing native or Cargo binary only', () => {
 });
 
 test('findAgentd supports the installed side-by-side layout', (t) => {
+  const override = process.env.ZAALIS_AGENTD_PATH;
+  delete process.env.ZAALIS_AGENTD_PATH;
+  t.after(() => {
+    if (override === undefined) delete process.env.ZAALIS_AGENTD_PATH;
+    else process.env.ZAALIS_AGENTD_PATH = override;
+  });
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zaalis-agentd-layout-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const name = process.platform === 'win32' ? 'zaalis-agentd.exe' : 'zaalis-agentd';

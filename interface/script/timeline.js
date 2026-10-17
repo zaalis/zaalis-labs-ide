@@ -344,8 +344,14 @@
                 if (!event || finished) return;
                 if (event.type === 'permission_required') { note('wait', 'lock', L('En attente de votre autorisation : ', 'Waiting for your approval: ') + (event.summary || event.target || ''), String(event.requestId || '')); return; }
                 if (event.type === 'plan_required') { note('wait', 'map', L('Plan proposé : en attente de votre validation.', 'Plan proposed: waiting for your approval.'), String(event.requestId || '')); return; }
+                if (event.type === 'clarification_required') { note('wait', 'map', L('Précisions demandées : ', 'Clarification requested: ') + (event.questions || []).map(question => question.prompt || question.question || '').join(' · '), String(event.requestId || '')); return; }
                 if (event.type !== 'rust_event' || !event.event) return;
                 const frame = event.event;
+                if (frame.type === 'clarification_resolved') {
+                    const pending = flowEl.querySelector(`.tl-note-wait[data-request="${CSS.escape(String(frame.request_id || ''))}"]`);
+                    if (pending) { pending.className = 'tl-note tl-note-ok'; pending.querySelector('span').textContent += L(' · répondu', ' · answered'); }
+                    return;
+                }
                 if (frame.type === 'agent_spawned' && frame.agent) {
                     const agent = frame.agent; agents.set(String(agent.id), agent);
                     if (agent.role?.name === 'lead') leadId = String(agent.id);
@@ -407,6 +413,7 @@
             fail(message) {
                 if (finished) return;
                 flush();
+                for (const [segment_id] of segments) completeSegment({ segment_id });
                 for (const call of tools.values()) if (call.state === 'running') finishTool({ call_id: call.id, outcome: { status: 'error', message: L('Interrompu.', 'Interrupted.') } });
                 finished = true; clearInterval(clock);
                 body.classList.remove('tl-running');

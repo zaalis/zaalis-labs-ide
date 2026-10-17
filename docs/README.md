@@ -1,6 +1,7 @@
 # Documentation
 
 - [Source layout](source-layout.md) explains where the JavaScript modules, entrypoints, tests, native code, and assets live.
+- [Shared conversation runtime](architecture/conversation-runtime.md) maps desktop/CLI sessions, tool discovery, approvals, tasks and knowledge storage.
 - [Virtual machines](virtual-machines.md) describes VM use, limits, preparation, and repeatable checks.
 - [Native web research](deep-search.md) describes the Rust web tools and network safeguards.
 - [Historical reports](reports/) records earlier implementation and validation snapshots. Dates, artifact hashes, and Git state in these reports describe their original runs; they are not a current release claim.

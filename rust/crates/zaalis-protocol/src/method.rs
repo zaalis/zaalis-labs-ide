@@ -23,6 +23,7 @@ pub const AGENT_ADD: &str = "agent.add";
 pub const AGENT_UPDATE: &str = "agent.update";
 pub const AGENT_REMOVE: &str = "agent.remove";
 pub const PERMISSION_DECIDE: &str = "permission.decide";
+pub const CLARIFICATION_DECIDE: &str = "clarification.decide";
 pub const PLAN_APPROVE: &str = "plan.approve";
 pub const PLAN_REJECT: &str = "plan.reject";
 pub const BUDGET_EXTEND: &str = "budget.extend";
@@ -50,6 +51,7 @@ pub enum ClientMethod {
     AgentUpdate,
     AgentRemove,
     PermissionDecide,
+    ClarificationDecide,
     PlanApprove,
     PlanReject,
     BudgetExtend,
@@ -74,6 +76,7 @@ impl ClientMethod {
             AGENT_UPDATE => ClientMethod::AgentUpdate,
             AGENT_REMOVE => ClientMethod::AgentRemove,
             PERMISSION_DECIDE => ClientMethod::PermissionDecide,
+            CLARIFICATION_DECIDE => ClientMethod::ClarificationDecide,
             PLAN_APPROVE => ClientMethod::PlanApprove,
             PLAN_REJECT => ClientMethod::PlanReject,
             BUDGET_EXTEND => ClientMethod::BudgetExtend,
@@ -99,6 +102,7 @@ impl ClientMethod {
             ClientMethod::AgentUpdate => AGENT_UPDATE,
             ClientMethod::AgentRemove => AGENT_REMOVE,
             ClientMethod::PermissionDecide => PERMISSION_DECIDE,
+            ClientMethod::ClarificationDecide => CLARIFICATION_DECIDE,
             ClientMethod::PlanApprove => PLAN_APPROVE,
             ClientMethod::PlanReject => PLAN_REJECT,
             ClientMethod::BudgetExtend => BUDGET_EXTEND,

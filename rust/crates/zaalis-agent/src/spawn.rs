@@ -46,6 +46,8 @@ impl NativeSpawnTool {
 struct SpawnInput {
     objective: String,
     #[serde(default)]
+    background: bool,
+    #[serde(default)]
     role: Option<RoleSpec>,
     #[serde(default)]
     model: Option<ModelBinding>,
@@ -66,11 +68,12 @@ impl Tool for NativeSpawnTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "spawn_agent".into(),
-            description: "Créer un sous-agent natif, strictement borné par le parent, et attendre son rapport.".into(),
+            description: "Créer un sous-agent natif borné par le parent. background=true rend immédiatement son identifiant; agent_status/agent_wait/agent_cancel permettent de le suivre.".into(),
             input_schema: json!({
                 "type":"object",
                 "properties":{
                     "objective":{"type":"string"},
+                    "background":{"type":"boolean"},
                     "role":{"type":"object","properties":{
                         "name":{"type":"string"},"label":{"type":"string"},
                         "instructions":{"type":"string"},"mutating":{"type":"boolean"}
@@ -107,8 +110,8 @@ impl Tool for NativeSpawnTool {
         if cancel.is_cancelled() || session.cancel.is_cancelled() {
             return Err(ZaalisError::cancelled());
         }
-        let _child_slot = Arc::clone(&session.child_concurrency).try_acquire_owned()
-            .map_err(|_| ZaalisError::invalid("limite de sous-agents concurrents atteinte"))?;
+        let permit = Some(Arc::clone(&session.child_concurrency).try_acquire_owned()
+            .map_err(|_| ZaalisError::invalid("limite de sous-agents concurrents atteinte"))?);
         let parent = session
             .tree
             .lock()
@@ -171,6 +174,18 @@ impl Tool for NativeSpawnTool {
             .lock()
             .await
             .insert(child_id.clone(), child_cancel.clone());
+        if args.background {
+            let result = json!({"agent_id":child_id,"workspace":child.workspace,"background":true});
+            tokio::spawn(async move {
+                let _permit = permit;
+                let run = run_agent(Arc::clone(&session), child, history, child_cancel).await;
+                session.finish_agent(&child_id, run).await;
+                session.agent_cancels.lock().await.remove(&child_id);
+                session.background_wakeup.notify_one();
+            });
+            return Ok(ToolResult { summary:"Sous-agent lancé en arrière-plan".into(),value:result });
+        }
+        let _permit = permit;
         let run = run_agent(Arc::clone(&session), child.clone(), history, child_cancel).await;
         session.agent_cancels.lock().await.remove(&child_id);
         let result_value = match &run {

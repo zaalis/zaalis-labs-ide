@@ -245,6 +245,28 @@ fn run_prompt(
                             json!({"session_id":session,"request_id":request_id}),
                         )?;
                     }
+                    Event::ClarificationRequested { request_id, questions, .. } => {
+                        let mut answers = serde_json::Map::new();
+                        for question in questions {
+                            println!("\n{CYAN}{}{RESET}", question.prompt);
+                            for (index, option) in question.options.iter().enumerate() {
+                                println!("  {}. {} — {}", index + 1, option.label, option.description);
+                            }
+                            let answer = editor.readline("Réponse (numéro ou texte, vide pour ignorer) : ")
+                                .map_err(|error| error.to_string())?;
+                            let answer = answer.trim();
+                            if answer.is_empty() { continue; }
+                            let selected = answer.parse::<usize>().ok().and_then(|index| index.checked_sub(1))
+                                .and_then(|index| question.options.get(index));
+                            if let Some(option) = selected {
+                                answers.insert(question.id.clone(), json!(option.label));
+                            } else if question.allow_free_text {
+                                answers.insert(question.id.clone(), json!(answer));
+                            }
+                        }
+                        client.request(method::CLARIFICATION_DECIDE,
+                            json!({"session_id":session,"request_id":request_id,"answers":answers}))?;
+                    }
                     Event::BudgetExhausted { request_id, .. } => {
                         let answer = editor
                             .readline("\nBudget atteint. Tokens supplémentaires (vide=arrêt) : ")

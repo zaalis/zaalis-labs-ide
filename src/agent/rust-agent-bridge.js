@@ -274,6 +274,19 @@ class RustAgentBridge {
     finally {await client.request('session.close',{session_id:made.session_id}).catch(()=>{});}
   }
 
+  async toolInventory(userId, keys, root, mcpServers = []) {
+    // Inspect the active daemon without changing its environment/fingerprint:
+    // a catalogue request must never interrupt an already running turn.
+    const existing = this.clients.get(userId);
+    const client = existing && !existing.client.closed ? existing.client : this._client(userId, keys, mcpServers);
+    const made = await client.request('session.create', { root, mode: 'chat',
+      model: { provider: 'mistral' }, permission_mode: 'read-only' });
+    try {
+      const result = await client.request('tools.list', { session_id: made.session_id });
+      return result.tools || [];
+    } finally { await client.request('session.close', { session_id: made.session_id }); }
+  }
+
   async run(options, onEvent) {
     const problem = options.message;
     let remembered = '', memoryError = '', incomplete = false;
@@ -287,7 +300,7 @@ class RustAgentBridge {
     const result = await this._run({ ...options, message: remembered ? remembered + '\nDEMANDE ACTUELLE :\n' + problem : problem }, event => {
       const frame = event.event;
       if (event.type === 'rust_event' && (['provider_error', 'agent_failed'].includes(frame?.type) || (frame?.type === 'agent_completed' && frame.report?.partial_reason) ||
-          (frame?.type === 'agent_state_changed' && ['failed', 'cancelled', 'partial'].includes(frame.state)))) incomplete = true;
+          (frame?.type === 'agent_state_changed' && ['failed', 'cancelled', 'partial'].includes(frame.state?.state || frame.state)))) incomplete = true;
       if (onEvent) onEvent(event);
     });
     try {
@@ -401,6 +414,7 @@ class RustAgentBridge {
         onEvent({ type: 'tool_done', id: frame.call_id, ...result });
       }
       if (frame.type === EVENTS.PERMISSION_REQUESTED) onEvent({ type: 'permission_required', sessionId, requestId: frame.request_id, summary: frame.summary, target: frame.target, risks: frame.risks || [] });
+      if (frame.type === EVENTS.CLARIFICATION_REQUESTED) onEvent({ type: 'clarification_required', sessionId, requestId: frame.request_id, questions: frame.questions });
       if (frame.type === EVENTS.PLAN_READY) {
         const leadId = String(lead.id);
         if (text.get(leadId)) text.set(leadId, text.get(leadId).trimEnd() + '\n\n');
@@ -462,6 +476,7 @@ class RustAgentBridge {
     if (body.kind === 'permission') return session.client.request(METHODS.PERMISSION_DECIDE, { ...base, answer: body.allow ? { allow: { scope: body.scope || 'once' } } : 'deny' });
     if (body.kind === 'plan') return session.client.request(body.allow ? METHODS.PLAN_APPROVE : METHODS.PLAN_REJECT, { ...base, feedback: body.feedback || undefined });
     if (body.kind === 'budget') return session.client.request(METHODS.BUDGET_EXTEND, { ...base, additional_tokens: body.additionalTokens, stop: !!body.stop });
+    if (body.kind === 'clarification') return session.client.request(METHODS.CLARIFICATION_DECIDE, { ...base, answers: body.answers || {} });
     throw Object.assign(new Error('Decision interactive invalide.'), { status: 400 });
   }
 

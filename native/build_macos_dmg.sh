@@ -130,6 +130,8 @@ build_arch() {
   echo "    - staging the Rust binaries"
   ZAALIS_RUST_RELEASE_DIR="$ROOT/rust/target/$rust_target/release" \
     sh scripts/stage-rust-binaries.sh "$ROOT/$serverdist"
+  # Keep the direct Rust diagnostic client as well as the shared HTTP CLI.
+  mv "$serverdist/bin/zaalis" "$serverdist/bin/zaalis-cli"
   npx pkg src/app/cli.js --no-bytecode --public --targets "$pkg_target" --output "$serverdist/bin/zaalis"
 
   # Same connectors as the Windows installer (github\gh.exe,

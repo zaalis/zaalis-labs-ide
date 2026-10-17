@@ -6,6 +6,8 @@ Build on a Mac with `sh native/build_macos_dmg.sh`. Prerequisites: Node.js 22+, 
 
 The build produces `native/installer/zaalis-macos-arm64.dmg` and `native/installer/zaalis-macos-x64.dmg`. Open the image for your Mac and drag `zaalis IDE` to Applications. The terminal client is `zaalis IDE.app/Contents/Resources/app/bundle/bin/zaalis` (the packaged `src/app/cli.js`, as `bin\zaalis.exe` on Windows); pass a prompt as an argument for a noninteractive request.
 
+The shared conversation history supports resume, fork, rename, archive, search and ordered event replay from the IDE and terminal. Clarification forms, queued messages, agent activity, the task center and general knowledge use the same services as `main`. The direct Rust diagnostic client is also included as `bundle/bin/zaalis-cli`.
+
 Like the Windows installer, each package ships the WhatsApp bridge (with a Node runtime of the same architecture), the official GitHub client `gh` for browser sign-in, and `cloudflared` for remote access. Set `ZAALIS_CODESIGN_ID` (or `MACOS_CODESIGN_IDENTITY` in CI) to a persistent signing identity: an ad-hoc signature changes on every build and silently revokes the macOS permissions below.
 
 Desktop control relies on macOS Screen Recording and Accessibility permissions. Grant both permissions to the application before using capture or input automation. `activate_app` accepts an `.app` path or the name shown in Applications or Launchpad (for example `Blender`), as Windows accepts a Start menu name. Voice dictation asks for the Microphone permission.

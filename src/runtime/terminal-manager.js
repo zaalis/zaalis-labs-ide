@@ -39,6 +39,18 @@ function ptyModule() {
 
 const MAX_BUFFER = 512 * 1024;
 
+// node-pty 1.1's DLL backend waits for a final data chunk before disposing its
+// output worker. A quiet terminal may never send that chunk. Its public API has
+// no dispose method, so keep this compatibility guard local and version-shape
+// checked. dispose() drains buffered output for one second before termination;
+// the regular public kill() below still owns native/process-group cleanup.
+function disposeQuietConptyOutput(proc) {
+  const agent = process.platform === 'win32' && proc?._agent;
+  if (agent?._useConptyDll && typeof agent._conoutSocketWorker?.dispose === 'function') {
+    agent._conoutSocketWorker.dispose();
+  }
+}
+
 function executableOnPath(name) {
   if (path.isAbsolute(name)) return fs.existsSync(name) ? name : '';
   const pathValue = process.env.Path || process.env.PATH || '';
@@ -137,9 +149,10 @@ class TerminalManager {
     if (!ptyRuntime) throw new Error(`Terminal intégré indisponible : ${ptyLoadError && ptyLoadError.message ? ptyLoadError.message : 'module natif non chargé'}`);
     const id = crypto.randomUUID();
     const profile = { id: label, shell, args };
-    // The bundled ConPTY closes SSH terminals without the legacy console-list
-    // helper racing a VM shutdown and logging AttachConsole failures.
-    const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, ...(process.platform==='win32'&&origin==='vm'?{useConptyDll:true}:{}), env: { ...process.env, TERM: 'xterm-256color' } });
+    // The bundled ConPTY releases the console and its attached processes through
+    // its native close path. The legacy backend starts a console-list helper
+    // after close, which races an exited shell and throws AttachConsole failed.
+    const proc = ptyRuntime.spawn(profile.shell, profile.args, { name: 'xterm-256color', cols: 100, rows: 26, cwd, ...(process.platform === 'win32' ? { useConptyDll: true } : {}), env: { ...process.env, TERM: 'xterm-256color' } });
     let readyResolve = null;
     const session = { id, userId, cwd, proc, profile, origin, buffer: '', events: new EventEmitter(), closed: false, ready: new Promise((resolve) => { readyResolve = resolve; }) };
     proc.onData((data) => {
@@ -174,9 +187,12 @@ class TerminalManager {
     if (!session) return;
     session.closed = true;
     this.sessions.delete(session.id);
+    if (session.disposeRequested) return;
+    session.disposeRequested = true;
     // onExit marks a session closed before the PTY addon has necessarily
     // disposed its pipes. Always release the native PTY handle as well.
     try { session.proc.kill(); } catch {}
+    disposeQuietConptyOutput(session.proc);
   }
 
   async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
@@ -184,7 +200,7 @@ class TerminalManager {
     await Promise.race([session.ready, new Promise((resolve) => setTimeout(resolve, 1200))]);
     const before = session.buffer.length;
     const marker = `__ZAALIS_DONE_${crypto.randomUUID().replace(/-/g, '')}`;
-    const resultPattern = new RegExp(`${marker}:(\\d+)`);
+    const completionPattern = new RegExp(`${marker}:(\\d+)(?:\\r?\\n|$)`);
     const completion = process.platform === 'win32'
       ? `\r@echo ${marker}:%errorlevel%\r`
       : `\rprintf '\\n${marker}:%s\\n' "$?"\r`;
@@ -192,7 +208,7 @@ class TerminalManager {
     await new Promise((resolve) => {
       let timer = null;
       const done = () => { session.events.removeListener('data', onData); resolve(); };
-      const onData = () => { if (resultPattern.test(session.buffer.slice(before))) { if (timer) clearTimeout(timer); done(); } };
+      const onData = () => { if (completionPattern.test(session.buffer.slice(before))) { if (timer) clearTimeout(timer); done(); } };
       timer = setTimeout(done, waitMs);
       session.events.on('data', onData);
     });

@@ -138,6 +138,22 @@ impl ToolRuntime {
         if definition.name.trim().is_empty() {
             return Err(ZaalisError::invalid("nom d'outil vide"));
         }
+        if crate::discovery::NAMES.contains(&definition.name.as_str()) {
+            return Err(ZaalisError::invalid("nom réservé au catalogue des outils"));
+        }
+        self.register_tool(tool)
+    }
+
+    /// Install the trusted agent catalogue, which can discover live MCP tools.
+    pub fn register_discovery<T: Tool + 'static>(&self, tool: T) -> Result<()> {
+        if !crate::discovery::NAMES.contains(&tool.definition().name.as_str()) {
+            return Err(ZaalisError::invalid("outil hors du catalogue de découverte"));
+        }
+        self.register_tool(tool)
+    }
+
+    fn register_tool<T: Tool + 'static>(&self, tool: T) -> Result<()> {
+        let definition = tool.definition();
         let mut tools = self.tools.write().expect("tools lock poisoned");
         if tools.contains_key(&definition.name) {
             return Err(ZaalisError::invalid(format!(
@@ -173,6 +189,11 @@ impl ToolRuntime {
             .values()
             .map(|tool| tool.definition())
             .collect();
+        for definition in crate::discovery::definitions() {
+            if !definitions.iter().any(|tool| tool.name == definition.name) {
+                definitions.push(definition);
+            }
+        }
         definitions.sort_by(|left, right| left.name.cmp(&right.name));
         definitions
     }
@@ -199,6 +220,35 @@ impl ToolRuntime {
         context: ToolContext,
         cancel: CancellationToken,
     ) -> ToolDispatch {
+        self.invoke_scoped(invocation, context, cancel, None).await
+    }
+
+    /// A surface may narrow the registry without allowing discovery/aliases to
+    /// expose or execute tools outside that effective catalogue.
+    pub async fn invoke_scoped(&self, invocation: ToolInvocation, context: ToolContext,
+        cancel: CancellationToken, allowed: Option<&[&str]>) -> ToolDispatch {
+        let call_id = invocation.call_id.clone();
+        // Agent sessions register discovery that also resolves dynamic MCP
+        // tools. Keep that implementation for unrestricted catalogues; scoped
+        // surfaces use the runtime dispatcher to enforce their advertised set.
+        let registered_discovery = allowed.is_none()
+            && crate::discovery::NAMES.contains(&invocation.name.as_str())
+            && self.get_tool(&invocation.name).is_some();
+        if !registered_discovery && matches!(invocation.name.as_str(), "tool_search" | "tool_describe") {
+            let mut definitions = self.definitions();
+            if let Some(names) = allowed { definitions.retain(|tool| names.contains(&tool.name.as_str())); }
+            return match crate::discovery::query(&invocation.name, invocation.input, definitions) {
+                Ok(result) => ToolDispatch::Complete { call_id, outcome: ToolOutcome::Ok { summary: result.summary, result: result.value, duration_ms: 0 } },
+                Err(error) => complete_error(call_id, error, 0),
+            };
+        }
+        let invocation = match if registered_discovery { Ok(invocation) } else { crate::discovery::expand(invocation) } {
+            Ok(invocation) => invocation,
+            Err(error) => return complete_error(call_id, error, 0),
+        };
+        if allowed.is_some_and(|names| !names.contains(&invocation.name.as_str())) {
+            return complete_error(call_id, ZaalisError::denied("outil indisponible dans ce mode de session"), 0);
+        }
         let tool = self
             .tools
             .read()

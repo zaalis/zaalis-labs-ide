@@ -5,6 +5,8 @@ The repository root holds project metadata, assets, platform projects, and docum
 | Directory | Responsibility |
 | --- | --- |
 | `src/app/` | HTTP server and terminal CLI entrypoints. Start with `npm start`; package the server through `npm run build:server`. |
+| `src/cli/` | Shared conversation commands, streamed response state, and task/tool/knowledge commands for the terminal client. |
+| `src/services/` | Account-scoped conversation persistence, event journal, general knowledge, scheduled tasks, and their authenticated HTTP adapters. |
 | `src/accounts/` | Account subscriptions, provider compatibility, and model metadata. |
 | `src/agent/` | Rust agent bridge, MCP registry, workspace context, secret masking, and tunnel policy. |
 | `src/artifacts/` | Local document and spreadsheet artifact generation. |
@@ -20,3 +22,5 @@ The repository root holds project metadata, assets, platform projects, and docum
 The server and CLI resolve the repository root when run from source. A packaged server resolves assets beside its executable. Source imports use relative paths; keep module imports and platform build paths in sync when moving files. `npm test`, `npm run check:mojibake`, `npm run build:server`, and `node test/package-smoke.js` cover the principal Node paths. Native installer behavior still requires a platform-specific build and runtime check.
 
 User language is selected at runtime. English is the source language for documentation and developer-facing comments. Explicit French locale values are translation data and must stay available while French remains a supported interface language.
+
+The [conversation runtime map](architecture/conversation-runtime.md) describes ownership, lifecycle, compatibility adapters, and verification for the shared desktop/terminal experience.

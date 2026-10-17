@@ -17,6 +17,8 @@ const MAX_PROJECT_GUIDANCE_CHARS: usize = 32 * 1024;
 /// Gemini, GPT, Grok, Kimi, Ollama and GGUF.  A weaker model therefore gets
 /// the same state-grounding and verification discipline as a stronger one.
 const RUNTIME_RULES: &str = "\n\nRÈGLES RUNTIME (prioritaires) :\n\
+- Pendant le travail, une mise à jour utile tient en UNE phrase de 280 caractères maximum. Exécute les outils directement pour les étapes ordinaires ; évite de raconter ton raisonnement ou de répéter ton plan. La réponse finale est un mini rapport concis, avec résultats et limites ; développe librement si l'utilisateur demande des explications détaillées. Cette limite de progression ne s'applique pas aux réponses finales, documents ni au code demandé.\n\
+- Si l'utilisateur demande des sous-agents et que spawn_agent est disponible, utilise réellement cet outil pour les sous-tâches indépendantes, avec un role.label court décrivant leur mission. Préfère background=true pour travailler en parallèle, consulte agent_status/agent_wait puis vérifie leurs rapports avant de conclure. Respecte les budgets et permissions, et signale toute impossibilité réelle.\n\
 - Après chaque outil, fonde ta décision suivante sur l'état réel renvoyé par le ToolResult, pas sur ton plan précédent.\n\
 - Ne présente jamais comme « à faire » ou « je vais » une action déjà confirmée comme réussie par un ToolResult : décris-la au passé (fait) et enchaîne sur ce qui reste réellement à faire.\n\
 - Avant de conclure une tâche de développement, vérifie ton travail : relis les fichiers créés ou modifiés, et lance un test quand c'est pertinent.\n\

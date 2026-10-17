@@ -1,0 +1,40 @@
+.collab-dialog { position:fixed; inset:0; margin:auto; color:var(--text-0,#e8e8e8); background:var(--bg-1,#1c1d20); border:1px solid var(--border,#42454c); border-radius:14px; width:min(760px,94vw); max-height:88vh; padding:20px; }
+.collab-dialog::backdrop { background:#0009; backdrop-filter:blur(3px); }
+.collab-dialog>header,.collab-actions,.collab-filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.collab-dialog>header { justify-content:space-between; }
+.collab-dialog h2 { margin:0; font-size:18px; }
+.collab-dialog button,.draft-queue button { border:1px solid var(--border-color,#444); border-radius:7px; background:var(--bg-tertiary,#2b2d32); color:inherit; padding:7px 11px; cursor:pointer; }
+.collab-dialog button:hover,.collab-dialog button[aria-pressed=true] { background:var(--bg-hover,#3b3e46); }
+.collab-dialog button:focus-visible,.collab-dialog input:focus-visible,.collab-dialog textarea:focus-visible,.draft-queue :focus-visible { outline:2px solid var(--accent,#79a8ff); outline-offset:2px; }
+.collab-dialog label { display:flex; flex-direction:column; gap:6px; font-size:12px; }
+.collab-dialog input,.collab-dialog textarea,.draft-queue textarea { background:var(--bg-primary,#151619); color:inherit; border:1px solid var(--border-color,#454851); border-radius:6px; padding:9px; font:inherit; min-width:0; }
+.collab-dialog input[type=checkbox] { align-self:flex-start; }
+.collab-dialog textarea { resize:vertical; min-height:70px; }
+.collab-form { display:grid; grid-template-columns:1fr 1fr; gap:12px; padding:15px 0; }
+.collab-form label:has(textarea),.collab-form>small,.collab-form fieldset { grid-column:1/-1; }
+.collab-form fieldset { border:1px solid var(--border-color,#444); border-radius:8px; display:flex; flex-direction:column; gap:8px; }
+.collab-form fieldset>button { text-align:left; }
+.collab-card { padding:14px; margin-top:10px; border:1px solid var(--border-color,#3e4148); border-radius:9px; display:flex; flex-direction:column; gap:8px; }
+.collab-card p { white-space:pre-wrap; overflow-wrap:anywhere; margin:0; }
+.collab-card pre { overflow:auto; max-height:220px; font-size:12px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.collab-card>button:first-child { text-align:left; font-weight:600; }
+.collab-dialog small,.collab-status { color:var(--text-secondary,#b5b7bc); }
+.collab-error { color:#ff9c9c; }
+.collab-inline { display:flex; gap:8px; align-items:end; flex-wrap:wrap; }
+.draft-queue { max-height:220px; overflow:auto; padding:10px; }
+.draft-queue-row { display:grid; grid-template-columns:minmax(0,1fr) auto auto auto; gap:5px; margin-top:8px; }
+.draft-queue-row textarea { min-height:42px; resize:vertical; width:100%; box-sizing:border-box; }
+.draft-queue-row small { grid-column:1/-1; }
+.draft-queue button:disabled { opacity:.35; cursor:default; }
+.topbar-left>.collab-launch { white-space:nowrap; display:flex; align-items:center; justify-content:center; gap:5px; padding:5px; border-radius:6px; color:var(--text-1); }
+.collab-launch svg { display:none; width:16px; height:16px; flex:none; }
+.collab-launch:hover { background:var(--bg-hover); }
+@media(max-width:1000px) { .collab-launch span { display:none; } .collab-launch svg { display:block; } .topbar-left>.collab-launch { width:30px; height:30px; flex:none; } }
+@media(max-width:650px) { #topbar { padding-left:7px; padding-right:7px; gap:6px; } .topbar-left { gap:5px; } .ws-version { display:none; } }
+.markdown-table-scroll { max-width:100%; overflow:auto; margin:14px 0; border:1px solid var(--border); border-radius:8px; }
+.markdown-table-scroll table { border-collapse:collapse; min-width:100%; font-size:inherit; }
+.markdown-table-scroll th,.markdown-table-scroll td { padding:9px 12px; border-bottom:1px solid var(--border); vertical-align:top; }
+.markdown-table-scroll th { background:var(--bg-2); font-weight:600; }
+.markdown-table-scroll tbody tr:last-child td { border-bottom:0; }
+.markdown-table-scroll:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+@media(max-width:650px) { .collab-form { grid-template-columns:1fr; } .collab-dialog { padding:12px; } .collab-filters { align-items:stretch; } .draft-queue-row { grid-template-columns:minmax(0,1fr) auto; } .draft-queue-row textarea { grid-column:1/-1; } }

@@ -377,7 +377,7 @@ pub(crate) fn register(session: &Arc<SessionInner>) {
     for name in ["tool_search", "tool_describe", "tool_call"] {
         session
             .tools
-            .register(DiscoveryTool::new(Arc::downgrade(session), name))
+            .register_discovery(DiscoveryTool::new(Arc::downgrade(session), name))
             .expect("discovery tool");
     }
     for (name, target, action) in [

@@ -13,6 +13,10 @@
  * the same `pkg` toolchain as the server.
  */
 
+const { createStreamState } = require('../cli/stream-state');
+const { createConversationClient } = require('../cli/conversations');
+const { createConversationController } = require('../cli/conversation-commands');
+const { workspaceCommand } = require('../cli/workspace-commands');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
@@ -237,6 +241,8 @@ function requestStream(method, pathname, { body, cookie, onEvent } = {}) {
           buffer = lines.pop() || '';
           for (const l of lines) handleLine(l);
         });
+        res.on('aborted', () => reject(new Error('Flux interrompu avant la fin de la réponse.')));
+        res.on('error', reject);
         res.on('end', () => {
           if (buffer) handleLine(buffer);
           resolve({
@@ -553,6 +559,13 @@ async function chooseModel(arg) {
 // Chat
 // ---------------------------------------------------------------------------
 const history = [];
+const conversations = createConversationClient((method, endpoint, body) => authed(method, endpoint, body));
+
+const conversationController = createConversationController({
+  conversations, history, getSession: () => session, saveSession, persistConversation, projectRoot,
+  output: (...args) => console.log(...args),
+});
+const { adoptConversation, ensureConversation, conversationCommand } = conversationController;
 
 function projectRoot() {
   return process.cwd();
@@ -569,6 +582,8 @@ function persistConversation() {
   try {
     fs.mkdirSync(SESSIONS_DIR, { recursive: true });
     fs.writeFileSync(conversationFile(), JSON.stringify({
+      conversationId: conversationController.active?.id || null,
+      sessionId: conversationController.active?.sessionId || null,
       cwd: projectRoot(),
       savedAt: Date.now(),
       model: session.model || null,
@@ -577,92 +592,20 @@ function persistConversation() {
     }));
   } catch {}
 }
-function restoreConversation() {
-  try {
-    const d = JSON.parse(fs.readFileSync(conversationFile(), 'utf-8'));
-    if (!Array.isArray(d.history) || !d.history.length) return null;
-    history.length = 0;
-    history.push(...d.history);
-    return d;
-  } catch { return null; }
-}
-
-// Toutes les sessions enregistrees, la plus recente d'abord.
-//
-// `/resume` ne voyait que le dossier courant : une session ouverte hier dans un
-// autre projet etait sur le disque mais introuvable.  La lister, c'est la
-// difference entre une fonctionnalite qui existe et une fonctionnalite qu'on
-// utilise.
-function listConversations() {
-  let files = [];
-  try { files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json')); }
-  catch { return []; }
-  const sessions = [];
-  for (const file of files) {
-    try {
-      const full = path.join(SESSIONS_DIR, file);
-      const d = JSON.parse(fs.readFileSync(full, 'utf-8'));
-      if (!Array.isArray(d.history) || !d.history.length) continue;
-      const lastUser = [...d.history].reverse().find((h) => h && h.role === 'user');
-      sessions.push({
-        file: full,
-        cwd: String(d.cwd || ''),
-        savedAt: Number(d.savedAt || 0),
-        model: d.model || null,
-        submodel: d.submodel || null,
-        history: d.history,
-        exchanges: Math.ceil(d.history.length / 2),
-        preview: String((lastUser && lastUser.content) || '').replace(/\s+/g, ' ').trim().slice(0, 90),
-      });
-    } catch {}
+async function restoreConversation() {
+  let snapshot = null;
+  try { snapshot = JSON.parse(fs.readFileSync(conversationFile(), 'utf-8')); } catch {}
+  if (snapshot?.conversationId) {
+    // Fail visibly if the shared conversation was deleted or access was lost.
+    // Reconstructing a new session silently would lose runtime continuity.
+    return adoptConversation(await conversations.get(snapshot.conversationId));
   }
-  return sessions.sort((a, b) => b.savedAt - a.savedAt);
-}
-
-// Filtre sur le chemin du projet et sur le contenu echange : on cherche
-// « la session ou je parlais du proxy », pas un identifiant.
-function searchConversations(sessions, query) {
-  const needle = String(query || '').toLowerCase().trim();
-  if (!needle) return sessions;
-  return sessions.filter((s) => {
-    if (s.cwd.toLowerCase().includes(needle)) return true;
-    if (s.preview.toLowerCase().includes(needle)) return true;
-    return s.history.some((h) => String((h && h.content) || '').toLowerCase().includes(needle));
-  });
-}
-
-function relativeTime(ms) {
-  const delta = Date.now() - ms;
-  if (!ms || delta < 0) return 'date inconnue';
-  const minutes = Math.round(delta / 60000);
-  if (minutes < 1) return "a l'instant";
-  if (minutes < 60) return `il y a ${minutes} min`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `il y a ${hours} h`;
-  const days = Math.round(hours / 24);
-  return days === 1 ? 'hier' : `il y a ${days} jours`;
-}
-
-function printConversationList(sessions) {
-  sessions.forEach((s, index) => {
-    const here = s.cwd.toLowerCase() === projectRoot().toLowerCase();
-    const where = here ? 'ce dossier' : (s.cwd || 'dossier inconnu');
-    console.log(`${brand(String(index + 1).padStart(2))}  ${relativeTime(s.savedAt)} · ${s.exchanges} echange(s) · ${dim(where)}`);
-    if (s.preview) console.log(`    ${dim(s.preview)}`);
-  });
-}
-
-function applyConversation(chosen) {
-  history.length = 0;
-  history.push(...chosen.history);
-  if (chosen.model) { session.model = chosen.model; session.submodel = chosen.submodel; saveSession(session); }
-  const when = relativeTime(chosen.savedAt);
-  console.log(green('✓ ') + `Session restauree : ${chosen.exchanges} echange(s) (${when}). Modele : ${currentModelLabel()}`);
-  if (chosen.cwd && chosen.cwd.toLowerCase() !== projectRoot().toLowerCase()) {
-    // Le contexte repris parle d'un autre projet que celui ou l'on se trouve :
-    // le dire evite des reponses qui semblent hors sujet sans raison visible.
-    console.log(dim(`    Cette session vient de ${chosen.cwd} — le dossier courant est different.`));
+  if (Array.isArray(snapshot?.history) && snapshot.history.length) {
+    history.splice(0, history.length, ...snapshot.history);
+    return snapshot;
   }
+  const latest = (await conversations.list('', projectRoot())).find(item => !item.archived);
+  return latest ? adoptConversation(await conversations.get(latest.id)) : null;
 }
 
 function isLocalModel(model) {
@@ -1114,10 +1057,15 @@ async function sendChat(message, hooks = {}) {
   }
   await refreshEfforts();
   const runtimeConfig = configForCurrentModel(await getSharedRuntimeConfig());
+  const conversation = await ensureConversation(effectiveMessage);
+  const live = createStreamState();
   const body = {
     model: session.model || 'claude',
     submodel: session.submodel || undefined,
     message: effectiveMessage,
+    conversationId: conversation.id,
+    sessionId: conversation.sessionId || undefined,
+    persistTurn: true,
     root: projectRoot(),
     permissionMode: currentPermission().id,
     language: 'fr',
@@ -1129,7 +1077,10 @@ async function sendChat(message, hooks = {}) {
     computerControl: session.computerControl === true,
   };
   const onEvent = event => {
-    if (['permission_required','plan_required','budget_required','question_required'].includes(event.type)) { decisionQueue = decisionQueue.then(() => terminalDecision(event)).catch(error => console.error('Décision : ' + error.message)); }
+    const delta = live.accept(event);
+    if (live.state.sessionId) conversation.sessionId = live.state.sessionId;
+    if (delta && typeof hooks.onDelta === 'function') hooks.onDelta(delta);
+    if (['permission_required','plan_required','budget_required','clarification_required','question_required'].includes(event.type)) { decisionQueue = decisionQueue.then(() => terminalDecision(event)).catch(error => console.error('Décision : ' + error.message)); }
     else if (typeof hooks.onEvent === 'function') hooks.onEvent(event);
   };
   const r = await requestStream('POST', '/api/agent-chat', { body, cookie: session.cookie, onEvent });
@@ -1137,8 +1088,10 @@ async function sendChat(message, hooks = {}) {
   if (r.status !== 200) return { error: (r.json && r.json.error) || `Erreur serveur (${r.status}).` };
   if (hooks.stop) hooks.stop();
 
-  history.push({ role: 'user', content: effectiveMessage });
   const json = r.json || {};
+  if (json.error) return { error: json.error };
+  history.push({ role: 'user', content: effectiveMessage });
+  if (json.sessionId) conversation.sessionId = json.sessionId;
   const toolMemory = Array.isArray(json.toolResults) && json.toolResults.length
     ? '\n\n[Outils utilises]\n' + json.toolResults
         .map((t) => `[${t.tool || 'outil'}] ${t.summary || ''}\n${String(t.text || '').slice(0, 4000)}`)
@@ -1158,6 +1111,7 @@ async function sendChat(message, hooks = {}) {
     thinking: cleanModelText(json.thinking || ''),
     events: Array.isArray(json.events) ? json.events : [],
     streamed: !!(onEvent && r.streamed),
+    liveText: !!live.state.text,
   };
 }
 
@@ -1349,7 +1303,8 @@ const SLASH = [
   { name: 'cost', category: 'context', desc: 'estimation tokens / cout' },
   { name: 'usage', category: 'context', desc: 'estimation tokens / cout' },
   { name: 'summary', category: 'context', desc: 'resumer la session' },
-  { name: 'memory', category: 'context', desc: 'afficher ZAALIS.md / AGENTS.md' },
+  { name: 'memory', category: 'context', desc: 'mémoire des corrections : list, on, off, delete' },
+  { name: 'knowledge', category: 'context', desc: 'mémoire générale : list, add, delete', args: true },
   { name: 'plan', category: 'mode', desc: 'mode plan sans modification' },
   { name: 'permissions', category: 'mode', desc: 'changer le mode permissions', usage: '[plan|supervised|semi|auto]' },
   { name: 'model', category: 'mode', desc: 'changer de modele', usage: '[modele]', args: true },
@@ -1368,9 +1323,7 @@ const SLASH = [
   { name: 'think', category: 'misc', desc: 'deplier la derniere reflexion' },
   { name: 'branch', category: 'soon', desc: 'gestion des branches', stub: true },
   { name: 'pr-comments', category: 'soon', desc: 'commentaires de PR', stub: true },
-  { name: 'tools', category: 'tools', desc: 'outils partagés, disponibilités et recherche' },
   { name: 'assistant-memory', category: 'context', desc: 'mémoire personnelle : list, search, add, delete, on, off' },
-  { name: 'sessions', category: 'context', desc: 'historique partagé : recherche ou read <id>' },
   { name: 'schedule', category: 'tools', desc: 'tâches planifiées : list, create <JSON>, pause, resume, remove' },
   { name: 'jobs', category: 'tools', desc: 'agents persistants : start, list, result, cancel, resume, questions' },
   { name: 'integrations', category: 'tools', desc: 'catalogue des intégrations IDE et terminal' },
@@ -1379,10 +1332,16 @@ const SLASH = [
   { name: 'connections', category: 'tools', desc: 'connexions : list, configure <fichier JSON>, test, authorize' },
   { name: 'attach', category: 'tools', desc: 'joindre une image au prochain message' },
   { name: 'computer', category: 'tools', desc: 'contrôle du bureau : on/off' },
-  { name: 'session', category: 'context', desc: 'historique partagé' },
-  { name: 'tasks', category: 'tools', desc: 'tableau de tâches partagé' },
   { name: 'skills', category: 'tools', desc: 'compétences : list, view, install, update, delete' },
   { name: 'mcp', category: 'tools', desc: 'serveurs MCP et connexions' },
+  { name: 'session', category: 'project', desc: 'lister les conversations partagées' },
+  { name: 'sessions', category: 'project', desc: 'lister ou rechercher les conversations', args: true },
+  { name: 'fork', category: 'project', desc: 'forker la conversation active', args: true },
+  { name: 'rename', category: 'project', desc: 'renommer la conversation active', args: true },
+  { name: 'archive', category: 'project', desc: 'archiver la conversation (off pour restaurer)' },
+  { name: 'delete', category: 'project', desc: 'supprimer la conversation avec son identifiant', args: true },
+  { name: 'tools', category: 'tools', desc: 'chercher un outil ou describe <nom>', args: true },
+  { name: 'tasks', category: 'project', desc: 'list, create, run, cancel, pause, enable, delete', args: true },
   { name: 'theme', category: 'soon', desc: 'theme du CLI', stub: true },
   { name: 'keybindings', category: 'soon', desc: 'raccourcis clavier', stub: true },
   { name: 'vim', category: 'soon', desc: 'mode Vim', stub: true },
@@ -1601,13 +1560,18 @@ async function runSlashCommand(ev, me) {
   const spec = SLASH.find((c) => c.name === name);
   if (!spec) { console.log(brand('✗ ') + `Commande inconnue : /${name}`); return; }
   if (spec.stub) { console.log(dim(`/${name} n est pas encore disponible dans le CLI.`)); return; }
-  if (await assistantCommand(name === 'session' ? 'sessions' : name === 'mcp' ? 'connections' : name, arg)) return;
+  if (!['session','sessions','tools','tasks'].includes(name) && await assistantCommand(name === 'mcp' ? 'connections' : name, arg)) return;
 
+  if (['session','sessions','resume','fork','rename','archive','delete'].includes(name)) { await conversationCommand(name, arg); return; }
+  if (['tools','tasks','knowledge'].includes(name)) {
+    const result = await workspaceCommand(name, arg, { request: authed, root: projectRoot(), model: session.model, submodel: session.submodel });
+    printBlock(name, JSON.stringify(result, null, 2)); return;
+  }
   if (name === 'exit' || name === 'quit') return 'exit';
   if (name === 'help') { printHelp(); return; }
   if (name === 'model') { arg ? await chooseModel(arg) : await runPicker(rawPickModel); return; }
   if (name === 'connect') { await connectSubscription(arg); return; }
-  if (name === 'experiences') { await experienceCommand(arg); return; }
+  if (name === 'experiences' || name === 'memory') { await experienceCommand(arg); return; }
   if (name === 'models') { await listModels(); return; }
   if (name === 'effort') { await runPicker(pickEffort); return; }
   if (name === 'think') {
@@ -1616,7 +1580,7 @@ async function runSlashCommand(ev, me) {
     return;
   }
   if (name === 'clear') {
-    history.length = 0; lastThinking = ''; transcript.length = 0; persistConversation();
+    history.length = 0; conversationController.active = null; lastThinking = ''; transcript.length = 0; persistConversation();
     emit(welcome(me, process.cwd())); emit(dim('Contexte effacé.'));
     return;
   }
@@ -1734,16 +1698,6 @@ async function runSlashCommand(ev, me) {
     printRows('Usage', [['messages', String(history.length)], ['tokens est.', String(Math.ceil(chars / 4))], ['cout', isLocalModel(session.model) ? '0 (local)' : 'n/d']]);
     return;
   }
-  if (name === 'memory') {
-    for (const file of ['ZAALIS.md', 'AGENTS.md']) {
-      try {
-        const d = await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=${encodeURIComponent(file)}`);
-        if (typeof d.content === 'string') { printBlock(file, d.content.slice(0, 6000)); return; }
-      } catch {}
-    }
-    console.log(dim('Aucun ZAALIS.md / AGENTS.md trouve.'));
-    return;
-  }
   if (name === 'init') {
     const body = `# ${path.basename(projectRoot())}\n\nNotes de projet pour l assistant IA (zaalis CLI).\n\n## Vue d ensemble\n- \n\n## Commandes\n- Install: \n- Build: \n- Test: \n- Run: \n`;
     try { await apiGet(`/api/file?root=${encodeURIComponent(projectRoot())}&path=ZAALIS.md`); console.log(dim('ZAALIS.md existe deja.')); return; } catch {}
@@ -1764,25 +1718,6 @@ async function runSlashCommand(ev, me) {
       : `# ${path.basename(projectRoot())}\n\nNotes de projet pour l assistant IA (zaalis CLI).\n\n## Notes\n`;
     await apiPost('/api/file', { root: projectRoot(), path: 'ZAALIS.md', content: base + `- ${arg}\n` });
     console.log(green('✓ ') + 'Note ajoutee a ZAALIS.md');
-    return;
-  }
-  if (name === 'resume') {
-    const all = listConversations();
-    if (!all.length) { console.log(dim('Aucune session enregistree.')); return; }
-
-    const query = String(arg || '').trim();
-    // Un numero reprend directement ; un mot filtre ; rien du tout liste.
-    const byNumber = /^\d+$/.test(query) ? all[Number(query) - 1] : null;
-    if (byNumber) { applyConversation(byNumber); return; }
-    if (/^\d+$/.test(query)) { console.log(brand('✗ ') + `Aucune session numero ${query}.`); return; }
-
-    const matches = searchConversations(all, query);
-    if (!matches.length) { console.log(dim(`Aucune session ne correspond a « ${query} ».`)); return; }
-    if (query && matches.length === 1) { applyConversation(matches[0]); return; }
-
-    console.log(query ? `${matches.length} session(s) pour « ${query} » :` : 'Sessions enregistrees :');
-    printConversationList(matches.slice(0, 20));
-    console.log(dim('  /resume <numero> pour reprendre, /resume <mot> pour filtrer.'));
     return;
   }
   if (name === 'export') {
@@ -1810,7 +1745,7 @@ async function runSlashCommand(ev, me) {
   }
   if (name === 'reset') {
     if (!(await confirmAction('Reinitialiser la session CLI locale', 'Efface le contexte courant, le style de reponse et le mode de permission. La connexion est conservee.'))) return;
-    history.length = 0; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; saveSession(session);
+    history.length = 0; conversationController.active = null; lastThinking = ''; delete session.responseStyle; delete session.permissionMode; saveSession(session);
     console.log(green('✓ ') + 'Session CLI reinitialisee.');
     return;
   }
@@ -1847,7 +1782,8 @@ function scrollLines(n) {
 }
 function scrollPage(dir) { scrollLines(dir * Math.max(1, termRows() - 4)); }
 let inputMode = 'normal';  // normal | answering
-let queuedInput = null;    // one pending { kind, text/name/arg, raw } while AI answers
+const queuedMessages = [];
+let queuedInput = null;    // next pending { kind, text/name/arg, raw } while AI answers
 let queueNotice = null;
 let queueNoticeTimer = null;
 let bracketPaste = false;
@@ -1950,7 +1886,7 @@ function setQueueNotice(text) {
 function cancelQueuedInput() {
   if (!queuedInput) return false;
   const restore = queuedInput.raw || queuedInput.text || '';
-  queuedInput = null;
+  queuedInput = queuedMessages.shift() || null;
   inBuf = restore + (inBuf ? ' ' + inBuf : '');
   inCur = inBuf.length;
   repaint();
@@ -1970,11 +1906,9 @@ function appendInputText(text) {
 function queueCurrentInput() {
   const ev = parseInput(inBuf);
   if (!ev) return false;
-  if (queuedInput) {
-    setQueueNotice('Un message est deja en attente.');
-    return false;
-  }
-  queuedInput = ev;
+  if (queuedMessages.length >= 19) { setQueueNotice('La file est limitée à 20 messages.'); return false; }
+  if (queuedInput) queuedMessages.push(ev);
+  else queuedInput = ev;
   inBuf = '';
   inCur = 0;
   inMenuIdx = 0;
@@ -2047,7 +1981,7 @@ function buildPendingDrawer(w) {
   if (!queuedInput) return [];
   const drawerW = Math.max(20, w - 4);
   const inner = drawerW - 2;
-  const title = ' En attente ';
+  const title = ` En attente · ${1 + queuedMessages.length} `;
   const titleLine = title.length >= inner
     ? title.slice(0, inner)
     : title + '─'.repeat(inner - title.length);
@@ -2195,34 +2129,6 @@ function emit(s) {
   if (transcript.length > 5000) transcript.splice(0, transcript.length - 5000);
   if (followTail) scrollOffset = 0;   // pinned to the bottom: show the newest output
   repaint();
-}
-
-// Reveal the AI answer word-by-word (typewriter), like the IDE. Re-renders the
-// growing prefix in place so Markdown stays correct, and the final frame is
-// byte-identical to a plain emit(mdRender(text)). Cost is bounded to ~120 frames
-// regardless of length, and the whole reveal is capped at ~1s.
-async function streamAnswer(text) {
-  const full = String(text == null ? '' : text);
-  // Plain dump (no typewriter) when not on a TTY, when empty, or when the user
-  // has scrolled up to read — emit() then preserves their scroll position.
-  if (!process.stdout.isTTY || !full.trim() || !followTail) { emit(mdRender(full) + '\n'); return; }
-  const words = full.match(/\S+\s*/g) || [full];
-  const startLen = transcript.length;
-  const chunk = Math.max(1, Math.ceil(words.length / 120));   // <= ~120 frames
-  const frames = Math.ceil(words.length / chunk);
-  const delay = Math.max(8, Math.min(22, Math.round(1000 / frames)));
-  let acc = '';
-  for (let i = 0; i < words.length; i += chunk) {
-    acc += words.slice(i, i + chunk).join('');
-    transcript.length = startLen;                              // replace the growing block in place
-    mdRender(acc).split('\n').forEach((l) => transcript.push(l));
-    scrollOffset = 0;
-    repaint();
-    await new Promise((r) => setTimeout(r, delay));
-  }
-  // Final exact render + trailing blank line (parity with emit(... + '\n')).
-  transcript.length = startLen;
-  emit(mdRender(full) + '\n');
 }
 
 function startThinkingAnimation(label = 'réflexion') {
@@ -2394,7 +2300,7 @@ async function repl(opts = {}) {
     let ev;
     if (queuedInput) {
       ev = queuedInput;
-      queuedInput = null;
+      queuedInput = queuedMessages.shift() || null;
       repaint();
       emit(promptEcho(ev.raw));
     } else {
@@ -2411,7 +2317,9 @@ async function repl(opts = {}) {
       boxActive = true;
       inputMode = 'answering';
       repaint();
-      const action = await runSlashCommand(ev, me);
+      let action;
+      try { action = await runSlashCommand(ev, me); }
+      catch (error) { emit('✗ ' + error.message); }
       inputMode = 'normal';
       if (action === 'exit') { bye(); process.exit(0); }
       continue;
@@ -2426,7 +2334,22 @@ async function repl(opts = {}) {
     followTail = true; scrollOffset = 0;
     emit('\n');
     let stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)');
+    let liveStart = null, liveRows = 0;
     const hooks = {
+      onDelta: delta => {
+        if (delta.kind === 'reasoning') {
+          lastThinking = delta.text;
+          if (stopWait?.setLabel) stopWait.setLabel('réflexion · ' + delta.text.length + ' caractères · /think pour déplier');
+          return;
+        }
+        if (stopWait) { stopWait(); stopWait = null; }
+        if (liveStart === null) liveStart = transcript.length;
+        const rows = mdRender(delta.text).split('\n');
+        transcript.splice(liveStart, liveRows, ...rows);
+        liveRows = rows.length;
+        if (followTail) scrollOffset = 0;
+        repaint();
+      },
       stop: () => { if (stopWait) { stopWait(); stopWait = null; } },
       start: () => { if (!stopWait) stopWait = startThinkingAnimation('réflexion (Échap pour arrêter)'); },
       // Live agent events: completed tools/notes are logged permanently, the
@@ -2452,7 +2375,7 @@ async function repl(opts = {}) {
     currentAbort = null;
     hooks.stop();
     if (aborted) {
-      cancelQueuedInput();
+      // Keep explicitly queued messages available; cancellation only stops this turn.
       emit(dim('  ⛔ Réponse interrompue.'));
     }
     else if (res.error) console.log(brand('✗ ') + res.error);
@@ -2463,8 +2386,9 @@ async function repl(opts = {}) {
       if (!res.streamed && res.events && res.events.length) {
         for (const ev of res.events) console.log(dim('  ▸ ' + ev.replace(/\n/g, '\n    ')));
       }
-      // Reveal the answer word-by-word (typewriter), like the IDE.
-      await streamAnswer(res.text);
+      // The runtime already delivered these fragments; never replay the final answer.
+      if (!res.liveText) emit(mdRender(res.text) + '\n');
+      else emit('');
     }
     // A fully queued message is handled at the top of the loop; a draft the
     // user was still typing (not yet queued) carries over into the next box.
@@ -2519,6 +2443,8 @@ function streamModelPull(pathname) {
           buffer = lines.pop() || '';
           for (const l of lines) handleLine(l);
         });
+        res.on('aborted', () => reject(new Error('Flux interrompu avant la fin de la réponse.')));
+        res.on('error', reject);
         res.on('end', () => {
           if (buffer) handleLine(buffer);
           if (isTTY) process.stdout.write('\r\x1b[2K');
@@ -2547,9 +2473,12 @@ function readStdin() {
 }
 
 async function oneShot(message) {
-  const res = await sendChat(message);
+  let wroteText = false;
+  const res = await sendChat(message, { onDelta: delta => {
+    if (delta.kind === 'text') { process.stdout.write(delta.delta); wroteText = true; }
+  } });
   if (res.error) { console.error(res.error); process.exit(1); }
-  process.stdout.write(res.text + '\n');
+  process.stdout.write((wroteText ? '' : res.text) + '\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -2602,6 +2531,29 @@ async function terminalDecision(event) {
     try { await assistantCli.question(event, authed); } finally { terminalQuestionActive = false; decisionActive = false; boxActive = previous; if (previous) {emit('Question traitée : '+event.question);repaint();} }
     return;
   }
+  if (event.type === 'clarification_required') {
+    const answers = {};
+    const wasBoxActive = boxActive;
+    decisionActive = true; boxActive = false;
+    try {
+      if (process.stdin.isTTY) for (const question of event.questions || []) {
+        const options = Array.isArray(question.options) ? question.options : [];
+        const items = options.map(option => ({ label: option.label, hint: option.description }));
+        if (question.allow_free_text !== false) items.push({ label: 'Réponse libre' });
+        items.push({ label: 'Ignorer cette question' });
+        const selected = await rawSelect({ title: question.prompt, items });
+        if (selected >= 0 && selected < options.length) answers[question.id] = options[selected].label;
+        else if (selected === options.length && question.allow_free_text !== false) {
+          rawOff();
+          try { answers[question.id] = (await prompt('Réponse : ')).trim(); }
+          finally { rawOn(); }
+        }
+      }
+      const response = await authed('POST', '/api/rust-core/decision', { sessionId: event.sessionId, requestId: event.requestId, kind: 'clarification', answers });
+      if (response.status !== 200) throw new Error(response.json?.error || 'Clarification refusée');
+    } finally { decisionActive = false; boxActive = wasBoxActive; repaint(); }
+    return;
+  }
   let allow = false;
   const kind = event.type === 'permission_required' ? 'permission' : event.type === 'plan_required' ? 'plan' : 'budget';
   if (process.stdin.isTTY) {
@@ -2641,6 +2593,14 @@ async function main() {
       '  echo "..." | zaalis    lire le message sur stdin',
       '  zaalis -p "<message>"  idem (mode print, comme claude -p)',
       '  zaalis -c              reprendre la dernière session de ce dossier',
+      '  zaalis sessions [mot]  conversations IDE et CLI partagées',
+      '  zaalis resume <id>     reprendre une conversation',
+      '  zaalis fork [titre]    forker la conversation active',
+      '  zaalis rename <titre>  renommer la conversation active',
+      '  zaalis archive [off]   archiver ou restaurer la conversation',
+      '  zaalis delete <id>     supprimer la conversation active',
+      '  zaalis tools [mot]     chercher / describe <nom>',
+      '  zaalis tasks [...]     gérer les tâches partagées',
       '  zaalis models          lister les modèles',
       '  zaalis pull <modèle>   télécharger un modèle (Ollama/GGUF)',
       '  zaalis connect <chatgpt|xai|minimax>  connecter un abonnement',
@@ -2658,6 +2618,7 @@ async function main() {
       '  zaalis connections [list|configure <fichier.json>|test <service>|authorize <service>]',
       '  zaalis --image <chemin> -p "<message>"  analyser une image',
       '  zaalis --computer      activer le contrôle ordinateur',
+      '  zaalis knowledge [list|add <note>|delete <id>]  mémoire générale',
       '  zaalis login           se connecter (compte zaalis)',
       '  zaalis logout          se déconnecter',
       '  zaalis serve           démarrer uniquement le serveur',
@@ -2696,7 +2657,8 @@ async function main() {
   if (cmd === 'logout') { await request('POST', '/api/auth/logout'); session = {}; saveSession(session); console.log(green('✓ ') + 'Déconnecté.'); return; }
 
   // Work out whether this is a one-shot or the interactive REPL.
-  const subcommand = ['models','pull','connect','memory',...assistantCli.commands].includes(cmd);
+  const lifecycleCommands = ['sessions','resume','fork','rename','archive','delete'];
+  const subcommand = ['models','pull','connect','memory','knowledge','tools','tasks',...assistantCli.commands,...lifecycleCommands].includes(cmd);
   let message = '';
   if (cmd === '-p' || cmd === '--print') message = argv.slice(1).join(' ');
   else if (cmd && !cmd.startsWith('-') && !subcommand) message = argv.join(' ');
@@ -2711,10 +2673,17 @@ async function main() {
 
   if (!(await ensureAuth())) process.exit(1);
   await refreshEfforts();
-  if (await assistantCommand(cmd, argv.slice(1).join(' '))) return;
+  if (!['sessions','tools','tasks'].includes(cmd) && await assistantCommand(cmd, argv.slice(1).join(' '))) return;
 
   if (cmd === 'connect') { await connectSubscription(argv[1]); return; }
   if (cmd === 'memory') { await experienceCommand(argv.slice(1).join(' ')); return; }
+  if (lifecycleCommands.includes(cmd)) {
+    if (cmd !== 'sessions') await restoreConversation();
+    await conversationCommand(cmd, argv.slice(1).join(' '));
+    if (cmd === 'resume' && process.stdin.isTTY) await repl({ resumed: conversationController.active });
+    return;
+  }
+  if (['tools','tasks','knowledge'].includes(cmd)) { printBlock(cmd, JSON.stringify(await workspaceCommand(cmd, argv.slice(1).join(' '), { request: authed, root: projectRoot(), model: session.model, submodel: session.submodel }), null, 2)); return; }
   if (cmd === 'models') { await listModels(); return; }
   if (cmd === 'pull') {
     const name = argv.slice(1).join(' ');
@@ -2730,11 +2699,11 @@ async function main() {
     return;
   }
 
-  if (message) { await oneShot(message); return; }
+  if (message) { if (continueSession) await restoreConversation(); await oneShot(message); return; }
 
   // Otherwise: interactive REPL (optionally resuming the last conversation).
   let resumed = null;
-  if (continueSession) resumed = restoreConversation();
+  if (continueSession) resumed = await restoreConversation();
   await repl({ resumed });
 }
 
