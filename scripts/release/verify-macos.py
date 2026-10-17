@@ -3,6 +3,7 @@
 import hashlib
 import json
 import plistlib
+import platform
 import subprocess
 import tempfile
 from pathlib import Path
@@ -70,10 +71,17 @@ def verify(arch):
                     assert digest(source) == digest(bundle / 'interface' / relative), f'UI differs: {relative}'
                     checked += 1
             assert (bundle / 'native/blender/mcp-1.0.3.zip').stat().st_size > 0
+            executed = platform.machine() == cpu
+            if executed:
+                setup_exe = str(setup / 'Contents/MacOS/zaalis-setup')
+                print(run(setup_exe, '--self-test'), flush=True)
+                with tempfile.TemporaryDirectory(prefix='zaalis-installer-copy-') as destination:
+                    print(run(setup_exe, '--verify-install', str(app), str(Path(destination) / 'Applications')), flush=True)
             return {'architecture': arch, 'version': info['CFBundleShortVersionString'],
                     'dmg': dmg.name, 'bytes': dmg.stat().st_size, 'sha256': digest(dmg),
                     'signatureVerified': True, 'verifiedInterfaceFiles': checked,
                     'installerSignatureVerified': True, 'applicationPayloadUnchanged': True,
+                    'installerExecuted': executed, 'installerCopyVerified': executed,
                     'payloadArchitectures': architectures}
         finally:
             run('hdiutil', 'detach', directory)

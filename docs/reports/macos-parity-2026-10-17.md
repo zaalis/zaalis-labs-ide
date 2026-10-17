@@ -21,7 +21,9 @@ The actual packaged Intel server passed `test/package-smoke.js`: canonical conve
 
 Bundled Intel GitHub CLI, cloudflared, Node runtime and Rust CLI execute successfully. After cross-compilation, the local Node PTY was restored and its 5 applicable tests passed (1 Windows-only test skipped).
 
-## Artifacts and limits
+## Original artifacts and limits
+
+The installation presentation and DMGs below were subsequently replaced by the [custom native macOS installer](macos-custom-installer-2026-10-17.md). The IDE application payload is unchanged.
 
 Version: `1.0.16`. Artifacts remain in `native/installer/`; they are ignored build output, not Git source files.
 

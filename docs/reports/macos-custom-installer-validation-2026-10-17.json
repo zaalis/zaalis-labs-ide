@@ -1,0 +1,78 @@
+{
+  "installerSourceCommit": "42939a889690ac193eea6f17ea2aa43287dcab6e",
+  "applicationSourceCommit": "ad419c1bb2667150319d975ecd2a5e2864ad99a0",
+  "scope": "Native installer only; existing signed IDE payloads preserved",
+  "checks": {
+    "swiftInstallerSelfTests": "passed",
+    "actualSignedApplicationInstall": "passed in disposable Applications directory",
+    "macosUpdaterTestsPassed": 4,
+    "visualPagesReviewed": [
+      "welcome",
+      "destination",
+      "progress",
+      "completion"
+    ]
+  },
+  "artifacts": [
+    {
+      "architecture": "arm64",
+      "version": "1.0.16",
+      "dmg": "zaalis-macos-arm64.dmg",
+      "bytes": 329194605,
+      "sha256": "defed8343e43a1e723517e7c33b23dd3c56f0174aae3068dafdc46e4349d32ce",
+      "signatureVerified": true,
+      "verifiedInterfaceFiles": 151,
+      "installerSignatureVerified": true,
+      "applicationPayloadUnchanged": true,
+      "payloadArchitectures": {
+        "Contents/MacOS/zaalis-ide": "arm64",
+        "Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework": "arm64",
+        "Contents/Resources/app/macos-computer-bridge": "arm64",
+        "Contents/Resources/app/macos-speech-transcriber": "arm64",
+        "Contents/Resources/app/bundle/zaalis-server": "arm64",
+        "Contents/Resources/app/bundle/zaalis-agentd": "arm64",
+        "Contents/Resources/app/bundle/zaalis-sandbox": "arm64",
+        "Contents/Resources/app/bundle/bin/zaalis": "arm64",
+        "Contents/Resources/app/bundle/bin/zaalis-cli": "arm64",
+        "Contents/Resources/app/bundle/messenger-runtime/node": "arm64",
+        "Contents/Resources/app/bundle/github/gh": "arm64",
+        "Contents/Resources/app/bundle/cloudflared": "arm64",
+        "Contents/Resources/app/bundle/whisper/whisper-cli": "x86_64 arm64",
+        "Contents/Resources/app/bundle/node_modules/node-pty/build/Release/pty.node": "arm64",
+        "Contents/Resources/app/bundle/node_modules/node-pty/build/Release/spawn-helper": "arm64"
+      },
+      "installerExecuted": false,
+      "installerCopyVerified": false
+    },
+    {
+      "architecture": "x64",
+      "version": "1.0.16",
+      "dmg": "zaalis-macos-x64.dmg",
+      "bytes": 346240639,
+      "sha256": "68c8ac80a0fe3edcd5fc1634267282fdba457202e55a89d93deac52e388cc6ef",
+      "signatureVerified": true,
+      "verifiedInterfaceFiles": 151,
+      "installerSignatureVerified": true,
+      "applicationPayloadUnchanged": true,
+      "installerExecuted": true,
+      "installerCopyVerified": true,
+      "payloadArchitectures": {
+        "Contents/MacOS/zaalis-ide": "x86_64",
+        "Contents/Frameworks/Electron Framework.framework/Versions/A/Electron Framework": "x86_64",
+        "Contents/Resources/app/macos-computer-bridge": "x86_64",
+        "Contents/Resources/app/macos-speech-transcriber": "x86_64",
+        "Contents/Resources/app/bundle/zaalis-server": "x86_64",
+        "Contents/Resources/app/bundle/zaalis-agentd": "x86_64",
+        "Contents/Resources/app/bundle/zaalis-sandbox": "x86_64",
+        "Contents/Resources/app/bundle/bin/zaalis": "x86_64",
+        "Contents/Resources/app/bundle/bin/zaalis-cli": "x86_64",
+        "Contents/Resources/app/bundle/messenger-runtime/node": "x86_64",
+        "Contents/Resources/app/bundle/github/gh": "x86_64",
+        "Contents/Resources/app/bundle/cloudflared": "x86_64",
+        "Contents/Resources/app/bundle/whisper/whisper-cli": "x86_64 arm64",
+        "Contents/Resources/app/bundle/node_modules/node-pty/build/Release/pty.node": "x86_64",
+        "Contents/Resources/app/bundle/node_modules/node-pty/build/Release/spawn-helper": "x86_64"
+      }
+    }
+  ]
+}
