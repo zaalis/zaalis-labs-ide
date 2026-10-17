@@ -30,12 +30,24 @@ def verify(arch):
         run('hdiutil', 'attach', '-readonly', '-nobrowse', '-mountpoint', directory, str(dmg))
         try:
             mount = Path(directory)
-            app = mount / 'zaalis IDE.app'
-            assert (mount / 'Applications').is_symlink(), 'Applications link missing'
+            app = mount / '.payload/zaalis IDE.app'
+            setup = mount / 'Installer zaalis IDE.app'
+            run('codesign', '--verify', '--deep', '--strict', str(setup))
+            run('lipo', str(setup / 'Contents/MacOS/zaalis-setup'), '-verify_arch', cpu)
+            assert (mount / '.DS_Store').is_file(), 'Installer Finder layout missing'
+            assert digest(mount / '.DS_Store') == digest(ROOT / 'native/installer-macos/Finder.DS_Store'), 'Outdated Finder layout'
             run('codesign', '--verify', '--deep', '--strict', str(app))
             with (app / 'Contents/Info.plist').open('rb') as stream:
                 info = plistlib.load(stream)
             assert info['CFBundleIdentifier'] == 'fr.zaalis.ide'
+            original = ROOT / f'native/dist-macos-{arch}/zaalis IDE.app'
+            for relative in ['Contents/Info.plist', 'Contents/MacOS/zaalis-ide', 'Contents/_CodeSignature/CodeResources']:
+                assert digest(app / relative) == digest(original / relative), f'Application changed: {relative}'
+            with (setup / 'Contents/Info.plist').open('rb') as stream:
+                setup_info = plistlib.load(stream)
+            assert setup_info['ZaalisVolumeToken'] == (mount / '.zaalis-install-id').read_text().strip()
+            assert setup_info['ZaalisPayloadSeal'] == digest(app / 'Contents/_CodeSignature/CodeResources')
+            assert setup_info['ZaalisPayloadCode'] == digest(app / 'Contents/MacOS/zaalis-ide')
             resources = app / 'Contents/Resources/app'
             bundle = resources / 'bundle'
             payloads = [app / 'Contents/MacOS/zaalis-ide',
@@ -61,6 +73,7 @@ def verify(arch):
             return {'architecture': arch, 'version': info['CFBundleShortVersionString'],
                     'dmg': dmg.name, 'bytes': dmg.stat().st_size, 'sha256': digest(dmg),
                     'signatureVerified': True, 'verifiedInterfaceFiles': checked,
+                    'installerSignatureVerified': True, 'applicationPayloadUnchanged': True,
                     'payloadArchitectures': architectures}
         finally:
             run('hdiutil', 'detach', directory)

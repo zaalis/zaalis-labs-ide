@@ -1,67 +1,43 @@
 #!/usr/bin/env sh
-# ============================================================
-#  Builds a drag-to-Applications .dmg from a single .app.
-#  macOS only: relies on hdiutil (no Linux/Windows equivalent).
-#
-#  Usage:
-#    native/make_dmg.sh "<app path>" "<output.dmg>" "<volume name>"
-# ============================================================
+# Package the native macOS wizard and the already-built IDE in a DMG.
+# Usage: make_dmg.sh <zaalis IDE.app> <output.dmg> <volume name>
 set -eu
-
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 APP=${1:?missing .app path}
 OUT=${2:?missing output .dmg path}
 VOLNAME=${3:?missing volume name}
-
-if [ ! -d "$APP" ]; then
-  echo "ERROR: app not found: $APP" >&2
-  exit 1
-fi
-
-if ! command -v hdiutil >/dev/null 2>&1; then
-  echo "ERROR: hdiutil not found. A .dmg can only be built on macOS." >&2
-  exit 1
-fi
-
-STAGE="${TMPDIR:-/tmp}/zaalis-dmg-stage-$$"
+[ -d "$APP" ] || { echo "Application missing: $APP" >&2; exit 1; }
+case "$(lipo -archs "$APP/Contents/MacOS/zaalis-ide")" in
+  arm64) ARCH=arm64 ;;
+  x86_64) ARCH=x64 ;;
+  *) echo "Expected a single-architecture macOS application" >&2; exit 1 ;;
+esac
+# Preserve the exact tested application, including its existing signatures.
+codesign --verify --deep --strict "$APP"
+mkdir -p "$(dirname "$OUT")"
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/zaalis-dmg-stage.XXXXXX")
+TEMP_OUT="$(dirname "$OUT")/.$(basename "$OUT" .dmg).partial-$$.dmg"
 cleanup() {
   rm -rf "$STAGE"
+  rm -f "$TEMP_OUT"
 }
 trap cleanup EXIT HUP INT TERM
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-
-# Layout shown inside the mounted disk image: the app + an Applications shortcut.
-cp -R "$APP" "$STAGE/"
-ln -s /Applications "$STAGE/Applications"
-
-mkdir -p "$(dirname "$OUT")"
-rm -f "$OUT"
-
-# Sign the app so Gatekeeper does not refuse it on first launch. Prefer the
-# persistent identity from ZAALIS_CODESIGN_ID (see package_macos_electron.sh)
-# so TCC approvals survive updates; fall back to ad-hoc.
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign "${ZAALIS_CODESIGN_ID:--}" "$STAGE/$(basename "$APP")" >/dev/null 2>&1 || true
-fi
-
+mkdir -p "$STAGE/.payload"
+cp -R "$APP" "$STAGE/.payload/"
+# The updater searches two levels deep for zaalis IDE.app. The hidden payload
+# remains compatible, while Finder presents only the installation assistant.
+TOKEN=$(uuidgen)
+printf '%s\n' "$TOKEN" > "$STAGE/.zaalis-install-id"
+sh "$ROOT/native/build_macos_setup.sh" "$ROOT" "$ARCH" "$STAGE/Installer zaalis IDE.app" "$TOKEN" "$APP"
+cp "$ROOT/native/installer-macos/Finder.DS_Store" "$STAGE/.DS_Store"
 create_status=0
-hdiutil create \
-  -volname "$VOLNAME" \
-  -srcfolder "$STAGE" \
-  -fs HFS+ \
-  -format UDZO \
-  -ov \
-  "$OUT" || create_status=$?
-
-# A file named .dmg is not necessarily a mountable disk image.  Do not report
-# success until macOS verifies the image it has just created.
-hdiutil verify "$OUT" >/dev/null || {
-  echo "ERROR: hdiutil could not create a valid DMG (create exit code: $create_status)." >&2
+hdiutil create -volname "$VOLNAME" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$TEMP_OUT" || create_status=$?
+hdiutil verify "$TEMP_OUT" >/dev/null || {
+  echo "Invalid DMG (hdiutil create exit code: $create_status)" >&2
   exit 1
 }
 if [ "$create_status" -ne 0 ]; then
-  # On some macOS versions hdiutil can return a late non-zero status after it
-  # has finished a valid compressed image. Verification above is authoritative.
-  echo "WARNING: hdiutil create exited $create_status, but the generated DMG verified successfully." >&2
+  echo "hdiutil returned $create_status, but independent verification passed." >&2
 fi
-echo "DMG written to $OUT"
+mv -f "$TEMP_OUT" "$OUT"
+echo "Custom macOS installer: $OUT"
