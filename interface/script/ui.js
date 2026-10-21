@@ -621,7 +621,7 @@ function clearProject(options = {}) {
 const ICON_FILE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6d8086" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 16h5" stroke-linecap="round"/></svg>';
 // Centered confirmation bubble (replaces the ugly browser window.confirm).
 function customConfirm(message, opts) {
-    opts = opts || {};
+    opts = { viewport: true, ...opts };
     return new Promise(resolve => {
         const modal = $('#confirm-modal');
         const lang = state.language || 'fr';
@@ -1558,6 +1558,12 @@ if (sbToggle) {
     const app = $('#app');
     sbToggle.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
     sbToggle.addEventListener('click', () => {
+        if (matchMedia('(max-width:900px)').matches) {
+            const expanded = document.body.classList.toggle('ws-mobile-navigation');
+            sbToggle.setAttribute('aria-expanded', String(expanded));
+            window.dispatchEvent(new Event('resize'));
+            return;
+        }
         const collapsed = sidebar.classList.toggle('collapsed');
         app.classList.toggle('sidebar-collapsed', collapsed);
         sbToggle.setAttribute('aria-expanded', String(!collapsed));
@@ -1844,7 +1850,7 @@ function createCustomSelect(selectId, opts) {
     function choose(value) {
         if (select.value !== value) {
             select.value = value;
-            select.dispatchEvent(new Event('change'));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
         }
         closeAllCustomSelects();
     }
@@ -1936,7 +1942,11 @@ function createCustomSelect(selectId, opts) {
     function updateOptions() {
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
-        trigger.setAttribute('aria-label', `${opts.label || (select.classList.contains('agent-role-select') ? (state.language === 'en' ? 'Role' : 'Rôle') : selectId === 'ai-model' ? (state.language === 'en' ? 'Provider' : 'Fournisseur') : uiText('Modèle'))} : ${triggerText.textContent}`);
+        const fieldLabel = select.getAttribute('aria-label') || document.querySelector(`label[for="${CSS.escape(selectId)}"]`)?.textContent || [...(select.closest('label')?.childNodes || [])].find(node => node.nodeType === 3)?.textContent?.trim();
+        const fallback = select.classList.contains('agent-role-select') ? (state.language === 'en' ? 'Role' : 'Rôle') : selectId === 'ai-model' ? (state.language === 'en' ? 'Provider' : 'Fournisseur') : selectId === 'ai-submodel' || select.classList.contains('agent-model-select') ? uiText('Modèle') : (state.language === 'en' ? 'Selection' : 'Choix');
+        trigger.setAttribute('aria-label', `${opts.label || fieldLabel || fallback} : ${triggerText.textContent}`);
+        trigger.setAttribute('aria-disabled', String(select.disabled));
+        trigger.tabIndex = select.disabled ? -1 : 0;
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
         search.hidden = !searchable();
         search.placeholder = allowsCustom()
@@ -1961,7 +1971,7 @@ function createCustomSelect(selectId, opts) {
     function fitDropdown() {
         if (opts.viewport) {
             const rect = trigger.getBoundingClientRect();
-            const width = Math.min(Math.max(rect.width, 240), innerWidth - 24);
+            const width = Math.min(Math.max(rect.width, selectId === 'lang-select' ? 160 : 240), innerWidth - 24);
             const below = innerHeight - rect.bottom - 16;
             const height = Math.min(300, Math.max(below, rect.top - 16));
             Object.assign(optionsContainer.style, { position: 'fixed', margin: '0', width: width + 'px', minWidth: '0', maxHeight: height + 'px', left: Math.max(12, Math.min(rect.left, innerWidth - width - 12)) + 'px', right: 'auto', bottom: 'auto', top: (below >= Math.min(300, optionsContainer.scrollHeight) ? rect.bottom + 6 : Math.max(12, rect.top - Math.min(height, optionsContainer.scrollHeight) - 6)) + 'px' });
@@ -1981,6 +1991,7 @@ function createCustomSelect(selectId, opts) {
     trigger.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (select.disabled) return;
         const isOpen = wrapper.classList.contains('open');
         closeAllCustomSelects();
         if (!isOpen) {
@@ -1999,6 +2010,11 @@ function createCustomSelect(selectId, opts) {
     trigger.addEventListener('keydown', e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); trigger.click(); }
         if (e.key === 'Escape') { closeAllCustomSelects(); trigger.focus(); }
+        if (['ArrowDown', 'ArrowUp'].includes(e.key) && !select.disabled) {
+            e.preventDefault(); if (!wrapper.classList.contains('open')) trigger.click();
+            const options = [...list.querySelectorAll('.custom-select-option:not(.disabled)')];
+            (e.key === 'ArrowUp' ? options.at(-1) : options[0])?.focus();
+        }
     });
 
     // Re-creating the dropdown for the same <select> must not stack observers
@@ -2007,7 +2023,7 @@ function createCustomSelect(selectId, opts) {
     const observer = new MutationObserver(() => {
         updateOptions();
     });
-    observer.observe(select, { childList: true, characterData: true, subtree: true });
+    observer.observe(select, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
     select.addEventListener('change', updateOptions);
     document.addEventListener('zaalis-language-changed', updateOptions);
     select._customSelectCleanup = () => {
@@ -2016,6 +2032,7 @@ function createCustomSelect(selectId, opts) {
         document.removeEventListener('zaalis-language-changed', updateOptions);
     };
 
+    select._customSelectRefresh = updateOptions;
     updateOptions();
 }
 

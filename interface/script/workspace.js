@@ -270,7 +270,7 @@
                 // A fixed inner surface avoids text reflow during the reveal.
                 dockContent.style.width = `${targetWidth - 1}px`;
                 dock.dataset.animating = 'true';
-                const timing = { duration: 320, easing: 'cubic-bezier(.22, 1, .36, 1)' };
+                const timing = { duration: 200, easing: 'cubic-bezier(.22, 1, .36, 1)' };
                 const frames = overlay
                     ? [{ opacity: fromOpacity, transform: `translateX(${visiblePanel ? 24 * (1 - fromOpacity) : 0}px)` }, { opacity: visiblePanel ? 1 : 0, transform: `translateX(${visiblePanel ? 0 : 24}px)` }]
                     : [{ width: `${fromWidth}px`, minWidth: '0px', opacity: fromOpacity }, { width: `${visiblePanel ? targetWidth : 0}px`, minWidth: '0px', opacity: visiblePanel ? 1 : 0 }];
@@ -320,7 +320,8 @@
     ];
     const currentConversation = (kind = activeKind()) => (state[kind === 'agents' ? 'agentConversations' : 'conversations'] || []).find(c => c.id === state[kind === 'agents' ? 'currentAgentConvId' : 'currentConvId']);
     function createConversationMenu(kind, conv) {
-        return button(text('Actions de conversation', 'Conversation actions'), 'menu', () => window.ZaalisConversations?.open(conv.title || ''), 'ws-icon-button');
+        const control=button(text('Options de la conversation','Conversation options'), null,()=>window.ZaalisConversations?.menuFor(kind,conv,control),'ws-icon-button ws-conversation-options');
+        control.textContent='…';control.setAttribute('aria-haspopup','menu');control.setAttribute('aria-expanded','false');return control;
     }
     function renderNavigation() {
         const focusKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
@@ -357,7 +358,7 @@
                 toggle.setAttribute('aria-expanded',String(value));
                 toggle.setAttribute('aria-label',`${value?text('Replier','Collapse'):text('Déplier','Expand')} ${group.label}`);
                 const body=section.querySelector('.ws-project-chats');body?.classList.toggle('is-collapsed',!value);
-                if(body){body.inert=!value;body.setAttribute('aria-hidden',String(!value));body.classList.add('is-animating');clearTimeout(body.motionTimer);body.motionTimer=setTimeout(()=>body.classList.remove('is-animating'),matchMedia('(prefers-reduced-motion: reduce)').matches?0:360);}
+                if(body){body.inert=!value;body.setAttribute('aria-hidden',String(!value));body.classList.add('is-animating');clearTimeout(body.motionTimer);body.motionTimer=setTimeout(()=>body.classList.remove('is-animating'),matchMedia('(prefers-reduced-motion: reduce)').matches?0:200);}
                 const collapsed=[...groups.keys()].every(k=>expanded.get(k)===false);
                 foldAll.title=collapsed?text('Déplier tous les projets','Expand all projects'):text('Replier tous les projets','Collapse all projects');
                 foldAll.setAttribute('aria-label',foldAll.title);
@@ -447,7 +448,7 @@
     // its own computed display already reflects visibility).
     // The top bar's model loader drops its panel over the page as well.
     function browserOccluded() {
-        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel, dialog[open]')].some(node => {
+        return document.hidden || document.body.classList.contains('ws-mobile-navigation') || [...document.querySelectorAll('.modal-overlay.active, #auth-overlay, .model-loader.open .model-loader-panel, dialog[open], .ui-action-menu:popover-open, .agent-select-popover:popover-open, .ui-model-picker[open], .mode-dropdown.open, .attach-menu.open')].some(node => {
             const style = getComputedStyle(node); return style.display !== 'none' && style.visibility !== 'hidden' && Number(style.opacity) !== 0 && node.getBoundingClientRect().height > 0;
         });
     }

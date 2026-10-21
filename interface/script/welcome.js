@@ -16,11 +16,11 @@
  function render(){
   const project=(state.projectRoot||state.lastProjectRoot||getRecentProjects()?.[0]||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop();
   const m=message(new Date(),project),editor=document.getElementById('welcome-screen');
-  if(editor){editor.replaceChildren();const icon=logo(),title=document.createElement('h1'),sub=document.createElement('p');title.textContent=m.title;sub.textContent=m.text;sub.className='welcome-sub';if(icon)editor.append(icon);editor.append(title,sub);}
+  if(editor){editor.replaceChildren();const icon=logo(),title=document.createElement('h1'),sub=document.createElement('p');title.textContent=m.title;sub.textContent=m.text;sub.className='welcome-sub';editor.append(title,sub);}
   const chat=document.getElementById('chat-messages');
   // Only the initial placeholder is replaced. New chats and history keep their own state.
   const placeholder=chat?.querySelector('[data-i18n="chat-default-msg"]');
-  if(placeholder&&chat.children.length===1){const welcome=document.createElement('div');welcome.className='launch-welcome';welcome.dataset.launchWelcome='true';const icon=logo(),title=document.createElement('h2'),sub=document.createElement('p');title.textContent=m.title;sub.textContent=m.text;if(icon)welcome.append(icon);welcome.append(title,sub);chat.replaceChildren(welcome);}
+  if(placeholder&&chat.children.length===1){const welcome=document.createElement('div');welcome.className='launch-welcome';welcome.dataset.launchWelcome='true';const icon=logo(),title=document.createElement('h2'),sub=document.createElement('p');title.textContent=m.title;sub.textContent=m.text;welcome.append(title,sub);chat.replaceChildren(welcome);}
   const visible=chat?.querySelector('[data-launch-welcome]');if(visible){visible.querySelector('h2').textContent=m.title;visible.querySelector('p').textContent=m.text;}
  }
  window.ZaalisWelcome={render,message,phrases,band};

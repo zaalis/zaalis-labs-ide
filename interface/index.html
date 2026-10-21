@@ -5,19 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.22">
-    <link rel="stylesheet" href="app.css?v=20261008.1">
-    <link rel="stylesheet" href="workspace.css?v=20261015.3">
-    <link rel="stylesheet" href="collaboration.css?v=20261015.2">
-    <link rel="stylesheet" href="timeline.css?v=20261008.1">
-    <link rel="stylesheet" href="splash.css?v=20261009.1">
+    <link rel="stylesheet" href="base.css?v=20261015.7">
+    <link rel="stylesheet" href="app.css?v=20261015.7">
+    <link rel="stylesheet" href="workspace.css?v=20261015.8">
+    <link rel="stylesheet" href="collaboration.css?v=20261015.7">
+    <link rel="stylesheet" href="timeline.css?v=20261015.7">
+    <link rel="stylesheet" href="splash.css?v=20261015.7">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
 
 <!-- ===== LAUNCH SPLASH (built and dismissed by script/splash.js) ===== -->
 <div id="zaalis-splash" class="zs-root"></div>
-<script src="script/splash.js?v=20261009.1"></script>
+<script src="script/splash.js?v=20261015.7"></script>
 
 <!-- ===== AUTH OVERLAY (login / register) ===== -->
 <div id="auth-overlay">
@@ -154,7 +154,7 @@
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1.25 2.1-2 2.5-.5.27-1 .8-1 1.5"/><circle cx="11.5" cy="16.5" r="1.1" fill="currentColor" stroke="none"/></svg>
                 <span data-i18n="help-btn">Aide</span>
             </button>
-            <button class="topbar-btn remote-btn" id="remote-btn" title="Remote control (téléphone)">
+            <button class="topbar-btn remote-btn" id="remote-btn" title="Contrôle mobile">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
                 <span class="remote-dot" id="remote-dot"></span>
             </button>
@@ -190,7 +190,7 @@
                         <span data-i18n="history-no-project">Aucun projet</span>
                     </button>
                     <div class="dropdown-divider"></div>
-                    <div class="dropdown-label" data-i18n="recent-projects">Projets recents</div>
+                    <div class="dropdown-label" data-i18n="recent-projects">Projets récents</div>
                     <div id="recent-projects">
                         <div class="dropdown-empty" data-i18n="no-recent-projects">Aucun projet recent</div>
                     </div>
@@ -289,7 +289,7 @@
                 <div class="slider-track">
                     <div class="slider-handle"></div>
                 </div>
-                <div class="reasoning-tooltip" data-i18n="incompatible-tooltip">Modele incompatible</div>
+                <div class="reasoning-tooltip" data-i18n="incompatible-tooltip">Modèle incompatible</div>
             </div>
 
             <!-- Panel Header: Tabs -->
@@ -306,7 +306,7 @@
             <!-- ===== CHAT VIEW ===== -->
             <div class="ai-view active" id="view-chat">
                 <div class="chat-messages" id="chat-messages">
-                    <div class="msg msg-system"><div class="msg-body" data-i18n="chat-default-msg">Selectionnez un modele et posez votre question.</div></div>
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="chat-default-msg">Sélectionnez un modèle et posez votre question.</div></div>
                 </div>
 
                 <!-- Attachments preview (not attached to the input bar) -->
@@ -348,7 +348,7 @@
 
                 <!-- Chat Input -->
                 <div class="chat-input-area">
-                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Ecrivez votre message..." autocomplete="off"></textarea>
+                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Écrivez votre message..." autocomplete="off"></textarea>
                     <div class="chat-input-bottom">
                         <div class="chat-input-bottom-left">
                             <div class="attach-wrap">
@@ -433,10 +433,10 @@
                         <div class="agent-info">
                             <span class="agent-name">Codex</span>
                             <select class="agent-role-select" data-agent="codex">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -451,9 +451,9 @@
                         <div class="agent-info">
                             <span class="agent-name">Claude</span>
                             <select class="agent-role-select" data-agent="claude">
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="architect">Architecte</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
@@ -471,8 +471,8 @@
                             <select class="agent-role-select" data-agent="gemini">
                                 <option value="architect">Architecte</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="developer">Développeur</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -489,9 +489,9 @@
                             <select class="agent-role-select" data-agent="grok">
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
@@ -505,10 +505,10 @@
                         <div class="agent-info">
                             <span class="agent-name">Le Chat</span>
                             <select class="agent-role-select" data-agent="mistral">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -523,8 +523,8 @@
                         <div class="agent-info">
                             <span class="agent-name">Kimi</span>
                             <select class="agent-role-select" data-agent="kimi">
-                                <option value="developer">Developpeur</option><option value="lead">Chef de projet</option>
-                                <option value="architect">Architecte</option><option value="reviewer">Reviewer</option>
+                                <option value="developer">Développeur</option><option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option><option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option><option value="tester">Testeur</option>
                             </select>
                         </div>
@@ -538,10 +538,10 @@
                         <div class="agent-info">
                             <span class="agent-name">Ollama</span>
                             <select class="agent-role-select" data-agent="local">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -556,10 +556,10 @@
                         <div class="agent-info">
                             <span class="agent-name">GGUF</span>
                             <select class="agent-role-select" data-agent="gguf">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -571,7 +571,7 @@
 
                 <!-- Agents Log -->
                 <div class="agents-log" id="agents-log">
-                    <div class="msg msg-system"><div class="msg-body" data-i18n="agents-log-default">Activez le Mode Agents et envoyez une tache.</div></div>
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="agents-log-default">Activez le Mode Agents et envoyez une tâche.</div></div>
                 </div>
 
                 <!-- Attachments preview (agents) -->
@@ -675,12 +675,12 @@
             <div class="settings-nav-label" data-i18n="settings-api-category">API</div>
             <button class="settings-nav-item" type="button" data-settings-section="api">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h3a5 5 0 0 1 0 10h-3"/><path d="M9 17H6A5 5 0 0 1 6 7h3"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-                <span data-i18n="settings-api-keys-title">Cles API</span>
+                <span data-i18n="settings-api-keys-title">Clés API</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="mcp">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg><span>MCP</span>
             </button>
-            <div class="settings-nav-label" data-i18n="settings-zside-category">ZS IDE</div>
+            <div class="settings-nav-label" data-i18n="settings-zside-category">zaalis IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
                 <span data-i18n="settings-appearance-title">Apparence</span>
@@ -691,14 +691,14 @@
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
-                <span data-i18n="settings-hardware-title">Hardware</span>
+                <span data-i18n="settings-hardware-title">Matériel</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="vm">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
                 <span>Machines virtuelles</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="integrations"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 3v5M16 3v5M5 8h14v3a7 7 0 0 1-14 0zM12 18v4"/></svg><span>Intégrations</span></button>
-            <button class="settings-nav-item" type="button" data-settings-section="tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-8"/></svg><span>Tokens</span></button>
+            <button class="settings-nav-item" type="button" data-settings-section="tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-8"/></svg><span>Consommation</span></button>
             <button class="settings-nav-item" type="button" data-settings-section="project">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 <span data-i18n="settings-project-title">Projet</span>
@@ -735,10 +735,10 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-lang-select" data-i18n="settings-language-label">Langue</label>
-                            <p data-i18n="settings-language-hint">Choisir la langue de ZS IDE.</p>
+                            <p data-i18n="settings-language-hint">Choisir la langue de zaalis IDE.</p>
                         </div>
                         <select id="settings-lang-select">
-                            <option value="fr">Francais</option>
+                            <option value="fr">Français</option>
                             <option value="en">English</option>
                         </select>
                     </div>
@@ -752,8 +752,8 @@
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="api">
-                    <h3 data-i18n="settings-api-keys-title">Cles API</h3>
-                    <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
+                    <h3 data-i18n="settings-api-keys-title">Clés API</h3>
+                    <p class="form-hint" data-i18n="api-keys-hint">Chaque modèle cloud nécessite sa propre clé API. Ollama fonctionne sans clé.</p>
                     <div class="form-group">
                         <div class="key-label-row">
                             <label for="key-openai">OpenAI (Codex)</label>
@@ -865,10 +865,10 @@
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="hardware">
-                    <h3 data-i18n="settings-hardware-title">Hardware</h3>
-                    <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option detectee sur cette machine.</p>
+                    <h3 data-i18n="settings-hardware-title">Matériel</h3>
+                    <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option détectée sur cette machine.</p>
                     <div class="settings-status-row">
-                        <span data-i18n="settings-detected-label">Detecte</span>
+                        <span data-i18n="settings-detected-label">Détecté</span>
                         <strong id="gguf-detected-variant">-</strong>
                     </div>
                     <div class="settings-status-row">
@@ -878,7 +878,7 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="gguf-variant-select" data-i18n="settings-gguf-engine-label">Moteur GGUF</label>
-                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne CUDA, Vulkan ou CPU selon le poste.</p>
+                            <p data-i18n="settings-gguf-engine-hint">Auto sélectionne CUDA, Vulkan ou CPU selon le poste.</p>
                         </div>
                         <select id="gguf-variant-select">
                             <option value="" data-i18n="settings-gguf-auto">Auto</option>
@@ -929,7 +929,7 @@
                 <!-- ===== APPEARANCE ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="appearance">
                     <h3 data-i18n="settings-appearance-title">Apparence</h3>
-                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de ZS IDE.</p>
+                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de zaalis IDE.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-theme-select" data-i18n="settings-theme-label">Thème</label>
@@ -1372,7 +1372,7 @@
 <div class="modal-overlay" id="remote-modal">
     <div class="modal modal-sm">
         <div class="modal-header">
-            <h2>Controle mobile</h2>
+            <h2>Contrôle mobile</h2>
             <button class="modal-close" id="close-remote">&times;</button>
         </div>
         <div class="modal-body remote-body">
@@ -1411,36 +1411,48 @@
 
 <script src="catalog.js?v=1.0.16"></script>
 <script src="help.js?v=1.0.17"></script>
-<script src="script/state.js?v=20261008.1" defer></script>
-<script src="script/locale.js?v=20261008.1" defer></script>
-<script src="script/ui.js?v=20261015.2" defer></script>
-<script src="script/commands.js?v=20261008.1" defer></script>
-<script src="script/timeline.js?v=20261015.2" defer></script>
-<script src="script/collaboration-ui.js?v=20261015.2" defer></script>
-<script src="script/pending-queue.js?v=20261015.1" defer></script>
-<script src="script/clarification.js?v=20261015.1" defer></script>
-<script src="script/markdown-tables.js?v=20261015.1" defer></script>
-<script src="script/ai.js?v=20261015.2" defer></script>
-<script src="script/remote.js?v=1.0.17" defer></script>
-<script src="script/main.js?v=20261015.2" defer></script>
-<script src="script/agent-catalog.js?v=20261007.2" defer></script>
+<script src="script/state.js?v=20261015.7" defer></script>
+<script src="script/locale.js?v=20261015.7" defer></script>
+<script src="script/ui.js?v=20261015.7" defer></script>
+<script src="script/commands.js?v=20261015.7" defer></script>
+<script src="script/timeline.js?v=20261015.7" defer></script>
+<script src="script/collaboration-ui.js?v=20261015.7" defer></script>
+<script src="script/pending-queue.js?v=20261015.7" defer></script>
+<script src="script/clarification.js?v=20261015.7" defer></script>
+<script src="script/markdown-tables.js?v=20261015.7" defer></script>
+<script src="script/ai.js?v=20261015.7" defer></script>
+<script src="script/remote.js?v=20261015.7" defer></script>
+<script src="script/ui-foundation.js?v=20261015.7" defer></script>
+<script src="script/main.js?v=20261015.7" defer></script>
+<script src="script/agent-catalog.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
-<link rel="stylesheet" href="vm.css?v=1">
-<link rel="stylesheet" href="laboratory.css?v=1">
-<script src="script/laboratory.js?v=20261007.2" defer></script>
+<link rel="stylesheet" href="vm.css?v=20261015.7">
+<link rel="stylesheet" href="laboratory.css?v=20261015.7">
+<script src="script/laboratory.js?v=20261015.7" defer></script>
 <script src="vendor/xterm/xterm.js" defer></script>
 <script src="vendor/xterm/addon-fit.js" defer></script>
-<script src="script/vm.js?v=20261007.2" defer></script>
-<link rel="stylesheet" href="correction-memory.css?v=20261007.2">
-<script src="script/correction-memory.js?v=20261007.2" defer></script>
-<script src="script/agent-activity.js?v=20261015.3" defer></script>
-<script src="script/workspace.js?v=20261015.3" defer></script>
-<script src="script/conversation-actions.js?v=20261015.1" defer></script>
-<script src="script/task-center.js?v=20261015.1" defer></script>
-<link rel="stylesheet" href="profile-integrations.css?v=20261008.1">
-<script src="script/integrations.js?v=20261008.1" defer></script>
-<script src="script/messengers.js?v=20261008.1" defer></script>
-<script src="script/token-profile.js?v=20261008.1" defer></script>
-<script src="script/welcome.js?v=20261007.2" defer></script>
+<script src="script/vm.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="correction-memory.css?v=20261015.7">
+<script src="script/correction-memory.js?v=20261015.7" defer></script>
+<script src="script/agent-activity.js?v=20261015.7" defer></script>
+<script src="script/action-menu.js?v=20261015.7" defer></script>
+<script src="script/workspace.js?v=20261015.7" defer></script>
+<script src="script/conversation-actions.js?v=20261015.7" defer></script>
+<script src="script/task-center.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="profile-integrations.css?v=20261015.7">
+<script src="script/integrations.js?v=20261015.7" defer></script>
+<script src="script/messengers.js?v=20261015.7" defer></script>
+<script src="script/token-profile.js?v=20261015.7" defer></script>
+<script src="script/welcome.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="design-system.css?v=20261015.7">
+<link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
+<script src="script/settings-layout.js?v=20261015.7" defer></script>
+<script src="script/settings-persistence.js?v=20261015.7" defer></script>
+<script src="script/inline-approval.js?v=20261015.7" defer></script>
+<script src="script/command-palette.js?v=20261015.7" defer></script>
+<script src="script/model-picker.js?v=20261015.7" defer></script>
+<script src="script/project-actions.js?v=20261015.7" defer></script>
+<script src="script/shell-layout.js?v=20261015.7" defer></script>
+<script src="script/ui-accessibility.js?v=20261015.7" defer></script>
 </body>
 </html>

@@ -41,7 +41,7 @@ async function main() {
   const cookie = register.headers.get('set-cookie');
   const headers = { cookie, 'content-type': 'application/json' };
   // Verify that the new modules are included in the actual packaged binary.
-  for (const asset of ['collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
+  for (const asset of ['interaction-polish.css', 'script/action-menu.js', 'design-system.css', 'script/ui-foundation.js', 'script/settings-layout.js', 'script/settings-persistence.js', 'script/model-picker.js', 'script/command-palette.js', 'script/project-actions.js', 'script/shell-layout.js', 'script/inline-approval.js', 'script/ui-accessibility.js', 'collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
     assert.equal((await fetch(`${base}/${asset}`)).status, 200, asset);
   }
   const canonical = await (await fetch(`${base}/api/conversations`, { method: 'POST', headers,

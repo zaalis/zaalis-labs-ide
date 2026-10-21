@@ -3,17 +3,19 @@
 (() => {
     'use strict';
     const { node, button, request, dialog, field, launch, confirm } = window.ZaalisCollabUI;
-    const view = dialog('Centre de travail');
+    const view = dialog('Centre de travail');view.el.classList.add('ui-work-center');
     const tabs = node('nav', undefined, 'collab-actions'); tabs.setAttribute('aria-label', 'Centre de travail');
     const body = node('section'); view.content.append(tabs, body);
     let section = 'tasks', generation = 0;
     const root = () => state.projectRoot || '';
+    function introduction(title,description){const intro=node('header',undefined,'ui-section-intro');intro.append(node('h3',title),node('p',description));body.append(intro);}
     function form(submit) { const el = node('form', undefined, 'collab-form'); el.addEventListener('submit', event => { event.preventDefault(); view.run(() => submit(el)); }); return el; }
     function saveButton(el, label) { const submit = node('button', label); submit.type = 'submit'; el.append(submit); return submit; }
     async function tasks() {
         const current = ++generation;
         const result = await request('/api/tasks'); if (current !== generation) return;
         body.replaceChildren();
+        introduction('Vos tâches','Préparez une instruction et choisissez quand votre assistant doit s’en occuper.');
         let editingTask = null;
         const create = form(async () => {
             const path = editingTask ? `/api/tasks/${encodeURIComponent(editingTask.id)}` : '/api/tasks';
@@ -34,25 +36,28 @@
         const interval = field(create, 'Répéter toutes les N minutes (facultatif)', 'number'); interval.min = '1';
         const at = field(create, 'Première exécution (facultatif)', 'datetime-local');
         create.append(node('small', 'Exécution locale : laissez Zaalis ouvert. Les permissions sélectionnées s’appliquent.'));
-        const submitTask = saveButton(create, 'Créer la tâche'); body.append(create);
+        const createBox=node('details',undefined,'ui-create-box');createBox.open=!result.tasks.length;createBox.append(node('summary','Nouvelle tâche'),create);
+        const submitTask = saveButton(create, 'Créer la tâche'); body.append(createBox);
         for (const task of result.tasks) {
             const card = node('article', undefined, 'collab-card'); card.append(node('strong', task.title), node('p', task.prompt));
-            card.append(node('small', `${task.status || (task.enabled ? 'active' : 'en pause')}${task.nextRunAt ? ' · ' + new Date(task.nextRunAt).toLocaleString() : ''}`));
+            const statuses={running:'En cours',completed:'Terminée',failed:'À vérifier',cancelled:'Arrêtée',pending:'En attente',scheduled:'Planifiée',paused:'En pause',idle:'Prête'};
+            card.append(node('small', `${statuses[task.status] || (task.enabled ? 'Prête' : 'En pause')}${task.nextRunAt ? ' · Prochaine exécution : ' + new Date(task.nextRunAt).toLocaleString() : ''}`));
             if (task.lastError) card.append(node('p', String(task.lastError), 'collab-error'));
             if (task.pending) {
                 card.append(node('p', task.pending.summary || task.pending.content || 'Une décision est nécessaire pour continuer.'));
                 card.append(button('Répondre à la demande', () => view.run(async () => {
                     const pending = task.pending;
-                    view.el.close();
-                    try { await handleRustInteractiveEvent({ ...pending, type: pending.type?.endsWith('_required') ? pending.type : `${pending.type || 'permission'}_required` }); }
-                    finally { view.el.showModal(); }
+                    const question = pending.type?.startsWith('clarification');
+                    if (question) view.el.close();
+                    try { await handleRustInteractiveEvent({ ...pending, approvalHost: card, type: pending.type?.endsWith('_required') ? pending.type : `${pending.type || 'permission'}_required` }); }
+                    finally { if (question) view.el.showModal(); }
                     await tasks();
                 })));
             }
             if (task.lastResult) card.append(node('pre', typeof task.lastResult === 'string' ? task.lastResult : JSON.stringify(task.lastResult, null, 2)));
             const actions = node('div', undefined, 'collab-actions');
             const mutation = (path, method = 'POST', payload) => view.run(async () => { await request(`/api/tasks/${encodeURIComponent(task.id)}${path}`, method, payload); await tasks(); });
-            actions.append(button('Modifier', () => { editingTask = task; title.value = task.title; prompt.value = task.prompt; project.value = task.root; interval.value = task.intervalMinutes || ''; at.value = task.runAt ? new Date(new Date(task.runAt).getTime() - new Date(task.runAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; submitTask.textContent = 'Enregistrer les modifications'; title.focus(); }), button('Exécuter', () => mutation('/run')), button(task.enabled ? 'Mettre en pause' : 'Reprendre', () => mutation('', 'PATCH', { enabled: !task.enabled })), button('Arrêter', () => mutation('/cancel')), button('Supprimer', () => view.run(async () => {
+            actions.append(button('Modifier', () => { createBox.open=true;editingTask = task; title.value = task.title; prompt.value = task.prompt; project.value = task.root; interval.value = task.intervalMinutes || ''; at.value = task.runAt ? new Date(new Date(task.runAt).getTime() - new Date(task.runAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; submitTask.textContent = 'Enregistrer les modifications'; title.focus(); }), button('Exécuter', () => mutation('/run')), button(task.enabled ? 'Mettre en pause' : 'Reprendre', () => mutation('', 'PATCH', { enabled: !task.enabled })), button('Arrêter', () => mutation('/cancel')), button('Supprimer', () => view.run(async () => {
                 if (await confirm(view, task.title, { title: 'Supprimer cette tâche ?', danger: true })) await mutation('', 'DELETE');
             })));
             card.append(actions); body.append(card);
@@ -63,6 +68,7 @@
         const current = ++generation;
         const result = await request(`/api/knowledge?root=${encodeURIComponent(root())}&q=${encodeURIComponent(query)}`); if (current !== generation) return;
         body.replaceChildren();
+        introduction('Ce que votre assistant retient','Gardez les préférences et les informations utiles pour vos prochaines conversations.');
         const filters = node('div'); const search = field(filters, 'Rechercher dans la mémoire', 'search', query);
         let debounce; search.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => view.run(() => memory(search.value)), 400); }); body.append(filters);
         if (restoreFocus) { search.focus(); search.setSelectionRange(query.length, query.length); }
@@ -89,7 +95,7 @@
         const restoreFocus = document.activeElement === body.querySelector('input[type=search]');
         const current = ++generation;
         const result = await request(`/api/tools?root=${encodeURIComponent(root())}&q=${encodeURIComponent(query)}`); if (current !== generation) return;
-        body.replaceChildren(); const filters = node('div'); const search = field(filters, 'Rechercher un outil', 'search', query);
+        body.replaceChildren();introduction('Les outils de votre assistant','Découvrez ce qu’il peut faire. Ouvrez un outil pour consulter ses détails.'); const filters = node('div'); const search = field(filters, 'Rechercher un outil', 'search', query);
         let debounce; search.addEventListener('input', () => { clearTimeout(debounce); debounce = setTimeout(() => view.run(() => tools(search.value)), 400); }); body.append(filters);
         if (restoreFocus) { search.focus(); search.setSelectionRange(query.length, query.length); }
         for (const tool of result.tools) {

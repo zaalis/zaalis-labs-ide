@@ -49,6 +49,7 @@
 #include "WebView2.h"
 #include "WebView2EnvironmentOptions.h"
 #include "BrowserHost.h"
+#include "../AppShortcuts.h"
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Data.Json.h>
 
@@ -787,6 +788,11 @@ static void RegisterEvents(View* v)
             const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+            if (const auto command = AppCommand(vk, ctrl, shift, alt, true)) {
+                args->put_Handled(TRUE);
+                if (g_stateCallback) g_stateCallback(std::wstring(L"{\"type\":\"uiCommand\",\"command\":\"") + command + L"\"}");
+                return S_OK;
+            }
             std::wstring key = KeyName(vk);
             if (key.empty()) return S_OK;
             for (const auto& a : g_accelerators) {

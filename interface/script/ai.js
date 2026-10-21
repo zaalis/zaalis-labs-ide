@@ -164,6 +164,7 @@ const approvalQueue = [];
 function showNextApproval() {
     if (pendingApproval || !approvalQueue.length) return;
     pendingApproval = approvalQueue.shift();
+    window.ZaalisInlineApproval?.prepare();
     $('#approval-desc').textContent = pendingApproval.description;
     $('#approval-content').textContent = pendingApproval.content;
     const plan = !!pendingApproval.plan;
@@ -172,13 +173,14 @@ function showNextApproval() {
     $('#plan-feedback').value = '';
     $('#approve-action').textContent = plan ? (state.language === 'en' ? 'Approve and implement' : 'Approuver et réaliser') : (state.language === 'en' ? 'Allow' : 'Autoriser');
     $('#deny-action').textContent = plan ? (state.language === 'en' ? 'Revise plan' : 'Réviser le plan') : (state.language === 'en' ? 'Deny' : 'Refuser');
-    $('#approval-modal').classList.add('active');
+    if (window.ZaalisInlineApproval) window.ZaalisInlineApproval.open(pendingApproval);
+    else $('#approval-modal').classList.add('active');
     $('#approve-action').focus();
 }
 
 function requestApproval(description, content, options = {}) {
     return new Promise((resolve) => {
-        approvalQueue.push({ description, content, resolve, plan: !!options.plan });
+        approvalQueue.push({ ...options, description, content, resolve, plan: !!options.plan });
         showNextApproval();
     });
 }
@@ -186,6 +188,7 @@ function requestApproval(description, content, options = {}) {
 function answerApproval(allow) {
     const current = pendingApproval;
     pendingApproval = null;
+    window.ZaalisInlineApproval?.close();
     $('#approval-modal').classList.remove('active');
     if (current) current.resolve(current.plan ? { allow, feedback: allow ? '' : $('#plan-feedback').value.trim() } : allow);
     showNextApproval();
@@ -222,7 +225,7 @@ $$('.ai-tab').forEach(tab => {
                 addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
                 state.agentMode = false;
             } else {
-                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents active.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prets.')));
+                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents activé.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prêts.')));
             }
         } else if (!isAgentsTab && state.agentMode) {
             state.agentMode = false;
@@ -652,16 +655,16 @@ async function handleRustInteractiveEvent(event) {
     let body = null;
     if (event.type === 'permission_required') {
         const detail = [event.target, ...(event.risks || [])].filter(Boolean).join('\n');
-        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail);
+        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail, { host: event.approvalHost });
         body = { kind: 'permission', allow, scope: 'once' };
     } else if (event.type === 'plan_required') {
-        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true });
+        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true, host: event.approvalHost });
         body = { kind: 'plan', ...decision };
     } else if (event.type === 'clarification_required') {
         const answers = await window.ZaalisClarification.request(event.questions || []);
         body = { kind: 'clarification', answers };
     } else if (event.type === 'budget_required') {
-        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '');
+        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '', { host: event.approvalHost });
         body = { kind: 'budget', stop: !allow, additionalTokens: allow ? 50000 : undefined };
     }
     if (!body) return;
@@ -1992,7 +1995,7 @@ const HIST = {
     chat: {
         store: 'conversations', current: 'currentConvId',
         container: '#chat-messages', list: '#history-list', tab: 'chat',
-        defaultKey: 'chat-default-msg', defaultMsg: uiText('Selectionnez un modele et posez votre question.')
+        defaultKey: 'chat-default-msg', defaultMsg: uiText('Sélectionnez un modèle et posez votre question.')
     },
     agents: {
         store: 'agentConversations', current: 'currentAgentConvId',

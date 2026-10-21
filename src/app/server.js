@@ -943,6 +943,8 @@ app.post('/api/profile', (req, res) => {
 
 // Shared local runtime settings used by both the desktop IDE and the CLI.
 // This intentionally covers hardware/local-model settings, not UI state.
+require('../services/project-clone').mountProjectClone(app);
+
 app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),

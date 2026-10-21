@@ -15,6 +15,7 @@
 #include "WebView2.h"
 #include <string>
 #include "browser/BrowserHost.h"
+#include "AppShortcuts.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -240,6 +241,19 @@ int WINAPI wWinMain(HINSTANCE hInst, HINSTANCE, PWSTR, int) {
                             g_webview->AddScriptToExecuteOnDocumentCreated(
                                 L"window.zaalisNativeCapabilities = Object.freeze({browser:true,browserEngine:'zaalis-webview2'});", nullptr);
                             EventRegistrationToken token;
+                            g_controller->add_AcceleratorKeyPressed(
+                                Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                                    [](ICoreWebView2Controller*, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+                                        COREWEBVIEW2_KEY_EVENT_KIND kind; args->get_KeyEventKind(&kind);
+                                        if (kind != COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN) return S_OK;
+                                        UINT key; args->get_VirtualKey(&key);
+                                        const auto command = AppCommand(key, GetKeyState(VK_CONTROL) & 0x8000, GetKeyState(VK_SHIFT) & 0x8000, GetKeyState(VK_MENU) & 0x8000);
+                                        if (command && g_webview) {
+                                            args->put_Handled(TRUE);
+                                            g_webview->PostWebMessageAsJson((std::wstring(L"{\"type\":\"uiCommand\",\"command\":\"") + command + L"\"}").c_str());
+                                        }
+                                        return S_OK;
+                                    }).Get(), &token);
                             g_webview->add_WebMessageReceived(
                                 Callback<ICoreWebView2WebMessageReceivedEventHandler>(
                                     [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args) -> HRESULT {

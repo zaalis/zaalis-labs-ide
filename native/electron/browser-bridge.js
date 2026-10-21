@@ -145,6 +145,11 @@ class ElectronBrowserBridge {
     wc.on('render-process-gone', () => emit('crashed'));
     wc.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown') return;
+      if ((input.control || input.meta) && !input.alt) {
+        const key = input.key.toLowerCase();
+        const command = input.shift ? ({p:'palette',e:'mode'})[key] : ({',':'settings',n:'new-chat',o:'open-folder',b:'sidebar'})[key];
+        if (command) { event.preventDefault(); this.window?.webContents.executeJavaScript('window.ZaalisCommands?.run(' + JSON.stringify(command) + ')').catch(() => {}); return; }
+      }
       const aliases = { arrowleft: 'Left', arrowright: 'Right', tab: 'Tab', '+': '=', '=': '=' };
       const shortcut = { key: aliases[input.key.toLowerCase()] || input.key.toUpperCase(), ctrl: !!(input.control || input.meta), alt: !!input.alt, shift: !!input.shift };
       if ((this.accelerators || []).some(k => k.key === shortcut.key && k.ctrl === shortcut.ctrl && k.alt === shortcut.alt && k.shift === shortcut.shift)) {

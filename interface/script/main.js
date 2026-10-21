@@ -17,6 +17,7 @@ const SETTINGS_SECTION_TITLES = {
 };
 
 function setSettingsSection(section) {
+    if (window.ZaalisSettings?.navigate(section)) return;
     const key = SETTINGS_SECTION_TITLES[section] ? section : 'general';
     $$('.settings-nav-item').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.settingsSection === key);
@@ -48,7 +49,7 @@ function toast(msg, opts) {
 // ----- Appearance: apply theme / density / font size to the whole app -----
 function applyAppearance() {
     const c = state.config;
-    document.body.classList.toggle('theme-light', c.theme === 'light');
+    window.ZaalisUI.appearance();
     document.body.classList.toggle('density-compact', c.density === 'compact');
     document.body.classList.remove('font-small', 'font-large');
     if (c.fontSize === 'small') document.body.classList.add('font-small');
@@ -166,7 +167,7 @@ function populateSettingsControls() {
     setVal('gguf-variant-select', c.ggufVariant || '');
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 16384));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
-    setVal('settings-theme-select', c.theme || 'dark');
+    setVal('settings-theme-select', c.theme || 'system');
     setVal('settings-density-select', c.density || 'normal');
     setVal('settings-fontsize-select', c.fontSize || 'normal');
     setVal('settings-default-chat-select', c.aiModel || 'codex');
@@ -1134,101 +1135,35 @@ API_KEY_FIELDS.forEach(provider => {
     if (input) input.dataset.defaultPlaceholder = input.placeholder;
 });
 
-$('#save-btn').addEventListener('click', async () => {
-    const keys = {};
-    API_KEY_FIELDS.forEach(provider => {
-        const value = ($('#key-' + provider)?.value || '').trim();
-        if (value) keys[provider] = value;
-    });
-    const settingsLang = $('#settings-lang-select');
-    if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
-    const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
-    const ollamaUrlInput = $('#ollama-url');
-    state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
-    // Default Ollama model = first of the managed list.
-    state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
-
-    // ----- Appearance -----
-    const c = state.config;
-    const getVal = id => $('#' + id)?.value;
-    c.theme = getVal('settings-theme-select') || 'dark';
-    c.density = getVal('settings-density-select') || 'normal';
-    c.fontSize = getVal('settings-fontsize-select') || 'normal';
-    applyAppearance();
-    // ----- Default models -----
-    const defChat = getVal('settings-default-chat-select');
-    if (defChat) c.aiModel = defChat;
-    c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
-    c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
-    const selectedPermission = getVal('settings-default-permission-select');
-    if (selectedPermission && typeof setPermissionMode === 'function') setPermissionMode(selectedPermission);
-    // ----- Hardware advanced -----
-    c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '16384');
-    const nglVal = getVal('gguf-ngl-select');
-    c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
-    // ----- Integrated terminal -----
-    const previousTerminalProfile = c.terminalProfile || terminalProfileDefault();
-    const terminalProfileSelect = $('#settings-terminal-profile');
-    if (terminalProfileSelect && terminalProfileSelect.value) c.terminalProfile = terminalProfileSelect.value;
-    if (c.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
-    // ----- Project -----
-    c.defaultProjectFolder = ($('#settings-default-folder')?.value || '').trim();
-    c.reopenLastProject = !!$('#settings-reopen-toggle')?.checked;
-    // ----- Updates -----
-    c.autoCheckUpdates = !!$('#settings-autoupdate-toggle')?.checked;
-    c.updateChannel = getVal('settings-channel-select') || 'stable';
-    if (typeof updateTokenMeter === 'function') updateTokenMeter();
-    saveState();
-    const btn = $('#save-btn');
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    try {
-        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers.map(mcpPayload) }) });
-        if (!mcpRes.ok) {
-            const problem = await mcpRes.json().catch(() => ({}));
-            toast(problem.error || uiText('Les serveurs MCP n’ont pas pu être enregistrés.'), { icon: '!' });
-            throw new Error('MCP');
-        }
-        // Secrets are stored now: the cards go back to showing names only.
-        const savedMcp = await mcpRes.json().catch(() => null);
-        if (savedMcp && Array.isArray(savedMcp.servers)) {
-            const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
-            personalMcpServers = [];
-            for (const server of savedMcp.servers) personalMcpServers.push({ ...newPersonalMcp(server), test: tests.get(server.id) || null });
-            renderPersonalMcpServers();
-        }
-        await syncSharedHardwareConfig();
+// Sensitive writes are explicit and scoped to the section being edited.
+async function saveSensitiveSettings(section) {
+    if (section === 'api') {
+        const keys = {};
+        API_KEY_FIELDS.forEach(provider => { const value = ($('#key-' + provider)?.value || '').trim(); if (value) keys[provider] = value; });
         if (Object.keys(keys).length) {
-            const res = await fetch('/api/keys', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keys })
-            });
-            if (!res.ok) throw new Error('keys');
-            const data = await res.json();
+            const response = await fetch('/api/keys', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys})});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement impossible');
             updateApiKeyInputs(data.keys || {});
         }
         await saveCompatSettings();
-        btn.textContent = 'OK';
-        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
-    } catch {
-        btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
-        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1200);
     }
-});
-
-// ----- Live preview: theme/density/font apply instantly when changed -----
-// Listeners are attached directly to each <select> (custom-select dispatches a
-// non-bubbling 'change' event, so document-level delegation would miss it).
-[
-    ['settings-theme-select', 'theme'],
-    ['settings-density-select', 'density'],
-    ['settings-fontsize-select', 'fontSize']
-].forEach(([id, key]) => {
-    const el = $('#' + id);
-    if (el) el.addEventListener('change', () => { state.config[key] = el.value; applyAppearance(); });
-});
+    if (section === 'mcp') {
+        const response = await fetch('/api/mcp', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({servers:personalMcpServers.map(mcpPayload)})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement MCP impossible');
+        const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
+        personalMcpServers = (data.servers || []).map(server => ({...newPersonalMcp(server),test:tests.get(server.id) || null}));
+        renderPersonalMcpServers();
+    }
+    if (section === 'hardware') {
+        const previous = {...state.config};
+        try {
+            state.config.ollamaUrl = ($('#ollama-url')?.value || 'http://127.0.0.1:11434').trim();
+            const response = await fetch('/api/config', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:sharedHardwareConfigPayload()})});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement impossible');
+            saveState();
+        } catch (error) { state.config = previous; throw error; }
+    }
+}
 
 // ----- Project: default folder picker -----
 const pickFolderBtn = $('#settings-pick-folder-btn');

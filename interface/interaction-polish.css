@@ -1,0 +1,56 @@
+/* Conversation navigation, floating menus and calm, consistent motion. */
+.workspace-navigation,.ws-project-group,.ws-project-chats,.ws-project-chats-inner{min-width:0;max-width:100%}
+.workspace-navigation{overflow-x:hidden}
+.ws-nav-actions{gap:8px;padding-bottom:12px}
+.ws-nav-actions>.ws-button{min-width:0;white-space:nowrap}
+.ws-nav-actions>.ws-icon-button{width:28px;min-width:28px}
+.ws-conversation-row{display:grid;grid-template-columns:minmax(0,1fr) 30px;width:100%;max-width:100%;gap:4px}
+.ws-conversation-row>.ws-conversation{width:100%;max-width:100%;padding:10px 8px 10px 12px;min-height:40px}
+.ws-conversation-row .ws-conversation>span:last-child{display:block;flex:1;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws-conversation-options{font-size:22px;font-weight:500;letter-spacing:0;line-height:1;color:var(--text-2);width:30px;min-width:30px}
+.ws-conversation-row:hover,.ws-conversation-row:focus-within{background:var(--bg-hover)}
+.ui-action-menu{position:fixed;inset:auto;margin:0;padding:8px;border:1px solid var(--border);border-radius:14px;background:var(--bg-1);color:var(--text-0);box-shadow:var(--ui-shadow);max-height:calc(100dvh - 24px);overflow-y:auto}
+.ui-action-menu:popover-open{display:flex;flex-direction:column;gap:4px}
+.ui-action-menu button{display:flex;align-items:center;width:100%;min-height:40px;padding:10px 12px;border:0;border-radius:8px;background:transparent;color:var(--text-1);text-align:left;font:13px var(--font-sans);cursor:pointer}
+.ui-action-menu button:hover,.ui-action-menu button:focus-visible{background:var(--bg-hover);color:var(--text-0)}
+.ui-action-menu button.is-danger{color:var(--red);border-top:1px solid var(--border-subtle);margin-top:4px}
+.ui-rename-form{display:flex;flex-direction:column;gap:16px}.ui-rename-form h2{font-size:17px;margin:0}.ui-rename-form label{display:flex;flex-direction:column;gap:8px;font-size:13px}
+.ui-rename-form .collab-actions{justify-content:flex-end}.ui-rename-form button{padding:10px 16px;background:var(--bg-2);border:1px solid var(--border);border-radius:8px}
+.collab-dialog{padding:24px;width:min(800px,calc(100vw - 32px));max-height:88dvh;border-radius:20px;overflow-y:auto;box-shadow:var(--ui-shadow);background:var(--bg-1);border-color:var(--border)}
+.collab-dialog>header{gap:16px;margin-bottom:12px}.collab-dialog h2{font-size:22px;font-weight:600}.collab-dialog>header>button{border:0;background:var(--bg-2);color:var(--text-1)}
+.collab-dialog button{background:var(--bg-2);border-color:var(--border);transition:background .18s,color .18s}
+.collab-dialog input,.collab-dialog textarea{background:var(--bg-0);border-color:var(--border);border-radius:10px;padding:12px;line-height:1.5}
+.collab-dialog small,.collab-status{color:var(--text-2);font-size:12px;line-height:1.6}.collab-status:empty{display:none}
+.collab-content,.collab-list{min-width:0}.collab-filters{gap:16px;align-items:center;margin:16px 0 24px}
+.collab-filters>label:first-child{flex:1;min-width:180px}.collab-filters>label:has(input[type=checkbox]){flex-direction:row;align-items:center;gap:8px;white-space:nowrap}
+.ui-conversation-card{display:grid;grid-template-columns:minmax(0,1fr) 36px;align-items:center;gap:12px;padding:12px 8px 12px 16px;border:0;border-bottom:1px solid var(--border-subtle);border-radius:10px;margin-top:4px;background:transparent}
+.ui-conversation-card:hover{background:var(--bg-2)}.ui-conversation-copy{min-width:0;display:flex;flex-direction:column;gap:6px}
+.ui-conversation-copy>button{display:block;width:100%;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0;border:0;background:transparent;text-align:left;font-size:13px;font-weight:500;line-height:1.6}
+.ui-conversation-copy>small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.collab-dialog .ui-conversation-options{padding:0;min-width:36px;height:36px;font-size:22px;border:0;background:transparent}
+.ui-section-intro{margin:24px 0 20px}.ui-section-intro h3{font-size:17px;font-weight:500;margin:0 0 8px}.ui-section-intro p{font-size:13px;line-height:1.7;color:var(--text-2);margin:0;max-width:60ch}
+.ui-work-center .collab-actions{gap:8px}.ui-work-center nav.collab-actions{padding:4px;background:var(--bg-0);border-radius:12px}
+.ui-work-center nav.collab-actions>button{border:0;background:transparent;padding:10px 12px}.ui-work-center nav.collab-actions>button[aria-pressed=true]{background:var(--bg-3);color:var(--text-0)}
+.ui-work-center .collab-card{padding:20px;border-color:var(--border-subtle);border-radius:14px;gap:12px;background:var(--bg-2);margin-top:16px}
+.ui-work-center .collab-form{gap:16px;padding:16px 0 4px}.ui-work-center .collab-form>button[type=submit]{justify-self:start;background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+.ui-create-box{padding:16px 20px;border:1px solid var(--border-subtle);border-radius:14px;margin:16px 0;background:var(--bg-2)}.ui-create-box>summary{font-size:13px;font-weight:500;cursor:pointer;padding:4px 0}
+/* The original context bar remains visible; no circular substitute. */
+#token-meter{display:flex!important;flex-direction:column;align-items:flex-start;gap:5px;min-width:100px;max-width:180px;padding:6px 8px;background:transparent;border:0;flex-shrink:1}
+#token-meter .token-bar{display:block;flex:none;width:100%;height:4px;background:var(--border);border-radius:99px;overflow:hidden}
+#token-meter .token-fill{height:100%;border-radius:99px;transition:width .2s,background .2s}
+#token-meter .token-text{font-size:10px;color:var(--text-2);white-space:nowrap;line-height:1.2}
+.ui-model-picker>summary{max-width:260px;overflow:visible;text-overflow:clip;white-space:normal;overflow-wrap:anywhere;line-height:1.5}
+.chat-input-bottom{gap:8px}.chat-input-bottom-right{flex-wrap:wrap;justify-content:flex-end;row-gap:8px;min-width:0}
+.ui-model-picker>.ui-menu{overflow:visible;max-height:none;padding:16px;gap:12px}.ui-model-picker .ui-status{padding:0;min-height:0}
+.ui-model-picker .custom-select-trigger{height:auto;min-height:36px}.ui-model-picker .custom-select-trigger-text{white-space:normal;overflow-wrap:anywhere;line-height:1.5;padding:8px 0}
+.agent-select-popover .custom-select-option{white-space:normal;overflow-wrap:anywhere;line-height:1.5;padding:10px 12px;min-height:36px}
+#custom-select-lang-select{width:66px;min-width:66px}#custom-select-lang-select .custom-select-trigger{height:30px;min-height:30px;font-size:11px;border-radius:8px;padding:0 8px}
+.settings-sidebar{overflow-y:auto}.settings-pane.active>h3:first-child{display:none}
+.model-loader-panel{background:var(--bg-1);max-width:calc(100vw - 24px)}
+@keyframes ui-menu-enter{from{opacity:0;transform:translateY(5px) scale(.98)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes ui-loader-enter{from{opacity:0;transform:translateX(-50%) translateY(-5px) scale(.98)}to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)}}
+.agent-select-popover:popover-open,.ui-action-menu:popover-open,.mode-dropdown.open,.attach-menu.open,.ui-model-picker[open]>.ui-menu,.collab-dialog[open],.ui-palette[open]{animation:ui-menu-enter .18s cubic-bezier(.2,.8,.2,1)}
+.model-loader.open .model-loader-panel{animation:ui-loader-enter .2s cubic-bezier(.2,.8,.2,1)}
+.mode-item,.attach-menu button{transition:background .18s,color .18s}.mode-select-btn[aria-expanded=true] svg:last-child{transition:transform .18s}
+@media(max-width:760px){.collab-dialog{padding:20px;width:calc(100vw - 20px);max-height:92dvh}.collab-form{grid-template-columns:1fr}.ui-model-picker>summary{max-width:155px;font-size:11px}#token-meter{min-width:80px;max-width:115px}.chat-input-bottom-right{flex-wrap:wrap!important;gap:4px}.settings-sidebar{grid-template-columns:repeat(2,minmax(0,1fr));max-height:180px;flex-shrink:0}}
+@media(max-width:580px){#custom-select-lang-select{display:none}}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
