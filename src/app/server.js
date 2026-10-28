@@ -18,6 +18,8 @@ const { registerSecret } = require('../agent/secrets-mask');
 const modelCatalog = require('../accounts/model-catalog');
 const compatProviders = require('../accounts/compat-providers');
 const chatgptSubscription = require('../accounts/chatgpt-subscription');
+const { beginSignIn } = require('../accounts/chatgpt-sign-in');
+const { SkillsStore } = require('../agent/skills-store');
 const accountSubscriptions = require('../accounts/account-subscriptions');
 const workspaceContext = require('../agent/workspace-context');
 const platformRuntime = require('../runtime/platform-runtime');
@@ -77,6 +79,7 @@ chatgptSubscription.setVersion(APP_VERSION);
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() { return platformRuntime.dataDir(APP_DIR, !!process.pkg); }
 const DATA_DIR = resolveDataDir();
+const skillsStore = new SkillsStore(DATA_DIR);
 const { VmManager } = require('../laboratory/vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
 const { Laboratory } = require('../laboratory/laboratory');
@@ -736,16 +739,26 @@ app.post('/api/internal/rust-browser', async (req, res) => {
 // ChatGPT subscription as one more OpenAI-compatible endpoint. The core sends
 // chat-completions with a per-launch key; the OAuth tokens never leave this
 // process and are renewed here.
-app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
+const cyberObservations = new Map();
+app.post(['/api/internal/chatgpt/v1/chat/completions', '/api/internal/openai/v1/chat/completions'], async (req, res) => {
   const refuse = (status, message) => res.status(status).json({ error: { message } });
   const user = chatgptProxyUser(req);
   if (!user) return refuse(401, 'Jeton ChatGPT interne invalide.');
   const controller = new AbortController();
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  const observation = { requested: user.cyberProgram || 'standard', applied: null, model: String(req.body?.model || ''), status: 'starting', at: new Date().toISOString() };
+  cyberObservations.set(user.id, observation);
   try {
-    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id });
-    const upstream = await withChatgptToken(user.id, (token) =>
-      chatgptSubscription.openResponseStream(token, request, { signal: controller.signal }));
+    const apiKey = req.path.includes('/internal/openai/');
+    const publicApi = apiKey || chatgptSession(user)?.transport === 'public';
+    const cyber = user.cyberProgram || 'standard';
+    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id, publicApi, subscription: !apiKey, cyber });
+    const options = { signal: controller.signal, publicApi };
+    const key = apiKey ? userApiKeys(user).openai : '';
+    if (apiKey && !key) throw Object.assign(Error('Clé API OpenAI absente.'), { status: 401 });
+    const upstream = apiKey ? await chatgptSubscription.openResponseStream(key, request, options)
+      : await withChatgptToken(user.id, token => chatgptSubscription.openResponseStream(token, request, options));
+    observation.status = 'streaming';
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -753,14 +766,22 @@ app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
     const reader = chatgptSubscription.createSseReader();
     const translator = chatgptSubscription.createChunkTranslator(request.model);
     const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
-    for await (const chunk of upstream.body) {
-      for (const event of reader.push(chunk)) write(translator.push(event));
-    }
-    for (const event of reader.finish()) write(translator.push(event));
+    const consume = events => {
+      for (const event of events) {
+        if (event.response?.access_programs?.cyber) observation.applied = event.response.access_programs.cyber;
+        if (event.type === 'response.completed') observation.status = 'completed';
+        if (['response.failed', 'error', 'response.incomplete'].includes(event.type)) observation.status = 'failed';
+        write(translator.push(event));
+      }
+    };
+    for await (const chunk of upstream.body) consume(reader.push(chunk));
+    consume(reader.finish());
     write(translator.finish());
+    if (observation.status === 'streaming') observation.status = 'interrupted';
     res.write('data: [DONE]\n\n');
     return res.end();
   } catch (error) {
+    observation.status = controller.signal.aborted ? 'interrupted' : 'failed';
     if (controller.signal.aborted) return res.end();
     const message = error.message || String(error);
     if (!res.headersSent) return refuse(error.status || 502, message);
@@ -1178,10 +1199,16 @@ function compatStatus(user) {
 // Every configured endpoint goes to the daemon at once, so switching provider
 // does not restart it. The keys travel as separate environment variables.
 function compatEndpointsFor(user) {
-  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+  const endpoints = compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
     // The daemon reaches the subscription through the loopback adapter above.
     ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/${entry.oauth === 'chatgpt' ? 'chatgpt' : `subscription/${entry.id}`}/v1`, key: chatgptProxyKey(user.id) }
     : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
+  if (userApiKeys(user).openai) endpoints.push({ id: 'openai-responses', base_url: `http://127.0.0.1:${PORT}/api/internal/openai/v1`, key: chatgptProxyKey(user.id) });
+  return endpoints;
+}
+function providerBinding(provider, model) {
+  if (provider === 'codex' && /^(gpt-(?:5|6|daybreak)|o[134])/.test(String(model || ''))) return { provider: 'compat', model: `openai-responses::${model}` };
+  return compatProviders.binding(provider, model);
 }
 
 // ---------------------------------------------------------------------------
@@ -1194,6 +1221,7 @@ function chatgptSession(user) {
     if (!session || !session.accessToken) return null;
     registerSecret('jeton ChatGPT', session.accessToken);
     registerSecret('jeton de renouvellement ChatGPT', session.refreshToken);
+    if (session.idToken) registerSecret('identité ChatGPT', session.idToken);
     return session;
   } catch { return null; }
 }
@@ -1209,7 +1237,7 @@ function storeChatgptSession(userId, session) {
 function chatgptStatus(user) {
   const session = chatgptSession(user);
   return session
-    ? { connected: true, email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
+    ? { connected: true, transport: session.transport || 'legacy', email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
     : { connected: false };
 }
 
@@ -1276,6 +1304,53 @@ function chatgptProxyUser(req) {
 
 app.get('/api/chatgpt/status', (req, res) => res.json(chatgptStatus(req.user)));
 
+const browserSignIns = new Map();
+app.post('/api/chatgpt/sign-in', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    browserSignIns.get(req.user.id)?.cancel();
+    const hostFile = path.join(DATA_DIR, 'chatgpt-host-id');
+    try { fs.writeFileSync(hostFile, `urn:uuid:${crypto.randomUUID()}`, { mode: 0o600, flag: 'wx' }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const flow = await beginSignIn({ hostId: fs.readFileSync(hostFile, 'utf8').trim(), previous: chatgptSession(req.user), onSession: session => storeChatgptSession(req.user.id, session) });
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    browserSignIns.set(req.user.id, { ...flow, flowId });
+    res.json({ flowId, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+app.post('/api/chatgpt/sign-in/status', (req, res) => {
+  const flow = browserSignIns.get(req.user.id);
+  if (!flow || flow.flowId !== req.body?.flowId) return res.json({ status: 'expired' });
+  const result = flow.poll();
+  const user = loadUsers().find(u => u.id === req.user.id);
+  res.json({ ...result, ...(result.status === 'connected' ? { account: chatgptStatus(user), providers: compatStatus(user) } : {}) });
+});
+app.delete('/api/chatgpt/sign-in', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  browserSignIns.get(req.user.id)?.cancel(); browserSignIns.delete(req.user.id); res.json({ success: true });
+});
+
+app.get('/api/openai/access', (req, res) => res.json({ program: req.user.cyberProgram || 'standard', lastRequest: cyberObservations.get(req.user.id) || null }));
+app.put('/api/openai/access', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  if (!['standard', 'daybreak_blue', 'daybreak_red'].includes(req.body?.program)) return res.status(400).json({ error: 'Programme invalide.' });
+  const users = loadUsers(), user = users.find(u => u.id === req.user.id);
+  user.cyberProgram = req.body.program; saveUsers(users); cyberObservations.delete(user.id);
+  res.json({ program: user.cyberProgram });
+});
+
+function skillProject(req) { return req.query.root ? workspaceContext.agentRoot({ root: String(req.query.root) }, req.user) : undefined; }
+app.get('/api/skills', (req, res) => {
+  try { res.json(skillsStore.list(req.user.id, skillProject(req))); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.post('/api/skills', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Import réservé au desktop.' });
+  try { res.status(201).json(skillsStore.import(req.user.id, req.body?.instructions)); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.put('/api/skills/:name', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { skillsStore.toggle(req.user.id, req.params.name, req.body?.enabled, skillProject(req)); res.json({ success: true }); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Sign-in with a code typed on auth.openai.com. The device id stays here; the
 // interface only ever holds the code to show and an opaque flow id.
 const chatgptFlows = new Map();
@@ -1323,6 +1398,7 @@ app.post('/api/chatgpt/device-poll', async (req, res) => {
 app.delete('/api/chatgpt/session', (req, res) => {
   if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
   try {
+    browserSignIns.get(req.user.id)?.cancel(); browserSignIns.delete(req.user.id);
     for (const [id, entry] of chatgptFlows) if (entry.userId === req.user.id) chatgptFlows.delete(id);
     const user = storeChatgptSession(req.user.id, null);
     res.json({ account: chatgptStatus(user), providers: compatStatus(user) });
@@ -1505,7 +1581,7 @@ app.get('/api/compat/models', async (req, res) => {
     try {
       if (provider.oauth === 'minimax') return res.json({ models: provider.models, live: false });
       const live = provider.oauth === 'chatgpt'
-        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token))
+        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token, { publicApi: session.transport === 'public' }))
         : await withAccountToken(req.user.id, 'xai', async (token) => {
           const answer = await fetch(`${accountSubscriptions.XAI_API}/models`, {
             headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
@@ -3553,6 +3629,16 @@ async function rustAgentHttp(req, res, next) {
     }
     const model = String(body.model || '');
     const message = String(body.message || '');
+    const skillCommand = /^\/(revers|skill)(?:\s+([\s\S]*))?$/.exec(message.trim());
+    if (skillCommand) {
+      const words = (skillCommand[2] || '').trim();
+      const name = skillCommand[1] === 'revers' ? 'revers' : words.split(/\s+/)[0];
+      const skill = skillsStore.get(req.user.id, root, name);
+      if (skill.instructions.length > 160000) throw Object.assign(Error('Cette skill est trop longue pour une invocation explicite (160 000 caractères maximum).'), { status: 400 });
+      body.systemPrompt = [body.systemPrompt, `SKILL EXPLICITEMENT DEMANDÉE : ${skill.name}\n${skill.instructions}`].filter(Boolean).join('\n\n');
+      body.sessionId = undefined;
+      if (name === 'revers' && !/(?:^|\s)--dynamic(?:\s|$)/.test(words)) body.permissionMode = 'read-only';
+    }
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
       if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
       return res.status(400).json({ error: 'model/team and message are required' });
@@ -3582,11 +3668,11 @@ async function rustAgentHttp(req, res, next) {
       ...(githubReadOnly ? { permissions: { ...agent.permissions, mode: 'read-only' } } : {}),
       model: {
         ...agent.model,
-        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
+        ...(providerBinding(agent.model?.provider, agent.model?.model) || {}),
         capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
       },
     }))) : null;
-    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
+    const lead = providerBinding(model, body.submodel) || { provider: model, model: body.submodel };
     if (conversation) {
       recordedTurn = { user: req.user.id, id: conversation.id, kind, body, turnId: crypto.randomUUID() };
       conversationStore.beginTurn(req.user.id, conversation.id, kind, body, recordedTurn.turnId);
@@ -3685,7 +3771,7 @@ async function rustChatHttp(req, res, next) {
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
     const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
-    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
+    const target = providerBinding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),

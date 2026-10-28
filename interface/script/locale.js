@@ -1,5 +1,14 @@
 // Explicit translations for UI copy. Project files and conversation content are never translated.
 const UI_EN = {
+  "Des instructions réutilisables pour vos agents. Les skills du projet sont chargées depuis .zaalis/skills. Les imports restent dans votre bibliothèque personnelle.": "Reusable instructions for your agents. Project skills load from .zaalis/skills. Imports stay in your personal library.",
+  "Rechercher une skill…": "Search skills…",
+  "Rechercher une skill": "Search skills",
+  "Importer SKILL.md": "Import SKILL.md",
+  "Importer un fichier SKILL.md": "Import a SKILL.md file",
+  "Actualiser": "Refresh",
+  "Accès cybersécurité OpenAI": "OpenAI cybersecurity access",
+  "S’applique à OpenAI et ChatGPT uniquement. Daybreak nécessite une autorisation OpenAI pour le compte, le projet, le modèle et cette intégration. Aucun abonnement ni réglage ne débloque ces droits automatiquement.": "Applies to OpenAI and ChatGPT only. Daybreak requires OpenAI approval for the account, project, model and this integration. A subscription or setting does not automatically grant access.",
+
   "Ouvrez cette conversation dans l’IDE, puis choisissez « Utiliser la conversation active ».": "Open this conversation in the IDE, then choose Use active conversation.",
   "Connexion": "Sign in",
   "Adresse email": "Email address",

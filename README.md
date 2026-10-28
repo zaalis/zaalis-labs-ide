@@ -51,6 +51,39 @@ A Claude/Codex-style JSON file (`mcpServers`) can be imported, and **Test connec
 
 The code is in `src/agent/mcp-registry.js` (validation, both transports), `src/agent/rust-agent-bridge.js` (configuration handed to the Rust core) and `rust/crates/zaalis-extensions/src/mcp.rs` (the runtime client).
 
+## Skills and reverse engineering
+
+**Settings → Skills** lists the built-in workflow, personal imports and the active
+project's `.zaalis/skills/<name>/SKILL.md` files. Import a Markdown file with
+`name` and `description` in its YAML front matter (up to 256 KiB). Instructions
+are previewed as text. Skills can be disabled per account; changes apply on the
+next agent turn. Project skills override personal skills with the same name,
+except for the reserved built-in `revers` workflow. Supporting scripts are not
+installed or executed by importing a Markdown file.
+
+- `/skills` opens the manager.
+- `/skill <name> <request>` explicitly loads an enabled skill for a new workflow.
+- `/revers [target or objective]` analyzes the active project with read-only
+  permissions, gathering architecture, dependencies and evidence.
+- `/revers --dynamic <authorized test>` also allows guarded execution with the
+  selected permission mode. Persistent applications use the existing `process`
+  tool (start, poll, kill); the workflow must stop its own test processes.
+
+Reverse engineering support depends on available source, formats and tools. It
+does not reconstruct the exact original source of every compiled application.
+
+**Settings → Keys and subscriptions → OpenAI cybersecurity access** selects
+Standard, Daybreak Blue or Daybreak Red for OpenAI Responses requests. OpenAI
+checks the model and the account/project's approved access; a refused request is
+never silently downgraded. Other compatible providers keep their own protocols.
+
+New ChatGPT connections use the official browser/PKCE Sign in with ChatGPT flow
+and the public Responses endpoint. Existing Codex device sessions remain usable
+for standard requests; reconnect to request Daybreak through the public flow.
+OAuth identity signatures, issuer, audience, nonce and granted plan-use scopes
+are checked before saving the encrypted session. Actual plan and Daybreak access
+remain subject to OpenAI eligibility and approval.
+
 ## Blender
 
 **Settings → MCP → Blender** links the agent to Blender, with nothing to install outside the IDE:

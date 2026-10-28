@@ -28,7 +28,7 @@ function modelCapabilities(provider, model, options = {}) {
 
   if (id === 'codex') {
     result.vision = !/^(o1|o3-mini|o4-mini)/.test(lower);
-    if (/^(gpt-5|o1|o3|o4)/.test(lower)) result.reasoning.mode = 'effort';
+    if (/^(gpt-[56]|gpt-daybreak|o1|o3|o4)/.test(lower)) result.reasoning.mode = 'effort';
   } else if (id === 'claude') {
     result.vision = true;
     if (/opus|sonnet|fable/.test(lower)) result.reasoning.mode = 'effort';

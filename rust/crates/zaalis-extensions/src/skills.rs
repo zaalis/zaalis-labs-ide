@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,10 +29,22 @@ pub struct SkillRegistry {
 impl SkillRegistry {
     pub fn load(workspace: &zaalis_fs::Workspace, user_root: Option<&Path>) -> Result<Self> {
         let mut registry = Self::default();
-        let project = workspace.root().join(".zaalis").join("skills");
-        registry.load_root(&project)?;
         if let Some(root) = user_root {
             registry.load_root(&root.join("skills"))?;
+        }
+        let builtin = registry.skills.get("revers").cloned();
+        let project = workspace.root().join(".zaalis").join("skills");
+        registry.load_root(&project)?;
+        if let Some(skill) = builtin { registry.skills.insert("revers".into(), skill); }
+        if let Some(root) = user_root {
+            let file = root.join("disabled-skills.json");
+            if file.exists() {
+                if fs::symlink_metadata(&file)?.file_type().is_symlink() || fs::metadata(&file)?.len() > MAX_SKILL_BYTES {
+                    return Err(ZaalisError::invalid("configuration de Skills invalide"));
+                }
+                let disabled: BTreeSet<String> = serde_json::from_str(&fs::read_to_string(file)?)?;
+                registry.skills.retain(|name, _| !disabled.contains(name));
+            }
         }
         Ok(registry)
     }
@@ -40,6 +52,13 @@ impl SkillRegistry {
     fn load_root(&mut self, root: &Path) -> Result<()> {
         if !root.exists() {
             return Ok(());
+        }
+        let mut ancestor = Some(root);
+        while let Some(path) = ancestor {
+            if fs::symlink_metadata(path)?.file_type().is_symlink() {
+                return Err(ZaalisError::invalid("dossier de Skills symbolique refusé"));
+            }
+            ancestor = path.parent().filter(|p| !p.as_os_str().is_empty());
         }
         let root = dunce::canonicalize(root)?;
         for entry in fs::read_dir(&root)? {
@@ -61,7 +80,7 @@ impl SkillRegistry {
             if fs::metadata(&file)?.len() > MAX_SKILL_BYTES {
                 return Err(ZaalisError::invalid("Skill trop volumineuse"));
             }
-            let instructions = fs::read_to_string(&file)?;
+            let instructions = fs::read_to_string(&file)?.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n");
             let (name, description) =
                 metadata(&instructions, entry.file_name().to_string_lossy().as_ref());
             if !valid_name(&name) {
@@ -111,10 +130,10 @@ fn metadata(content: &str, fallback: &str) -> (String, String) {
     {
         for line in front.lines() {
             if let Some(value) = line.strip_prefix("name:") {
-                name = value.trim().trim_matches('"').to_owned();
+                name = value.trim().trim_matches(&['"', '\''][..]).to_owned();
             }
             if let Some(value) = line.strip_prefix("description:") {
-                description = value.trim().trim_matches('"').to_owned();
+                description = value.trim().trim_matches(&['"', '\''][..]).to_owned();
             }
         }
     }
@@ -132,6 +151,8 @@ fn metadata(content: &str, fallback: &str) -> (String, String) {
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 80
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && !name.contains("..")
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
@@ -195,6 +216,25 @@ impl Tool for SkillTool {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn windows_metadata_disabled_skills_and_project_precedence() {
+        let dir = TempDir::new().unwrap();
+        let project = dir.path().join("project");
+        let user = dir.path().join("user");
+        for (base, content) in [(&project.join(".zaalis"), "project"), (&user, "user")] {
+            let root = base.join("skills/review");
+            fs::create_dir_all(&root).unwrap();
+            fs::write(root.join("SKILL.md"), format!("---\r\nname: 'review'\r\ndescription: {content}\r\n---\r\n# Instructions")).unwrap();
+        }
+        let workspace = zaalis_fs::Workspace::open(&project).unwrap();
+        let registry = SkillRegistry::load(&workspace, Some(&user)).unwrap();
+        assert_eq!(registry.get("review").unwrap().description, "project");
+        fs::write(user.join("disabled-skills.json"), "[\"review\"]").unwrap();
+        assert!(SkillRegistry::load(&workspace, Some(&user)).unwrap().get("review").is_none());
+        assert!(!valid_name(".."));
+        assert!(!valid_name("../outside"));
+    }
 
     #[test]
     fn project_and_user_skills_load_without_following_symlinks() {

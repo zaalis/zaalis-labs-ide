@@ -55,7 +55,7 @@ let legacyApiKeysForMigration = null;
 // Sub-model options per provider — real/current API models only, NEWEST FIRST.
 // The first entry of each list is the default selection when that provider is chosen.
 const SUBMODELS = {
-    codex:  ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
+    codex:  ['gpt-5.6-sol', 'gpt-6-luna', 'gpt-6-sol', 'gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
     claude: ['claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
     gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
     grok:   ['grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
@@ -67,7 +67,7 @@ const SUBMODELS = {
 
 // Human-friendly display names (dots, not dashes). Falls back to the raw id.
 const MODEL_LABELS = {
-    'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
+    'gpt-6-luna': 'GPT-6 Luna', 'gpt-6-sol': 'GPT-6 Sol', 'gpt-daybreak-blue-latest': 'Daybreak Blue', 'gpt-daybreak-red-latest': 'Daybreak Red', 'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
     'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
     'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
     'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
@@ -122,7 +122,7 @@ function modelIdentity(model, submodel, lang) {
 // Context window (tokens) per model — aligned with official developer API key limits.
 const CONTEXT_WINDOWS = {
     codex: {
-        'gpt-5.6-sol': 1050000,
+        'gpt-6-luna': 1050000, 'gpt-6-sol': 1050000, 'gpt-daybreak-blue-latest': 1050000, 'gpt-daybreak-red-latest': 400000, 'gpt-5.6-sol': 1050000,
         'gpt-5.6-terra': 1050000,
         'gpt-5.6-luna': 1050000,
         'gpt-5.5': 1050000,

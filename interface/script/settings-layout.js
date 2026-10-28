@@ -7,6 +7,7 @@
         models:{label:text('Modèles','Models'),panes:['models']},
         api:{label:text('Clés et abonnements','Keys and subscriptions'),panes:['api']},
         mcp:{label:'MCP',panes:['mcp']},
+        skills:{label:'Skills',panes:['skills']},
         hardware:{label:text('Matériel','Hardware'),panes:['hardware']},
         vm:{label:text('Machines virtuelles','Virtual machines'),panes:['vm']},
         integrations:{label:text('Intégrations','Integrations'),panes:['integrations']},

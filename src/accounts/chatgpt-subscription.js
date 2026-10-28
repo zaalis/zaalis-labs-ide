@@ -81,9 +81,10 @@ function sessionFromTokens(tokens, previous) {
   const profile = access['https://api.openai.com/profile'] || {};
   const plan = authClaims(tokens.id_token).chatgpt_plan_type || authClaims(accessToken).chatgpt_plan_type;
   return {
+    ...(previous || {}),
     accessToken,
     refreshToken: String(tokens.refresh_token || (previous && previous.refreshToken) || '').trim(),
-    expiresAt: Number(access.exp) > 0 ? Number(access.exp) * 1000 : 0,
+    expiresAt: Number(tokens.expires_in) > 0 ? Date.now() + Number(tokens.expires_in) * 1000 : Number(access.exp) > 0 ? Number(access.exp) * 1000 : 0,
     email: String(id.email || profile.email || (previous && previous.email) || ''),
     plan: String(plan || (previous && previous.plan) || ''),
     connectedAt: (previous && previous.connectedAt) || new Date().toISOString(),
@@ -181,10 +182,10 @@ async function pollDeviceCode({ deviceAuthId, userCode }, { fetchImpl = fetch } 
 // before anything else uses the old one, and must not run two refreshes at once.
 async function refreshSession(session, { fetchImpl = fetch } = {}) {
   if (!session || !session.refreshToken) throw fail(401, 'Session ChatGPT expirée. Reconnectez votre abonnement.', { relogin: true });
-  const response = await fetchImpl(`${issuer()}/oauth/token`, {
+  const response = await fetchImpl(`${issuer()}${session.transport === 'public' ? '/api/accounts/oauth/token' : '/oauth/token'}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json', 'User-Agent': userAgent },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: session.refreshToken, client_id: CLIENT_ID }),
+    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: session.refreshToken, client_id: session.clientId || CLIENT_ID, ...(session.transport === 'public' ? { resource: 'https://api.openai.com/v1' } : {}) }),
     signal: AbortSignal.timeout(20000),
   });
   if (response.status === 429) throw fail(429, 'OpenAI limite temporairement le renouvellement de la session. Réessayez dans une minute.');
@@ -207,7 +208,13 @@ async function refreshSession(session, { fetchImpl = fetch } = {}) {
 
 // The endpoint gates models on a Codex client version: ask as the newest
 // client first, then as the ungated legacy sentinel.
-async function listModels(accessToken, { fetchImpl = fetch } = {}) {
+async function listModels(accessToken, { fetchImpl = fetch, publicApi = false } = {}) {
+  if (publicApi) {
+    const response = await fetchImpl(`${publicBaseUrl()}/models`, { headers: { Authorization: `Bearer ${accessToken}` }, signal: AbortSignal.timeout(10000) });
+    if (!response.ok) throw await upstreamError(response);
+    const data = await response.json();
+    return (data.models || []).filter(m => m.visibility === 'list' && typeof m.slug === 'string').map(m => m.slug);
+  }
   for (const version of ['99.0.0', '0.0.0']) {
     const response = await fetchImpl(`${baseUrl()}/models?client_version=${version}`, {
       headers: { ...backendHeaders(accessToken), Accept: 'application/json' },
@@ -268,7 +275,7 @@ function clampCallId(id) {
 
 const EFFORTS = new Set(['none', 'low', 'medium', 'high', 'xhigh', 'max']);
 
-function toResponsesRequest(chat, { cacheScope = '' } = {}) {
+function toResponsesRequest(chat, { cacheScope = '', publicApi = false, subscription = false, cyber = 'standard' } = {}) {
   const body = chat && typeof chat === 'object' ? chat : {};
   const model = String(body.model || '').trim();
   if (!model) throw fail(400, 'Modèle ChatGPT requis.');
@@ -353,6 +360,13 @@ function toResponsesRequest(chat, { cacheScope = '' } = {}) {
   // this is what lets the backend reuse its prompt cache from turn to turn.
   request.prompt_cache_key = crypto.createHash('sha256')
     .update(`${cacheScope}\n${request.instructions}\n${firstUserText}`).digest('hex').slice(0, 32);
+  if (publicApi) {
+    if (!['standard', 'daybreak_blue', 'daybreak_red'].includes(cyber)) throw fail(400, 'Programme Daybreak invalide.');
+    request.access_programs = { cyber };
+    if (subscription && request.tools) request.tools = [{ type: 'namespace', name: 'zaalis', description: 'Local Zaalis tools', tools: request.tools }];
+  } else if (cyber !== 'standard') {
+    throw fail(409, 'Reconnectez ChatGPT avec la connexion officielle pour demander Daybreak.');
+  }
   return request;
 }
 
@@ -517,13 +531,14 @@ async function upstreamError(response) {
 
 // Opens the streamed Responses call. Resolves with the fetch Response on
 // success and throws a shaped error otherwise.
-async function openResponseStream(accessToken, request, { signal, fetchImpl = fetch } = {}) {
+const publicBaseUrl = () => loopbackOverride('ZAALIS_OPENAI_BASE_URL', 'https://api.openai.com/v1');
+async function openResponseStream(accessToken, request, { signal, fetchImpl = fetch, publicApi = false } = {}) {
   let response;
   try {
-    response = await fetchImpl(`${baseUrl()}/responses`, {
+    response = await fetchImpl(`${publicApi ? publicBaseUrl() : baseUrl()}/responses`, {
       method: 'POST',
       headers: {
-        ...backendHeaders(accessToken),
+        ...(publicApi ? { Authorization: `Bearer ${accessToken}`, 'User-Agent': userAgent } : backendHeaders(accessToken)),
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
         session_id: request.prompt_cache_key,
@@ -542,7 +557,7 @@ async function openResponseStream(accessToken, request, { signal, fetchImpl = fe
 
 module.exports = {
   CLIENT_ID, DEFAULT_MODELS, DEFAULT_BASE_URL,
-  setVersion, jwtClaims, needsRefresh,
+  setVersion, jwtClaims, needsRefresh, sessionFromTokens, issuer, publicBaseUrl,
   requestDeviceCode, pollDeviceCode, refreshSession, listModels,
   toResponsesRequest, createSseReader, createChunkTranslator, openResponseStream,
 };

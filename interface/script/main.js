@@ -394,7 +394,8 @@ function renderChatgptAccount(account) {
         ? chatgptSubText(uiText('Abonnement ChatGPT actif'), 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
         : chatgptSubText(uiText('Non connecté'), 'Not connected');
     status.classList.toggle('connected', connected);
-    $('#chatgpt-sub-connect').hidden = connected || !!chatgptSub.flow;
+    $('#chatgpt-sub-connect').hidden = (connected && account.transport === 'public') || !!chatgptSub.flow;
+    $('#chatgpt-sub-connect').textContent = connected ? chatgptSubText('Reconnecter avec ChatGPT', 'Reconnect with ChatGPT') : 'Continue with ChatGPT';
     $('#chatgpt-sub-disconnect').hidden = !connected;
 }
 function showChatgptError(message) {
@@ -405,8 +406,10 @@ function showChatgptError(message) {
 }
 function stopChatgptFlow() {
     clearTimeout(chatgptSub.timer);
+    const pending = chatgptSub.flow;
     chatgptSub.flow = null;
     chatgptSub.timer = null;
+    if (pending?.modern) fetch('/api/chatgpt/sign-in', { method: 'DELETE' }).catch(() => {});
     const panel = $('#chatgpt-sub-flow');
     if (panel) panel.hidden = true;
 }
@@ -429,7 +432,7 @@ async function pollChatgptFlow() {
     if (!flow) return;
     let data = null;
     try {
-        const response = await fetch('/api/chatgpt/device-poll', {
+        const response = await fetch(flow.modern ? '/api/chatgpt/sign-in/status' : '/api/chatgpt/device-poll', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ flowId: flow.flowId })
         });
@@ -456,11 +459,13 @@ async function startChatgptFlow() {
     showChatgptError('');
     button.disabled = true;
     try {
-        const response = await fetch('/api/chatgpt/device-start', { method: 'POST' });
+        const response = await fetch('/api/chatgpt/sign-in', { method: 'POST' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || chatgptSubText(uiText('Connexion impossible.'), 'Sign-in failed.'));
-        chatgptSub.flow = data;
-        $('#chatgpt-sub-code').textContent = data.userCode;
+        chatgptSub.flow = { ...data, modern: true };
+        $('#chatgpt-sub-code').textContent = '';
+        $('#chatgpt-sub-code').hidden = true;
+        $('#chatgpt-sub-copy').hidden = true;
         $('#chatgpt-sub-flow').hidden = false;
         button.hidden = true;
         chatgptSub.timer = setTimeout(pollChatgptFlow, data.interval * 1000);

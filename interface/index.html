@@ -680,6 +680,9 @@
             <button class="settings-nav-item" type="button" data-settings-section="mcp">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg><span>MCP</span>
             </button>
+            <button class="settings-nav-item" type="button" data-settings-section="skills">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/></svg><span>Skills</span>
+            </button>
             <div class="settings-nav-label" data-i18n="settings-zside-category">zaalis IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
@@ -795,16 +798,16 @@
                     </div>
                     <hr class="settings-separator">
                     <h3 id="chatgpt-sub-title">Abonnement ChatGPT (Plus / Pro)</h3>
-                    <p class="form-hint">Utilisez les modèles GPT avec votre abonnement ChatGPT plutôt qu’une clé API facturée au token. La connexion se fait sur le site d’OpenAI avec un code : zaalis ne voit jamais votre mot de passe, et la session est chiffrée sur ce PC.</p>
+                    <p class="form-hint">Utilisez les modèles disponibles dans votre forfait ChatGPT. Validez la connexion et les permissions sur le site OpenAI ; la session reste chiffrée sur ce PC. La disponibilité dépend du compte et de l’éligibilité de cette application locale.</p>
                     <div class="chatgpt-sub" id="chatgpt-sub">
                         <div class="settings-status-row"><span>État</span><strong id="chatgpt-sub-status">Non connecté</strong></div>
                         <div class="chatgpt-sub-actions">
-                            <button class="btn btn-primary" id="chatgpt-sub-connect" type="button">Connecter mon abonnement ChatGPT</button>
+                            <button class="btn btn-primary" id="chatgpt-sub-connect" type="button">Continue with ChatGPT</button>
                             <button class="btn btn-ghost" id="chatgpt-sub-disconnect" type="button" hidden>Déconnecter</button>
                         </div>
                         <div class="chatgpt-sub-flow" id="chatgpt-sub-flow" hidden>
                             <p class="chatgpt-sub-step">1. Ouvrez la page de connexion OpenAI et connectez-vous à votre compte ChatGPT.</p>
-                            <p class="chatgpt-sub-step">2. Saisissez ce code :</p>
+                            <p class="chatgpt-sub-step">2. Autorisez l’utilisation de votre forfait, puis revenez dans Zaalis Labs.</p>
                             <div class="chatgpt-sub-code" id="chatgpt-sub-code" aria-live="polite"></div>
                             <div class="chatgpt-sub-actions">
                                 <button class="btn btn-primary" id="chatgpt-sub-open" type="button">Ouvrir la page OpenAI</button>
@@ -815,6 +818,16 @@
                         </div>
                         <p class="chatgpt-sub-error" id="chatgpt-sub-error" role="alert" hidden></p>
                     </div>
+                    <div class="cyber-controls">
+                        <label for="cyber-program">Accès cybersécurité OpenAI</label>
+                        <select id="cyber-program">
+                            <option value="standard">Standard</option>
+                            <option value="daybreak_blue">Daybreak Blue</option>
+                            <option value="daybreak_red">Daybreak Red</option>
+                        </select>
+                        <p class="form-hint">S’applique à OpenAI et ChatGPT uniquement. Daybreak nécessite une autorisation OpenAI pour le compte, le projet, le modèle et cette intégration. Aucun abonnement ni réglage ne débloque ces droits automatiquement.</p>
+                        <p id="cyber-status" class="form-hint" role="status" aria-live="polite"></p>
+                    </div>
                     <hr class="settings-separator">
                     <h3 id="compat-settings-title">Autres fournisseurs (compatibles OpenAI)</h3>
                     <p class="form-hint">Appel direct depuis ce PC vers le fournisseur choisi. Les clés sont chiffrées localement et ne passent par aucun service tiers. Un fournisseur apparaît dans la liste des modèles dès que sa clé est enregistrée.</p>
@@ -824,6 +837,18 @@
                     <h3 id="account-subscriptions-title">Compatibles abonnement</h3>
                     <p class="form-hint">Connectez votre compte directement sur le site du fournisseur. L’IDE garde les jetons chiffrés sur ce PC et affiche les modèles après la connexion. L’accès dépend du forfait et des droits accordés par le fournisseur.</p>
                     <div id="account-subscriptions" class="account-subscriptions"></div>
+                </section>
+
+                <section class="settings-card settings-pane" data-settings-pane="skills">
+                    <h3>Skills</h3>
+                    <p class="form-hint">Des instructions réutilisables pour vos agents. Les skills du projet sont chargées depuis .zaalis/skills. Les imports restent dans votre bibliothèque personnelle.</p>
+                    <div class="skills-toolbar">
+                        <input type="search" id="skills-filter" class="compat-filter" placeholder="Rechercher une skill…" aria-label="Rechercher une skill">
+                        <label class="btn btn-primary skills-import-label">Importer SKILL.md<input type="file" id="skills-import" accept=".md,text/markdown" aria-label="Importer un fichier SKILL.md"></label>
+                        <button class="btn btn-ghost" id="skills-refresh" type="button">Actualiser</button>
+                    </div>
+                    <p id="skills-status" class="form-hint skills-status" role="status" aria-live="polite"></p>
+                    <div id="skills-list" class="skills-list" aria-busy="false"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -1411,10 +1436,10 @@
 
 <script src="catalog.js?v=1.0.16"></script>
 <script src="help.js?v=1.0.17"></script>
-<script src="script/state.js?v=20261015.7" defer></script>
-<script src="script/locale.js?v=20261015.7" defer></script>
+<script src="script/state.js?v=20261027.1" defer></script>
+<script src="script/locale.js?v=20261027.1" defer></script>
 <script src="script/ui.js?v=20261015.7" defer></script>
-<script src="script/commands.js?v=20261015.7" defer></script>
+<script src="script/commands.js?v=20261027.1" defer></script>
 <script src="script/timeline.js?v=20261015.7" defer></script>
 <script src="script/collaboration-ui.js?v=20261015.7" defer></script>
 <script src="script/pending-queue.js?v=20261015.7" defer></script>
@@ -1423,7 +1448,7 @@
 <script src="script/ai.js?v=20261015.7" defer></script>
 <script src="script/remote.js?v=20261015.7" defer></script>
 <script src="script/ui-foundation.js?v=20261015.7" defer></script>
-<script src="script/main.js?v=20261015.7" defer></script>
+<script src="script/main.js?v=20261027.1" defer></script>
 <script src="script/agent-catalog.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
 <link rel="stylesheet" href="vm.css?v=20261015.7">
@@ -1446,7 +1471,7 @@
 <script src="script/welcome.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="design-system.css?v=20261015.7">
 <link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
-<script src="script/settings-layout.js?v=20261015.7" defer></script>
+<script src="script/settings-layout.js?v=20261027.1" defer></script>
 <script src="script/settings-persistence.js?v=20261015.7" defer></script>
 <script src="script/inline-approval.js?v=20261015.7" defer></script>
 <script src="script/command-palette.js?v=20261015.7" defer></script>
@@ -1454,5 +1479,7 @@
 <script src="script/project-actions.js?v=20261015.7" defer></script>
 <script src="script/shell-layout.js?v=20261015.7" defer></script>
 <script src="script/ui-accessibility.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="skills.css?v=20261027.1">
+<script src="script/skills.js?v=20261027.1" defer></script>
 </body>
 </html>

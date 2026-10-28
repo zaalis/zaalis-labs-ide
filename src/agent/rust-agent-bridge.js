@@ -8,6 +8,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const mcpRegistry = require('./mcp-registry');
+const { SkillsStore } = require('./skills-store');
 // Noms de méthodes et étiquettes d'événements générés depuis
 // rust/crates/zaalis-protocol.  Les retaper ici serait le bug silencieux
 // classique : le cœur émet un événement que personne ne rend, sans erreur.
@@ -211,6 +212,7 @@ class RustAgentBridge {
     this.executable = findAgentd(baseDir);
     this.clients = new Map();
     this.sessions = new Map();
+    this.skillRevisions = new Map();
   }
 
   status() { return { enabled: this.enabled, available: !!this.executable, executable: this.executable ? path.basename(this.executable) : '' }; }
@@ -291,6 +293,9 @@ class RustAgentBridge {
   }
 
   async _run(options, onEvent) {
+    const skills = new SkillsStore(this.dataDir);
+    const skillRevision = skills.revision(options.userId, options.root);
+    if (options.sessionId && this.skillRevisions.has(options.sessionId) && this.skillRevisions.get(options.sessionId) !== skillRevision) options = { ...options, sessionId: undefined };
     const client = this._client(options.userId, options.keys, options.mcpServers, options.runtimeConfig);
     const create = {
       root: options.root,
@@ -335,6 +340,7 @@ class RustAgentBridge {
     })) made = null;
     if (!made) made = await client.request('session.create', create);
     const sessionId = made.session_id;
+    this.skillRevisions.set(sessionId, skillRevision);
     onEvent({ type: 'run_started', runId: sessionId, sessionId, conversationId: options.conversationId || null, resumed: !!made.resumed });
     for (const agent of made.agents || []) {
       onEvent({ type: 'rust_event', event: { type: 'agent_spawned', agent } });
