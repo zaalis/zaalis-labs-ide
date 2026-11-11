@@ -546,6 +546,8 @@ const TOOLS = [
     description: 'Annule les dernières étapes de l’historique de Blender (1 par défaut, 20 au plus) : chaque appel à execute_python ou focus_object en est une. Pour revenir sur une action ratée.' },
   { name: 'execute_python', raw: true, after: UNDO_PUSH('execute_python'), inputSchema: object({ code: { type: 'string' } }, ['code']),
     description: 'Exécute du code Python dans Blender (module bpy), sur le fil principal. Pour renvoyer une valeur, l’affecter à la variable `result` (dictionnaire sérialisable en JSON). Ce qui est imprimé avec print() est renvoyé aussi. Sert à tout ce que les autres outils ne font pas : créer, modifier, animer, enregistrer.' },
+  { name: 'execute_python_background', local: true, inputSchema: object({ code: { type: 'string' }, path: { type: 'string' }, save: { type: 'boolean' }, timeout_seconds: { type: 'integer', minimum: 5, maximum: 600 } }, ['code']),
+    description: 'Exécute du code Python arbitraire dans un Blender sans fenêtre, séparé de celui de l’utilisateur : sur un fichier .blend (chemin absolu dans `path`, ses scripts intégrés désactivés) ou sur une scène vide. Affecter la valeur de retour à `result` ; print() est renvoyé. `save=true` enregistre le fichier ouvert à la fin. Pour traiter des fichiers en lot, faire des rendus ou des conversions sans toucher la scène ouverte.' },
   { name: 'inspect_blend_file', local: true, inputSchema: object({ path: { type: 'string' } }, ['path']),
     description: 'Analyse un autre fichier .blend sans l’ouvrir dans Blender (un Blender sans fenêtre le lit, ses scripts désactivés) : état du fichier, inventaire des données, fichiers manquants, bibliothèques liées. Chemin absolu requis.' },
 ];

@@ -296,3 +296,14 @@ body[data-workspace-mode="chat"] :is(#view-chat,#view-agents) .chat-input-area{w
 .ws-discussion-messages{flex:1;min-height:80px;overflow:auto;padding:12px}.ws-discussion-empty{color:var(--ws-muted);font-size:13px;line-height:1.6;padding:16px 8px}
 .ws-discussion-form{flex:none;display:grid;gap:8px;padding:12px;border-top:1px solid var(--border)}.ws-discussion-form textarea{resize:vertical;min-height:76px;max-height:180px;border:1px solid var(--border);border-radius:var(--radius-field);background:var(--bg-0);color:var(--text-0);padding:8px;font:inherit}.ws-discussion-status{font-size:12px;color:var(--ws-muted);margin:0}.ws-discussion-form .ws-button{justify-self:end}.ws-other-message>div{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(prefers-reduced-motion:reduce){.ws-project-chats,.ws-project-chevron,.profile-popup{transition:none}}
+
+/* Layout switch: one highlight that slides between Éditeur and Chat IDE. */
+.workspace-modes{position:relative;isolation:isolate}
+.workspace-modes .ws-mode-indicator{position:absolute;top:4px;bottom:4px;left:4px;width:0;border-radius:calc(var(--radius-field) - 2px);background:var(--bg-hover);box-shadow:0 1px 2px rgba(0,0,0,.35);z-index:-1;opacity:0;pointer-events:none}
+.workspace-modes.is-ready .ws-mode-indicator{opacity:1;transition:transform .28s cubic-bezier(.3,.7,.2,1),width .28s cubic-bezier(.3,.7,.2,1)}
+.workspace-modes .ws-button,.workspace-modes .ws-button[aria-pressed="true"],.workspace-modes .ws-button:hover{background:transparent!important;transition:color .2s}
+.workspace-modes .ws-button{color:var(--text-2)}
+.workspace-modes .ws-button:hover,.workspace-modes .ws-button[aria-pressed="true"]{color:var(--text-0)}
+@media(prefers-reduced-motion:reduce){.workspace-modes.is-ready .ws-mode-indicator{transition:none}}
+/* Collapsed sidebar: the files/chats switch stays at the bottom, right above the profile. */
+#sidebar .ws-view-switch+.sidebar-profile,#sidebar.collapsed .ws-view-switch+.sidebar-profile{margin-top:0}

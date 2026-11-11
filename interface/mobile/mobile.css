@@ -178,3 +178,5 @@ button{font-family:inherit;}
 /* toast */
 .toast{position:fixed;left:50%;bottom:calc(24px + var(--safe-bottom));transform:translateX(-50%);z-index:200;background:var(--bg-3);color:var(--text-0);font-size:12.5px;padding:10px 16px;border-radius:20px;border:1px solid var(--border);box-shadow:0 8px 24px rgba(0,0,0,.5);opacity:0;transition:opacity .2s;pointer-events:none;max-width:80%;text-align:center;}
 .toast.show{opacity:1;}
+.link-banner{position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 8px);transform:translate(-50%,-140%);z-index:95;padding:6px 14px;border-radius:999px;background:var(--bg-2,#1d1d22);color:var(--text-1,#ccc);font-size:12px;box-shadow:0 6px 20px rgba(0,0,0,.35);transition:transform .25s ease;pointer-events:none}
+.link-banner.show{transform:translate(-50%,0)}

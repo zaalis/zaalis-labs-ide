@@ -105,10 +105,24 @@ function populateTerminalProfiles(profiles) {
         option.disabled = !profile.available;
         return option;
     }));
+    if (!profiles.length) {
+        const empty = document.createElement('option');
+        empty.value = ''; empty.disabled = true;
+        empty.textContent = uiText('Aucun terminal détecté sur ce PC');
+        select.append(empty);
+    }
     const saved = state.config.terminalProfile;
     state.config.terminalProfile = profiles.some(profile => profile.id === saved && profile.available) ? saved : terminalProfileDefault();
-    select.value = state.config.terminalProfile;
+    select.value = state.config.terminalProfile || '';
+    select._customSelectRefresh?.();
 }
+// The list comes from the server: if it was not loaded yet (slow start, signed
+// in after the page opened, transient error), fetch it again when Settings opens.
+document.addEventListener('click', event => {
+    if (!event.target.closest?.('#settings-btn, .settings-nav-item')) return;
+    const select = document.getElementById('settings-terminal-profile');
+    if (select && !select.querySelector('option[value]:not([value=""])')) loadSharedHardwareConfig();
+}, true);
 
 function applySharedHardwareConfig(config) {
     if (!config || typeof config !== 'object') return;

@@ -132,6 +132,30 @@ async function blenderPython(exe, script, env = process.env, { file = '', extraE
   if (!line) throw connectError('blender-script', 'Blender n’a pas répondu comme prévu.');
   return JSON.parse(line.slice(MARKER.length));
 }
+// Wrapper for execute_python_background: runs the user's code, captures
+// print() output and `result`, optionally saves, and prints one JSON line.
+const BACKGROUND_SCRIPT = [
+  'import bpy, json, os, io, sys, traceback, contextlib',
+  'ns = {"__name__": "__main__", "bpy": bpy}',
+  'buf = io.StringIO()',
+  'out = {"status": "ok"}',
+  'try:',
+  '    with contextlib.redirect_stdout(buf):',
+  '        exec(compile(os.environ["ZAALIS_USER_CODE"], "<zaalis-background>", "exec"), ns)',
+  '    value = ns.get("result")',
+  '    try:',
+  '        json.dumps(value)',
+  '        out["result"] = value',
+  '    except Exception:',
+  '        out["result"] = repr(value)',
+  '    if os.environ.get("ZAALIS_SAVE") == "1":',
+  '        bpy.ops.wm.save_mainfile()',
+  '        out["saved"] = True',
+  'except Exception:',
+  '    out = {"status": "error", "message": traceback.format_exc()}',
+  'out["stdout"] = buf.getvalue()[-20000:]',
+  `print("${MARKER}" + json.dumps(out))`,
+].join('\n');
 const READ_PREFS = [
   'import bpy, json',
   'prefs = bpy.context.preferences',
@@ -386,6 +410,34 @@ function create(options = {}) {
     return images;
   }
 
+  // execute_python_background: arbitrary Python in a windowless Blender, on a
+  // given .blend or an empty scene. The user's open Blender is never touched.
+  async function runBackground(input) {
+    const code = String(input.code || '');
+    if (!code.trim()) return toolText('Le paramètre `code` est requis.', true);
+    const file = input.path ? String(input.path) : '';
+    if (file && (!path.isAbsolute(file) || !/\.blend\d*$/i.test(file) || !isFile(file))) return toolText('`path` doit être le chemin absolu d’un fichier .blend existant.', true);
+    if (input.save && !file) return toolText('`save=true` nécessite `path`.', true);
+    const found = await blender();
+    if (!found) return toolText('Blender est introuvable sur ce PC.', true);
+    const timeout = Math.min(600, Math.max(5, Number(input.timeout_seconds) || 120)) * 1000;
+    const started = Date.now();
+    try {
+      const output = await run(found.exe, ['--background', ...(file ? ['--disable-autoexec', file] : ['--factory-startup']), '--python-expr', "import os;exec(os.environ['ZAALIS_BLENDER_SCRIPT'])"],
+        { timeout, env: { ...env, ZAALIS_BLENDER_SCRIPT: BACKGROUND_SCRIPT, ZAALIS_USER_CODE: code, ZAALIS_SAVE: input.save ? '1' : '' } });
+      const line = output.split(/\r?\n/).reverse().find((entry) => entry.startsWith(MARKER));
+      if (!line) return toolText({ error: 'Blender n’a pas renvoyé de résultat.', stdout: output.slice(-4000) }, true);
+      const reply = JSON.parse(line.slice(MARKER.length));
+      const payload = { result: reply.result === undefined ? null : reply.result, ...(file ? { path: file, saved: !!reply.saved } : {}), timing: { total_ms: Date.now() - started } };
+      if (reply.stdout) payload.stdout = String(reply.stdout).slice(-20_000);
+      if (reply.status !== 'ok') return toolText({ error: String(reply.message || 'Erreur Python').slice(-6000), ...(reply.stdout ? { stdout: String(reply.stdout).slice(-4000) } : {}) }, true);
+      return toolText(payload, false);
+    } catch (error) {
+      const detail = error.killed ? `Délai dépassé (${timeout / 1000} s).` : String(error.message || error).slice(0, 400);
+      return toolText({ error: detail, ...(error.stdout ? { stdout: String(error.stdout).slice(-4000) } : {}) }, true);
+    }
+  }
+
   // inspect_blend_file: summaries of another .blend, read by a windowless
   // Blender so the file open in the user's Blender is left alone.
   async function inspectFile(input) {
@@ -406,6 +458,7 @@ function create(options = {}) {
     if (!tool) return toolText(`Outil Blender inconnu : ${name}`, true);
     const input = args && typeof args === 'object' ? args : {};
     try { validateInput(input, tool.inputSchema); } catch (error) { return toolText(error.message, true); }
+    if (tool.name === 'execute_python_background') return runBackground(input);
     if (tool.local) return inspectFile(input);
     if (tool.raw && !String(input.code || '').trim()) return toolText('Le paramètre `code` est requis.', true);
     // Arguments reach Python as JSON text: a JSON string literal is also a

@@ -4136,7 +4136,13 @@ let cfProc = null;        // cloudflared child process
 let cfUrl = null;         // https://xxx.trycloudflare.com (null when down)
 let cfStartedAt = 0;
 let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
-let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
+// The epoch survives restarts: a phone revoked by "stop" stays revoked, and a
+// paired phone keeps its session when the IDE restarts.
+const MOBILE_EPOCH_FILE = path.join(DATA_DIR, 'mobile-epoch');
+let mobileEpoch = (() => { try { const n = parseInt(fs.readFileSync(MOBILE_EPOCH_FILE, 'utf8'), 10); return Number.isSafeInteger(n) && n > 0 ? n : 1; } catch { return 1; } })();
+function bumpMobileEpoch() { mobileEpoch++; try { fs.writeFileSync(MOBILE_EPOCH_FILE, String(mobileEpoch)); } catch {} }
+let tunnelWanted = false;   // true between a user "start" and "stop"
+let tunnelRestartTimer = null, tunnelRestarts = 0;
 let tunnelProxy = null;
 let tunnelProxyPort = 0;
 
@@ -4224,7 +4230,9 @@ function ensureTunnelProxy() {
 }
 
 function stopTunnel() {
-  mobileEpoch++;                       // every paired phone is now logged out
+  tunnelWanted = false;
+  if (tunnelRestartTimer) { clearTimeout(tunnelRestartTimer); tunnelRestartTimer = null; }
+  bumpMobileEpoch();                   // every paired phone is now logged out
   if (cfProc) { try { cfProc.kill(); } catch {} }
   if (tunnelProxy) { try { tunnelProxy.close(); } catch {} }
   tunnelProxy = null; tunnelProxyPort = 0;
@@ -4251,7 +4259,15 @@ function startTunnel() {
     proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
     proc.on('exit', () => {
       if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
-      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+      else {
+        // Tunnel died after being up: restart it while the user still wants it.
+        // Paired phones keep their token; only the public address can change.
+        cfUrl = null; cfProc = null; cfStarting = null;
+        if (tunnelWanted && !tunnelRestartTimer) {
+          const delay = Math.min(30000, 1000 * 2 ** Math.min(tunnelRestarts++, 5));
+          tunnelRestartTimer = setTimeout(() => { tunnelRestartTimer = null; startTunnel().then(() => { tunnelRestarts = 0; }, () => {}); }, delay);
+        }
+      }
     });
     setTimeout(() => {
       if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
@@ -4265,6 +4281,7 @@ app.post('/api/remote/start', async (req, res) => {
   if (req.isMobile) return res.status(403).json({ error: 'Indisponible en mode mobile.' });
   if (!QRCode) return res.status(500).json({ error: 'Module QR indisponible (npm install qrcode).' });
   try {
+    tunnelWanted = true;
     const url = await startTunnel();
     const token = makeMobileToken(req.user.id);
     const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;

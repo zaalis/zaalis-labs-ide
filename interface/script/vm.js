@@ -81,9 +81,9 @@
   }
   async function settings() {
     const target=document.getElementById('vm-settings-content'); if(!target)return;
-    target.replaceChildren();target.className='vm-settings';
+    target.replaceChildren(node('p','vm-settings-loading',uiText('Vérification des machines virtuelles…')));target.className='vm-settings';
     try {
-      const result=await api('/api/vm'); const c=result.capabilities;
+      const result=await api('/api/vm'); const c=result.capabilities; target.replaceChildren();
       for(const [name,body] of [[uiText('Linux intégré'),`${c.linux.image} · ${(c.linux.imageBytes/1024/1024).toFixed(0)} Mo. ${c.linux.bundled?uiText('Pack présent.'):'Pack manquant.'} Accélération WHPX requise. Jusqu’à trois VM ; disque logique de 24 Go, espace utilisé progressivement.`],['Windows Sandbox',c.windows.reason]]) {
         const card=node('article');card.append(node('h4','',name),node('p','',body));
         if(name==='Windows Sandbox'&&c.windows.compatible&&!c.windows.enabled) card.append(button(uiText('Activer Windows Sandbox'),async()=>{card.append(node('p','',uiText('Autorisez la demande administrateur Windows…')));const value=await api('/api/vm/activate-sandbox',{});await settings();if(value.restartNeeded)target.append(node('p','',uiText('Activation terminée. Redémarrez Windows pour utiliser Sandbox.')));}));

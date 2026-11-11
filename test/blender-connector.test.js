@@ -78,7 +78,7 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   assert.deepEqual((await rpc('ping')).result, {});
   const tools = (await rpc('tools/list')).result.tools;
   assert.deepEqual(tools.map((tool) => tool.name), ['scene_summary', 'list_objects', 'object_details', 'screenshot', 'render', 'file_info', 'missing_files',
-    'linked_libraries', 'datablocks', 'node_tree', 'api_search', 'api_docs', 'focus_object', 'switch_workspace', 'show_properties', 'undo', 'execute_python', 'inspect_blend_file',
+    'linked_libraries', 'datablocks', 'node_tree', 'api_search', 'api_docs', 'focus_object', 'switch_workspace', 'show_properties', 'undo', 'execute_python', 'execute_python_background', 'inspect_blend_file',
     'scene_audit', 'scene_snapshot', 'verify_changes', 'checkpoint', 'performance_report', 'place_objects', 'detect_intersections', 'export_asset', 'create_pbr_material', 'create_geometry_repeat', 'update_geometry_repeat', 'inspect_batch']);
   assert.ok(tools.every((tool) => Object.keys(tool).sort().join() === 'description,inputSchema,name'));
   assert.ok(tools.every((tool) => tool.description && tool.inputSchema.type === 'object' && !('code' in tool)));
@@ -173,4 +173,12 @@ test('the Skill names every tool and says whether Blender is open', () => {
   assert.match(open.instructions, /- `list_objects` \(type\?, name_contains\?, limit\?\)/);
   assert.match(open.instructions, /Blender est ouvert et répond/);
   assert.match(connector.skill({ version: '5.2.2', reachable: false }).instructions, /Blender est fermé pour le moment/);
+});
+
+test('execute_python_background refuses a bad path and a save without a file', async () => {
+  const instance = connector.create({ env: {}, dataDir: os.tmpdir() });
+  const call = (args) => instance.callTool('execute_python_background', args);
+  assert.equal((await call({ code: '  ' })).isError, true);
+  assert.equal((await call({ code: 'result = 1', path: 'relative.blend' })).isError, true);
+  assert.equal((await call({ code: 'result = 1', save: true })).isError, true);
 });

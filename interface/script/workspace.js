@@ -83,7 +83,20 @@
     modeControl.setAttribute('aria-label', text('Disposition', 'Workspace layout'));
     const editorButton = button(text('Éditeur', 'Editor'), 'editor', () => setMode('editor'));
     const chatButton = button('Chat IDE', 'chat', () => setMode('chat'));
-    modeControl.append(editorButton, chatButton);
+    const modeIndicator = el('span', 'ws-mode-indicator');
+    modeIndicator.setAttribute('aria-hidden', 'true');
+    modeControl.append(modeIndicator, editorButton, chatButton);
+    // The highlight slides from one button to the other instead of jumping.
+    function placeModeIndicator() {
+        const active = mode === 'chat' ? chatButton : editorButton;
+        if (!active.offsetWidth) return;
+        modeIndicator.style.width = active.offsetWidth + 'px';
+        modeIndicator.style.transform = `translateX(${active.offsetLeft - 4}px)`;
+        // Enable the slide only after the first placement, so it never animates in from 0.
+        if (!modeControl.classList.contains('is-ready')) setTimeout(() => modeControl.classList.add('is-ready'), 60);
+    }
+    new ResizeObserver(placeModeIndicator).observe(modeControl);
+    document.addEventListener('zaalis-language-changed', () => requestAnimationFrame(placeModeIndicator));
     const memoryButton = button(text('Mémoire des corrections', 'Correction memory'), 'memory', () => window.openCorrectionMemory?.(), 'ws-icon-button');
 
     document.querySelector('.topbar-left').append(modeControl);
@@ -200,6 +213,7 @@
         document.body.dataset.workspaceMode = mode;
         editorButton.setAttribute('aria-pressed', String(mode === 'editor'));
         chatButton.setAttribute('aria-pressed', String(mode === 'chat'));
+        placeModeIndicator();
         if (mode === 'chat') { panes.files.replaceChildren(editor); filesPaneRoot = null; }
         else { editorAnchor.after(editor); renderEditorFilesPane(); }
         placeComposerControls();

@@ -82,8 +82,11 @@
   async function api(url, method, body) {
     var opt = { method: method || 'GET', headers: {}, credentials: 'same-origin' };
     if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
-    var r = await fetch(url, opt);
-    if (r.status === 401 || r.status === 403) { showUnpaired(); throw new Error('unauth'); }
+    var r;
+    try { r = await fetch(url, opt); }
+    catch (e) { setLink(false); throw e; }
+    if (r.status === 401) { showUnpaired(); throw new Error('unauth'); }
+    if (r.status >= 500 && r.status !== 501) setLink(false); else setLink(true);
     var d = await r.json().catch(function () { return {}; });
     if (!r.ok && !(d && d.error)) throw new Error('HTTP ' + r.status);
     return d;
@@ -318,6 +321,20 @@
   function closeSettings() { $('#settings-screen').classList.remove('open'); }
 
   function showUnpaired() { $('#pair-screen').classList.remove('hidden'); }
+  // Connection state shown as a thin banner; the session itself is kept.
+  var linkOk = true;
+  function setLink(ok) {
+    if (ok === linkOk) return;
+    linkOk = ok;
+    var bar = $('#link-banner');
+    if (!bar) {
+      bar = document.createElement('div'); bar.id = 'link-banner'; bar.className = 'link-banner';
+      document.body.appendChild(bar);
+    }
+    bar.textContent = lang === 'en' ? 'Reconnecting to your PC…' : 'Reconnexion au PC…';
+    bar.classList.toggle('show', !ok);
+    if (ok && !$('#pair-screen').classList.contains('hidden')) { hideUnpaired(); pollSync(); }
+  }
   function hideUnpaired() { $('#pair-screen').classList.add('hidden'); }
 
   // ---- remote status / profile (settings) ----
@@ -395,7 +412,10 @@
   // (near) real time. Cheap diff: only re-render when the JSON actually changed.
   async function pollSync() {
     if (busy || document.hidden) return;
-    if ($('#pair-screen') && !$('#pair-screen').classList.contains('hidden')) return;
+    if ($('#pair-screen') && !$('#pair-screen').classList.contains('hidden')) {
+      // Quiet probe: the cookie may be valid again (tunnel back, PC restarted).
+      try { await api('/api/chats?kind=chat'); hideUnpaired(); setLink(true); } catch (e) { return; }
+    }
     try {
       var d = await api('/api/chats?kind=chat');
       var arr = Array.isArray(d) ? d : [];
@@ -483,17 +503,20 @@
   function startPolling() {
     if (pollTimer) return;
     pollTimer = setInterval(pollSync, 4000);
-    // Refresh immediately when the user returns to the tab.
-    document.addEventListener('visibilitychange', function () { if (!document.hidden) pollSync(); });
+    // Refresh immediately when the user returns: tab shown again, page restored
+    // from the back/forward cache, window focused or network back.
+    var wake = function () { if (!document.hidden) pollSync(); };
+    document.addEventListener('visibilitychange', wake);
+    window.addEventListener('pageshow', wake);
+    window.addEventListener('focus', wake);
+    window.addEventListener('online', function () { setLink(true); wake(); });
+    window.addEventListener('offline', function () { setLink(false); });
   }
 
   async function init() {
-    try {
-      await loadLocalModels();
-      fillSubmodels();
-      await loadChats();
-      startPolling();
-    } catch (e) { /* unpaired screen already shown on 401/403 */ }
+    try { await loadLocalModels(); fillSubmodels(); } catch (e) {}
+    try { await loadChats(); } catch (e) { /* retried by polling; unpaired screen shown on 401 */ }
+    startPolling();
   }
 
   document.documentElement.lang = lang;
