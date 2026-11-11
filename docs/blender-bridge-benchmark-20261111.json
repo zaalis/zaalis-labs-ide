@@ -1,0 +1,49 @@
+{
+  "scenario": "Sequential read-only requests over loopback, default UI polling, fresh factory scene. Same Blender executable. Not a render or modeling speed benchmark.",
+  "official": {
+    "kind": "official",
+    "blender": "5.3.0",
+    "samples": 12,
+    "median_ms": 253.544,
+    "p95_ms": 254.366,
+    "timer": "official v1.0.3 default active 250 ms",
+    "measurements_ms": [
+      253.14,
+      253.37,
+      252.738,
+      253.544,
+      253.758,
+      254.133,
+      252.825,
+      254.366,
+      253.648,
+      252.565,
+      254.114,
+      253.549
+    ]
+  },
+  "zaalis": {
+    "kind": "zaalis",
+    "blender": "5.3.0",
+    "samples": 12,
+    "median_ms": 11.058,
+    "p95_ms": 12.585,
+    "timer": "Zaalis v1.0.0 active 10 ms",
+    "measurements_ms": [
+      12.585,
+      11.017,
+      11.006,
+      11.067,
+      11.015,
+      11.063,
+      11.1,
+      10.734,
+      11.13,
+      11.058,
+      10.995,
+      11.248
+    ]
+  },
+  "median_latency_ratio": 22.93,
+  "limitation": "Official polling is configurable. Faster polling wakes the main thread more often; this does not accelerate bpy calculations or improve model reasoning."
+}

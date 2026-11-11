@@ -774,8 +774,12 @@ function renderBlenderInstall() {
         !supported || closed ? uiText('Blender est fermé.') : uiText('Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).'));
     const present = !!(status && status.addon && status.addon.installed);
     $('#blender-step-addon').textContent = present
-        ? `L’add-on officiel « MCP » de Blender Lab est déjà présent (version ${status.addon.version}) : il est conservé tel quel.`
-        : `Installer l’add-on officiel « MCP » de Blender Lab (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`;
+        ? (state.language === 'en'
+            ? `Configure the Zaalis Blender bridge (installed: ${status.addon.version}, bundled: ${status.addonVersion}).`
+            : `Configurer le pont Blender Zaalis (installé : ${status.addon.version}, fourni : ${status.addonVersion}).`)
+        : (state.language === 'en'
+            ? `Install the Zaalis Blender bridge (version ${status ? status.addonVersion : ''}), included with zaalis IDE.`
+            : `Installer le pont Blender Zaalis (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`);
     const busy = modal.dataset.busy === 'true';
     $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
     $('#blender-install-confirm').textContent = busy ? 'Installation…' : uiText('Installer');

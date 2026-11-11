@@ -1,38 +1,46 @@
-# Blender MCP add-on
+# Zaalis Blender Bridge
 
-`mcp-1.0.3.zip` is the official **MCP** add-on of Blender Lab, unmodified. It
-runs inside Blender and opens a local TCP socket (port 9876 by default) that
-executes Python sent to it. zaalis IDE talks to that socket itself
-(`blender-connector.js`): no other program has to be installed.
+The active integration is original Zaalis code on both sides: the JavaScript
+MCP connector in `src/integrations/` and the extension source in `zaalis_bridge/`.
+It uses Blender's public Python API and Python's standard library. It does not
+import Blender Lab code, require its add-on, or run its external MCP server.
 
-| | |
-|---|---|
-| Origin | <https://projects.blender.org/lab/blender_mcp/releases/download/v1.0.3/mcp-1.0.3.zip> |
-| Page | <https://www.blender.org/lab/mcp-server/> |
-| sha256 | `a7a9da816192502e5a0a202a396444e266b47d8fc4f74ad4698048bd43040707` |
-| Requires | Blender 5.1 or newer |
-| License | **GPL-3.0-or-later** (Blender Authors). The archive is its own complete source. |
+The extension is GPL-3.0-or-later; the complete license is inside the archive.
+This is source ownership of our integration, not ownership of Blender itself.
 
-The add-on is a separate program under its own license, redistributed here
-verbatim. It is not part of the zaalis Labs IDE code and nothing of it is
-copied into it: the IDE only exchanges messages with it over a socket.
+## Install
 
-## How it gets into Blender
+From the updated IDE, open **Settings → MCP → Blender → Installer**, with
+Blender closed. The installer verifies the archive checksum, installs/enables
+`zaalis_bridge`, generates a random local authentication token, enables
+autostart, and saves preferences. It does **not** enable Blender's online-access
+setting. Start Blender, then enable its connection in the IDE.
 
-**Settings → MCP → Blender → Installer** (after the user agrees in the window
-that opens) runs, with Blender closed:
+The bridge only binds `127.0.0.1:9877`, independently of Blender Lab's default
+9876. An existing Lab installation is left untouched. No token is returned by
+the public status endpoint or included in the agent skill.
 
-1. `blender --command extension install-file -r user_default -e mcp-1.0.3.zip`
-   — skipped when the add-on is already installed, whichever version;
-2. a windowless Blender that enables the add-on, its start with Blender, and
-   Blender's "Allow Online Access" setting (the add-on refuses to start its
-   server without it), then saves the preferences.
+Blender 5.1+ is declared in the manifest; real integration tests were run on
+Windows with 5.2.2 and 5.3.0. The installer selects the newest detected Blender,
+as before. Test on other versions/platforms before promising support.
 
-`blender-connector.js` refuses to install an archive whose sha256 differs from
-the one above.
+## Build and verify
 
-## Updating
+```powershell
+python scripts/build-blender-bridge.py
+node --test test/blender-connector.test.js
+$env:BLENDER_TEST_EXE = 'C:\Program Files\Blender Foundation\Blender 5.3\blender.exe'
+node --test test/blender-live.test.js
+```
 
-Replace the archive, then update `ADDON` in `blender-connector.js`, this table
-and the `Source:` line of `native/installer.iss` if the file name changes. Run
-`node --test test/blender-connector.test.js`.
+The deterministic builder emits `zaalis-bridge-1.0.0.zip` and its checksum in
+`src/integrations/blender-bridge-release.js`. Rebuild after editing the Python
+source. The Windows package ships this archive, not the former official one.
+
+The original unmodified `mcp-1.0.3.zip` is retained **only as a benchmark fixture**
+(GPL-3.0-or-later, Blender Authors), SHA-256
+`a7a9da816192502e5a0a202a396444e266b47d8fc4f74ad4698048bd43040707`.
+Source: [Blender Lab v1.0.3](https://projects.blender.org/lab/blender_mcp/releases/download/v1.0.3/mcp-1.0.3.zip).
+It is not loaded or installed by the new connector.
+
+See `docs/BLENDER-ZAALIS-20261111.md` for features, limitations and measured comparison.

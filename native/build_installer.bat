@@ -17,7 +17,7 @@ if not exist dist\zaalis-server.exe goto :nobuild
 if not exist dist\zaalis-agentd.exe goto :norust
 if not exist dist\zaalis-cli.exe goto :nocli
 if not exist dist\whisper\whisper-cli.exe goto :nowhisper
-if not exist dist\blender\mcp-1.0.3.zip goto :noblender
+if not exist dist\blender\zaalis-bridge-1.0.0.zip goto :noblender
 if not exist dist\vm\images\debian.qcow2 goto :novm
 
 "%ISCC%" installer.iss
@@ -30,7 +30,7 @@ goto :eof
 echo ERROR: Inno Setup not found. Install it with:  winget install JRSoftware.InnoSetup
 exit /b 1
 :noblender
-echo ERROR: dist\blender\mcp-1.0.3.zip missing. Run build_shell.bat first.
+echo ERROR: dist\blender\zaalis-bridge-1.0.0.zip missing. Run build_shell.bat first.
 exit /b 1
 :novm
 echo ERROR: VM pack missing. Run powershell -File ..\scripts\prepare-vm-assets.ps1 -Download

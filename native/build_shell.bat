@@ -47,9 +47,9 @@ if exist dist\whisper rmdir /S /Q dist\whisper
 xcopy "whisper\*" "dist\whisper\" /E /Y /I /Q >nul
 if errorlevel 1 goto :failed
 
-REM --- Copy the Blender MCP add-on (installed into Blender on request) ---
+REM --- Copy only the original Zaalis bridge (installed on request) ---
 if exist dist\blender rmdir /S /Q dist\blender
-xcopy "blender\*" "dist\blender\" /E /Y /I /Q >nul
+xcopy "blender\zaalis-bridge-1.0.0.zip" "dist\blender\" /Y /I /Q >nul
 if errorlevel 1 goto :failed
 
 REM --- Stage the verified offline Linux VM pack ---

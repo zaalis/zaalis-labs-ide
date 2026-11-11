@@ -70,7 +70,7 @@ Source: "dist\vm\*"; DestDir: "{app}\vm"; Flags: ignoreversion recursesubdirs cr
 ; whisper.cpp : moteur local de dictee vocale (le modele est telecharge a part,
 ; dans le dossier de donnees, a la premiere utilisation).
 Source: "dist\whisper\*";         DestDir: "{app}\whisper"; Flags: ignoreversion recursesubdirs createallsubdirs
-; Add-on MCP officiel de Blender (GPL, non modifie) : installe dans Blender
+; Pont Blender Zaalis (GPL) : installe dans Blender
 ; seulement a la demande de l'utilisateur, depuis Reglages > MCP > Blender.
 Source: "dist\blender\*";         DestDir: "{app}\blender"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; CLI Rust : depose dans {app}\bin et renomme zaalis.exe -> commande `zaalis` dans le terminal.

@@ -865,7 +865,7 @@
                     </div>
                     <hr class="settings-separator">
                     <h3 class="mcp-builtin-title"><img class="mcp-server-logo" src="image/blender.png" alt="" width="22" height="22">Blender</h3>
-                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit la scène ouverte et la modifie grâce à l’add-on MCP officiel de Blender. Tout se passe sur ce PC, et le nécessaire est fourni avec zaalis IDE.</p>
+                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit, vérifie et modifie la scène ouverte grâce au pont Zaalis. La connexion est locale et authentifiée, et le nécessaire est fourni avec zaalis IDE.</p>
                     <div class="opale-link" id="blender-link">
                         <div class="settings-status-row"><span>État</span><strong id="blender-status">Recherche de Blender…</strong></div>
                         <div class="opale-actions">
@@ -1295,9 +1295,9 @@
             </ul>
             <h3>Ce qui sera fait dans Blender</h3>
             <ul class="blender-steps">
-                <li id="blender-step-addon">Installer l’add-on officiel « MCP » de Blender Lab, fourni avec zaalis IDE.</li>
+                <li id="blender-step-addon">Installer le pont Blender Zaalis, fourni avec zaalis IDE.</li>
                 <li>Activer cet add-on et son démarrage automatique à l’ouverture de Blender.</li>
-                <li>Activer le réglage « Autoriser l’accès en ligne » de Blender : sans lui, l’add-on ne démarre pas.</li>
+                <li>Créer une clé d’authentification pour la connexion locale. Le réglage d’accès en ligne de Blender reste inchangé.</li>
             </ul>
             <p class="blender-install-warning">Une fois Blender relié, l’assistant peut y exécuter du code Python sans vous demander de confirmation. Enregistrez votre travail avant de lui confier une scène.</p>
             <label class="blender-consent"><input type="checkbox" id="blender-consent"><span>J’ai compris et j’autorise cette installation.</span></label>
@@ -1471,11 +1471,12 @@
 <script src="script/welcome.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="design-system.css?v=20261015.7">
 <link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
+<link rel="stylesheet" href="model-picker.css?v=20261111.1">
 <script src="script/settings-layout.js?v=20261027.1" defer></script>
 <script src="script/settings-persistence.js?v=20261015.7" defer></script>
 <script src="script/inline-approval.js?v=20261015.7" defer></script>
 <script src="script/command-palette.js?v=20261015.7" defer></script>
-<script src="script/model-picker.js?v=20261015.7" defer></script>
+<script src="script/model-picker.js?v=20261111.1" defer></script>
 <script src="script/project-actions.js?v=20261015.7" defer></script>
 <script src="script/shell-layout.js?v=20261015.7" defer></script>
 <script src="script/ui-accessibility.js?v=20261015.7" defer></script>

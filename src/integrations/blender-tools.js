@@ -550,4 +550,28 @@ const TOOLS = [
     description: 'Analyse un autre fichier .blend sans l’ouvrir dans Blender (un Blender sans fenêtre le lit, ses scripts désactivés) : état du fichier, inventaire des données, fichiers manquants, bibliothèques liées. Chemin absolu requis.' },
 ];
 
+TOOLS.push(...require('./blender-advanced-tools').TOOLS.map((tool) => ({
+  ...tool, code: tool.code + (tool.mutates ? UNDO_PUSH(tool.name) : ''),
+})));
+
+// A single socket round trip for a coherent diagnostic, with independent
+// failures reported per section. Only read-only tools are allowed here.
+const batchNames = ['scene_summary', 'file_info', 'missing_files', 'scene_audit', 'performance_report'];
+const batchCodes = Object.fromEntries(TOOLS.filter((t) => batchNames.includes(t.name)).map((t) => [t.name, t.code]));
+TOOLS.push({ name: 'inspect_batch', description: 'Exécute plusieurs diagnostics de lecture en un échange : scene_summary, file_info, missing_files, scene_audit, performance_report. Réduit les allers-retours ; n’accélère pas les calculs de Blender.',
+  inputSchema: object({ sections: { type: 'array', items: { type: 'string', enum: batchNames }, minItems: 1, maxItems: 5, uniqueItems: true } }, ['sections']),
+  code: `import json\n_codes = json.loads(${JSON.stringify(JSON.stringify(batchCodes))})\n` + String.raw`
+sections = params.get('sections', [])
+if not sections or len(sections) > 5 or len(set(sections)) != len(sections) or any(s not in _codes for s in sections):
+    raise ValueError('Choose 1-5 unique supported read-only sections')
+result = {}
+for section in sections:
+    namespace = {'params': {}}
+    try:
+        exec(_codes[section], namespace)
+        result[section] = {'ok': True, 'result': namespace.get('result')}
+    except Exception as error:
+        result[section] = {'ok': False, 'error': str(error)}
+` });
+
 module.exports = { TOOLS, HELPERS, FILE_SUMMARIES };

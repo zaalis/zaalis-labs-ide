@@ -234,6 +234,36 @@ async function listModels(accessToken, { fetchImpl = fetch, publicApi = false } 
   return [];
 }
 
+// Plan usage windows (5 h / weekly) as the ChatGPT backend reports them.
+// Returns null when the account exposes none; callers show "unknown".
+function normalizeUsageWindow(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const used = Number(raw.used_percent);
+  if (!Number.isFinite(used)) return null;
+  const seconds = Number(raw.limit_window_seconds);
+  let resetAt = Number(raw.reset_at);
+  if (!Number.isFinite(resetAt) && Number.isFinite(Number(raw.reset_after_seconds))) resetAt = Math.floor(Date.now() / 1000) + Number(raw.reset_after_seconds);
+  return {
+    usedPercent: Math.max(0, Math.min(100, Math.round(used))),
+    windowMinutes: Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds / 60) : null,
+    resetsAt: Number.isFinite(resetAt) && resetAt > 0 ? resetAt * 1000 : null,
+  };
+}
+async function fetchUsageLimits(accessToken, { fetchImpl = fetch } = {}) {
+  const root = baseUrl().replace(/\/codex$/, '');
+  const response = await fetchImpl(`${root}/wham/usage`, {
+    headers: { ...backendHeaders(accessToken), Accept: 'application/json' },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (response.status === 401) throw fail(401, 'Session ChatGPT refusée.');
+  if (!response.ok) return null;
+  const data = (await readJson(response)) || {};
+  const limit = data.rate_limit || data.rate_limits || {};
+  const windows = [normalizeUsageWindow(limit.primary_window), normalizeUsageWindow(limit.secondary_window)].filter(Boolean);
+  if (!windows.length) return null;
+  return { plan: typeof data.plan_type === 'string' ? data.plan_type : null, windows };
+}
+
 // ---------------------------------------------------------------------------
 // chat-completions request -> Responses request
 // ---------------------------------------------------------------------------
@@ -558,6 +588,6 @@ async function openResponseStream(accessToken, request, { signal, fetchImpl = fe
 module.exports = {
   CLIENT_ID, DEFAULT_MODELS, DEFAULT_BASE_URL,
   setVersion, jwtClaims, needsRefresh, sessionFromTokens, issuer, publicBaseUrl,
-  requestDeviceCode, pollDeviceCode, refreshSession, listModels,
+  requestDeviceCode, pollDeviceCode, refreshSession, listModels, fetchUsageLimits,
   toResponsesRequest, createSseReader, createChunkTranslator, openResponseStream,
 };

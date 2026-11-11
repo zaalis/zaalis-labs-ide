@@ -2,7 +2,7 @@
 
 // Blender, driven by the agent — built into the IDE.
 //
-// Blender's official "MCP" add-on (Blender Lab) opens a local TCP socket that
+// The original Zaalis bridge opens an authenticated local TCP socket that
 // runs Python sent to it. This module is everything on the IDE side:
 //   - finding Blender and reading the state of its add-on;
 //   - installing the add-on shipped with the IDE (native/blender) and turning
@@ -21,8 +21,8 @@ const { TOOLS, HELPERS, FILE_SUMMARIES } = require('./blender-tools');
 const SERVER_ID = 'blender';
 const MIN_VERSION = [5, 1];
 // The add-on shipped in native/blender, unmodified (see the README there).
-const ADDON = { id: 'mcp', version: '1.0.3', file: 'mcp-1.0.3.zip', sha256: 'a7a9da816192502e5a0a202a396444e266b47d8fc4f74ad4698048bd43040707' };
-const DEFAULT_PORT = 9876;
+const ADDON = require('./blender-bridge-release');
+const DEFAULT_PORT = 9877;
 const TOOL_TIMEOUT_MS = 110_000;
 const MAX_TOOL_TEXT = 100_000;
 const MARKER = 'ZAALIS_BLENDER ';
@@ -112,7 +112,7 @@ function addonOnDisk(profile) {
   for (const repo of repos) {
     let manifest = '';
     try { manifest = fs.readFileSync(path.join(profile, 'extensions', repo, ADDON.id, 'blender_manifest.toml'), 'utf8'); } catch { continue; }
-    if (!/^id\s*=\s*"mcp"\s*$/m.test(manifest) || !/^maintainer\s*=\s*"Blender Lab/m.test(manifest)) continue;
+    if (!/^id\s*=\s*"zaalis_bridge"\s*$/m.test(manifest) || !/^maintainer\s*=\s*"Zaalis"\s*$/m.test(manifest)) continue;
     return { repo, version: (/^version\s*=\s*"([^"]+)"/m.exec(manifest) || [])[1] || '' };
   }
   return null;
@@ -135,21 +135,23 @@ async function blenderPython(exe, script, env = process.env, { file = '', extraE
 const READ_PREFS = [
   'import bpy, json',
   'prefs = bpy.context.preferences',
-  'modules = [name for name in prefs.addons.keys() if name.startswith("bl_ext.") and name.endswith(".mcp")]',
+  'modules = [name for name in prefs.addons.keys() if name.startswith("bl_ext.") and name.endswith(".zaalis_bridge")]',
   'addon = prefs.addons[modules[0]].preferences if modules else None',
   'state = {"version": list(bpy.app.version), "online": bool(prefs.system.use_online_access), "enabled": bool(modules)}',
   'if addon is not None:',
-  '    state.update({"host": str(addon.host), "port": int(addon.port), "autostart": bool(addon.use_autostart)})',
+  '    state.update({"host": "127.0.0.1", "port": int(addon.port), "autostart": bool(addon.use_autostart), "token": str(addon.token)})',
   `print("${MARKER}" + json.dumps(state))`,
 ].join('\n');
-// Enables the add-on and the two settings its server needs, then saves.
+// Enables the add-on, generates its token, enables autostart, then saves.
 const WRITE_PREFS = (repo) => [
   'import bpy, json, addon_utils',
   `module = ${JSON.stringify(`bl_ext.${repo}.${ADDON.id}`)}`,
   'prefs = bpy.context.preferences',
-  'prefs.system.use_online_access = True',
   'if module not in prefs.addons:',
   '    addon_utils.enable(module, default_set=True, persistent=True)',
+  'import secrets',
+  'if not prefs.addons[module].preferences.token:',
+  '    prefs.addons[module].preferences.token = secrets.token_urlsafe(32)',
   'prefs.addons[module].preferences.use_autostart = True',
   'bpy.ops.wm.save_userpref()',
   `print("${MARKER}" + json.dumps({"saved": True}))`,
@@ -161,12 +163,24 @@ function isRunning() {
     : run('pgrep', ['-x', 'blender|Blender'], { timeout: 15_000 }).then((out) => !!out.trim(), () => false);
 }
 const socketHost = (host) => (!host || host === 'localhost' ? '127.0.0.1' : host);
-function reachable(host, port, timeoutMs = 800) {
+function reachable(host, port, timeoutMs = 800, token = '') {
   return new Promise((resolve) => {
     const socket = net.connect({ host: socketHost(host), port });
     const done = (ok) => { socket.destroy(); resolve(ok); };
     socket.setTimeout(timeoutMs, () => done(false));
-    socket.once('connect', () => done(true));
+    let response = '';
+    socket.once('connect', () => {
+      if (!token) return done(false);
+      socket.write(JSON.stringify({ type: 'ping', token }) + '\0');
+    });
+    socket.on('data', (chunk) => {
+      response += chunk.toString('utf8');
+      if (response.length > 4096) return done(false);
+      if (!response.includes('\0')) return;
+      try { const reply = JSON.parse(response.split('\0')[0]); done(reply.status === 'ok' && reply.result.bridge === 'zaalis'); }
+      catch { done(false); }
+    });
+    socket.once('end', () => done(false));
     socket.once('error', () => done(false));
   });
 }
@@ -176,19 +190,24 @@ function reachable(host, port, timeoutMs = 800) {
 // ---------------------------------------------------------------------------
 // One request per connection: a JSON object ended by a NUL byte, answered the
 // same way. The code runs on Blender's main thread and hands back `result`.
-function send(code, { host, port, timeoutMs = TOOL_TIMEOUT_MS } = {}) {
+function send(code, { host, port, token, timeoutMs = TOOL_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
+    const request = JSON.stringify({ type: 'execute', code: String(code), ...(token ? { token } : {}), strict_json: false }) + '\0';
+    if (Buffer.byteLength(request) > 4 * 1024 * 1024) return reject(connectError('blender-request', 'Requête Blender trop volumineuse.'));
     const socket = net.connect({ host: socketHost(host), port: port || DEFAULT_PORT });
     const chunks = [];
+    let receivedBytes = 0;
     let settled = false;
     const finish = (error, value) => { if (settled) return; settled = true; socket.destroy(); if (error) reject(error); else resolve(value); };
     socket.setTimeout(timeoutMs, () => finish(connectError('blender-timeout', 'Blender n’a pas répondu à temps (opération trop longue ?).', 504)));
     socket.once('error', (error) => finish(connectError('blender-closed', error.code === 'ECONNREFUSED'
       ? 'Blender n’est pas joignable : ouvrez Blender (l’add-on MCP démarre avec lui), puis réessayez.'
       : `Connexion à Blender impossible : ${error.message}`, 503)));
-    socket.once('connect', () => socket.write(JSON.stringify({ type: 'execute', code: String(code), strict_json: false }) + '\0'));
+    socket.once('connect', () => socket.write(request));
     socket.on('data', (chunk) => {
       chunks.push(chunk);
+      receivedBytes += chunk.length;
+      if (receivedBytes > 16 * 1024 * 1024 + 1) return finish(connectError('blender-reply', 'Réponse Blender trop volumineuse.'));
       const end = chunk.indexOf(0);
       if (end < 0) return;
       const raw = Buffer.concat(chunks);
@@ -225,6 +244,33 @@ function toolText(payload, isError) {
   let text = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 1);
   if (text.length > MAX_TOOL_TEXT) text = text.slice(0, MAX_TOOL_TEXT) + '\n[résultat tronqué]';
   return { content: [{ type: 'text', text }], isError: !!isError };
+}
+
+// Validate before sending code. MCP clients may call tools without enforcing
+// their JSON schema; invalid arguments must never partially mutate a scene.
+function validateInput(value, schema, location = 'arguments') {
+  const fail = (message) => { throw new Error(`${location}: ${message}`); };
+  if (schema.type === 'object') {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) fail('objet requis');
+    for (const key of schema.required || []) if (!(key in value)) fail(`paramètre requis : ${key}`);
+    for (const [key, item] of Object.entries(value)) {
+      if (!Object.hasOwn(schema.properties || {}, key)) { if (schema.additionalProperties === false) fail(`paramètre inconnu : ${key}`); }
+      else validateInput(item, schema.properties[key], `${location}.${key}`);
+    }
+  } else if (schema.type === 'array') {
+    if (!Array.isArray(value)) fail('liste requise');
+    if (value.length < (schema.minItems || 0) || value.length > (schema.maxItems || Infinity)) fail('taille de liste invalide');
+    if (schema.uniqueItems && new Set(value.map((v) => JSON.stringify(v))).size !== value.length) fail('valeurs uniques requises');
+    value.forEach((item, index) => validateInput(item, schema.items, `${location}[${index}]`));
+  } else if (schema.type === 'string') {
+    if (typeof value !== 'string' || value.length < (schema.minLength || 0)) fail('texte requis');
+  } else if (schema.type === 'boolean') {
+    if (typeof value !== 'boolean') fail('booléen requis');
+  } else if (schema.type === 'number' || schema.type === 'integer') {
+    if (typeof value !== 'number' || !Number.isFinite(value) || (schema.type === 'integer' && !Number.isInteger(value))) fail('nombre valide requis');
+    if ((schema.minimum !== undefined && value < schema.minimum) || (schema.maximum !== undefined && value > schema.maximum)) fail('nombre hors limites');
+  }
+  if (schema.enum && !schema.enum.includes(value)) fail('valeur non permise');
 }
 
 // ---------------------------------------------------------------------------
@@ -270,8 +316,8 @@ function create(options = {}) {
     const onDisk = addonOnDisk(profile);
     let prefs = { online: false, enabled: false, autostart: false, host: 'localhost', port: DEFAULT_PORT };
     try { prefs = { ...prefs, ...(await preferences(install, profile)) }; } catch {}
-    const ready = !!onDisk && prefs.enabled && prefs.online && prefs.autostart;
-    const [running, open] = await Promise.all([quick ? false : isRunning(), ready ? reachable(prefs.host, prefs.port) : false]);
+    const ready = !!onDisk && onDisk.version === ADDON.version && prefs.enabled && !!prefs.token && prefs.autostart;
+    const [running, open] = await Promise.all([quick ? false : isRunning(), ready ? reachable('127.0.0.1', prefs.port, 800, prefs.token) : false]);
     return {
       ...found, state: ready ? 'ready' : 'install', running, reachable: open, port: prefs.port, host: prefs.host,
       addon: { installed: !!onDisk, version: onDisk ? onDisk.version : '', enabled: !!prefs.enabled, autostart: !!prefs.autostart },
@@ -288,10 +334,10 @@ function create(options = {}) {
       const found = await blender();
       if (!found) throw connectError('blender-missing', 'Blender est introuvable sur ce PC.', 404);
       if (compareVersions(found.version, MIN_VERSION) < 0) throw connectError('blender-unsupported', `Blender ${found.version.join('.')} est trop ancien : la version ${MIN_VERSION.join('.')} ou plus récente est requise.`, 409);
-      if (await isRunning()) throw connectError('blender-running', 'Blender est ouvert : fermez-le, puis relancez l’installation.', 409);
+      if (await (options.isRunning || isRunning)()) throw connectError('blender-running', 'Blender est ouvert : fermez-le, puis relancez l’installation.', 409);
       const profile = profileDir(found.version, env);
       let onDisk = addonOnDisk(profile);
-      if (!onDisk) {
+      if (!onDisk || onDisk.version !== ADDON.version) {
         const archive = addonArchive();
         if (!archive) throw connectError('addon-missing', 'L’add-on MCP fourni avec zaalis IDE est introuvable.', 500);
         if (crypto.createHash('sha256').update(fs.readFileSync(archive)).digest('hex') !== ADDON.sha256) throw connectError('addon-altered', 'L’add-on MCP fourni avec zaalis IDE a été modifié : installation refusée.', 500);
@@ -321,7 +367,8 @@ function create(options = {}) {
 
   // Where the add-on listens, from the last preferences read (default port
   // otherwise): a tool call must not wait for a windowless Blender to start.
-  const target = () => ({ host: (inspected.state && inspected.state.host) || 'localhost', port: (inspected.state && inspected.state.port) || DEFAULT_PORT });
+  const target = () => ({ host: '127.0.0.1', port: (inspected.state && inspected.state.port) || DEFAULT_PORT,
+    ...((inspected.state && inspected.state.token) ? { token: inspected.state.token } : {}) });
 
   // Images a tool left in Blender's temporary folder, as MCP image content.
   // The files are removed once read.
@@ -358,6 +405,7 @@ function create(options = {}) {
     const tool = TOOLS.find((entry) => entry.name === name);
     if (!tool) return toolText(`Outil Blender inconnu : ${name}`, true);
     const input = args && typeof args === 'object' ? args : {};
+    try { validateInput(input, tool.inputSchema); } catch (error) { return toolText(error.message, true); }
     if (tool.local) return inspectFile(input);
     if (tool.raw && !String(input.code || '').trim()) return toolText('Le paramètre `code` est requis.', true);
     // Arguments reach Python as JSON text: a JSON string literal is also a
@@ -375,6 +423,7 @@ function create(options = {}) {
       result = { ...rest, images_attached: images.length };
     }
     const payload = { result };
+    if (reply.timing) payload.timing = reply.timing;
     if (reply.stdout) payload.stdout = String(reply.stdout).slice(-20_000);
     if (reply.stderr) payload.stderr = String(reply.stderr).slice(-8000);
     const answer = toolText(payload, false);
@@ -417,6 +466,9 @@ const INSTRUCTIONS = [
   'Respecte les noms et l’organisation existants. Ne supprime ni n’écrase rien sans que l’utilisateur l’ait demandé, et n’enregistre le fichier que s’il le demande.',
   'Dans `execute_python` : préfère bpy.data pour des modifications précises et bpy.ops pour les actions standard ; vérifie le mode (Objet / Édition) avant un opérateur ; renvoie ce que tu as fait dans `result`.',
   'Un rendu final ou un calcul long bloque Blender pendant son exécution : préviens l’utilisateur avant de le lancer.',
+  'Pour un travail complexe : inspect_batch, scene_snapshot, puis checkpoint create si la demande autorise une copie de sauvegarde. Après modification, verify_changes avec critères mesurables et screenshot/render. Une comparaison ne prouve pas la qualité esthétique.',
+  'place_objects et export_asset analysent sans agir par défaut : apply=true ou export=true déclenche l’action. Les profils Roblox/Unreal exigent un vrai import cible avant de promettre une compatibilité.',
+  'create_pbr_material et create_geometry_repeat sont des constructeurs paramétriques précis ; pour un autre shader/graphe, utilise execute_python et api_docs. detect_intersections détecte les contacts de surfaces, pas tout confinement.',
 ].join('\n');
 
 // What the agent's prompt says about Blender, and the instructions it loads on demand.

@@ -1471,6 +1471,15 @@ function accountStatus(user, provider) {
 }
 const accountFlows = new Map();
 function accountKind(id) { return id === 'xai-sub' ? 'xai' : id === 'minimax-sub' ? 'minimax' : null; }
+// Plan usage limits for the composer's usage card. Only the ChatGPT
+// subscription exposes them; anything else answers { available: false }.
+app.get('/api/plan-limits', async (req, res) => {
+  try {
+    if (!chatgptSession(req.user)) return res.json({ available: false });
+    const limits = await withChatgptToken(req.user.id, token => chatgptSubscription.fetchUsageLimits(token));
+    res.json(limits ? { available: true, ...limits } : { available: false });
+  } catch { res.json({ available: false }); }
+});
 app.get('/api/subscriptions/:provider/status', (req, res) => {
   const kind = accountKind(req.params.provider);
   if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
@@ -1740,8 +1749,8 @@ app.get('/api/blender/status', async (req, res) => {
 });
 app.post('/api/blender/install', async (req, res) => {
   try {
-    // Installing changes Blender's own settings (it turns on "Allow Online
-    // Access"): it only happens on an explicit yes from the settings window.
+    // Installing writes Blender's preferences and generates its local token:
+    // it only happens on an explicit yes from the settings window.
     if (!req.body || req.body.consent !== true) return res.status(400).json({ error: 'Consentement requis.', code: 'consent-required' });
     const status = await blender.install();
     setBlenderConnected(req.user.id, true);

@@ -85,7 +85,7 @@ async function main() {
   // are in the packaged server; the entries of the former Blender preset are
   // dropped, and nothing is installed into Blender without consent.
   assert.equal((await fetch(base + '/image/blender.png')).status, 200);
-  assert.ok(fs.statSync(path.join(path.dirname(exe), 'blender', 'mcp-1.0.3.zip')).size > 0);
+  assert.ok(fs.statSync(path.join(path.dirname(exe), 'blender', 'zaalis-bridge-1.0.0.zip')).size > 0);
   const legacy = await (await fetch(`${base}/api/mcp`, { method: 'PUT', headers,
     body: JSON.stringify({ servers: [{ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp' }, { id: 'notes', name: 'Notes', command: 'npx', args: ['-y', 'x'] }] }) })).json();
   assert.deepEqual(legacy.servers.map((server) => [server.id, server.transport]), [['notes', 'stdio']]);

@@ -23,14 +23,14 @@ test('the MCP add-on is found in whichever extension repository holds it', (t) =
   t.after(() => fs.rmSync(profile, { recursive: true, force: true }));
   assert.equal(connector.addonOnDisk(profile), null);
   const write = (repo, manifest) => {
-    fs.mkdirSync(path.join(profile, 'extensions', repo, 'mcp'), { recursive: true });
-    fs.writeFileSync(path.join(profile, 'extensions', repo, 'mcp', 'blender_manifest.toml'), manifest);
+    fs.mkdirSync(path.join(profile, 'extensions', repo, connector.ADDON.id), { recursive: true });
+    fs.writeFileSync(path.join(profile, 'extensions', repo, connector.ADDON.id, 'blender_manifest.toml'), manifest);
   };
   // Someone else's extension that happens to be called "mcp" is not ours.
   write('blender_org', 'id = "mcp"\nversion = "9.9.9"\nmaintainer = "Somebody"\n');
   assert.equal(connector.addonOnDisk(profile), null);
-  write('lab_blender_org', 'schema_version = "1.0.0"\n\nid = "mcp"\nversion = "1.0.3"\nname = "MCP"\nmaintainer = "Blender Lab"\n');
-  assert.deepEqual(connector.addonOnDisk(profile), { repo: 'lab_blender_org', version: '1.0.3' });
+  write('user_default', 'schema_version = "1.0.0"\n\nid = "zaalis_bridge"\nversion = "1.0.0"\nname = "Zaalis Blender Bridge"\nmaintainer = "Zaalis"\n');
+  assert.deepEqual(connector.addonOnDisk(profile), { repo: 'user_default', version: '1.0.0' });
   assert.equal(connector.profileDir([5, 2, 2], { BLENDER_USER_RESOURCES: profile }), profile);
 });
 
@@ -78,7 +78,8 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   assert.deepEqual((await rpc('ping')).result, {});
   const tools = (await rpc('tools/list')).result.tools;
   assert.deepEqual(tools.map((tool) => tool.name), ['scene_summary', 'list_objects', 'object_details', 'screenshot', 'render', 'file_info', 'missing_files',
-    'linked_libraries', 'datablocks', 'node_tree', 'api_search', 'api_docs', 'focus_object', 'switch_workspace', 'show_properties', 'undo', 'execute_python', 'inspect_blend_file']);
+    'linked_libraries', 'datablocks', 'node_tree', 'api_search', 'api_docs', 'focus_object', 'switch_workspace', 'show_properties', 'undo', 'execute_python', 'inspect_blend_file',
+    'scene_audit', 'scene_snapshot', 'verify_changes', 'checkpoint', 'performance_report', 'place_objects', 'detect_intersections', 'export_asset', 'create_pbr_material', 'create_geometry_repeat', 'update_geometry_repeat', 'inspect_batch']);
   assert.ok(tools.every((tool) => Object.keys(tool).sort().join() === 'description,inputSchema,name'));
   assert.ok(tools.every((tool) => tool.description && tool.inputSchema.type === 'object' && !('code' in tool)));
   assert.equal((await rpc('resources/list')).error.code, -32601);
@@ -87,7 +88,7 @@ test('the MCP server lists its tools and turns a call into Python for Blender', 
   const summary = (await rpc('tools/call', { name: 'scene_summary', arguments: {} })).result;
   assert.deepEqual(JSON.parse(summary.content[0].text), { result: { scene: 'Scene' } });
   assert.equal(summary.isError, false);
-  assert.deepEqual(sent[0].target, { host: 'localhost', port: 9876 });
+  assert.deepEqual(sent[0].target, { host: '127.0.0.1', port: 9877 });
   assert.match(sent[0].code, /^import json\nparams = json\.loads\("\{\}"\)\n+import bpy\n/);
 
   // Arguments travel as data: quotes and newlines of theirs cannot become code.
