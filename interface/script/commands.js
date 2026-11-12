@@ -60,7 +60,7 @@ const SLASH_COMMANDS = [
     { name: 'skills',      category: 'tools', fr: 'Gérer les compétences disponibles', en: 'Manage available skills' },
     { name: 'skill',       category: 'tools', fr: 'Utiliser une compétence', en: 'Use a skill', usage: '<nom> [demande]', args: true },
     { name: 'revers',      category: 'tools', fr: 'Analyser l’architecture et le fonctionnement du projet', en: 'Analyze project architecture and behavior', usage: '[cible ou objectif]', args: true },
-    { name: 'pentest',     category: 'tools', fr: 'Test d’intrusion autorisé sur le périmètre confirmé', en: 'Authorized penetration test on the confirmed scope', usage: '[objectif]', args: true },
+    { name: 'pentest',     category: 'tools', fr: 'Test d’intrusion autorisé : l’IA demande les cibles, installe les outils et rédige le rapport', en: 'Authorized penetration test: the AI asks for targets, installs tools and writes the report', usage: '[cibles et objectif]', args: true },
     { name: 'mcp',         category: 'misc', fr: 'Serveurs MCP',             en: 'MCP servers',           stub: true },
     { name: 'theme',       category: 'mode', fr: 'Changer le thème (sombre/clair)', en: 'Change the theme (dark/light)', usage: '[dark|light]' },
     { name: 'keybindings', category: 'misc', fr: 'Raccourcis clavier',       en: 'Keyboard shortcuts',    stub: true },
@@ -311,8 +311,8 @@ SLASH_HANDLERS.revers = async (arg, out, lang) => {
 };
 
 SLASH_HANDLERS.pentest = async (arg, out, lang) => {
-    if (!_needProject(out, lang) || chatAbort) return;
-    await sendChat('/pentest ' + (arg || (lang === 'en' ? 'Run an authorized test of the confirmed scope: reconnaissance, validation, findings and report.' : 'Mène un test autorisé du périmètre confirmé : reconnaissance, validation, constats et rapport.')));
+    if (chatAbort) return;
+    await sendChat('/pentest ' + (arg || (lang === 'en' ? 'Run an authorized penetration test: ask me for the targets, then reconnaissance, validation, findings and report.' : 'Mène un test d’intrusion autorisé : demande-moi les cibles, puis reconnaissance, validation, constats et rapport.')));
 };
 
 SLASH_HANDLERS.help = async (arg, out, lang) => {

@@ -4,9 +4,7 @@
 // Windows Sandbox:
 //
 // * Docker containers — disposable, no host folder mounted, no network unless
-//   the user confirmed a connected machine, no privilege escalation. A pentest
-//   container runs a Kali-based image whose egress is limited to the scope;
-//   agent commands run as an unprivileged user that cannot change the rules.
+//   the user confirmed a connected machine, no privilege escalation.
 // * SSH hosts — servers the USER registered and verified from the VM panel
 //   (host key pinned on first contact). The agent can only pick one of them; it
 //   can never add a host or a key.
@@ -14,11 +12,9 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { execFile, spawn } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const { sanitize } = require('../agent/secrets-mask');
-const { containerFirewall, PENTEST_PACKAGES } = require('./vm-firewall');
 
-const PENTEST_IMAGE = 'zaalis/pentest:1';
 const IMAGE_PATTERN = /^[a-z0-9][a-z0-9._/-]{0,199}(?::[A-Za-z0-9._-]{1,128})?(?:@sha256:[a-f0-9]{64})?$/;
 const owner = value => crypto.createHash('sha256').update(String(value)).digest('hex').slice(0, 32);
 
@@ -31,23 +27,9 @@ function execute(exe, args, options = {}) {
   });
 }
 
-// Kali rolling with the usual tools and an unprivileged `pentest` account. The
-// container runs with no-new-privileges, so file capabilities cannot apply:
-// scanners use connect scans (nmap -sT) as that user.
-function pentestDockerfile() {
-  return [
-    'FROM kalilinux/kali-rolling',
-    'ENV DEBIAN_FRONTEND=noninteractive',
-    `RUN apt-get update -q && for p in ${[...PENTEST_PACKAGES.filter(p => !['nftables', 'testssl.sh'].includes(p)), 'iptables', 'testssl.sh', 'nuclei', 'exploitdb', 'netcat-traditional'].join(' ')}; do apt-get install -y -q --no-install-recommends "$p" || echo "ABSENT $p"; done && rm -rf /var/lib/apt/lists/*`,
-    'RUN useradd -m -u 1000 -s /bin/bash pentest && mkdir -p /home/pentest/workspace && chown -R pentest:pentest /home/pentest',
-    'LABEL zaalis.pentest=1',
-    'CMD ["sleep", "infinity"]',
-  ].join('\n') + '\n';
-}
-
 class DockerBackend {
-  constructor(manager, { run = execute, spawnProcess = spawn, exe = 'docker' } = {}) {
-    this.manager = manager; this.run = run; this.spawn = spawnProcess; this.exe = exe; this.probe = null; this.build = null;
+  constructor(manager, { run = execute, exe = 'docker' } = {}) {
+    this.manager = manager; this.run = run; this.exe = exe; this.probe = null;
   }
   async capabilities() {
     if (this.probe && Date.now() - this.probe.at < 60000) return this.probe.value;
@@ -55,49 +37,24 @@ class DockerBackend {
     const version = result.code === 0 ? result.stdout.trim() : '';
     const value = version ? { available: true, version, reason: 'Prêt · Docker ' + version }
       : { available: false, version: null, reason: /not recognized|ENOENT|introuvable|not found/i.test(result.stderr + (result.error?.code || '')) ? 'Docker n’est pas installé sur ce PC.' : 'Le service Docker ne répond pas (Docker Desktop arrêté ?).' };
-    if (version) {
-      const image = await this.run(this.exe, ['image', 'inspect', PENTEST_IMAGE, '--format', '{{.Id}}'], { timeout: 8000 });
-      value.pentestImage = image.code === 0;
-    }
     this.probe = { at: Date.now(), value };
     return value;
   }
   name(s) { return 'zaalis-' + s.id.replace(/-/g, '').slice(0, 16); }
-  user(s) { return s.profile === 'pentest' ? ['-u', 'pentest', '-w', '/home/pentest/workspace'] : ['-w', '/workspace']; }
-  workspace(s) { return s.profile === 'pentest' ? '/home/pentest/workspace' : '/workspace'; }
+  user() { return ['-w', '/workspace']; }
+  workspace() { return '/workspace'; }
   async start(s) {
-    const image = s.profile === 'pentest' ? PENTEST_IMAGE : (s.image || 'debian:12-slim');
+    const image = s.image || 'debian:12-slim';
     if (!IMAGE_PATTERN.test(image)) throw new Error('Image Docker invalide.');
     const args = ['run', '-d', '--name', this.name(s), '--hostname', 'zaalis-ctr', '--label', 'zaalis.managed=1', '--label', `zaalis.owner=${process.pid}`,
       '--memory', `${s.memoryMB}m`, '--cpus', String(s.cpus), '--pids-limit', '512', '--security-opt', 'no-new-privileges'];
     if (s.network === 'isolated') args.push('--network', 'none');
-    if (s.profile === 'pentest') {
-      // NET_ADMIN serves root's policy setup only: agent commands run as
-      // `pentest`, without capabilities, under no-new-privileges.
-      args.push('--cap-drop', 'ALL', '--cap-add', 'NET_ADMIN', '--cap-add', 'CHOWN', '--cap-add', 'DAC_OVERRIDE', '--cap-add', 'FOWNER');
-      if (s.egress?.hostAll || s.egress?.hostPorts?.length) args.push('--add-host', 'host.docker.internal:host-gateway');
-    }
     args.push(image, 'sleep', 'infinity');
     const created = await this.run(this.exe, args, { timeout: 900000 });
     if (created.code !== 0) throw new Error('Docker : ' + sanitize((created.stderr || created.stdout).trim().slice(-600)));
     s.containerId = created.stdout.trim().slice(0, 64);
-    if (s.profile !== 'pentest') {
-      const prepared = await this.run(this.exe, ['exec', this.name(s), 'sh', '-c', 'mkdir -p /workspace'], { timeout: 30000 });
-      if (prepared.code !== 0) throw new Error('Conteneur inutilisable : ' + sanitize(prepared.stderr.slice(-300)));
-      return;
-    }
-    // Policy first, as root; then prove the agent account cannot change it.
-    let hostAddress = null;
-    if (s.egress?.hostAll || s.egress?.hostPorts?.length) {
-      const resolved = await this.run(this.exe, ['exec', '-u', '0', this.name(s), 'sh', '-c', "getent ahostsv4 host.docker.internal | awk 'NR==1{print $1}'"], { timeout: 15000 });
-      hostAddress = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(resolved.stdout.trim()) ? resolved.stdout.trim() : null;
-    }
-    const policy = await this.run(this.exe, ['exec', '-u', '0', this.name(s), 'sh', '-c', containerFirewall({ ...(s.egress || {}), hostAddress })], { timeout: 30000 });
-    const probe = await this.run(this.exe, ['exec', '-u', 'pentest', this.name(s), 'sh', '-c', 'cat /run/zaalis-firewall; iptables -A OUTPUT -j ACCEPT 2>/dev/null && echo ESCAPED || echo LOCKED'], { timeout: 15000 });
-    if (policy.code !== 0 || !/active/.test(probe.stdout) || !/LOCKED/.test(probe.stdout)) {
-      throw new Error('Pare-feu du conteneur pentest non vérifié : machine refusée. ' + sanitize((policy.stderr || '').slice(-300)));
-    }
-    s.guestFirewall = 'active';
+    const prepared = await this.run(this.exe, ['exec', this.name(s), 'sh', '-c', 'mkdir -p /workspace'], { timeout: 30000 });
+    if (prepared.code !== 0) throw new Error('Conteneur inutilisable : ' + sanitize(prepared.stderr.slice(-300)));
   }
   exec(s, command, timeoutMs) {
     const seconds = Math.max(1, Math.ceil(timeoutMs / 1000));
@@ -115,8 +72,7 @@ class DockerBackend {
     const copied = await this.run(this.exe, ['cp', archive, `${this.name(s)}:/tmp/zaalis-project.tar`], { timeout: 120000 });
     if (copied.code !== 0) throw new Error('Copie vers le conteneur impossible : ' + sanitize(copied.stderr.slice(-300)));
     const target = this.workspace(s);
-    const owner = s.profile === 'pentest' ? ` && chown -R pentest:pentest ${target}` : '';
-    const unpacked = await this.run(this.exe, ['exec', '-u', '0', this.name(s), 'sh', '-c', `rm -rf ${target} && mkdir -p ${target} && tar -xf /tmp/zaalis-project.tar -C ${target} && rm /tmp/zaalis-project.tar${owner}`], { timeout: 120000 });
+    const unpacked = await this.run(this.exe, ['exec', '-u', '0', this.name(s), 'sh', '-c', `rm -rf ${target} && mkdir -p ${target} && tar -xf /tmp/zaalis-project.tar -C ${target} && rm /tmp/zaalis-project.tar`], { timeout: 120000 });
     if (unpacked.code !== 0) throw new Error('Import du projet impossible : ' + sanitize(unpacked.stderr.slice(-300)));
     return target;
   }
@@ -142,19 +98,6 @@ class DockerBackend {
       const [name, pid] = line.trim().split(/\s+/);
       if (/^zaalis-[0-9a-f]{16}$/.test(name) && !alive(Number(pid))) await this.run(this.exe, ['rm', '-f', name], { timeout: 30000 });
     }
-  }
-  // Builds the Kali-based pentest image. Needs Internet on the host.
-  buildPentestImage() {
-    if (this.build?.status === 'running') return this.build;
-    const build = { status: 'running', startedAt: Date.now(), log: '', image: PENTEST_IMAGE };
-    this.build = build;
-    const child = this.spawn(this.exe, ['build', '-t', PENTEST_IMAGE, '-'], { windowsHide: true });
-    const append = data => { build.log = (build.log + sanitize(String(data))).slice(-64 * 1024); };
-    child.stdout?.on('data', append); child.stderr?.on('data', append);
-    child.on('error', error => { build.status = 'failed'; build.error = error.message; });
-    child.on('exit', code => { build.status = code === 0 ? 'done' : 'failed'; build.finishedAt = Date.now(); if (code !== 0) build.error = 'docker build a échoué (' + code + ')'; this.probe = null; });
-    child.stdin?.end(pentestDockerfile());
-    return build;
   }
 }
 
@@ -211,4 +154,4 @@ class SshHosts {
   }
 }
 
-module.exports = { DockerBackend, SshHosts, pentestDockerfile, PENTEST_IMAGE, IMAGE_PATTERN, execute };
+module.exports = { DockerBackend, SshHosts, IMAGE_PATTERN, execute };

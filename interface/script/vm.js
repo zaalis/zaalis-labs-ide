@@ -48,7 +48,7 @@
 
   let pane, terminal, fit, stream = null, timer = null, resizeTimer = null, noticeTimer = null, inflight = null;
   let activeId = null, terminalId = null, attachedKey = '', tabsKey = '', themeKey = '';
-  let line = '', seen = 0, busy = false, creating = false, choice = { system: '', network: 'isolated', host: '', pentest: false };
+  let line = '', seen = 0, busy = false, creating = false, choice = { system: '', network: 'isolated', host: '' };
   let caps = null, machines = [], hosts = [];
   const el = {};
 
@@ -142,21 +142,16 @@
     el.hostRow = node('label', 'vm-field'); el.hostSelect = node('select', 'vm-select'); el.hostSelect.id = 'vm-ssh-host';
     el.hostSelect.addEventListener('change', () => { choice.host = el.hostSelect.value; render(); });
     el.hostRow.append(node('span', '', t('Serveur')), el.hostSelect);
-    // Pentest profile: scoped firewall, no sudo, journaled commands.
-    el.pentestRow = node('label', 'vm-field vm-check'); el.pentestBox = node('input'); el.pentestBox.type = 'checkbox';
-    el.pentestBox.addEventListener('change', () => { choice.pentest = el.pentestBox.checked; render(); });
-    el.pentestRow.append(el.pentestBox, node('span', '', t('Profil pentest (limité au périmètre confirmé du projet)')));
     el.start = button('Démarrer la machine', 'vm-primary', async () => {
       const input = { action: 'create', system: choice.system, network: choice.network };
       if (choice.system === 'ssh') input.host = choice.host;
-      if (choice.pentest && ['linux', 'docker'].includes(choice.system)) { if (!state.projectRoot) throw new Error(t('Ouvrez d’abord le projet dont le périmètre pentest est confirmé.')); input.profile = 'pentest'; input.root = state.projectRoot; }
       const result = await action(input);
       activeId = result.machine.id; creating = false;
     });
     el.cancel = node('button', 'vm-quiet', t('Annuler')); el.cancel.type = 'button';
     el.cancel.addEventListener('click', () => { creating = false; render(); });
     const setupActions = node('div', 'vm-setup-actions'); setupActions.append(el.start, el.cancel);
-    el.setup.append(el.systems, el.networkRow, el.hostRow, el.pentestRow, setupActions);
+    el.setup.append(el.systems, el.networkRow, el.hostRow, setupActions);
 
     // Selected machine
     el.machine = node('section', 'vm-machine');
@@ -310,8 +305,7 @@
     if (!verified.some(h => h.id === choice.host)) choice.host = verified[0]?.id || '';
     el.hostSelect.value = choice.host;
     el.hostRow.hidden = choice.system !== 'ssh';
-    el.pentestRow.hidden = !['linux', 'docker'].includes(choice.system); el.pentestBox.checked = choice.pentest;
-    el.networkRow.hidden = choice.system === 'ssh' || (choice.pentest && ['linux', 'docker'].includes(choice.system));
+    el.networkRow.hidden = choice.system === 'ssh';
     el.start.disabled = !choice.system || (choice.system === 'ssh' && !choice.host); el.cancel.hidden = !machines.length;
     if (!s) return;
 
@@ -378,16 +372,9 @@
         if (name === t('Linux intégré')) { card.append(node('p', '', `${t('Accélération Windows :')} ${c.linux.accelerationEnabled ? t('activée') : t('désactivée')} · client SSH : ${c.linux.sshAvailable ? t('présent') : 'absent'}.`)); if (c.linux.compatible && (!c.linux.accelerationEnabled || !c.linux.sshAvailable)) card.append(settingButton(t('Activer les composants Linux'), async () => { const value = await api('/api/vm/activate-linux', {}); await settings(); if (value.restartNeeded) document.getElementById('vm-settings-content')?.append(node('p', '', t('Redémarrez Windows pour activer l’accélération Linux.'))); })); }
         target.append(card);
       }
-      // Docker and the pentest environments.
+      // Docker.
       const docker = node('article'); docker.append(node('h4', '', 'Docker'), node('p', '', t(c.docker?.reason || 'Docker non détecté.')));
-      if (c.docker?.available) docker.append(node('p', '', t(c.docker.pentestImage ? 'Image pentest (Kali) présente.' : 'Image pentest (Kali) absente.')),
-        settingButton(t(c.docker.pentestImage ? 'Reconstruire l’image pentest' : 'Construire l’image pentest (Kali, Internet requis)'), async () => { await api('/api/vm/pentest-template', { system: 'docker' }); await settings(); }));
-      if (c.dockerBuild) docker.append(node('p', '', `${t('Construction :')} ${c.dockerBuild.status}${c.dockerBuild.error ? ' · ' + c.dockerBuild.error : ''}`));
       target.append(docker);
-      const pentest = node('article'); pentest.append(node('h4', '', t('Environnement pentest Linux')), node('p', '', t('Debian avec nmap, sqlmap, nikto, ffuf, gobuster, hydra, testssl… installés une fois puis figés. Les machines pentest démarrent sans sudo, avec un pare-feu limité au périmètre confirmé.')));
-      if (c.linux.available) pentest.append(settingButton(t('Construire l’environnement pentest (Internet requis)'), async () => { await api('/api/vm/pentest-template', { system: 'linux' }); await settings(); }));
-      if (c.templateBuild) pentest.append(node('p', '', `${t('Construction :')} ${c.templateBuild.status}${c.templateBuild.error ? ' · ' + c.templateBuild.error : ''}`));
-      target.append(pentest);
       // SSH servers: registered and verified by the user only.
       const ssh = node('article'); ssh.append(node('h4', '', t('Serveurs SSH')), node('p', '', t('L’agent peut seulement choisir un serveur vérifié ici ; chaque commande y suit les règles de commandes du PC. L’empreinte du serveur est enregistrée au premier test.')));
       for (const h of (await api('/api/vm/ssh-hosts')).hosts || []) {

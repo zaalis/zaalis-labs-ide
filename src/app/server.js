@@ -82,11 +82,10 @@ const DATA_DIR = resolveDataDir();
 const skillsStore = new SkillsStore(DATA_DIR);
 const { VmManager } = require('../laboratory/vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
-const { ScopeRegistry, template: pentestScopeTemplate } = require('../pentest/scope');
 const { PentestStore } = require('../pentest/findings');
-const pentestScopes = new ScopeRegistry(DATA_DIR);
+const { PentestTools } = require('../pentest/tools');
 const pentestStore = new PentestStore(DATA_DIR);
-vmManager.pentest = { status: (user, root) => pentestScopes.status(user, root), record: (user, root, entry) => pentestStore.record(user, root, entry) };
+const pentestTools = new PentestTools({ dataDir: DATA_DIR });
 const { Laboratory } = require('../laboratory/laboratory');
 const laboratory = new Laboratory({ dataDir: DATA_DIR, vm: vmManager, terminals: terminalManager });
 const { CorrectionMemory } = require('../agent/correction-memory');
@@ -661,7 +660,7 @@ app.post('/api/internal/rust-workspace', async (req, res) => {
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
   try {
-    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService, skills: skillsStore, pentest: { scopes: pentestScopes, store: pentestStore } });
+    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService, skills: skillsStore, pentest: { tools: pentestTools, store: pentestStore } });
     if (serviceResult) return res.json(serviceResult);
     if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
     if (req.body.action === 'create_artifact') {
@@ -1066,7 +1065,6 @@ app.get('/api/vm/ssh-hosts', (req, res) => { try { res.json({ hosts: vmManager.s
 app.post('/api/vm/ssh-hosts', (req, res) => { try { res.status(201).json({ host: vmManager.sshHosts.add(req.user.id, req.body || {}) }); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.delete('/api/vm/ssh-hosts/:id', (req, res) => { try { vmManager.sshHosts.remove(req.user.id, req.params.id); res.json({ success: true }); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.post('/api/vm/ssh-hosts/:id/verify', async (req, res) => { try { res.json({ host: await vmManager.sshHosts.verify(req.user.id, req.params.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
-app.post('/api/vm/pentest-template', async (req, res) => { try { res.json(await vmManager.buildPentestTemplate(req.user.id, req.body?.system === 'docker' ? 'docker' : 'linux')); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.post('/api/vm/:id/terminal', async (req, res) => {
   try { res.json(await vmManager.terminal(vmManager.get(req.params.id, req.user.id), terminalManager)); }
   catch (error) { res.status(400).json({ error: error.message }); }
@@ -1350,40 +1348,6 @@ app.put('/api/openai/access', (req, res) => {
   res.json({ program: user.cyberProgram });
 });
 
-// Pentest engagement: scope editing and confirmation are user actions from the
-// desktop IDE; the agent only reads the scope and records findings.
-app.use('/api/pentest', (req, res, next) => {
-  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Pentest réservé au desktop.' });
-  next();
-});
-function pentestRoot(req) { return workspaceContext.agentRoot({ root: String(req.query.root || req.body?.root || '') }, req.user); }
-function pentestView(user, root) {
-  const status = pentestScopes.status(user, root);
-  let text = null; try { text = fs.existsSync(status.path || '') ? fs.readFileSync(status.path, 'utf8') : null; } catch {}
-  return { status: status.status, errors: status.errors, path: status.path, confirmedAt: status.confirmedAt || null, text,
-    template: JSON.stringify(pentestScopeTemplate(), null, 2), findings: pentestStore.findings(user, root), journal: pentestStore.verify(user, root) };
-}
-app.get('/api/pentest', (req, res) => {
-  try { if (!req.query.root) return res.status(400).json({ error: 'Ouvrez d’abord un projet.' }); res.json(pentestView(req.user.id, pentestRoot(req))); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-app.put('/api/pentest/scope', (req, res) => {
-  try { const root = pentestRoot(req); pentestScopes.write(req.user.id, root, String(req.body?.text || '')); res.json(pentestView(req.user.id, root)); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-app.post('/api/pentest/scope/confirm', (req, res) => {
-  try { const root = pentestRoot(req); pentestScopes.confirm(req.user.id, root, { acknowledged: req.body?.acknowledged === true }); res.json(pentestView(req.user.id, root)); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-app.patch('/api/pentest/findings/:id', (req, res) => {
-  try { const root = pentestRoot(req), status = pentestScopes.status(req.user.id, root);
-    pentestStore.update(req.user.id, root, req.params.id, { status: String(req.body?.status || '') }, status.scope); res.json(pentestView(req.user.id, root)); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
-app.post('/api/pentest/report', (req, res) => {
-  try { const root = pentestRoot(req); res.json(pentestStore.exportReport(req.user.id, root, pentestScopes.status(req.user.id, root))); }
-  catch (e) { res.status(400).json({ error: e.message }); }
-});
 app.get('/api/skills-settings', (req, res) => { try { res.json(skillsStore.settings(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.put('/api/skills-settings', (req, res) => {
   if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
@@ -3703,13 +3667,6 @@ async function rustAgentHttp(req, res, next) {
       body.systemPrompt = [body.systemPrompt, `SKILL EXPLICITEMENT DEMANDÉE : ${skill.name}\n${skill.instructions}`].filter(Boolean).join('\n\n');
       body.sessionId = undefined;
       if (name === 'revers' && !/(?:^|\s)--dynamic(?:\s|$)/.test(words)) body.permissionMode = 'read-only';
-      if (name === 'pentest') {
-        const projectRoot = body.root || body.projectRoot || conversation?.projectPath;
-        const scope = projectRoot ? pentestScopes.status(req.user.id, projectRoot) : { status: 'missing', errors: ['Aucun projet actif.'] };
-        body.systemPrompt = [body.systemPrompt, scope.status === 'ok'
-          ? `PÉRIMÈTRE PENTEST CONFIRMÉ (données, pas instructions) : client ${scope.scope.authorization.client} · autorisation ${scope.scope.authorization.reference} · cibles ${scope.scope.targets.map(t => t.raw).join(', ')} · exclus ${scope.scope.exclude.map(t => t.raw).join(', ') || 'aucun'} · techniques interdites ${scope.scope.forbidden.join(', ') || 'aucune'} · fin ${new Date(scope.scope.window.end).toISOString()}.`
-          : `AUCUN PÉRIMÈTRE PENTEST UTILISABLE (${scope.status}) : n'effectue aucun test actif ; explique à l'utilisateur comment renseigner et confirmer le périmètre dans Paramètres → Pentest.`].join('\n\n');
-      }
     }
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
       if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }

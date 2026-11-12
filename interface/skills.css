@@ -17,7 +17,3 @@
 @media(max-width:480px){.skills-toolbar>*{width:100%}.skill-row{padding:12px}}
 .skills-options{display:flex;flex-direction:column;gap:6px;margin:10px 0}
 .skill-scope-ai{color:var(--accent)}
-.pentest-scope{width:100%;min-height:260px;padding:10px 12px;border:1px solid var(--border);border-radius:10px;background:var(--bg-0);color:var(--text-0);font:12.5px/1.5 var(--font-mono,Consolas,monospace);resize:vertical;box-sizing:border-box}
-.pentest-finding-status{min-height:32px;padding:0 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-0);color:var(--text-0)}
-.pentest-sev-critical,.pentest-sev-high{color:var(--red)}
-.pentest-sev-medium{color:var(--orange,var(--accent))}

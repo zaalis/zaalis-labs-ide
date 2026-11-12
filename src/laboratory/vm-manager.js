@@ -7,9 +7,8 @@ const net = require('net');
 const { spawn, execFile } = require('child_process');
 const { seedIso } = require('./vm-seed');
 const { sanitize } = require('../agent/secrets-mask');
-const { cloudConfig, pentestInstallScript } = require('./vm-firewall');
+const { cloudConfig } = require('./vm-firewall');
 const { DockerBackend, SshHosts, IMAGE_PATTERN } = require('./vm-backends');
-const scopeTools = require('../pentest/scope');
 const SYSTEMS = ['linux', 'windows', 'docker', 'ssh'];
 const SSH_PREFIX = 'ssh-';
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -39,8 +38,6 @@ function processAlive(pid) {
 class VmManager {
   constructor({ appDir, dataDir, docker, sshHosts }) { this.assets = path.join(appDir, 'vm'); if (!fs.existsSync(this.assets)) this.assets = path.join(appDir, 'native', 'vm'); this.root = path.join(dataDir, 'virtual-machines'); fs.mkdirSync(this.root, { recursive: true }); this.sessions = new Map(); this.windowsStarting = false; this.templates = new (require("./vm-templates").VmTemplates)(this.root); this.probe = null;
     this.docker = docker || new DockerBackend(this); this.sshHosts = sshHosts || new SshHosts(this.root);
-    // Set by the server: { status(user, root), record(user, root, entry) }.
-    this.pentest = null; this.templateBuild = null;
     const sweep = setImmediate(() => { this.sweep().catch(() => {}); }); if (sweep.unref) sweep.unref(); }
   // Sessions live in memory only: after a restart or a crash their folders (a
   // disk overlay that grows with use, keys, staged project copies) can no longer
@@ -101,26 +98,7 @@ class VmManager {
     let docker = { available: false, reason: 'Docker non détecté.' };
     try { docker = await this.docker.capabilities(); } catch (error) { docker.reason = error.message; }
     const ssh = { available: process.platform !== 'win32' || linuxHost.sshAvailable, reason: process.platform !== 'win32' || linuxHost.sshAvailable ? 'Client OpenSSH disponible' : 'Client OpenSSH absent.' };
-    return { windows, linux: { ...linuxHost,bundled,available:bundled&&linuxHost.compatible&&linuxHost.accelerationEnabled&&linuxHost.sshAvailable, image: 'Debian 12 · serveur', imageBytes: fs.existsSync(path.join(this.assets, 'images', 'debian.qcow2')) ? fs.statSync(path.join(this.assets, 'images', 'debian.qcow2')).size : 0 }, docker, ssh, mode: 'autonomous', maxLinux: 3, maxDocker: 4, maxSsh: 4, templateBuild: this.templateBuild ? { ...this.templateBuild, log: undefined } : null, dockerBuild: this.docker.build ? { ...this.docker.build, log: String(this.docker.build.log || '').slice(-2000) } : null };
-  }
-  // Scope gate for a pentest machine: the confirmed scope must still be the one
-  // the machine's firewall was built from.
-  pentestGate(s, command) {
-    if (s.profile !== 'pentest') return { allowed: true };
-    if (!this.pentest) return { allowed: false, reason: 'module pentest indisponible' };
-    const status = this.pentest.status(s.userId, s.projectRoot);
-    if (status.status !== 'ok') return { allowed: false, reason: 'périmètre ' + status.status + ' : ' + status.errors.join(' ') };
-    if (status.hash !== s.scopeHash) return { allowed: false, reason: 'le périmètre a changé depuis la création de cette machine : en créer une nouvelle' };
-    return scopeTools.checkCommand(status.scope, command, { resolved: s.egress?.resolved || {} });
-  }
-  async preparePentest(s, userId, projectRoot) {
-    if (!this.pentest) throw new Error('Module pentest indisponible.');
-    const status = this.pentest.status(userId, projectRoot);
-    if (status.status !== 'ok') throw new Error('Périmètre pentest ' + status.status + ' : ' + status.errors.join(' ') + ' Renseignez et confirmez le périmètre dans Paramètres → Pentest.');
-    s.projectRoot = projectRoot; s.scopeHash = status.hash; s.network = 'internet';
-    s.egress = await scopeTools.egress(status.scope);
-    if (!s.egress.networks.length && !s.egress.hostAll && !s.egress.hostPorts.length) throw new Error('Aucune cible du périmètre n’a pu être résolue en adresse IPv4.');
-    if (s.egress.unresolved.length) this.log(s, 'Cibles non résolues (bloquées par le pare-feu) : ' + s.egress.unresolved.join(', ') + '\r\n');
+    return { windows, linux: { ...linuxHost,bundled,available:bundled&&linuxHost.compatible&&linuxHost.accelerationEnabled&&linuxHost.sshAvailable, image: 'Debian 12 · serveur', imageBytes: fs.existsSync(path.join(this.assets, 'images', 'debian.qcow2')) ? fs.statSync(path.join(this.assets, 'images', 'debian.qcow2')).size : 0 }, docker, ssh, mode: 'autonomous', maxLinux: 3, maxDocker: 4, maxSsh: 4 };
   }
   // `outputEnd` counts every character ever logged, so a client can append only
   // what is new even after the buffer has dropped its oldest part.
@@ -131,8 +109,6 @@ class VmManager {
   async create(userId, input = {}, projectRoot = null) {
     const system = SYSTEMS.includes(input.system) ? input.system : null;
     if (!system) throw new Error('Système inconnu : linux, windows, docker ou ssh.');
-    const profile = input.profile === 'pentest' ? 'pentest' : null;
-    if (profile && !['linux', 'docker'].includes(system)) throw new Error('Le profil pentest existe pour linux (QEMU) et docker.');
     const caps = await this.capabilities();
     const active = kind => [...this.sessions.values()].filter(s => s.system === kind && !['stopped', 'error'].includes(s.status)).length;
     if (system === 'windows' && (!caps.windows.compatible || !caps.windows.enabled || !caps.windows.cli)) throw new Error(caps.windows.reason);
@@ -146,22 +122,16 @@ class VmManager {
     const memoryMB = Math.max(1024, Math.min(8192, Number(input.memoryMB) || 2048));
     const cpus = Math.max(1, Math.min(4, Math.floor(Number(input.cpus) || 2)));
     if (system !== 'ssh' && [...this.sessions.values()].filter(s => s.system !== 'ssh' && !['stopped', 'error'].includes(s.status)).reduce((n, s) => n + s.memoryMB, memoryMB) > os.totalmem() / 1024 / 1024 * .65) throw new Error('Mémoire disponible insuffisante pour cette VM.');
-    let template = input.templateId ? this.templates.get(userId, input.templateId) : null;
+    const template = input.templateId ? this.templates.get(userId, input.templateId) : null;
     if (template && system !== 'linux') throw new Error('Un environnement figé requiert Linux.');
-    if (profile && system === 'linux') {
-      template = template || this.templates.list(userId).filter(item => item.kind === 'pentest').sort((a, b) => b.created - a.created).map(item => this.templates.get(userId, item.id))[0] || null;
-      if (!template || template.kind !== 'pentest') throw new Error('Aucun environnement pentest : lancez d’abord build_pentest_template (system=linux).');
-    }
-    if (profile && system === 'docker' && !caps.docker.pentestImage) throw new Error('Image pentest absente : lancez d’abord build_pentest_template (system=docker).');
     if (system === 'docker' && input.image && !IMAGE_PATTERN.test(String(input.image))) throw new Error('Image Docker invalide.');
     const remote = system === 'ssh' ? this.sshHosts.get(userId, String(input.host || '')) : null;
     if (remote && !remote.verified) throw new Error('Hôte SSH non vérifié : testez la connexion depuis le panneau Machines virtuelles.');
     const uuid = crypto.randomUUID();
     const names = { linux: 'Debian', windows: 'Windows Sandbox', docker: 'Conteneur', ssh: remote?.name || 'SSH' };
-    const s = { templateId: template?.id, image: system === 'docker' ? (input.image || null) : template?.image, id: system === 'ssh' ? SSH_PREFIX + uuid : uuid, userId, system, profile,
-      name: String(input.name || (profile ? 'Pentest · ' + names[system] : names[system])).slice(0, 80), memoryMB, cpus,
+    const s = { templateId: template?.id, image: system === 'docker' ? (input.image || null) : template?.image, id: system === 'ssh' ? SSH_PREFIX + uuid : uuid, userId, system,
+      name: String(input.name || names[system]).slice(0, 80), memoryMB, cpus,
       network: system === 'ssh' ? 'remote' : input.network === 'internet' ? 'internet' : 'isolated', status: 'starting', output: '', queue: Promise.resolve(), remote };
-    if (profile) await this.preparePentest(s, userId, projectRoot);
     s.dir = path.join(this.root, uuid); fs.mkdirSync(s.dir); this.sessions.set(s.id, s);
     try { fs.writeFileSync(path.join(s.dir, 'owner.json'), JSON.stringify({ pid: process.pid, created: Date.now() })); } catch {}
     s.startTask=this.start(s).catch(async error => { const cancelled=s.stopRequested; try { await this.stop(s,undefined,true); } catch {} if(cancelled)return; s.error = error.message; s.status = 'error'; this.log(s, '\r\n' + error.message); });
@@ -200,7 +170,7 @@ class VmManager {
       this.log(s, 'Docker · démarrage du conteneur\r\n');
       await this.docker.start(s);
       check();
-      this.log(s, `Conteneur prêt${s.profile === 'pentest' ? ' · pare-feu limité au périmètre' : ''}\r\n`);
+      this.log(s, 'Conteneur prêt\r\n');
     } else if (s.system === 'ssh') {
       const probe = await run(process.platform === 'win32' ? 'ssh.exe' : 'ssh', [...this.sshArgs(s), `mkdir -p ${this.guestWorkspace(s)} && echo zaalis-ok`], { timeout: 20000 });
       if (!/zaalis-ok/.test(probe)) throw new Error('Hôte SSH injoignable.');
@@ -210,7 +180,7 @@ class VmManager {
       await run('ssh-keygen.exe', ['-q', '-t', 'ed25519', '-N', '', '-f', key]);
       check();
       const pub = fs.readFileSync(key + '.pub', 'utf8').trim();
-      const seed = cloudConfig({ id: s.id, publicKey: pub, network: s.network, profile: s.profile, egress: s.egress });
+      const seed = cloudConfig({ id: s.id, publicKey: pub, network: s.network });
       fs.writeFileSync(path.join(s.dir, 'seed.iso'), seedIso({ 'meta-data': seed.meta, 'user-data': seed.user }));
       const qemuDir = path.join(this.assets, 'qemu');
       await run(path.join(qemuDir, 'qemu-img.exe'), ['create', '-f', 'qcow2', '-F', 'qcow2', '-b', s.image || path.join(this.assets, 'images', 'debian.qcow2'), path.join(s.dir, 'disk.qcow2'), '24G']);
@@ -225,18 +195,16 @@ class VmManager {
       // An exit we asked for is a normal stop, not a failure to report.
       s.proc.on('exit', code => { if (!s.stopRequested && s.status !== 'stopped') { s.status = 'error'; s.error = 'QEMU arrêté (' + code + '). ' + sanitize(s.output.slice(-600)); } });
       await this.wait(s, async () => { try { await run('ssh.exe', [...this.sshArgs(s), 'true'], { timeout: 8000 }); return true; } catch { return false; } }, 180000);
-      if (s.network === 'internet' || s.profile === 'pentest') await this.verifyGuestPolicy(s);
+      if (s.network === 'internet') await this.verifyGuestPolicy(s);
       this.log(s, '\r\nDebian prêt · SSH\r\n');
     }
     if (s.status === 'starting') s.status = 'ready';
   }
   // The guest policy is written by cloud-init; the host checks it took effect.
-  // A pentest machine without it, or whose account kept sudo, is refused.
   async verifyGuestPolicy(s) {
     let report = '';
-    try { report = await run('ssh.exe', [...this.sshArgs(s), 'cat /run/zaalis-firewall 2>/dev/null; sudo -n true 2>/dev/null && echo SUDO || echo NOSUDO'], { timeout: 15000 }); } catch (error) { report = error.message; }
+    try { report = await run('ssh.exe', [...this.sshArgs(s), 'cat /run/zaalis-firewall 2>/dev/null'], { timeout: 15000 }); } catch (error) { report = error.message; }
     s.guestFirewall = /active/.test(report) ? 'active' : 'unavailable';
-    if (s.profile === 'pentest' && (s.guestFirewall !== 'active' || !/NOSUDO/.test(report))) throw new Error('Pare-feu ou droits de la VM pentest non vérifiés : machine refusée.');
     if (s.guestFirewall !== 'active') this.log(s, '\r\nAttention : pare-feu invité indisponible, les services du PC hôte restent joignables depuis cette VM.\r\n');
   }
   guestWorkspace(s) { return s.system === 'ssh' ? `zaalis-workspace/${s.id.slice(SSH_PREFIX.length, SSH_PREFIX.length + 8)}` : '/home/zaalis/workspace'; }
@@ -249,16 +217,6 @@ class VmManager {
     const timeoutMs = Math.max(100, Math.min(120000, options.timeoutMs || 120000));
     if (s.status !== 'ready') return Promise.reject(new Error('La VM n’est pas prête.'));
     if (typeof command !== 'string' || !command.trim() || command.length > 32000) return Promise.reject(new Error('Commande invalide.'));
-    // Pentest machines: every command is checked against the confirmed scope
-    // and written to the evidence journal, refused ones included.
-    if (s.profile === 'pentest' && !options.internal) {
-      const gate = this.pentestGate(s, command);
-      if (!gate.allowed) {
-        try { this.pentest?.record(s.userId, s.projectRoot, { machine: s.id, system: s.system, command, allowed: false, reason: gate.reason }); } catch {}
-        this.log(s, '\r\n$ ' + command + '\r\nRefusé : ' + gate.reason + '\r\n');
-        return Promise.reject(new Error('Commande refusée par le périmètre pentest : ' + gate.reason));
-      }
-    }
     const task = s.queue.catch(() => {}).then(async () => {
       if (s.status !== 'ready') throw new Error('VM arrêtée.');
       this.log(s, '\r\n$ ' + command + '\r\n');
@@ -281,9 +239,6 @@ class VmManager {
         result = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));try{fs.unlinkSync(file);}catch{}
       }
       result.output = sanitize(String(result.output || '')); this.log(s, result.output + '\r\n' + (result.cwd ? `PS ${result.cwd}> ` : ''));
-      if (s.profile === 'pentest' && !options.internal) {
-        try { result.journal = this.pentest?.record(s.userId, s.projectRoot, { machine: s.id, system: s.system, command, exitCode: result.exitCode, timedOut: result.timedOut, output: result.output })?.id; } catch {}
-      }
       return result;
     }); s.queue = task; return task;
   }
@@ -329,7 +284,7 @@ class VmManager {
       const workspace = this.guestWorkspace(s);
       const target = s.system === 'ssh' ? workspace : '~/workspace';
       const reset = s.system === 'ssh' ? `rm -rf -- ${shQuote(workspace)}` : 'rm -rf -- /home/zaalis/workspace';
-      await this.exec(s, `${reset} && mkdir -p ${target} && tar -xf ${remoteTar} -C ${target} && rm ${remoteTar}`, { internal: true });
+      await this.exec(s, `${reset} && mkdir -p ${target} && tar -xf ${remoteTar} -C ${target} && rm ${remoteTar}`);
       if (s.system === 'ssh') return { summary: 'Copie du projet importée sur l’hôte SSH. Les fichiers sensibles et dépendances locales sont exclus.', files: count, bytes, fingerprint: projectFingerprint, guestPath: '~/' + workspace };
     }
     return { summary: 'Copie du projet importée. Les fichiers sensibles et dépendances locales sont exclus.', files: count, bytes, fingerprint: projectFingerprint, guestPath: s.system === 'linux' ? '/home/zaalis/workspace' : 'C:\\workspace' };
@@ -411,46 +366,6 @@ class VmManager {
     if (!fs.existsSync(file)) throw new Error('Activation interrompue avant son résultat. Réessayez.');
     const result = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); fs.unlinkSync(file); if (!result.ok) throw new Error(result.error); return result;
   }
-  // The pentest environment is built once, with Internet (to install the
-  // tools), then frozen: pentest machines start from it with their scoped
-  // firewall and no sudo. Installation runs in the background in the guest;
-  // its progress is polled because it outlasts the two-minute exec limit.
-  async buildPentestTemplate(userId, system = 'linux') {
-    if (system === 'docker') {
-      const caps = await this.docker.capabilities();
-      if (!caps.available) throw new Error(caps.reason);
-      const build = this.docker.buildPentestImage();
-      return { system, status: build.status, startedAt: build.startedAt, image: build.image };
-    }
-    if (this.templateBuild?.status === 'running') return { ...this.templateBuild, log: undefined };
-    const machine = await this.create(userId, { system: 'linux', network: 'internet', name: 'Construction pentest', memoryMB: 2048, cpus: 2 });
-    const s = this.get(machine.id, userId);
-    const build = { system, status: 'running', machineId: s.id, startedAt: Date.now(), log: '', userId };
-    this.templateBuild = build;
-    build.task = (async () => {
-      try {
-        await this.wait(s, () => s.status === 'ready', 240000);
-        const script = Buffer.from(pentestInstallScript()).toString('base64');
-        const started = await this.exec(s, `echo ${script} | base64 -d > /tmp/zaalis-install.sh && (nohup sh /tmp/zaalis-install.sh > /tmp/zaalis-install.out 2>&1 &) && echo started`, { timeoutMs: 30000 });
-        if (!/started/.test(started.output)) throw new Error('Installation non démarrée.');
-        for (const end = Date.now() + 45 * 60000; ; ) {
-          if (Date.now() > end) throw new Error('Installation trop longue (45 min).');
-          await delay(10000);
-          const progress = await this.exec(s, 'cat /tmp/zaalis-install.out 2>/dev/null | tail -c 6000', { timeoutMs: 20000 });
-          build.log = progress.output;
-          if (/INSTALL_DONE/.test(progress.output)) break;
-          if (/APT_UPDATE_FAILED|NFT_MISSING/.test(progress.output)) throw new Error('Installation impossible : ' + (/(APT_UPDATE_FAILED|NFT_MISSING)/.exec(progress.output)[1]));
-        }
-        const template = await this.templates.save(userId, s, this, { name: 'Zaalis Pentest (Debian + outils)', kind: 'pentest', packages: build.log.split(/\r?\n/).filter(line => /^(OK|ABSENT) /.test(line)) });
-        try { await this.remove(s); } catch {}
-        Object.assign(build, { status: 'done', finishedAt: Date.now(), templateId: template.id });
-      } catch (error) {
-        Object.assign(build, { status: 'failed', finishedAt: Date.now(), error: sanitize(error.message) });
-        try { await this.remove(s); } catch {}
-      }
-    })();
-    return { system, status: 'running', machineId: s.id, startedAt: build.startedAt };
-  }
   async action(userId, input, terminals, projectRoot) {
     switch (input.action) {
       case 'templates': return {summary:'Environnements Linux réutilisables',templates:this.templates.list(userId)};
@@ -458,8 +373,6 @@ class VmManager {
       case 'list': return { summary: 'Machines virtuelles', capabilities: await this.capabilities(), machines: this.list(userId).map(({output, ...machine}) => machine) };
       case 'create': return { summary: 'Démarrage en cours ; utiliser status avant exec', machine: await this.create(userId, input, projectRoot) };
       case 'hosts': return { summary: 'Hôtes SSH enregistrés par l’utilisateur', hosts: this.sshHosts.list(userId).map(({ id, name, host, user, port, verified, system }) => ({ id, name, host, user, port, verified, system })) };
-      case 'build_pentest_template': return { summary: 'Construction de l’environnement pentest lancée ; suivre avec template_status', build: await this.buildPentestTemplate(userId, input.system === 'docker' ? 'docker' : 'linux') };
-      case 'template_status': return { summary: 'État de la construction pentest', linux: this.templateBuild ? { ...this.templateBuild, log: String(this.templateBuild.log || '').slice(-4000) } : null, docker: this.docker.build ? { ...this.docker.build, log: String(this.docker.build.log || '').slice(-4000) } : null };
       case 'status': {
         const s = this.get(input.id, userId), waitMs = input.waitMs ?? 0;
         if (!Number.isInteger(waitMs) || waitMs < 0 || waitMs > 30000) throw new Error('Attente invalide : waitMs entre 0 et 30000.');
@@ -474,7 +387,7 @@ class VmManager {
       case 'export_file': return this.exportFile(this.get(input.id,userId),input.path);
       case 'reset': {
         const old=this.get(input.id,userId); if(old.status!=='stopped')await this.stop(old,terminals);
-        const options={system:old.system,name:old.name,network:old.network,memoryMB:old.memoryMB,cpus:old.cpus,templateId:old.templateId,profile:old.profile,image:old.system==='docker'?old.image:undefined,host:old.remote?.id};
+        const options={system:old.system,name:old.name,network:old.network,memoryMB:old.memoryMB,cpus:old.cpus,templateId:old.templateId,image:old.system==='docker'?old.image:undefined,host:old.remote?.id};
         // The replaced machine would otherwise stay listed and keep its disk.
         try{await this.remove(old,terminals);}catch{}
         return {summary:'Nouvel environnement propre ; utiliser le nouvel id',machine:await this.create(userId,options,old.projectRoot||projectRoot)};

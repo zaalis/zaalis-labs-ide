@@ -62,23 +62,23 @@ function workspaceServiceAction(context, body, { memory, conversations, tasks, s
     throw Object.assign(new Error('Action skills inconnue.'), { status: 400 });
   }
   if (body.action === 'pentest' && pentest) {
-    const status = pentest.scopes.status(user, projectRoot);
-    const summary = {
-      status: status.status, errors: status.errors, path: status.path, confirmedAt: status.confirmedAt || null,
-      scope: status.scope ? {
-        client: status.scope.authorization.client, reference: status.scope.authorization.reference,
-        window: { start: new Date(status.scope.window.start).toISOString(), end: new Date(status.scope.window.end).toISOString() },
-        targets: status.scope.targets.map(item => item.raw), exclude: status.scope.exclude.map(item => item.raw), forbidden: status.scope.forbidden,
-      } : null,
-    };
-    const action = input.action || 'scope';
-    if (action === 'scope') return { summary: status.status === 'ok' ? 'Périmètre confirmé et actif.' : `Périmètre ${status.status} : aucun test actif autorisé.`, ...summary };
-    if (action === 'journal') { const entries = pentest.store.journal(user, projectRoot); return { summary: `${entries.length} commande(s) journalisée(s).`, integrity: pentest.store.verify(user, projectRoot), entries: entries.slice(-50).map(({ excerpt, ...entry }) => ({ ...entry, excerpt: excerpt.slice(-600) })) }; }
+    const action = input.action || 'tools';
+    const names = input.name ? [String(input.name)] : Array.isArray(input.names) ? input.names.map(String) : [];
+    if (action === 'tools') {
+      const wait = Number(input.waitMs) || 0;
+      if (wait < 0 || wait > 25000) throw fail('waitMs : 0 à 25000.');
+      return Promise.resolve(pentest.tools.wait(names.length ? names : [...pentest.tools.jobs.keys()], wait))
+        .then(() => pentest.tools.status(names))
+        .then(value => ({ summary: `${value.tools.filter(tool => tool.installed).length}/${value.tools.length} outil(s) installé(s) dans ${value.root}.`, ...value }));
+    }
+    if (action === 'install') {
+      if (!names.length) throw fail('input.name requis (voir action tools).');
+      return pentest.tools.install(names[0]).then(job => ({ summary: job.status === 'done' ? `${names[0]} déjà installé.` : `Installation de ${names[0]} lancée : suivre avec action tools et waitMs.`, status: job.status }));
+    }
     if (action === 'findings') return { summary: 'Constats du projet.', findings: pentest.store.findings(user, projectRoot) };
-    if (['finding_add', 'finding_update', 'report'].includes(action) && ['missing', 'invalid'].includes(status.status)) throw fail('Aucun périmètre valide : les constats et le rapport exigent un périmètre confirmé.', 409);
-    if (action === 'finding_add') return { summary: 'Constat enregistré.', finding: pentest.store.add(user, projectRoot, input, status.scope) };
-    if (action === 'finding_update') return { summary: 'Constat mis à jour.', finding: pentest.store.update(user, projectRoot, String(input.id || ''), input, status.scope) };
-    if (action === 'report') { const file = pentest.store.exportReport(user, projectRoot, status); return { summary: `Rapport écrit : ${file.path}`, ...file }; }
+    if (action === 'finding_add') return { summary: 'Constat enregistré.', finding: pentest.store.add(user, projectRoot, input) };
+    if (action === 'finding_update') return { summary: 'Constat mis à jour.', finding: pentest.store.update(user, projectRoot, String(input.id || ''), input) };
+    if (action === 'report') { const file = pentest.store.exportReport(user, projectRoot, input); return { summary: `Rapport écrit : ${file.path}`, ...file }; }
     throw Object.assign(new Error('Action pentest inconnue.'), { status: 400 });
   }
   return null;
