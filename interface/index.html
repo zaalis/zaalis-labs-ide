@@ -683,6 +683,9 @@
             <button class="settings-nav-item" type="button" data-settings-section="skills">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/></svg><span>Skills</span>
             </button>
+            <button class="settings-nav-item" type="button" data-settings-section="pentest">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3 4 6v6c0 4.5 3.4 8.3 8 9 4.6-.7 8-4.5 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg><span>Pentest</span>
+            </button>
             <div class="settings-nav-label" data-i18n="settings-zside-category">zaalis IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
@@ -847,8 +850,35 @@
                         <label class="btn btn-primary skills-import-label">Importer SKILL.md<input type="file" id="skills-import" accept=".md,text/markdown" aria-label="Importer un fichier SKILL.md"></label>
                         <button class="btn btn-ghost" id="skills-refresh" type="button">Actualiser</button>
                     </div>
+                    <div class="skills-options">
+                        <label class="skill-toggle"><input type="checkbox" id="skills-auto-activate"><span>Activer automatiquement les skills écrites par l’IA</span></label>
+                        <label class="skill-toggle"><input type="checkbox" id="skills-drafts"><span>Garder un brouillon de procédure après une longue tâche réussie</span></label>
+                        <p class="form-hint">Sans activation automatique, une skill proposée par l’IA reste désactivée jusqu’à ce que vous la relisiez et l’activiez ici.</p>
+                    </div>
                     <p id="skills-status" class="form-hint skills-status" role="status" aria-live="polite"></p>
                     <div id="skills-list" class="skills-list" aria-busy="false"></div>
+                </section>
+
+                <section class="settings-card settings-pane" data-settings-pane="pentest">
+                    <h3>Pentest autorisé</h3>
+                    <p class="form-hint">Le périmètre se trouve dans .zaalis/pentest-scope.json du projet actif. Il ne prend effet qu’après votre confirmation, et toute modification ultérieure le remet en attente. Les machines pentest n’atteignent que ces cibles, sans sudo, et chaque commande est journalisée. Lancez ensuite /pentest dans le chat.</p>
+                    <p id="pentest-status" class="form-hint skills-status" role="status" aria-live="polite"></p>
+                    <label for="pentest-scope" class="form-hint">Périmètre (JSON)</label>
+                    <textarea id="pentest-scope" class="pentest-scope" rows="16" spellcheck="false" aria-label="Périmètre pentest au format JSON"></textarea>
+                    <div class="skills-toolbar">
+                        <button class="btn btn-ghost" id="pentest-template" type="button">Insérer le modèle</button>
+                        <button class="btn btn-primary" id="pentest-save" type="button">Enregistrer</button>
+                    </div>
+                    <label class="skill-toggle"><input type="checkbox" id="pentest-ack"><span>Je dispose d’une autorisation écrite du propriétaire pour tester ces cibles pendant cette fenêtre.</span></label>
+                    <div class="skills-toolbar">
+                        <button class="btn btn-primary" id="pentest-confirm" type="button">Confirmer le périmètre</button>
+                        <button class="btn btn-ghost" id="pentest-refresh" type="button">Actualiser</button>
+                    </div>
+                    <hr class="settings-separator">
+                    <h3>Constats</h3>
+                    <p id="pentest-journal" class="form-hint"></p>
+                    <div id="pentest-findings" class="skills-list"></div>
+                    <div class="skills-toolbar"><button class="btn btn-primary" id="pentest-report" type="button">Écrire le rapport dans pentest/</button></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -1451,12 +1481,12 @@
 <script src="script/main.js?v=20261027.1" defer></script>
 <script src="script/agent-catalog.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
-<link rel="stylesheet" href="vm.css?v=20261015.7">
-<link rel="stylesheet" href="laboratory.css?v=20261015.7">
+<link rel="stylesheet" href="vm.css?v=20261112.1">
+<link rel="stylesheet" href="laboratory.css?v=20261110.1">
 <script src="script/laboratory.js?v=20261015.7" defer></script>
 <script src="vendor/xterm/xterm.js" defer></script>
 <script src="vendor/xterm/addon-fit.js" defer></script>
-<script src="script/vm.js?v=20261015.7" defer></script>
+<script src="script/vm.js?v=20261112.1" defer></script>
 <link rel="stylesheet" href="correction-memory.css?v=20261015.7">
 <script src="script/correction-memory.js?v=20261015.7" defer></script>
 <script src="script/agent-activity.js?v=20261015.7" defer></script>
@@ -1469,10 +1499,10 @@
 <script src="script/messengers.js?v=20261015.7" defer></script>
 <script src="script/token-profile.js?v=20261015.7" defer></script>
 <script src="script/welcome.js?v=20261015.7" defer></script>
-<link rel="stylesheet" href="design-system.css?v=20261015.7">
+<link rel="stylesheet" href="design-system.css?v=20261112.1">
 <link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
 <link rel="stylesheet" href="model-picker.css?v=20261111.1">
-<script src="script/settings-layout.js?v=20261027.1" defer></script>
+<script src="script/settings-layout.js?v=20261112.1" defer></script>
 <script src="script/settings-persistence.js?v=20261015.7" defer></script>
 <script src="script/inline-approval.js?v=20261015.7" defer></script>
 <script src="script/command-palette.js?v=20261015.7" defer></script>
@@ -1480,7 +1510,10 @@
 <script src="script/project-actions.js?v=20261015.7" defer></script>
 <script src="script/shell-layout.js?v=20261015.7" defer></script>
 <script src="script/ui-accessibility.js?v=20261015.7" defer></script>
-<link rel="stylesheet" href="skills.css?v=20261027.1">
-<script src="script/skills.js?v=20261027.1" defer></script>
+<link rel="stylesheet" href="skills.css?v=20261112.1">
+<script src="script/skills.js?v=20261112.1" defer></script>
+<script src="script/pentest.js?v=20261112.1" defer></script>
+<link rel="stylesheet" href="chat-simple.css?v=20261112.1">
+<script src="script/chat-simple.js?v=20261110.1" defer></script>
 </body>
 </html>

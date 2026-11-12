@@ -42,7 +42,7 @@ test('skills and Daybreak flow through the real HTTP adapter and Rust tool runti
     const headers={'Content-Type':'application/json',cookie:register.headers.get('set-cookie').split(';')[0]};
     const api=async(url,method='GET',body)=>{const response=await fetch(base+url,{method,headers,body:body===undefined?undefined:JSON.stringify(body)});return {status:response.status,data:await response.json()};};
     const query='?root='+encodeURIComponent(project);
-    assert.equal((await api('/api/skills'+query)).data.skills[0].name,'revers');
+    assert.deepEqual((await api('/api/skills'+query)).data.skills.filter(s=>s.scope==='builtin').map(s=>s.name),['pentest','revers']);
     assert.equal((await api('/api/skills','POST',{instructions:'---\nname: review\ndescription: Review\n---\n# Steps\nRead fixture.js.'})).status,201);
     assert.equal((await api('/api/skills','POST',{instructions:'---\nname: ../outside\n---\nBad'})).status,400);
     await api('/api/keys','PUT',{keys:{openai:'sk-runtime-fake-only'}});

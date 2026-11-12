@@ -6,7 +6,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'native/blender/zaalis_bridge'
-VERSION = '1.0.0'
+VERSION = '1.0.1'
 target = SOURCE.parent / f'zaalis-bridge-{VERSION}.zip'
 with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
     for name in ('__init__.py', 'blender_manifest.toml', 'LICENSE', 'COPYING'):

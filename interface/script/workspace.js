@@ -46,7 +46,8 @@
     if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {};
     const expanded = new Map((Array.isArray(saved.collapsedProjects) ? saved.collapsedProjects : [])
         .filter(key => typeof key === 'string').map(key => [key, false]));
-    let mode = saved.mode === 'chat' ? 'chat' : 'editor';
+    // Chat is the default surface; a saved choice of the editor layout is kept.
+    let mode = saved.mode === 'editor' ? 'editor' : 'chat';
     let panel = ['files', 'browser', 'terminal', 'vm', 'artifacts', 'agents', 'chat'].includes(saved.panel) ? saved.panel : null;
     let width = Math.max(300, Math.min(760, Number(saved.width) || 420));
     // The left sidebar shows either the project files or the conversations.

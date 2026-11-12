@@ -5,6 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { rank } = require('../services/text-search');
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 function clean(value, max = 3000) {
   return String(value || '').replace(/\x1b\[[0-9;]*m/g, '')
@@ -31,12 +32,14 @@ class CorrectionMemory {
   }
   list(user, root, query = '') {
     const key = projectKey(root), settings = this.settings(user, root);
-    const words = [...new Set(clean(query).toLowerCase().match(/[\p{L}\p{N}_-]{3,}/gu) || [])];
-    return fs.readdirSync(this.dir(user)).filter(name => /^[a-f0-9-]{36}\.json$/.test(name)).flatMap(name => {
+    const records = fs.readdirSync(this.dir(user)).filter(name => /^[a-f0-9-]{36}\.json$/.test(name)).flatMap(name => {
       try { return [JSON.parse(fs.readFileSync(path.join(this.dir(user), name), 'utf8'))]; } catch { return []; }
     }).filter(r => r.projectKey === key || (settings.crossProject && r.shared === true))
-      .map(r => { const corpus = [r.problem, r.summary, r.cause, ...(r.files || [])].join(' ').toLowerCase(); return { ...r, sameProject: r.projectKey === key, score: words.filter(w => corpus.includes(w)).length }; })
-      .filter(r => !words.length || r.score > 0)
+      .map(r => ({ ...r, sameProject: r.projectKey === key, score: 0 }));
+    const text = clean(query).trim();
+    if (!text) return records.sort((a, b) => Number(b.sameProject) - Number(a.sameProject) || b.updatedAt - a.updatedAt);
+    return rank(records, text, r => [{ text: r.problem, weight: 3 }, { text: r.cause, weight: 2 }, { text: r.summary, weight: 1 }, { text: (r.files || []).join(' '), weight: 2 }], { limit: 200 })
+      .map(hit => ({ ...hit.item, score: Math.round(hit.score * 100) / 100 }))
       .sort((a, b) => Number(b.sameProject) - Number(a.sameProject) || b.score - a.score || b.updatedAt - a.updatedAt);
   }
   save(user, root, input) {

@@ -8,7 +8,7 @@
 .lab-section button,.lab-toolbar select,.lab-toolbar input{min-height:44px;padding:8px 12px;border:1px solid var(--border-color,#555);border-radius:var(--radius-sm);background:var(--bg-secondary,#242428);color:var(--text-primary,#eee);cursor:pointer}
 .lab-section textarea{display:block;box-sizing:border-box;width:100%;margin:12px 0;padding:12px;border:1px solid var(--border-color,#555);border-radius:var(--radius-sm);background:var(--bg-primary,#161618);color:var(--text-primary,#eee);font:13px/1.6 Consolas,monospace;resize:vertical}
 .lab-section summary{cursor:pointer;padding:12px 0}.lab-list{display:grid;gap:12px;margin-top:16px}.lab-state{display:block;margin:8px 0;font-weight:600}
-.lab-record p{overflow-wrap:anywhere}.lab-record a{display:block;width:fit-content;max-width:100%;overflow-wrap:anywhere;padding:8px 0;margin:4px 0;color:#c0caff;text-decoration:underline}
+.lab-record p{overflow-wrap:anywhere}.lab-record a{display:block;width:fit-content;max-width:100%;overflow-wrap:anywhere;padding:8px 0;margin:4px 0;color:var(--accent-hover);text-decoration:underline}
 .lab-table-scroll{overflow:auto}.lab-table{width:100%;border-collapse:collapse;font-size:13px}.lab-table th,.lab-table td{padding:8px;text-align:left;border-bottom:1px solid var(--border-color,#444)}
 .lab-section :focus-visible,.lab-toolbar :focus-visible{outline:2px solid var(--accent,#a9b8ff);outline-offset:3px}
 .lab-field{display:flex;flex-direction:column;gap:8px;margin:16px 0;font-size:13px;font-weight:500}.lab-field input:not([type=checkbox]),.lab-field select{box-sizing:border-box;width:100%;min-height:44px;padding:8px;border:1px solid var(--border-color,#555);border-radius:var(--radius-sm);background:var(--bg-primary,#161618);color:var(--text-primary,#eee)}

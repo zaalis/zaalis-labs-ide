@@ -8,6 +8,7 @@
         api:{label:text('Clés et abonnements','Keys and subscriptions'),panes:['api']},
         mcp:{label:'MCP',panes:['mcp']},
         skills:{label:'Skills',panes:['skills']},
+        pentest:{label:'Pentest',panes:['pentest']},
         hardware:{label:text('Matériel','Hardware'),panes:['hardware']},
         vm:{label:text('Machines virtuelles','Virtual machines'),panes:['vm']},
         integrations:{label:text('Intégrations','Integrations'),panes:['integrations']},
@@ -34,6 +35,8 @@
         document.querySelectorAll('.settings-pane').forEach(pane=>pane.classList.toggle('active',groups[key].panes.includes(pane.dataset.settingsPane)));
         const title = document.getElementById('settings-active-title'); title.removeAttribute('data-i18n'); title.textContent = window.ZaalisUI.translate(groups[key].label);
         if (key === 'vm') window.ZaalisVM?.settings();
+        if (key === 'pentest') window.ZaalisPentest?.refresh();
+        if (key === 'skills') window.ZaalisSkills?.options?.();
         if (key === 'integrations') window.ZaalisIntegrations?.settings();
         if (key === 'tokens') window.ZaalisTokenProfile?.mount();
         return true;

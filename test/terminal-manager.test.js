@@ -63,6 +63,22 @@ test('le marqueur renvoyé en écho ne termine pas une commande avant son résul
   assert.match(result.output, /Résultat complet/);
 });
 
+test('une commande aboutit encore quand le tampon du terminal est plein', async () => {
+  const manager = new TerminalManager();
+  const full = 512 * 1024;
+  const session = { buffer: 'x'.repeat(full), closed: false, ready: Promise.resolve(), events: new EventEmitter() };
+  const emit = (data) => { session.buffer = (session.buffer + data).slice(-full); session.events.emit('data', data); };
+  session.proc = { write(input) {
+    const marker = input.match(/__ZAALIS_DONE_[a-f0-9]+/)[0];
+    setImmediate(() => emit(`\r\nsortie après saturation\r\n${marker}:0\r\n`));
+  } };
+  manager.latest = () => session;
+  const result = await manager.runCommand({ userId: 'full', cwd: process.cwd(), command: 'echo test', waitMs: 1000 });
+  assert.equal(result.timedOut, false); assert.equal(result.exitCode, 0);
+  assert.match(result.output, /sortie après saturation/);
+  assert.equal(session.events.listenerCount('data'), 0);
+});
+
 test('le PTY persistant exécute une commande et rend son code de sortie', { skip: !ptyAvailable() && 'node-pty indisponible' }, async () => {
   const manager = new TerminalManager();
   const command = process.platform === 'win32' ? 'echo terminal-ok' : 'printf terminal-ok';

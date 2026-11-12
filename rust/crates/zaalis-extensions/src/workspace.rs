@@ -46,8 +46,8 @@ impl Tool for WorkspaceTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "workspace".into(),
-            description: "Projets connus de l'IDE, terminal visible et création locale de fichiers. memory : input.action list/search/save/delete ; tasks : input.action list/create/update/run/cancel/delete ; session_search : recherche dans les conversations du projet actif. GitHub : action github avec input.action (repos, files, read, pulls, push, create_pull, merge), input.repo owner/name ; utilisez repos pour découvrir les dépôts autorisés. Les push et merge exigent le projet associé vérifié ; ne déduisez jamais le dépôt de son seul nom. list donne les projets connus. open sélectionne un projet connu et ouvre éventuellement son terminal. create_artifact crée un vrai PDF, DOCX, XLSX ou CSV dans artifacts/ du projet actif (ou de l'espace de chat) ; fournir format, name, title et content pour PDF/DOCX, ou rows/sheets pour XLSX, ou rows pour CSV. N'annonce le fichier créé qu'après le résultat de l'outil. Après open, confirme puis termine le tour : les outils restent dans l'ancien dossier jusqu'au prochain tour. Aucun chemin hôte arbitraire n'est accepté.".into(),
-            input_schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","open","create_artifact","github","memory","tasks","session_search"]},"input":{"type":"object","description":"GitHub : action repos, files, read (path), pulls, push (branch), create_pull (title, head, branch base, body), merge (number, sha exact). repo=owner/name. Toujours vérifier le dépôt et le projet ; les droits sont imposés par le serveur."},"project":{"type":"string"},"terminal":{"type":"boolean"},"format":{"type":"string","enum":["pdf","docx","xlsx","csv"]},"name":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}},"sheets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}}},"required":["rows"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}),
+            description: "Projets connus de l'IDE, terminal visible et création locale de fichiers. memory : input.action list/search/save/delete (recherche plein texte classée ; save est automatique : enregistre sans demander les préférences durables, conventions et faits stables utiles, jamais de secret) ; tasks : input.action list/create/update/run/cancel/delete (planification : runAt ISO, intervalMinutes ou cron « minute heure jour mois jourSemaine ») ; session_search : recherche plein texte dans les conversations du projet actif ; skills : input.action list ou propose (name, description, instructions) pour enregistrer une procédure réutilisable, activée selon le réglage de l'utilisateur ; pentest : input.action scope (état du périmètre confirmé), journal (commandes journalisées), findings, finding_add / finding_update (title, asset, cvss vecteur 3.1, description, impact, reproduction, remediation, evidence = identifiants J du journal, cwe, references, status draft/confirmed/false_positive/fixed), report (rapport Markdown dans pentest/ du projet). GitHub : action github avec input.action (repos, files, read, pulls, push, create_pull, merge), input.repo owner/name ; utilisez repos pour découvrir les dépôts autorisés. Les push et merge exigent le projet associé vérifié ; ne déduisez jamais le dépôt de son seul nom. list donne les projets connus. open sélectionne un projet connu et ouvre éventuellement son terminal. create_artifact crée un vrai PDF, DOCX, XLSX ou CSV dans artifacts/ du projet actif (ou de l'espace de chat) ; fournir format, name, title et content pour PDF/DOCX, ou rows/sheets pour XLSX, ou rows pour CSV. N'annonce le fichier créé qu'après le résultat de l'outil. Après open, confirme puis termine le tour : les outils restent dans l'ancien dossier jusqu'au prochain tour. Aucun chemin hôte arbitraire n'est accepté.".into(),
+            input_schema: json!({"type":"object","properties":{"action":{"type":"string","enum":["list","open","create_artifact","github","memory","tasks","session_search","skills","pentest"]},"input":{"type":"object","description":"GitHub : action repos, files, read (path), pulls, push (branch), create_pull (title, head, branch base, body), merge (number, sha exact). repo=owner/name. Toujours vérifier le dépôt et le projet ; les droits sont imposés par le serveur."},"project":{"type":"string"},"terminal":{"type":"boolean"},"format":{"type":"string","enum":["pdf","docx","xlsx","csv"]},"name":{"type":"string"},"title":{"type":"string"},"content":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}},"sheets":{"type":"array","items":{"type":"object","properties":{"name":{"type":"string"},"rows":{"type":"array","items":{"type":"array","items":{}}}},"required":["rows"],"additionalProperties":false}}},"required":["action"],"additionalProperties":false}),
         }
     }
     fn access(&self, input: &Value, context: &ToolContext) -> Result<AccessRequest> {
@@ -57,8 +57,24 @@ impl Tool for WorkspaceTool {
             "session_search" => AccessKind::Read,
             "memory" => match input.get("input").and_then(|i|i.get("action")).and_then(Value::as_str) {
                 Some("list" | "search") => AccessKind::Read,
-                Some("save" | "delete") => AccessKind::Write,
+                // Saving a memory is IDE bookkeeping, like a todo: automatic
+                // capture must not stop the turn. Deleting still asks.
+                Some("save") => AccessKind::Session,
+                Some("delete") => AccessKind::Write,
                 _ => return Err(ZaalisError::invalid("action mémoire inconnue")),
+            },
+            "skills" => match input.get("input").and_then(|i| i.get("action")).and_then(Value::as_str) {
+                Some("list") => AccessKind::Read,
+                // A proposal is stored pending; only the user activates it,
+                // unless they chose automatic activation.
+                Some("propose") => AccessKind::Session,
+                _ => return Err(ZaalisError::invalid("action skills inconnue")),
+            },
+            "pentest" => match input.get("input").and_then(|i| i.get("action")).and_then(Value::as_str) {
+                Some("scope" | "journal" | "findings") => AccessKind::Read,
+                Some("finding_add" | "finding_update") => AccessKind::Session,
+                Some("report") => AccessKind::Write,
+                _ => return Err(ZaalisError::invalid("action pentest inconnue")),
             },
             "tasks" => match input.get("input").and_then(|i|i.get("action")).and_then(Value::as_str) {
                 Some("list") => AccessKind::Read,
@@ -72,7 +88,7 @@ impl Tool for WorkspaceTool {
             },
             _ => return Err(ZaalisError::invalid("action workspace inconnue")) };
         Ok(AccessRequest::new(context.agent_id.clone(), "workspace", kind)
-            .with_target(if action == "create_artifact" { "artifacts".into() } else { format!("projet IDE : {}", input.get("project").and_then(Value::as_str).unwrap_or(action)) }))
+            .with_target(if action == "create_artifact" { "artifacts".into() } else if action == "pentest" { "pentest/ (rapport)".into() } else { format!("projet IDE : {}", input.get("project").and_then(Value::as_str).unwrap_or(action)) }))
     }
     async fn execute(&self, mut input: Value, context: ToolContext, cancel: CancellationToken) -> Result<ToolResult> {
         input["agent_id"] = json!(context.agent_id);

@@ -58,7 +58,7 @@
             return { key: 'mcp:' + label.toLowerCase(), icon: label.toLowerCase() === 'github' ? 'github' : 'plug', brand: pretty, fr: () => `a utilisé ${pretty}`, en: () => `used ${pretty}` };
         }
         if (name === 'todo') return { key: 'todo', icon: 'todo', fr: () => 'a mis à jour ses tâches', en: () => 'updated its tasks' };
-        if (['task', 'spawn_agent', 'merge_agent'].includes(name)) return { key: 'agent', icon: 'users', fr: n => n > 1 ? `a délégué ${n} tâches à des sous-agents` : 'a délégué une tâche à un sous-agent', en: n => n > 1 ? `delegated ${n} tasks to sub-agents` : 'delegated a task to a sub-agent' };
+        if (['task', 'spawn_agent', 'spawn_agents', 'merge_agent'].includes(name)) return { key: 'agent', icon: 'users', fr: n => n > 1 ? `a délégué ${n} tâches à des sous-agents` : 'a délégué une tâche à un sous-agent', en: n => n > 1 ? `delegated ${n} tasks to sub-agents` : 'delegated a task to a sub-agent' };
         if (name === 'skill') return { key: 'skill', icon: 'sparkle', fr: () => 'a utilisé une compétence', en: () => 'used a skill' };
         if (name === 'laboratory') return { key: 'lab', icon: 'flask', fr: () => 'a utilisé le laboratoire', en: () => 'used the laboratory' };
         if (name === 'git_status') return { key: 'git', icon: 'git', fr: () => 'a vérifié l’état Git', en: () => 'checked Git status' };
@@ -79,6 +79,7 @@
             : name === 'mcp' ? [input.server, input.tool].filter(Boolean).join(' · ')
             : name === 'workspace' ? [input.action, input.repo || input.path].filter(Boolean).join(' ')
             : ['task', 'spawn_agent'].includes(name) ? pick(input.title, input.description, input.role)
+            : name === 'spawn_agents' ? [(Array.isArray(input.tasks) ? input.tasks.length : 0) + ' ' + L('sous-agents', 'sub-agents'), input.review && input.review !== 'none' ? (input.review === 'debate' ? L('débat', 'debate') : L('vérification croisée', 'cross-check')) : ''].filter(Boolean).join(' · ')
             : '';
         return text || fallback || name || L('outil', 'tool');
     }

@@ -94,11 +94,22 @@ impl Tool for ComputerTool {
             .bearer_auth(self.token.expose())
             .json(&input);
         let response = tokio::select! { value = request.send() => value.map_err(|error| ZaalisError::io(error.to_string()))?, () = cancel.cancelled() => return Err(ZaalisError::cancelled()) };
-        if !response.status().is_success() {
-            return Err(ZaalisError::io(format!(
-                "computer HTTP {}",
-                response.status()
-            )));
+        let status = response.status();
+        if !status.is_success() {
+            // The bridge explains its refusal in JSON: pass that on, so the
+            // model can react to the cause instead of a bare status code.
+            let detail = response
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|value| value.get("error").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_default();
+            let detail: String = detail.chars().take(600).collect();
+            return Err(ZaalisError::io(if detail.is_empty() {
+                format!("computer HTTP {status}")
+            } else {
+                format!("computer HTTP {status} : {detail}")
+            }));
         }
         let value: Value = response
             .json()

@@ -1128,6 +1128,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_agents_runs_a_batch_then_a_read_only_cross_review() {
+        let text = |value: &str| {
+            vec![
+                TurnEvent::TextDelta { text: value.into() },
+                TurnEvent::Completed { reason: StopReason::EndTurn },
+            ]
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![
+                vec![
+                    TurnEvent::ToolCallCompleted {
+                        call: ProviderToolCall {
+                            id: "batch_1".into(),
+                            name: "spawn_agents".into(),
+                            arguments: serde_json::json!({
+                                "tasks":[
+                                    {"objective":"Analyse le module A","role":{"name":"a","label":"Module A"}},
+                                    {"objective":"Analyse le module B","role":{"name":"b","label":"Module B"}}
+                                ],
+                                "review":"cross"
+                            }),
+                        },
+                    },
+                    TurnEvent::Completed { reason: StopReason::ToolUse },
+                ],
+                text("Rapport enfant"),
+                text("Rapport enfant"),
+                text("Synthèse vérifiée"),
+                text("Conclusion du parent"),
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        let parent = fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::Bypass))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Analyse A et B en parallèle").await.unwrap();
+
+        let tree = fixture.session.tree().await;
+        assert_eq!(tree.len(), 4, "parent, two workers and one reviewer");
+        let children: Vec<_> = tree
+            .iter()
+            .filter(|agent| agent.parent_id.as_ref() == Some(&parent))
+            .collect();
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|agent| matches!(agent.state, zaalis_core::AgentState::Done)));
+        let reviewer = children
+            .iter()
+            .find(|agent| agent.role.name == "review")
+            .expect("cross reviewer");
+        assert_eq!(reviewer.permissions.mode, PermissionMode::ReadOnly);
+        assert!(reviewer.objective.contains("Analyse le module A"));
+        assert!(reviewer.objective.contains("Analyse le module B"));
+
+        let requests = provider.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 5);
+        let parent_view = format!("{:?}", requests[4].messages);
+        assert!(parent_view.contains("vérification croisée effectuée"), "{parent_view}");
+        assert!(parent_view.contains("Synthèse vérifiée"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agents_rejects_oversized_batches_and_background_review() {
+        let fixture = fixture(SessionRunMode::Chat, vec![]);
+        let parent = fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::Bypass))
+            .await
+            .unwrap();
+        let task = serde_json::json!({"objective":"x"});
+        for input in [
+            serde_json::json!({"tasks":[]}),
+            serde_json::json!({"tasks":vec![task.clone(); 9]}),
+            serde_json::json!({"tasks":[task.clone()],"review":"debate","background":true}),
+        ] {
+            let dispatch = fixture
+                .session
+                .inner
+                .tools
+                .invoke(
+                    ToolInvocation {
+                        call_id: ToolCallId::from_raw("batch"),
+                        name: "spawn_agents".into(),
+                        input,
+                    },
+                    ToolContext {
+                        agent_id: parent.clone(),
+                        permissions: PermissionSet::new(PermissionMode::Bypass),
+                        workspace: Workspace::open(&fixture.root).unwrap(),
+                    },
+                    CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                !matches!(dispatch, ToolDispatch::Complete { outcome: ToolOutcome::Ok { .. }, .. }),
+                "invalid batch accepted: {dispatch:?}"
+            );
+        }
+        assert_eq!(fixture.session.tree().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn native_spawn_inherits_limits_runs_child_and_uses_snapshot_off_git() {
         let provider = Arc::new(ScriptedProvider::new(
             ProviderId::Mistral,

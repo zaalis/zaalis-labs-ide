@@ -1,0 +1,30 @@
+/* Chat-first shell: in the Chat layout only the conversation stays on screen.
+   The tool rail and secondary top-bar controls move into the "Outils" menu. */
+.cs-tools-trigger,.cs-starters{display:none}
+body[data-workspace-mode="chat"] .cs-tools-trigger{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 12px;border:0;border-radius:10px;background:transparent;color:var(--text-1);font:13px var(--font-sans);cursor:pointer;transition:background .18s,color .18s}
+body[data-workspace-mode="chat"] .cs-tools-trigger:hover,body[data-workspace-mode="chat"] .cs-tools-trigger[aria-expanded=true]{background:var(--bg-2);color:var(--text-0)}
+body[data-workspace-mode="chat"] :is(.workspace-rail,#lang-select,#custom-select-lang-select,#catalog-btn,#help-btn){display:none!important}
+
+.cs-tools-menu .cs-menu-item{gap:12px}
+.cs-menu-icon{display:grid;place-items:center;width:18px;height:18px;flex:none;color:var(--text-2)}
+.cs-menu-icon svg{width:16px;height:16px}
+.cs-tools-menu .cs-menu-item[aria-current=true]{color:var(--text-0);background:var(--accent-muted)}
+.cs-tools-menu .cs-menu-item[aria-current=true] .cs-menu-icon{color:var(--accent-hover)}
+.cs-menu-rule{border:0;border-top:1px solid var(--border-subtle,var(--border));margin:4px 0}
+
+/* Empty chat: greeting, composer and starting points sit together, centred. */
+body[data-workspace-mode="chat"] #view-chat.cs-empty{justify-content:center;padding-bottom:8vh}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .scroll-pin-wrap{flex:0 0 auto;min-height:0}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .chat-messages{flex:0 0 auto;overflow:visible;padding-top:0;padding-bottom:0}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .launch-welcome{min-height:0;height:auto;padding:0 24px 28px;gap:8px;animation:cs-rise .32s cubic-bezier(.2,.8,.2,1)}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .launch-welcome h2{font-size:30px;font-weight:600;letter-spacing:-.02em}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .launch-welcome p{font-size:15px}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .chat-input-area{margin-bottom:0;box-shadow:0 16px 48px #0000002e;animation:cs-rise .36s cubic-bezier(.2,.8,.2,1)}
+body[data-workspace-mode="chat"] #view-chat.cs-empty .cs-starters{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;width:calc(100% - 48px);max-width:var(--ws-column,780px);margin:20px auto 0;animation:cs-rise .42s cubic-bezier(.2,.8,.2,1)}
+.cs-starter{display:inline-flex;align-items:center;gap:8px;min-height:38px;padding:0 14px;border:1px solid var(--border);border-radius:999px;background:var(--bg-1);color:var(--text-0);font:13px var(--font-sans);cursor:pointer;transition:background .18s,border-color .18s,transform .12s}
+.cs-starter svg{color:var(--accent-hover);flex:none}
+.cs-starter:hover{background:var(--bg-2);border-color:color-mix(in srgb,var(--accent) 40%,var(--border))}
+.cs-starter:active{transform:scale(.97)}
+@keyframes cs-rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+@media(max-width:760px){body[data-workspace-mode="chat"] .cs-tools-trigger span{display:none}body[data-workspace-mode="chat"] #view-chat.cs-empty{padding-bottom:0}}
+@media(prefers-reduced-motion:reduce){.cs-starter,.cs-tools-trigger,#view-chat.cs-empty *{animation:none!important;transition:none!important}}

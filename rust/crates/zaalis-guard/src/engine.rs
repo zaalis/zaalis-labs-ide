@@ -14,6 +14,13 @@ use zaalis_core::{
     PermissionSet,
 };
 
+/// Written into the target of a VM or laboratory request that asks for a
+/// connected machine. The guard keys its confirmation on it.
+pub const VM_NETWORK_MARK: &str = "réseau Internet + réseau local";
+/// Written into the target of a VM request that opens a session on a server
+/// the user registered over SSH.
+pub const VM_REMOTE_MARK: &str = "hôte SSH distant";
+
 /// What a tool is about to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRequest {
@@ -377,6 +384,25 @@ impl Guard {
             };
         }
 
+        // 4a. A VM or laboratory run with network access reaches the Internet,
+        //     the local network and services listening on the host's loopback
+        //     (QEMU user networking maps 10.0.2.2 to it). The sandbox capability
+        //     covers isolated machines only, so this always asks, whatever the
+        //     mode, unless the user saved an explicit allowance above.
+        if request.kind == AccessKind::Sandbox
+            && ["vm", "laboratory"].contains(&request.tool.as_str())
+            && (target.contains(VM_NETWORK_MARK) || target.contains(VM_REMOTE_MARK))
+        {
+            return Decision::Ask {
+                reason: DecisionReason::ModeAsk,
+                summary: if target.contains(VM_REMOTE_MARK) {
+                    format!("{target} : l'agent pourra lancer des commandes sur ce serveur")
+                } else {
+                    format!("{target} : la machine pourra joindre Internet et le réseau local")
+                },
+            };
+        }
+
         // 4. Credential files are never auto-approved. A model that reads `.env`
         //    can leak every key the user owns through its own answer, so this
         //    outranks the mode — only an explicit rule (checked above) allows it.
@@ -624,6 +650,14 @@ mod tests {
         assert!(guard.evaluate(&vm, &permissions, 0).is_allow());
         let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox).with_target("run");
         assert!(guard.evaluate(&lab, &permissions, 0).is_allow());
+        for mode in [PermissionMode::Supervised, PermissionMode::Auto, PermissionMode::Bypass] {
+            let connected = AccessRequest::new(agent(), "vm", AccessKind::Sandbox)
+                .with_target(format!("VM : create · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&connected, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }), "{mode} must ask for a connected VM");
+            let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox)
+                .with_target(format!("VM : run · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&lab, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }));
+        }
         let apply = AccessRequest::new(agent(), "laboratory", AccessKind::Edit).with_target("apply").sensitive(true);
         assert!(matches!(guard.evaluate(&apply, &permissions, 0).decision, Decision::Ask { .. }));
         let host = AccessRequest::new(agent(), "run", AccessKind::Execute).with_target("npm test");

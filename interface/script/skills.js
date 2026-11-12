@@ -29,8 +29,9 @@
             const toggle = document.createElement('input'); toggle.type = 'checkbox'; toggle.checked = skill.enabled;
             toggle.setAttribute('aria-label', t('Activer ', 'Enable ') + skill.name);
             label.append(toggle, element('span', 'skill-name', skill.name));
-            const scope = skill.scope === 'builtin' ? t('Intégrée', 'Built in') : skill.scope === 'project' ? t('Projet', 'Project') : t('Personnelle', 'Personal');
-            head.append(label, element('span', 'skill-scope', scope));
+            const scope = skill.scope === 'builtin' ? t('Intégrée', 'Built in') : skill.scope === 'project' ? t('Projet', 'Project')
+                : skill.origin === 'agent' ? t('Proposée par l’IA', 'Proposed by AI') : skill.origin === 'draft' ? t('Brouillon automatique', 'Automatic draft') : t('Personnelle', 'Personal');
+            head.append(label, element('span', 'skill-scope' + (skill.scope === 'user' && skill.origin !== 'user' ? ' skill-scope-ai' : ''), scope));
             row.append(head, element('p', 'form-hint', skill.description));
             const details = document.createElement('details'); details.append(element('summary', '', t('Voir les instructions', 'View instructions')), element('pre', 'skill-instructions', skill.instructions));
             row.append(details);
@@ -42,6 +43,15 @@
                 const input = $id('chat-input'); input.value = skill.name === 'revers' ? '/revers ' : `/skill ${skill.name} `; input.dispatchEvent(new Event('input')); input.focus();
             });
             row.append(use);
+            if (skill.scope === 'user' && skill.origin !== 'user') {
+                const remove = element('button', 'btn btn-ghost', t('Supprimer', 'Delete')); remove.type = 'button';
+                remove.addEventListener('click', async () => {
+                    remove.disabled = true;
+                    try { await api('/api/skills/' + encodeURIComponent(skill.name), { method: 'DELETE' }); await refresh(); }
+                    catch (e) { status(e.message, true); remove.disabled = false; }
+                });
+                row.append(remove);
+            }
             toggle.addEventListener('change', async () => {
                 toggle.disabled = true;
                 try {
@@ -80,6 +90,20 @@
         document.querySelector('[data-settings-section="skills"]')?.click();
         refresh();
     }
+    async function options() {
+        try {
+            const value = await api('/api/skills-settings');
+            if ($id('skills-auto-activate')) $id('skills-auto-activate').checked = !!value.autoActivateAgentSkills;
+            if ($id('skills-drafts')) $id('skills-drafts').checked = value.draftAfterLongTasks !== false;
+        } catch {}
+    }
+    for (const [id, key] of [['skills-auto-activate', 'autoActivateAgentSkills'], ['skills-drafts', 'draftAfterLongTasks']]) {
+        $id(id)?.addEventListener('change', async event => {
+            try { await api('/api/skills-settings', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ [key]: event.target.checked }) }); status(t('Réglage enregistré.', 'Setting saved.')); }
+            catch (e) { status(e.message, true); await options(); }
+        });
+    }
+    document.querySelector('[data-settings-section="skills"]')?.addEventListener('click', options);
     $id('skills-filter')?.addEventListener('input', render);
     $id('skills-refresh')?.addEventListener('click', refresh);
     document.querySelector('[data-settings-section="skills"]')?.addEventListener('click', refresh);
@@ -101,5 +125,5 @@
         finally { select.disabled = false; }
     });
     document.addEventListener('zaalis-language-changed', () => { render(); access(); });
-    window.ZaalisSkills = { open, refresh, access, get loading() { return loading; } };
+    window.ZaalisSkills = { open, refresh, access, options, get loading() { return loading; } };
 })();

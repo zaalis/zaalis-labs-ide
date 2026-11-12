@@ -1,6 +1,6 @@
 schema_version = "1.0.0"
 id = "zaalis_bridge"
-version = "1.0.0"
+version = "1.0.1"
 name = "Zaalis Blender Bridge"
 tagline = "Local authenticated bridge for the Zaalis assistant"
 maintainer = "Zaalis"

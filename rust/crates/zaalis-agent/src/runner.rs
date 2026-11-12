@@ -31,11 +31,11 @@ const MAX_IMAGES_PER_ROUND: usize = 8;
 const DESKTOP_TOOLS: [&str; 7] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call", "request_user_input"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
-const ESSENTIAL_TOOLS: [&str; 22] = [
+const ESSENTIAL_TOOLS: [&str; 23] = [
     "read", "list", "tree", "glob", "grep", "code_search", "edit", "write", "apply_patch", "run",
     "todo", "workspace", "enter_plan_mode", "exit_plan_mode",
     "tool_search", "tool_describe", "tool_call", "request_user_input",
-    "spawn_agent", "agent_status", "agent_wait", "agent_cancel",
+    "spawn_agent", "spawn_agents", "agent_status", "agent_wait", "agent_cancel",
 ];
 const REDUCED_TOOLS_NOTE: &str = "\n\nCONTEXTE RÉDUIT : la fenêtre de contexte du modèle est petite, seuls les outils essentiels sont proposés pour ce tour.";
 /// Corrections a model without native tools may get, in a row, for an

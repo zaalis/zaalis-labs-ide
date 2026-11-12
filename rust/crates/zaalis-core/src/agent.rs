@@ -526,6 +526,14 @@ impl AgentTree {
         node.depth = parent_depth.saturating_add(1);
         node.permissions = node.permissions.intersect(&parent_permissions);
         node.budget = node.budget.clamp_to(&parent_budget);
+        // A child is always at least one level shallower than its parent.
+        // Clamping alone kept the parent's allowance when a caller supplied an
+        // explicit budget that omitted or repeated `max_depth`, so each
+        // generation could spawn the next one without end.
+        if let Some(parent_max) = parent_budget.max_depth {
+            let ceiling = parent_max.saturating_sub(1);
+            node.budget.max_depth = Some(node.budget.max_depth.map_or(ceiling, |own| own.min(ceiling)));
+        }
 
         let id = node.id.clone();
         self.nodes.insert(id.clone(), node);
@@ -973,6 +981,38 @@ mod tests {
             ),
         );
         assert!(matches!(err, Err(TreeError::DepthExceeded(_))));
+    }
+
+    #[test]
+    fn an_explicit_child_budget_cannot_keep_the_parent_depth() {
+        let (mut tree, root, session) = tree_with_root();
+        tree.get_mut(&root).unwrap().budget = Budget {
+            max_depth: Some(2),
+            ..Budget::UNLIMITED
+        };
+        let node = |budget: Budget| {
+            AgentNode::new(
+                session.clone(),
+                RoleSpec::new("recursive"),
+                ModelBinding::new(ProviderId::Mistral, None),
+                PermissionSet::read_only(),
+                0,
+            )
+            .with_budget(budget)
+        };
+        // An empty budget object and one repeating the parent's depth used to
+        // keep the full allowance at every generation.
+        let child = tree.insert_child(&root, node(Budget::UNLIMITED)).unwrap();
+        assert_eq!(tree.get(&child).unwrap().budget.max_depth, Some(1));
+        let grandchild = tree
+            .insert_child(&child, node(Budget { max_depth: Some(2), ..Budget::UNLIMITED }))
+            .unwrap();
+        assert_eq!(tree.get(&grandchild).unwrap().budget.max_depth, Some(0));
+        assert!(!tree.get(&grandchild).unwrap().can_spawn());
+        assert!(matches!(
+            tree.insert_child(&grandchild, node(Budget::UNLIMITED)),
+            Err(TreeError::DepthExceeded(_))
+        ));
     }
 
     #[test]

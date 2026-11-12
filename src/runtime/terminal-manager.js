@@ -198,7 +198,13 @@ class TerminalManager {
   async runCommand({ userId, cwd, command, waitMs = 10 * 60_000 }) {
     const session = this.latest(userId, cwd);
     await Promise.race([session.ready, new Promise((resolve) => setTimeout(resolve, 1200))]);
-    const before = session.buffer.length;
+    // The command's own output is collected from the data events. An offset
+    // into `session.buffer` stops working once that buffer is full: it keeps
+    // only its last 512 KB, so everything after the offset would read as empty
+    // and every later command would wait for its full timeout.
+    let captured = '';
+    const collect = (data) => { captured = (captured + data).slice(-MAX_BUFFER); };
+    session.events.on('data', collect);
     const marker = `__ZAALIS_DONE_${crypto.randomUUID().replace(/-/g, '')}`;
     const completionPattern = new RegExp(`${marker}:(\\d+)(?:\\r?\\n|$)`);
     const completion = process.platform === 'win32'
@@ -208,11 +214,12 @@ class TerminalManager {
     await new Promise((resolve) => {
       let timer = null;
       const done = () => { session.events.removeListener('data', onData); resolve(); };
-      const onData = () => { if (completionPattern.test(session.buffer.slice(before))) { if (timer) clearTimeout(timer); done(); } };
+      const onData = () => { if (completionPattern.test(captured)) { if (timer) clearTimeout(timer); done(); } };
       timer = setTimeout(done, waitMs);
       session.events.on('data', onData);
     });
-    const raw = session.buffer.slice(before);
+    session.events.removeListener('data', collect);
+    const raw = captured;
     const match = raw.match(new RegExp(`${marker}:(\\d+)`));
     const output = raw.replace(new RegExp(`\\n?${marker}:\\d+\\r?\\n?`), '').slice(-64 * 1024);
     return { session, output: sanitize(output), exitCode: match ? Number(match[1]) : 124, timedOut: !match };

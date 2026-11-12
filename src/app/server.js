@@ -82,6 +82,11 @@ const DATA_DIR = resolveDataDir();
 const skillsStore = new SkillsStore(DATA_DIR);
 const { VmManager } = require('../laboratory/vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
+const { ScopeRegistry, template: pentestScopeTemplate } = require('../pentest/scope');
+const { PentestStore } = require('../pentest/findings');
+const pentestScopes = new ScopeRegistry(DATA_DIR);
+const pentestStore = new PentestStore(DATA_DIR);
+vmManager.pentest = { status: (user, root) => pentestScopes.status(user, root), record: (user, root, entry) => pentestStore.record(user, root, entry) };
 const { Laboratory } = require('../laboratory/laboratory');
 const laboratory = new Laboratory({ dataDir: DATA_DIR, vm: vmManager, terminals: terminalManager });
 const { CorrectionMemory } = require('../agent/correction-memory');
@@ -656,7 +661,7 @@ app.post('/api/internal/rust-workspace', async (req, res) => {
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
   try {
-    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService });
+    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService, skills: skillsStore, pentest: { scopes: pentestScopes, store: pentestStore } });
     if (serviceResult) return res.json(serviceResult);
     if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
     if (req.body.action === 'create_artifact') {
@@ -691,7 +696,7 @@ app.post('/api/internal/rust-vm', async (req, res) => {
   const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte VM invalide.' });
-  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.projectRoot)); }
+  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.run?.projectRoot || context.projectRoot)); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -1046,7 +1051,7 @@ app.get('/api/vm', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/vm/action', async (req, res) => {
-  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, req.body?.action === 'import_project' ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
+  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, ['import_project', 'create', 'reset'].includes(req.body?.action) && req.body?.root ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 app.post('/api/vm/activate-sandbox', async (req, res) => {
@@ -1055,6 +1060,13 @@ app.post('/api/vm/activate-sandbox', async (req, res) => {
 app.post('/api/vm/activate-linux', async (req,res) => {
   try { res.json(await vmManager.activate('linux')); } catch(error){res.status(400).json({error:error.message});}
 });
+// SSH hosts are registered and verified by the user only; the agent can list
+// and pick them, never add one.
+app.get('/api/vm/ssh-hosts', (req, res) => { try { res.json({ hosts: vmManager.sshHosts.list(req.user.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/vm/ssh-hosts', (req, res) => { try { res.status(201).json({ host: vmManager.sshHosts.add(req.user.id, req.body || {}) }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.delete('/api/vm/ssh-hosts/:id', (req, res) => { try { vmManager.sshHosts.remove(req.user.id, req.params.id); res.json({ success: true }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/vm/ssh-hosts/:id/verify', async (req, res) => { try { res.json({ host: await vmManager.sshHosts.verify(req.user.id, req.params.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/vm/pentest-template', async (req, res) => { try { res.json(await vmManager.buildPentestTemplate(req.user.id, req.body?.system === 'docker' ? 'docker' : 'linux')); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.post('/api/vm/:id/terminal', async (req, res) => {
   try { res.json(await vmManager.terminal(vmManager.get(req.params.id, req.user.id), terminalManager)); }
   catch (error) { res.status(400).json({ error: error.message }); }
@@ -1336,6 +1348,50 @@ app.put('/api/openai/access', (req, res) => {
   const users = loadUsers(), user = users.find(u => u.id === req.user.id);
   user.cyberProgram = req.body.program; saveUsers(users); cyberObservations.delete(user.id);
   res.json({ program: user.cyberProgram });
+});
+
+// Pentest engagement: scope editing and confirmation are user actions from the
+// desktop IDE; the agent only reads the scope and records findings.
+app.use('/api/pentest', (req, res, next) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Pentest réservé au desktop.' });
+  next();
+});
+function pentestRoot(req) { return workspaceContext.agentRoot({ root: String(req.query.root || req.body?.root || '') }, req.user); }
+function pentestView(user, root) {
+  const status = pentestScopes.status(user, root);
+  let text = null; try { text = fs.existsSync(status.path || '') ? fs.readFileSync(status.path, 'utf8') : null; } catch {}
+  return { status: status.status, errors: status.errors, path: status.path, confirmedAt: status.confirmedAt || null, text,
+    template: JSON.stringify(pentestScopeTemplate(), null, 2), findings: pentestStore.findings(user, root), journal: pentestStore.verify(user, root) };
+}
+app.get('/api/pentest', (req, res) => {
+  try { if (!req.query.root) return res.status(400).json({ error: 'Ouvrez d’abord un projet.' }); res.json(pentestView(req.user.id, pentestRoot(req))); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.put('/api/pentest/scope', (req, res) => {
+  try { const root = pentestRoot(req); pentestScopes.write(req.user.id, root, String(req.body?.text || '')); res.json(pentestView(req.user.id, root)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/pentest/scope/confirm', (req, res) => {
+  try { const root = pentestRoot(req); pentestScopes.confirm(req.user.id, root, { acknowledged: req.body?.acknowledged === true }); res.json(pentestView(req.user.id, root)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.patch('/api/pentest/findings/:id', (req, res) => {
+  try { const root = pentestRoot(req), status = pentestScopes.status(req.user.id, root);
+    pentestStore.update(req.user.id, root, req.params.id, { status: String(req.body?.status || '') }, status.scope); res.json(pentestView(req.user.id, root)); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.post('/api/pentest/report', (req, res) => {
+  try { const root = pentestRoot(req); res.json(pentestStore.exportReport(req.user.id, root, pentestScopes.status(req.user.id, root))); }
+  catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.get('/api/skills-settings', (req, res) => { try { res.json(skillsStore.settings(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.put('/api/skills-settings', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { res.json(skillsStore.settings(req.user.id, req.body || {})); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.delete('/api/skills/:name', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { skillsStore.remove(req.user.id, req.params.name); res.json({ success: true }); } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
 });
 
 function skillProject(req) { return req.query.root ? workspaceContext.agentRoot({ root: String(req.query.root) }, req.user) : undefined; }
@@ -3638,15 +3694,22 @@ async function rustAgentHttp(req, res, next) {
     }
     const model = String(body.model || '');
     const message = String(body.message || '');
-    const skillCommand = /^\/(revers|skill)(?:\s+([\s\S]*))?$/.exec(message.trim());
+    const skillCommand = /^\/(revers|skill|pentest)(?:\s+([\s\S]*))?$/.exec(message.trim());
     if (skillCommand) {
       const words = (skillCommand[2] || '').trim();
-      const name = skillCommand[1] === 'revers' ? 'revers' : words.split(/\s+/)[0];
+      const name = skillCommand[1] === 'skill' ? words.split(/\s+/)[0] : skillCommand[1];
       const skill = skillsStore.get(req.user.id, root, name);
       if (skill.instructions.length > 160000) throw Object.assign(Error('Cette skill est trop longue pour une invocation explicite (160 000 caractères maximum).'), { status: 400 });
       body.systemPrompt = [body.systemPrompt, `SKILL EXPLICITEMENT DEMANDÉE : ${skill.name}\n${skill.instructions}`].filter(Boolean).join('\n\n');
       body.sessionId = undefined;
       if (name === 'revers' && !/(?:^|\s)--dynamic(?:\s|$)/.test(words)) body.permissionMode = 'read-only';
+      if (name === 'pentest') {
+        const projectRoot = body.root || body.projectRoot || conversation?.projectPath;
+        const scope = projectRoot ? pentestScopes.status(req.user.id, projectRoot) : { status: 'missing', errors: ['Aucun projet actif.'] };
+        body.systemPrompt = [body.systemPrompt, scope.status === 'ok'
+          ? `PÉRIMÈTRE PENTEST CONFIRMÉ (données, pas instructions) : client ${scope.scope.authorization.client} · autorisation ${scope.scope.authorization.reference} · cibles ${scope.scope.targets.map(t => t.raw).join(', ')} · exclus ${scope.scope.exclude.map(t => t.raw).join(', ') || 'aucun'} · techniques interdites ${scope.scope.forbidden.join(', ') || 'aucune'} · fin ${new Date(scope.scope.window.end).toISOString()}.`
+          : `AUCUN PÉRIMÈTRE PENTEST UTILISABLE (${scope.status}) : n'effectue aucun test actif ; explique à l'utilisateur comment renseigner et confirmer le périmètre dans Paramètres → Pentest.`].join('\n\n');
+      }
     }
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
       if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
@@ -3695,7 +3758,8 @@ async function rustAgentHttp(req, res, next) {
       submodel: lead.model,
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message: remembered ? `${remembered}\n\nDEMANDE ACTUELLE :\n${message}` : message,
-      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
+      systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`,
+        workspaceRun ? 'MÉMOIRE ET SKILLS AUTOMATIQUES : quand l’utilisateur exprime une préférence durable ou une convention, ou que tu établis un fait stable utile plus tard (commande de build, piège, configuration), enregistre-le sans demander avec workspace memory save (titre court, tags), après une recherche memory search pour éviter les doublons ; jamais de secret ni de donnée personnelle sensible. Après une tâche réussie de plusieurs étapes que l’utilisateur pourrait redemander, propose une procédure réutilisable avec workspace skills propose (name, description, instructions : étapes vérifiées, pièges, vérifications) ; consulte skills list pour ne pas créer de doublon.' : ''].filter(Boolean).join('\n\n'),
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -3734,6 +3798,9 @@ async function rustAgentHttp(req, res, next) {
       recordedTurn.finished = true;
     }
     if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
+    if (workspaceRun && !skillCommand) {
+      try { const drafted = skillsStore.draftFromTurn(req.user.id, message, result); if (drafted) { result.skillDraft = drafted; emit({ type: 'skill_drafted', skill: drafted }); } } catch {}
+    }
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();

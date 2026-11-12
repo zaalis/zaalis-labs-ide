@@ -326,7 +326,9 @@ impl ToolRuntime {
         findings: &[zaalis_guard::Finding],
     ) -> Option<ReviewVerdict> {
         let reviewer = self.reviewer.as_ref()?;
-        if !zaalis_guard::may_delegate(context.permissions.mode, findings) {
+        // Credential files and connected VMs are the user's call: a model
+        // reviewer must not turn either into a silent approval.
+        if access.sensitive || !zaalis_guard::may_delegate(context.permissions.mode, findings) {
             return None;
         }
         let request = ReviewRequest {

@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { readJson, writeJson, safeKey, fail, copy } = require('./json-store');
+const cron = require('./cron');
 
 class TaskService {
   constructor({ directory, run, concurrency = 2, clock = Date.now }) {
@@ -35,8 +36,25 @@ class TaskService {
     if (task.intervalMinutes !== null && (!Number.isFinite(task.intervalMinutes) || task.intervalMinutes < 1 || task.intervalMinutes > 525600)) throw fail('La récurrence doit être comprise entre 1 minute et 1 an.');
     task.runAt = task.runAt || null;
     if (task.runAt && !Number.isFinite(Date.parse(task.runAt))) throw fail('Date de lancement invalide.');
+    task.cron = task.cron ? String(task.cron).trim().slice(0, 120) : null;
+    if (task.cron) {
+      try { cron.parse(task.cron); } catch (error) { throw fail(error.message); }
+      if (task.intervalMinutes) throw fail('Choisissez soit une récurrence en minutes, soit une expression cron.');
+    }
     task.enabled = task.enabled !== false;
     return task;
+  }
+  // First run: an explicit date wins, then the cron schedule, then the interval.
+  firstRun(task, now) {
+    if (!task.enabled) return null;
+    if (task.runAt) return Date.parse(task.runAt);
+    if (task.cron) return cron.next(task.cron, now);
+    return task.intervalMinutes ? now + task.intervalMinutes * 60000 : null;
+  }
+  following(task, now) {
+    if (!task.enabled) return null;
+    if (task.cron) return cron.next(task.cron, now);
+    return task.intervalMinutes ? now + task.intervalMinutes * 60000 : null;
   }
   create(user, input) {
     const list = this.read(user); if (list.length >= 100) throw fail('Limite de 100 tâches atteinte.');
@@ -45,18 +63,18 @@ class TaskService {
     // conversation, current execution status or approval request.
     const task = { id: crypto.randomUUID(), title: valid.title, prompt: valid.prompt, root: valid.root,
       model: valid.model || 'mistral', submodel: valid.submodel || null, permissionMode: valid.permissionMode,
-      intervalMinutes: valid.intervalMinutes, runAt: valid.runAt, enabled: valid.enabled,
-      nextRunAt: valid.enabled ? valid.runAt ? Date.parse(valid.runAt) : valid.intervalMinutes ? now + valid.intervalMinutes * 60000 : null : null,
+      intervalMinutes: valid.intervalMinutes, cron: valid.cron, runAt: valid.runAt, enabled: valid.enabled,
+      nextRunAt: this.firstRun(valid, now),
       createdAt: now, updatedAt: now, status: 'idle', history: [] };
     list.push(task); this.write(user, list); return copy(task);
   }
   update(user, id, input) {
     const old = this.find(user, id);
-    const fields = Object.fromEntries(['title', 'prompt', 'root', 'model', 'submodel', 'permissionMode', 'intervalMinutes', 'runAt', 'enabled'].filter(key => key in input).map(key => [key, input[key]]));
+    const fields = Object.fromEntries(['title', 'prompt', 'root', 'model', 'submodel', 'permissionMode', 'intervalMinutes', 'cron', 'runAt', 'enabled'].filter(key => key in input).map(key => [key, input[key]]));
     if (this.active.has(`${user}:${id}`) && Object.keys(fields).some(key => !['title', 'enabled'].includes(key))) throw fail('Arrêtez la tâche avant de modifier sa configuration.', 409);
     const valid = this.validate(fields, old);
     valid.updatedAt = this.clock();
-    valid.nextRunAt = !valid.enabled ? null : valid.runAt ? Date.parse(valid.runAt) : valid.intervalMinutes ? this.clock() + valid.intervalMinutes * 60000 : null;
+    valid.nextRunAt = this.firstRun(valid, this.clock());
     this.write(user, this.read(user).map(task => task.id === id ? valid : task)); return copy(valid);
   }
   mutate(user, id, change) {
@@ -89,7 +107,7 @@ class TaskService {
           current.sessionId = result?.sessionId || current.sessionId;
           current.lastFinishedAt = this.clock();
           current.history = [...(current.history || []), { startedAt: started, finishedAt: current.lastFinishedAt, status: current.status, error: current.lastError }].slice(-20);
-          current.nextRunAt = current.enabled && current.intervalMinutes ? this.clock() + current.intervalMinutes * 60000 : null;
+          current.nextRunAt = this.following(current, this.clock());
         });
       }
     })();

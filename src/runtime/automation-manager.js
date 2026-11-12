@@ -197,6 +197,9 @@ class AutomationManager {
   record(session, type, label, input) {
     session.lastAction = label;
     session.events.push({ at: new Date().toISOString(), type, label, input });
+    // A long task records thousands of actions (typed text included); only the
+    // recent ones are ever shown.
+    if (session.events.length > 400) session.events.splice(0, session.events.length - 200);
   }
 
   owns(session, userId) { return !!session && session === this.active && session.userId === userId; }

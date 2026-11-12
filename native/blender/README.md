@@ -33,7 +33,7 @@ $env:BLENDER_TEST_EXE = 'C:\Program Files\Blender Foundation\Blender 5.3\blender
 node --test test/blender-live.test.js
 ```
 
-The deterministic builder emits `zaalis-bridge-1.0.0.zip` and its checksum in
+The deterministic builder emits `zaalis-bridge-1.0.1.zip` and its checksum in
 `src/integrations/blender-bridge-release.js`. Rebuild after editing the Python
 source. The Windows package ships this archive, not the former official one.
 

@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { rank } = require('./text-search');
 const fs = require('node:fs');
 const { readJson, writeJson, safeKey, fail, copy } = require('./json-store');
 
@@ -33,11 +34,20 @@ class ConversationStore {
   list(user, query = {}) {
     const kinds = query.kind === 'all' ? ['chat', 'agents'] : [kindOf(query.kind)];
     const needle = String(query.q || '').trim().toLocaleLowerCase();
-    const all = kinds.flatMap(kind => this.read(user, kind).map(item => ({ ...item, kind })))
+    const recent = (a, b) => Number(b.updatedAt || b.contentUpdatedAt || b.id) - Number(a.updatedAt || a.contentUpdatedAt || a.id);
+    let all = kinds.flatMap(kind => this.read(user, kind).map(item => ({ ...item, kind })))
       .filter(item => query.archived === 'all' || (query.archived === 'true' ? item.archived : !item.archived))
-      .filter(item => !query.root || item.projectPath === query.root)
-      .filter(item => !needle || searchable(item).includes(needle))
-      .sort((a, b) => Number(b.updatedAt || b.contentUpdatedAt || b.id) - Number(a.updatedAt || a.contentUpdatedAt || a.id));
+      .filter(item => !query.root || item.projectPath === query.root);
+    if (!needle) all = all.sort(recent);
+    else {
+      // Exact matches first (unchanged behaviour), then ranked full-text hits
+      // so a reworded question still finds the earlier conversation.
+      const exact = all.filter(item => searchable(item).includes(needle)).sort(recent);
+      const seen = new Set(exact.map(item => item.kind + ':' + item.id));
+      const ranked = rank(all.filter(item => !seen.has(item.kind + ':' + item.id)), needle, item => [{ text: item.title, weight: 3 }, { text: searchable(item), weight: 1 }], { limit: 100 })
+        .filter(hit => hit.coverage >= 0.5).map(hit => hit.item);
+      all = [...exact, ...ranked];
+    }
     const limit = Math.min(100, Math.max(1, Number(query.limit) || 100));
     const offset = Math.max(0, Number(query.offset) || 0);
     return { conversations: copy(all.slice(offset, offset + limit)), total: all.length, offset, limit };

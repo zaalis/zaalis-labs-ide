@@ -47,7 +47,7 @@ def _handle(client, token):
                 _reply(client, {'status': 'error', 'message': 'Authentication required'})
                 return
             if request.get('type') == 'ping':
-                _reply(client, {'status': 'ok', 'result': {'bridge': 'zaalis', 'version': '1.0.0'}})
+                _reply(client, {'status': 'ok', 'result': {'bridge': 'zaalis', 'version': '1.0.1'}})
                 return
             if request.get('type') != 'execute' or not isinstance(request.get('code'), str):
                 raise ValueError('Expected execute request with code')
@@ -152,12 +152,20 @@ def stop_server():
 
 
 def _autostart():
-    if _preferences().use_autostart:
-        try:
+    try:
+        if _server is None and _preferences().use_autostart:
             start_server()
-        except Exception as error:
-            print('Zaalis bridge:', error)
+    except Exception as error:
+        print('Zaalis bridge:', error)
     return None
+
+
+@bpy.app.handlers.persistent
+def _on_load_post(*_args):
+    # Opening a .blend (double-click, File > Open, startup file) clears every
+    # non-persistent timer. Re-arm the autostart so the bridge is always up.
+    if _server is None and not bpy.app.timers.is_registered(_autostart):
+        bpy.app.timers.register(_autostart, first_interval=0.5, persistent=True)
 
 
 class ZaalisPreferences(bpy.types.AddonPreferences):
@@ -175,10 +183,16 @@ class ZaalisPreferences(bpy.types.AddonPreferences):
 
 def register():
     bpy.utils.register_class(ZaalisPreferences)
-    bpy.app.timers.register(_autostart, first_interval=1.0)
+    # persistent=True: survive the file load that follows startup when Blender
+    # is opened with a .blend, which would otherwise cancel the autostart.
+    bpy.app.timers.register(_autostart, first_interval=1.0, persistent=True)
+    if _on_load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_on_load_post)
 
 
 def unregister():
+    if _on_load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_on_load_post)
     if bpy.app.timers.is_registered(_autostart):
         bpy.app.timers.unregister(_autostart)
     stop_server()

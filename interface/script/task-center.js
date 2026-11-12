@@ -25,6 +25,7 @@
                 submodel: editingTask?.submodel || document.getElementById('ai-submodel')?.value,
                 permissionMode: editingTask?.permissionMode || state.permissionMode,
                 intervalMinutes: Number(interval.value) || null,
+                cron: cron.value.trim() || null,
                 runAt: at.value ? new Date(at.value).toISOString() : null,
                 enabled: editingTask?.enabled ?? true,
             });
@@ -34,6 +35,7 @@
         const prompt = field(create, 'Instruction', 'textarea'); prompt.required = true;
         const project = field(create, 'Dossier du projet', 'text', root()); project.required = true;
         const interval = field(create, 'Répéter toutes les N minutes (facultatif)', 'number'); interval.min = '1';
+        const cron = field(create, 'Ou planification cron « minute heure jour mois jourSemaine » (ex. 0 9 * * 1-5)'); cron.maxLength = 120; cron.spellcheck = false;
         const at = field(create, 'Première exécution (facultatif)', 'datetime-local');
         create.append(node('small', 'Exécution locale : laissez Zaalis ouvert. Les permissions sélectionnées s’appliquent.'));
         const createBox=node('details',undefined,'ui-create-box');createBox.open=!result.tasks.length;createBox.append(node('summary','Nouvelle tâche'),create);
@@ -41,7 +43,7 @@
         for (const task of result.tasks) {
             const card = node('article', undefined, 'collab-card'); card.append(node('strong', task.title), node('p', task.prompt));
             const statuses={running:'En cours',completed:'Terminée',failed:'À vérifier',cancelled:'Arrêtée',pending:'En attente',scheduled:'Planifiée',paused:'En pause',idle:'Prête'};
-            card.append(node('small', `${statuses[task.status] || (task.enabled ? 'Prête' : 'En pause')}${task.nextRunAt ? ' · Prochaine exécution : ' + new Date(task.nextRunAt).toLocaleString() : ''}`));
+            card.append(node('small', `${statuses[task.status] || (task.enabled ? 'Prête' : 'En pause')}${task.cron ? ' · cron ' + task.cron : ''}${task.nextRunAt ? ' · Prochaine exécution : ' + new Date(task.nextRunAt).toLocaleString() : ''}`));
             if (task.lastError) card.append(node('p', String(task.lastError), 'collab-error'));
             if (task.pending) {
                 card.append(node('p', task.pending.summary || task.pending.content || 'Une décision est nécessaire pour continuer.'));
@@ -57,7 +59,7 @@
             if (task.lastResult) card.append(node('pre', typeof task.lastResult === 'string' ? task.lastResult : JSON.stringify(task.lastResult, null, 2)));
             const actions = node('div', undefined, 'collab-actions');
             const mutation = (path, method = 'POST', payload) => view.run(async () => { await request(`/api/tasks/${encodeURIComponent(task.id)}${path}`, method, payload); await tasks(); });
-            actions.append(button('Modifier', () => { createBox.open=true;editingTask = task; title.value = task.title; prompt.value = task.prompt; project.value = task.root; interval.value = task.intervalMinutes || ''; at.value = task.runAt ? new Date(new Date(task.runAt).getTime() - new Date(task.runAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; submitTask.textContent = 'Enregistrer les modifications'; title.focus(); }), button('Exécuter', () => mutation('/run')), button(task.enabled ? 'Mettre en pause' : 'Reprendre', () => mutation('', 'PATCH', { enabled: !task.enabled })), button('Arrêter', () => mutation('/cancel')), button('Supprimer', () => view.run(async () => {
+            actions.append(button('Modifier', () => { createBox.open=true;editingTask = task; title.value = task.title; prompt.value = task.prompt; project.value = task.root; interval.value = task.intervalMinutes || ''; cron.value = task.cron || ''; at.value = task.runAt ? new Date(new Date(task.runAt).getTime() - new Date(task.runAt).getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ''; submitTask.textContent = 'Enregistrer les modifications'; title.focus(); }), button('Exécuter', () => mutation('/run')), button(task.enabled ? 'Mettre en pause' : 'Reprendre', () => mutation('', 'PATCH', { enabled: !task.enabled })), button('Arrêter', () => mutation('/cancel')), button('Supprimer', () => view.run(async () => {
                 if (await confirm(view, task.title, { title: 'Supprimer cette tâche ?', danger: true })) await mutation('', 'DELETE');
             })));
             card.append(actions); body.append(card);

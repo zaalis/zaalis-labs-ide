@@ -3,7 +3,7 @@ use crate::event_bus::EventBus;
 use crate::interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
 use crate::prompt::discover_project_guidance;
 use crate::runner::{run_agent, run_lifecycle_hook, AgentRun};
-use crate::spawn::{NativeMergeTool, NativeSpawnTool};
+use crate::spawn::{NativeBatchSpawnTool, NativeMergeTool, NativeSpawnTool};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -138,6 +138,10 @@ impl AgentSession {
             .tools
             .register(NativeSpawnTool::new(Arc::downgrade(&inner)))
             .expect("register native spawn_agent tool");
+        inner
+            .tools
+            .register(NativeBatchSpawnTool::new(Arc::downgrade(&inner)))
+            .expect("register native spawn_agents tool");
         inner.tools.register(crate::clarify::ClarifyTool(Arc::downgrade(&inner))).expect("register user input tool");
         for action in ["agent_status", "agent_wait", "agent_cancel"] {
             inner.tools.register(crate::agent_control::AgentControlTool::new(Arc::downgrade(&inner),action)).expect("register agent control tool");

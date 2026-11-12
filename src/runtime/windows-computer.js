@@ -878,6 +878,8 @@ function call(action, overlayConfig) {
       env: { ...process.env, ZAALIS_COMPUTER_ACTION: payload },
       timeout: 25000, maxBuffer: 32 * 1024 * 1024, windowsHide: true,
     }, (error, stdout, stderr) => {
+      // A timeout kills PowerShell: say so, instead of the whole command line Node puts in its message.
+      if (error && error.killed) return resolve({ ok: false, error: 'timeout: the desktop did not answer within 25 s; inspect again before retrying' });
       if (error) return resolve({ ok: false, error: (stderr || error.message || 'windows-computer-failed').slice(0, 1000) });
       try { resolve(JSON.parse(String(stdout || '').trim())); }
       catch { resolve({ ok: false, error: 'windows-computer-invalid-response' }); }

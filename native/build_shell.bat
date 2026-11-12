@@ -49,7 +49,7 @@ if errorlevel 1 goto :failed
 
 REM --- Copy only the original Zaalis bridge (installed on request) ---
 if exist dist\blender rmdir /S /Q dist\blender
-xcopy "blender\zaalis-bridge-1.0.0.zip" "dist\blender\" /Y /I /Q >nul
+xcopy "blender\zaalis-bridge-1.0.1.zip" "dist\blender\" /Y /I /Q >nul
 if errorlevel 1 goto :failed
 
 REM --- Stage the verified offline Linux VM pack ---

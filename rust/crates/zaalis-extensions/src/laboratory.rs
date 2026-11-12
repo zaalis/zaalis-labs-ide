@@ -51,7 +51,9 @@ impl Tool for LabTool {
         let action = input.get("action").and_then(Value::as_str).unwrap_or("");
         if !["list","recall","run","status","cancel","apply"].contains(&action) { return Err(ZaalisError::invalid("action VM inconnue")); }
         if action == "apply" { return Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", AccessKind::Edit).with_target("intégration du candidat VM").sensitive(true)); }
-        Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", if ["list","recall","status"].contains(&action) { AccessKind::Read } else { AccessKind::Sandbox }).with_target(format!("VM : {action}")))
+        let connected = action == "run" && input.get("network").and_then(Value::as_str) == Some("internet");
+        let target = if connected { format!("VM : {action} · {}", zaalis_guard::VM_NETWORK_MARK) } else { format!("VM : {action}") };
+        Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", if ["list","recall","status"].contains(&action) { AccessKind::Read } else { AccessKind::Sandbox }).with_target(target).sensitive(connected))
     }
     async fn execute(&self, mut input: Value, context: ToolContext, cancel: CancellationToken) -> Result<ToolResult> {
         input["agent_id"] = json!(context.agent_id);

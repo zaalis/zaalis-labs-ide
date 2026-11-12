@@ -26,16 +26,21 @@ pub struct SkillRegistry {
     skills: BTreeMap<String, Skill>,
 }
 
+const BUILTIN_SKILLS: [&str; 2] = ["revers", "pentest"];
+
 impl SkillRegistry {
     pub fn load(workspace: &zaalis_fs::Workspace, user_root: Option<&Path>) -> Result<Self> {
         let mut registry = Self::default();
         if let Some(root) = user_root {
             registry.load_root(&root.join("skills"))?;
         }
-        let builtin = registry.skills.get("revers").cloned();
+        // Built-in workflows cannot be shadowed by an untrusted project file.
+        let builtins: Vec<(String, Skill)> = BUILTIN_SKILLS.iter()
+            .filter_map(|name| registry.skills.get(*name).cloned().map(|skill| ((*name).to_owned(), skill)))
+            .collect();
         let project = workspace.root().join(".zaalis").join("skills");
         registry.load_root(&project)?;
-        if let Some(skill) = builtin { registry.skills.insert("revers".into(), skill); }
+        for (name, skill) in builtins { registry.skills.insert(name, skill); }
         if let Some(root) = user_root {
             let file = root.join("disabled-skills.json");
             if file.exists() {

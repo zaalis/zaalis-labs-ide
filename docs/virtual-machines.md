@@ -2,7 +2,7 @@
 
 The right sidebar opens distinct VM sessions. Linux has a real SSH/PT​Y terminal with xterm. Windows Sandbox provides a persistent PowerShell console for navigation and commands, without full-screen editors, program-level interactive input, or Ctrl+C interruption of an already running command. Stop closes the whole Sandbox.
 
-The native `vm` tool offers `list`, `create`, `status`, `import_project`, `exec`, `export_file`, `reset`, and `stop` without desktop clicks. Owned-VM actions are autonomous even when host desktop actions require supervision. Plan mode still prohibits mutations; the VM permission does not grant host commands or Windows feature activation.
+The native `vm` tool offers `list`, `create`, `status`, `import_project`, `exec`, `export_file`, `reset`, `stop`, and `delete` without desktop clicks. `status` accepts `waitMs` (up to 30 s) so the agent waits for readiness in one call; `exec` accepts `timeoutMs` (1 to 120 s). Owned-VM actions are autonomous even when host desktop actions require supervision. Plan mode still prohibits mutations; the VM permission does not grant host commands or Windows feature activation.
 
 ## Use
 
@@ -11,7 +11,7 @@ The native `vm` tool offers `list`, `create`, `status`, `import_project`, `exec`
 3. Copy project imports a copy of the active project, excluding `.env`, common keys and credential directories, `.git`, `node_modules`, `target`, and symlinks. The transfer is limited to 256 MiB and 12,000 files.
 4. The guest workspace is `/home/zaalis/workspace` on Linux or `C:\workspace` on Windows. Linux agent `exec` calls use separate shells; include `cd /home/zaalis/workspace && ...` as needed.
 5. Export file returns a download link for a guest file up to 32 MiB. Guest results are never applied automatically to the local project.
-6. Reset stops the session and starts a clean environment. Old overlays remain in local data; this version does not automatically delete them or restore snapshots.
+6. Reset stops the session, frees its disk and starts a clean environment under a new id. `delete` (the Delete button of a stopped machine) frees a session's overlay, staged copies and exported files. At startup the server also removes the folders of sessions whose server process is gone, ends a QEMU left behind by it, and drops exported files older than seven days. Snapshots are not restored.
 
 Networking is disabled by default. Internet + host network also allows local-network access; it is not an internet-only filter. Agent commands have a two-minute limit and bounded output. Stopping a VM interrupts guest processes. Windows Sandbox uses `wsb`, a read-only shared input directory, and a separate writable result directory because the API does not provide stdout/stderr. A guest watchdog stops the Sandbox after 30 seconds without an IDE heartbeat. The IDE does not adopt or stop a Sandbox started elsewhere.
 
