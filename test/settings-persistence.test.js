@@ -3,8 +3,8 @@ const test=require('node:test'),assert=require('node:assert/strict'),vm=require(
 const {settle}=require('./helpers/frontend-dom');
 function setup({failStorage=false,failServer=false}={}){
   const requests=[],controls={};
-  for(const id of ['settings-theme-select','gguf-ctx-input']) controls[id]={tagName:id==='gguf-ctx-input'?'INPUT':'SELECT',type:'text',value:id==='gguf-ctx-input'?'32768':'light',listeners:new Map(),addEventListener(name,fn){this.listeners.set(name,fn);}};
-  const state={language:'fr',config:{theme:'dark',ggufCtx:16384}};
+  for(const id of ['settings-theme-select','settings-fontfamily-select','gguf-ctx-input']) controls[id]={tagName:id==='gguf-ctx-input'?'INPUT':'SELECT',type:'text',value:id==='gguf-ctx-input'?'32768':id==='settings-fontfamily-select'?'inter':'light',listeners:new Map(),addEventListener(name,fn){this.listeners.set(name,fn);}};
+  const state={language:'fr',config:{theme:'dark',fontFamily:'system',ggufCtx:16384}};
   const context={state,document:{getElementById:id=>controls[id],dispatchEvent(){}},window:{ZaalisUI:{text:fr=>fr},ZaalisSettings:{status:{dataset:{}}}},
     clampGgufCtx:Number,sharedHardwareConfigPayload:()=>({ggufCtx:state.config.ggufCtx}),applyAppearance(){},saveState(){if(failStorage)throw new Error('Storage unavailable');},setPermissionMode(){},setLanguage(){},
     fetch:async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return{ok:!failServer,json:async()=>({error:failServer?'Offline':undefined})};}};
@@ -22,4 +22,10 @@ test('failed preference saves restore the last confirmed value and expose the er
 test('hardware save is scoped to the runtime endpoint and rolls back on failure',async()=>{
   const ui=setup({failServer:true});ui.controls['gguf-ctx-input'].listeners.get('blur')();await settle();
   assert.equal(ui.state.config.ggufCtx,16384);assert.deepEqual(ui.requests.map(r=>r.url),['/api/config']);assert.equal(ui.controls['gguf-ctx-input'].disabled,false);
+});
+test('font choice is saved locally and restored when persistence fails',async()=>{
+  const saved=setup();saved.controls['settings-fontfamily-select'].listeners.get('change')();await settle();
+  assert.equal(saved.state.config.fontFamily,'inter');assert.equal(saved.requests.length,0);
+  const failed=setup({failStorage:true});failed.controls['settings-fontfamily-select'].listeners.get('change')();await settle();
+  assert.equal(failed.state.config.fontFamily,'system');assert.equal(failed.controls['settings-fontfamily-select'].value,'system');
 });

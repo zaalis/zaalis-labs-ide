@@ -79,31 +79,56 @@ pub(crate) fn compact(messages: &mut Vec<Message>, budget: usize) -> Result<bool
         }
     }
     if estimate(messages) <= budget { return Ok(true); }
-    let mut tail = messages.len().saturating_sub(6).min(latest_user);
+    // The last message that is not a tool result opens the final group: the
+    // latest request, or the assistant round whose results the model has not
+    // read yet. That group always stays, so the model never loses its place.
+    let last_group = messages.iter().rposition(|m| !matches!(m, Message::Tool { .. })).unwrap_or(0);
+    // Prefer keeping the whole current turn. A turn that is one request
+    // followed by many tool rounds is itself the bulk of the context, so the
+    // boundary may then move past the latest request, which is kept verbatim.
+    let mut tail = messages.len().saturating_sub(6).min(if latest_user > 0 { latest_user } else { last_group });
     while tail > 1 && matches!(&messages[tail], Message::Tool { .. }) { tail -= 1; }
+    let build = |messages: &[Message], tail: usize| -> Vec<Message> {
+        let per_message = (budget.saturating_mul(3) / 5 / tail).clamp(80, 700);
+        let mut summary = String::from(SUMMARY_MARKER);
+        for (index, message) in messages.iter().enumerate().take(tail).skip(1) {
+            if index == latest_user { continue; }
+            let (label, text) = match message {
+                Message::User { text, .. } => ("Demande / contraintes", text.clone()),
+                Message::Assistant { text, tool_calls, .. } => ("Réponse / actions", format!("{text} {}", serde_json::to_string(tool_calls).unwrap_or_default())),
+                Message::Tool { name, content, is_error, .. } => ("Résultat observé", format!("{name} (erreur={is_error}): {content}")),
+            };
+            summary.push_str(&format!("\n{label}: {}", excerpt(&text, per_message)));
+        }
+        let mut candidate = vec![messages[0].clone(), Message::assistant(summary)];
+        if latest_user > 0 && latest_user < tail { candidate.push(messages[latest_user].clone()); }
+        candidate.extend_from_slice(&messages[tail..]);
+        candidate
+    };
     // Increase removed middle only along boundaries that never split tool calls.
     loop {
         if tail > 1 {
-            let per_message = (budget.saturating_mul(3) / 5 / tail).clamp(80, 700);
-            let mut summary = String::from(SUMMARY_MARKER);
-            for message in &messages[1..tail] {
-                let (label, text) = match message {
-                    Message::User { text, .. } => ("Demande / contraintes", text.clone()),
-                    Message::Assistant { text, tool_calls, .. } => ("Réponse / actions", format!("{text} {}", serde_json::to_string(tool_calls).unwrap_or_default())),
-                    Message::Tool { name, content, is_error, .. } => ("Résultat observé", format!("{name} (erreur={is_error}): {content}")),
-                };
-                summary.push_str(&format!("\n{label}: {}", excerpt(&text, per_message)));
-            }
-            let mut candidate = vec![messages[0].clone(), Message::assistant(summary)];
-            candidate.extend_from_slice(&messages[tail..]);
+            let candidate = build(messages, tail);
             if estimate(&candidate) <= budget {
                 *messages = candidate;
                 return Ok(true);
             }
         }
-        if tail >= latest_user { break; }
+        if tail >= last_group { break; }
         tail += 1;
-        while tail < latest_user && matches!(&messages[tail], Message::Tool { .. }) { tail += 1; }
+        while tail < last_group && matches!(&messages[tail], Message::Tool { .. }) { tail += 1; }
+    }
+    // Last resort: the final group alone is too large. Shorten its tool
+    // results further rather than failing a turn that is otherwise healthy.
+    if last_group > 1 {
+        let mut candidate = build(messages, last_group);
+        for message in &mut candidate {
+            if let Message::Tool { content, .. } = message { *content = excerpt(content, 1200); }
+        }
+        if estimate(&candidate) <= budget {
+            *messages = candidate;
+            return Ok(true);
+        }
     }
     Err(ZaalisError::invalid(format!(
         "Contexte trop volumineux : {} tokens estimés pour un budget de {budget}. La demande initiale et la demande récente ont été conservées ({old_len} messages). Réduire les pièces jointes ou choisir un modèle avec un contexte plus grand.", estimate(messages)
@@ -137,6 +162,29 @@ mod tests {
         assert_eq!(messages.first(), Some(&Message::user("Garder le français")));
         assert_eq!(messages.last(), Some(&Message::user("Dernière demande exacte")));
         assert!(estimate(&messages) <= 3000);
+        let before = messages.clone(); repair_interrupted_tools(&mut messages); assert_eq!(messages, before);
+    }
+
+    #[test]
+    fn a_long_single_turn_of_tool_rounds_is_compacted_instead_of_failing() {
+        // One request followed by many tool rounds: the usual agentic turn.
+        let mut messages = vec![Message::user("Audite tout le dépôt")];
+        for _ in 0..40 { messages.extend([call(), Message::tool_result("c1", "read", "été".repeat(3000))]); }
+        assert!(compact(&mut messages, 12000).unwrap());
+        assert_eq!(messages.first(), Some(&Message::user("Audite tout le dépôt")));
+        assert!(estimate(&messages) <= 12000);
+        assert!(matches!(messages.last(), Some(Message::Tool { .. })), "the latest tool result stays in context");
+        let before = messages.clone(); repair_interrupted_tools(&mut messages); assert_eq!(messages, before);
+    }
+
+    #[test]
+    fn tool_rounds_after_the_latest_request_are_compacted_and_the_request_is_kept() {
+        let mut messages = vec![Message::user("Garder le français"), Message::assistant("D'accord"), Message::user("Dernière demande exacte")];
+        for _ in 0..40 { messages.extend([call(), Message::tool_result("c1", "read", "été".repeat(3000))]); }
+        assert!(compact(&mut messages, 12000).unwrap());
+        assert_eq!(messages.first(), Some(&Message::user("Garder le français")));
+        assert_eq!(messages.iter().filter(|m| **m == Message::user("Dernière demande exacte")).count(), 1);
+        assert!(estimate(&messages) <= 12000);
         let before = messages.clone(); repair_interrupted_tools(&mut messages); assert_eq!(messages, before);
     }
 

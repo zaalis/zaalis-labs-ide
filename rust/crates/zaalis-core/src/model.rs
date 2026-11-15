@@ -171,7 +171,7 @@ pub enum ReasoningMode {
 pub struct ModelBinding {
     pub provider: ProviderId,
     /// The provider-specific model identifier (`mistral-medium-3-5`,
-    /// `claude-fable-5`, a `.gguf` filename…). `None` means "the provider's
+    /// `claude-fable-5-2`, a `.gguf` filename…). `None` means "the provider's
     /// configured default".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

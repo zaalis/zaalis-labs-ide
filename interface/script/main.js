@@ -60,7 +60,7 @@ function applyAppearance() {
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
     'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
-    'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
+    'settings-theme-select', 'settings-density-select', 'settings-fontsize-select', 'settings-fontfamily-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-default-permission-select', 'settings-channel-select'
 ];
@@ -184,6 +184,7 @@ function populateSettingsControls() {
     setVal('settings-theme-select', c.theme || 'system');
     setVal('settings-density-select', c.density || 'normal');
     setVal('settings-fontsize-select', c.fontSize || 'normal');
+    setVal('settings-fontfamily-select', c.fontFamily || 'system');
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);

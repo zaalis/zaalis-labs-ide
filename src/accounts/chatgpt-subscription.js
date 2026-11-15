@@ -27,7 +27,7 @@ const MAX_CALL_ID_LENGTH = 64;
 
 // Starter list shown before the account's live catalogue answers.
 const DEFAULT_MODELS = Object.freeze([
-  'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',
+  'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',
 ]);
 
 // Tests point both hosts at a fake server. Only a loopback http URL is ever
@@ -432,7 +432,9 @@ function errorText(event) {
   return typeof message === 'string' && message.trim() ? message.trim() : 'Le modèle ChatGPT a interrompu la réponse.';
 }
 
-function createChunkTranslator(model) {
+function createChunkTranslator(model, options = {}) {
+  const aliases = options && options.aliases && typeof options.aliases === 'object' ? options.aliases : {};
+  const localName = (name) => aliases[String(name || '')] || String(name || '');
   const id = `chatcmpl-${crypto.randomUUID()}`;
   const created = Math.floor(Date.now() / 1000);
   const calls = new Map();       // Responses item id -> { index, streamed }
@@ -448,7 +450,7 @@ function createChunkTranslator(model) {
     calls.set(key, entry);
     return [entry, chunk({ tool_calls: [{
       index: entry.index, id: String(item.call_id || item.id || `call_${entry.index}`), type: 'function',
-      function: { name: String(item.name || ''), arguments: '' },
+      function: { name: localName(item.name), arguments: '' },
     }] })];
   };
   const callFor = (itemId, outputIndex) => calls.get(itemId) || calls.get(`#${outputIndex}`);

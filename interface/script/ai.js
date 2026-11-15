@@ -469,10 +469,7 @@ document.addEventListener('click', async e => {
 });
 
 function formatAIResponse(text) {
-    const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
-
-    if (isImageGen) {
+    if (isImageGenModel()) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
         if (imgMatch) return imageBubble(imgMatch[2], imgMatch[1] || '');
     }
@@ -1089,7 +1086,7 @@ function toolRunDetailsHTML(results) {
         const name = toolDisplayName(r);
         const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
         const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
-        return `<details class="ghost-tool-item">
+        return `<details class="ghost-tool-item${failed ? ' is-error' : ''}">
             <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
             <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
         </details>`;
@@ -2634,7 +2631,7 @@ function isVisionCompatible(model, submodel) {
             if (model === 'compat:xai-sub') return true;
             if (model === 'compat:minimax-sub') return /^minimax-m3/i.test(s);
             return String(model || '').startsWith('compat:')
-                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-[56]/.test(s);
     }
 }
 function chatImagesAllowed() {

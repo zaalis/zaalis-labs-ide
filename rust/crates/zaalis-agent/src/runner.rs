@@ -403,6 +403,20 @@ pub(crate) async fn run_agent(
             // Images returned during this round, by the tool that returned them.
             let mut round_images: Vec<(String, Vec<zaalis_providers::ImagePart>)> = Vec::new();
             for call in calls {
+                // A provider can return many calls in one round. Checking only
+                // at the next inference lets that batch overrun the tool limit.
+                if partial_reason.is_none() && node.budget.max_tool_calls.is_some_and(|limit| usage.tool_calls >= limit)
+                    && !request_budget(&session, &mut node, &mut usage, zaalis_core::BudgetLimit::ToolCalls, &cancel).await?
+                {
+                    partial_reason = Some("budget tool_calls non prolongé".into());
+                }
+                if let Some(reason) = &partial_reason {
+                    let outcome = ToolOutcome::Denied { summary: "Outil non exécuté".into(), reason: reason.clone() };
+                    history.push(Message::Tool { call_id: call.id, name: call.name,
+                        content: serde_json::to_string(&outcome)?, is_error: true });
+                    session.checkpoint_history(&node.id, &history).await;
+                    continue;
+                }
                 usage.tool_calls = usage.tool_calls.saturating_add(1);
                 let effective_name = if call.name == "tool_call" {
                     call.arguments.get("name").and_then(serde_json::Value::as_str).unwrap_or("tool_call").to_owned()
@@ -471,6 +485,7 @@ pub(crate) async fn run_agent(
                 history.retain(|message| !is_tool_images_message(message));
                 history.push(message);
             }
+            if partial_reason.is_some() { break; }
             continue;
         }
 
@@ -929,7 +944,9 @@ async fn request_budget(
                     .saturating_add(additional),
             );
         }
-        None => node.budget.max_tokens = None,
+        None if limit == zaalis_core::BudgetLimit::Tokens => node.budget.max_tokens = None,
+        // Extending tools/rounds/time does not grant unlimited tokens.
+        None => {},
     }
     // Non-token limits receive one conservative extra tranche as well; the
     // client protocol currently carries token increments only.

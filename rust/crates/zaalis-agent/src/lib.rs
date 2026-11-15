@@ -260,6 +260,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_long_conversation_does_not_exhaust_the_common_budget_of_new_turns() {
+        let reply = || vec![
+            TurnEvent::TextDelta { text: "ok".into() },
+            TurnEvent::Usage { usage: Usage { input_tokens: 600, output_tokens: 10, ..Usage::default() } },
+            TurnEvent::Completed { reason: StopReason::EndTurn },
+        ];
+        let provider = Arc::new(ScriptedProvider::new(ProviderId::Mistral, vec![reply(), reply(), reply()]));
+        let f = fixture(SessionRunMode::Chat, vec![provider]);
+        let mut n = node(&f.session, ProviderId::Mistral, PermissionMode::ReadOnly);
+        n.budget.max_tokens = Some(100_000);
+        let agent = f.session.add_root(n).await.unwrap();
+        f.session.run_turn("premier").await.unwrap();
+        // Earlier turns consumed far more than the root budget in total.
+        f.session.inner.envelope.lock().await.spent = 10_000_000;
+        let usage = f.session.run_turn("deuxième").await.unwrap();
+        // The usage returned is the agent's running total: one more reply was billed.
+        assert_eq!(usage.input_tokens, 1200, "a new turn starts with a fresh envelope");
+        assert!(matches!(f.session.tree().await.get(&agent).unwrap().state, zaalis_core::AgentState::Done));
+        let usage = f.session.run_turn("troisième").await.unwrap();
+        assert_eq!(usage.input_tokens, 1800, "and so does the next one");
+    }
+
+    #[tokio::test]
     async fn one_agent_streams_typed_segments_and_completes() {
         let provider = Arc::new(ScriptedProvider::new(
             ProviderId::Mistral,

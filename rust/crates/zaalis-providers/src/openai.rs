@@ -57,12 +57,12 @@ impl OpenAiConfig {
         let (base_url, default_model, reasoning, capabilities) = match provider {
             ProviderId::Codex => (
                 "https://api.openai.com/v1",
-                "gpt-5.6-sol",
+                "gpt-6-astra",
                 ReasoningStyle::Effort,
                 Capabilities {
                     reasoning: true,
                     vision: true,
-                    max_context: 400_000,
+                    max_context: 1_050_000,
                     max_concurrency: 6,
                     ..Capabilities::default()
                 },
@@ -82,25 +82,25 @@ impl OpenAiConfig {
             ),
             ProviderId::Kimi => (
                 "https://api.moonshot.ai/v1",
-                "kimi-k3",
+                "kimi-k3.1-pro",
                 ReasoningStyle::None,
                 Capabilities {
                     reasoning: true,
-                    max_context: 256_000,
+                    max_context: 1_000_000,
                     max_concurrency: 4,
                     ..Capabilities::default()
                 },
             ),
             ProviderId::Grok => (
                 "https://api.x.ai/v1",
-                "grok-4.5",
+                "grok-4.7",
                 // The grok-4.x models reason natively and reject
                 // `reasoning_effort` outright, so it is never sent.
                 ReasoningStyle::None,
                 Capabilities {
                     reasoning: true,
                     vision: true,
-                    max_context: 256_000,
+                    max_context: 500_000,
                     max_concurrency: 4,
                     ..Capabilities::default()
                 },

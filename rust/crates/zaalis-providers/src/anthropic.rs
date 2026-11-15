@@ -27,7 +27,7 @@ impl AnthropicConfig {
         Self {
             base_url: "https://api.anthropic.com/v1".to_owned(),
             api_key: api_key.into(),
-            default_model: "claude-fable-5".to_owned(),
+            default_model: "claude-fable-5-2".to_owned(),
             api_version: "2023-06-01".to_owned(),
             capabilities: Capabilities {
                 reasoning: true,
@@ -482,7 +482,7 @@ mod tests {
 
     fn request() -> TurnRequest {
         TurnRequest::new(
-            ModelBinding::new(ProviderId::Claude, Some("claude-fable-5".into())),
+            ModelBinding::new(ProviderId::Claude, Some("claude-fable-5-2".into())),
             "système",
             vec![Message::user("lis")],
         )

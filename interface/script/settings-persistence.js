@@ -5,6 +5,7 @@
     const fields = {
         'settings-lang-select':['language'], 'settings-theme-select':['theme'],
         'settings-density-select':['density'],'settings-fontsize-select':['fontSize'],
+        'settings-fontfamily-select':['fontFamily'],
         'settings-default-chat-select':['aiModel'],'settings-default-agent-select':['defaultAgentModel'],
         'settings-default-reasoning-select':['defaultReasoning','number'],
         'settings-default-permission-select':['defaultPermissionMode'],

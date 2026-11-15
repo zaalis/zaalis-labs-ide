@@ -81,19 +81,40 @@
         card.append(node('p','ui-usage-title',text('Contexte utilisé','Context used')));
         card.append(row(text('Fenêtre de contexte','Context window'),measured?(txt?.textContent||''):text('Pas encore mesuré','Not measured yet'),measured?pct:0));
         card.append(node('div','ui-usage-sep'));
-        if(limits&&limits.available&&limits.windows?.length){
+        const fmtNum=n=>Number(n).toLocaleString(state.language==='en'?'en-GB':'fr-FR');
+        // Never show another provider's answer, even for the instant before the refetch.
+        if(limitsFor&&limitsFor!==String(state.config.aiModel||'')){limits=null;limitsAt=0;}
+        if(limits&&limits.available&&limits.kind==='rate'&&limits.windows?.length){
+            // xAI: rate limits from the last response, not the plan's quota.
+            card.append(node('p','ui-usage-title',text('Limites de débit · xAI','Rate limits · xAI')));
+            for(const w of limits.windows)card.append(row(w.kind==='tokens'?'Tokens':text('Requêtes','Requests'),
+                fmtNum(w.remaining)+' / '+fmtNum(w.limit)+text(' restants',' left'),w.usedPercent));
+            card.append(node('p','ui-usage-unknown',text('Mesurées à la dernière réponse. Le quota du forfait SuperGrok n’est pas communiqué par xAI.','Measured on the last reply. xAI does not report the SuperGrok plan quota.')));
+        }else if(limits&&limits.available&&limits.windows?.length){
             card.append(node('p','ui-usage-title',text('Limites d’utilisation du forfait','Plan usage limits')+(limits.plan?' · '+limits.plan.charAt(0).toUpperCase()+limits.plan.slice(1):'')));
             for(const w of limits.windows)card.append(row(windowLabel(w),(fmtReset(w.resetsAt)+'  '+w.usedPercent+' %').trim(),w.usedPercent));
         }else{
             card.append(node('p','ui-usage-title',text('Limites d’utilisation du forfait','Plan usage limits')));
-            card.append(node('p','ui-usage-unknown',limitsBusy?text('Chargement…','Loading…'):text('Inconnues — non communiquées par ce fournisseur.','Unknown — not reported by this provider.')));
+            card.append(node('p','ui-usage-unknown',limitsBusy||!limits?text('Chargement…','Loading…')
+                :limits&&limits.pending?text('Envoyez un message à Grok pour mesurer les limites.','Send a message to Grok to measure the limits.')
+                :text('Inconnues — non communiquées par ce fournisseur.','Unknown — not reported by this provider.')));
         }
     }
+    let limitsFor='';
     async function loadLimits(){
-        if(limitsBusy||Date.now()-limitsAt<60000)return;
+        // Limits belong to the selected provider: switching provider refetches.
+        const provider=String(state.config.aiModel||'');
+        // Grok's limits move with every reply (and may still be awaited): short cache.
+        const ttl=limits&&(limits.kind==='rate'||limits.pending)?5000:60000;
+        if(limitsBusy||(provider===limitsFor&&Date.now()-limitsAt<ttl))return;
+        if(provider!==limitsFor)limits=null;
         limitsBusy=true;renderCard();
-        try{const r=await fetch('/api/plan-limits');limits=r.ok?await r.json():{available:false};}catch{limits={available:false};}
-        limitsBusy=false;limitsAt=Date.now();if(!card.hidden)renderCard();
+        let answer;
+        try{const r=await fetch('/api/plan-limits?provider='+encodeURIComponent(provider));answer=r.ok?await r.json():{available:false};}catch{answer={available:false};}
+        limitsBusy=false;
+        // The provider changed during the request: that answer is for the old one.
+        if(String(state.config.aiModel||'')!==provider){limits=null;limitsFor='';loadLimits();return;}
+        limits=answer;limitsAt=Date.now();limitsFor=provider;if(!card.hidden)renderCard();
     }
     function updateRing(){
         const fill=document.getElementById('token-fill');
@@ -105,12 +126,16 @@
     }
     function toggleCard(open){
         card.hidden=!open;ring.setAttribute('aria-expanded',String(open));
-        if(open){renderCard();loadLimits();picker.open=false;vendor.open=false;}
+        if(open){renderCard();loadLimits();picker.open=false;vendor.open=false;placeMenu(usage,card);}
     }
     ring.addEventListener('click',()=>toggleCard(card.hidden));
 
     // ---- Placement ---------------------------------------------------------
-    right.prepend(usage);right.prepend(picker);right.prepend(vendor);
+    const controls=node('div','ui-model-controls');
+    controls.setAttribute('aria-label',text('Modèle et contexte','Model and context'));
+    // Same row as the microphone: brand · model · context ring · mic · send,
+    // in Chat IDE and in the editor's AI panel alike.
+    controls.append(vendor,picker,usage);right.prepend(controls);
     park.append(bar,original);picker.append(park);
 
     // ---- Rendering ---------------------------------------------------------
@@ -119,8 +144,10 @@
         // The workspace can move the legacy controls while switching layouts.
         if(bar.parentElement!==park)park.append(bar);
         if(original.parentElement!==park)park.append(original);
-        if(!right.contains(picker))right.prepend(picker);
-        if(!right.contains(vendor))right.prepend(vendor);
+        if(controls.parentElement!==right)right.prepend(controls);
+        if(!controls.contains(usage))controls.append(usage);
+        if(!controls.contains(picker))controls.prepend(picker);
+        if(!controls.contains(vendor))controls.prepend(vendor);
         const levels=reasoningLevels();
         const providers=[...providerSelect.options].map(o=>({value:o.value,label:clean(o.textContent),action:o.dataset.action||'',group:o.parentElement.label||''}));
         const models=[...modelSelect.options].filter(o=>o.value).map(o=>({value:o.value,label:o.textContent.trim()}));
@@ -172,11 +199,26 @@
         summary.title=model+(effort?' · '+text('Raisonnement : ','Reasoning: ')+effort:'');
         updateRing();
     }
-    picker.addEventListener('toggle',()=>{if(picker.open){vendor.open=false;toggleCard(false);last='';refresh();}});
-    vendor.addEventListener('toggle',()=>{if(vendor.open){picker.open=false;toggleCard(false);last='';refresh();}});
+    // Menus open upward from the send row; when the composer sits high (the
+    // centred welcome screen) there is not enough room, so open downward.
+    function placeMenu(host,panel){
+        host.classList.remove('opens-down');panel.style.maxHeight='';
+        // The Chat/Agents header is drawn above the conversation: a menu
+        // reaching under it would lose its first rows.
+        const header=host.closest('#ai-panel')?.querySelector('.ai-panel-header');
+        const ceiling=header&&header.offsetParent?header.getBoundingClientRect().bottom:0;
+        const box=host.getBoundingClientRect(),room=box.top-ceiling-16,below=window.innerHeight-box.bottom-16;
+        const down=panel.scrollHeight>room&&below>room;
+        host.classList.toggle('opens-down',down);
+        if(panel.scrollHeight>(down?below:room))panel.style.maxHeight=Math.max(160,down?below:room)+'px';
+    }
+    picker.addEventListener('toggle',()=>{if(picker.open){vendor.open=false;toggleCard(false);last='';refresh();placeMenu(picker,menu);}});
+    vendor.addEventListener('toggle',()=>{if(vendor.open){picker.open=false;toggleCard(false);last='';refresh();placeMenu(vendor,vendorMenu);}});
     new MutationObserver(refresh).observe(document.getElementById('reasoning-slider-bar'),{attributes:true,childList:true,subtree:true});
     new MutationObserver(refresh).observe(modelSelect,{childList:true,subtree:true,attributes:true});
     new MutationObserver(refresh).observe(providerSelect,{childList:true,subtree:true});
+    // An open card follows the provider instead of keeping the previous one's limits.
+    providerSelect.addEventListener('change',()=>{if(!card.hidden){renderCard();loadLimits();}});
     const tokenText=document.getElementById('token-text');
     if(tokenText)new MutationObserver(updateRing).observe(original,{attributes:true,childList:true,subtree:true,characterData:true});
     for(const select of [providerSelect,modelSelect])select.addEventListener('change',refresh);

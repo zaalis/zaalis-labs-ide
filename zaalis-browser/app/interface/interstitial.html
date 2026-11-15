@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Avertissement de sécurité</title>
+<style>
+  * { box-sizing:border-box; }
+  html, body { margin:0; min-height:100%; }
+  body { font:15px/1.55 "Segoe UI", system-ui, Arial, sans-serif; display:flex; justify-content:center; padding:12vh 24px 40px; }
+  body.sb { background:#d93025; color:#fff; }
+  body.cert { background:#fff; color:#202124; }
+  body.cert.dark { background:#202124; color:#e8eaed; }
+  .box { width:100%; max-width:600px; }
+  .icon { width:72px; height:72px; margin-bottom:26px; }
+  .icon svg { width:72px; height:72px; }
+  h1 { font-size:26px; font-weight:500; margin:0 0 16px; line-height:1.3; }
+  p { margin:0 0 14px; }
+  .code { font-size:12.5px; opacity:.75; margin-top:6px; letter-spacing:.2px; }
+  .url { word-break:break-all; font-size:13px; opacity:.85; }
+  .actions { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-top:34px; flex-wrap:wrap; }
+  button { font:500 14px "Segoe UI", sans-serif; border-radius:4px; padding:9px 18px; cursor:pointer; border:1px solid transparent; }
+  body.sb .primary { background:#fff; color:#d93025; }
+  body.sb .link { background:transparent; color:#fff; border-color:rgba(255,255,255,.6); }
+  body.cert .primary { background:#1a73e8; color:#fff; }
+  body.cert.dark .primary { background:#8ab4f8; color:#202124; }
+  body.cert .link { background:transparent; color:#1a73e8; border-color:#dadce0; }
+  body.cert.dark .link { color:#8ab4f8; border-color:#5f6368; }
+  .details { display:none; margin-top:24px; padding-top:18px; border-top:1px solid rgba(127,127,127,.35); }
+  .details.open { display:block; }
+  .details a { color:inherit; text-decoration:underline; cursor:pointer; font-weight:600; }
+  .cert-box { font-size:12.5px; font-family:Consolas, "Cascadia Mono", monospace; opacity:.85; margin:10px 0 16px; white-space:pre-wrap; word-break:break-all; }
+</style>
+</head>
+<body>
+  <div class="box" id="box" style="display:none">
+    <div class="icon" id="icon"></div>
+    <h1 id="title"></h1>
+    <p id="reason"></p>
+    <div class="url" id="url"></div>
+    <div class="code" id="code"></div>
+    <div class="actions">
+      <button class="link" id="details-btn">Détails</button>
+      <button class="primary" id="back">Retour en lieu sûr</button>
+    </div>
+    <div class="details" id="details">
+      <p id="details-text"></p>
+      <div class="cert-box" id="cert"></div>
+      <p id="proceed-wrap"><a id="proceed"></a></p>
+    </div>
+  </div>
+<script src="zx.js"></script>
+<script>
+  const token = location.hash.slice(1);
+  const ICON_SB = '<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 3 6v6c0 5 3.8 9.4 9 10 5.2-.6 9-5 9-10V6l-9-4z"/><path d="M12 8v5"/><path d="M12 16.5v.5"/></svg>';
+  const ICON_CERT = '<svg viewBox="0 0 24 24" fill="none" stroke="#d93025" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/><path d="M12 14v3"/></svg>';
+  function fmt(ts) { try { return new Date(ts).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return ''; } }
+  function render(i) {
+    document.body.classList.add(i.kind === 'cert' ? 'cert' : 'sb');
+    if (document.documentElement.classList.contains('dark')) document.body.classList.add('dark');
+    zx.$('box').style.display = '';
+    zx.$('url').textContent = i.url;
+    if (i.kind === 'cert') {
+      document.title = 'Erreur de confidentialité';
+      zx.$('icon').innerHTML = ICON_CERT;
+      zx.$('title').textContent = 'Votre connexion n\'est pas privée';
+      zx.$('reason').textContent = 'Des individus malveillants tentent peut-être de dérober vos informations sur ' + i.host + ' (mots de passe, messages ou numéros de carte de crédit, par exemple).';
+      zx.$('code').textContent = i.error || '';
+      zx.$('details-btn').textContent = 'Paramètres avancés';
+      zx.$('details-text').textContent = i.errorText || '';
+      if (i.cert) {
+        zx.$('cert').textContent = 'Délivré à : ' + (i.cert.subject || '?') + '\nDélivré par : ' + (i.cert.issuer || '?') +
+          '\nValide du ' + fmt(i.cert.validFrom) + ' au ' + fmt(i.cert.validTo) + '\nEmpreinte SHA-256 : ' + (i.cert.sha256 || '?');
+      }
+      zx.$('proceed').textContent = 'Continuer vers le site ' + i.host + ' (dangereux)';
+    } else {
+      document.title = i.threat === 'phishing' ? 'Site trompeur' : 'Site dangereux';
+      zx.$('icon').innerHTML = ICON_SB;
+      zx.$('title').textContent = i.title || 'Site dangereux';
+      zx.$('reason').textContent = i.reason || '';
+      zx.$('code').textContent = 'Source : ' + (i.threat === 'phishing' ? 'listes anti-hameçonnage' : 'listes de logiciels malveillants') + ' (Navigation sécurisée de zaalis)';
+      zx.$('details-text').textContent = i.threat === 'phishing'
+        ? 'Ce site a été signalé comme site d\'hameçonnage. Ces sites se font passer pour d\'autres afin de vous tromper.'
+        : 'Ce site a été signalé comme hébergeant ou distribuant des logiciels malveillants.';
+      zx.$('proceed').textContent = 'Accéder à ce site dangereux';
+    }
+    zx.$('proceed-wrap').style.display = i.canProceed ? '' : 'none';
+  }
+  zx.$('details-btn').onclick = () => zx.$('details').classList.toggle('open');
+  zx.$('back').onclick = () => zx.call('secBack', { token }).catch(() => { location.href = 'zaalis://home/index.html'; });
+  zx.$('proceed').onclick = () => zx.call('secProceed', { token }).catch(e => alert(e.message));
+  zx.call('secInterstitialInfo', { token }).then(render).catch(() => {
+    document.body.classList.add('cert');
+    zx.$('box').style.display = '';
+    zx.$('icon').innerHTML = ICON_CERT;
+    zx.$('title').textContent = 'Cet avertissement a expiré';
+    zx.$('reason').textContent = 'Rechargez la page d\'origine pour réessayer.';
+    zx.$('details-btn').style.display = 'none';
+  });
+</script>
+</body>
+</html>

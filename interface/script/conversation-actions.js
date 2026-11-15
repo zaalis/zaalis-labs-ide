@@ -42,6 +42,9 @@
     function menuFor(kind,conversation,anchor){
         const conv={...conversation,kind};
         window.ZaalisActionMenu.open(anchor,[
+            {label:conv.pinned?'Désépingler':'Épingler',run:()=>view.run(async()=>{
+                const result=await request(`/api/conversations/${encodeURIComponent(conv.id)}`,'PATCH',{pinned:!conv.pinned,kind});updateLocal({...result.conversation,kind});if(view.el.open)await refresh();
+            })},
             {label:'Renommer',run:()=>rename(conv)},
             {label:conv.archived?'Restaurer':'Archiver',run:()=>view.run(async()=>{
                 const result=await request(`/api/conversations/${encodeURIComponent(conv.id)}`,'PATCH',{archived:!conv.archived,kind});updateLocal({...result.conversation,kind});if(view.el.open)await refresh();
@@ -77,7 +80,7 @@
     let debounce;
     search.addEventListener('input', () => { clearTimeout(debounce); offset = 0; debounce = setTimeout(() => view.run(refresh), 180); });
     archived.addEventListener('change', () => { offset = 0; view.run(refresh); });
-    const open = (query = '') => { offset = 0; search.value = typeof query === 'string' ? query : ''; if (!view.el.open) view.el.showModal(); search.focus(); view.run(refresh); };
+    const open = (query = '', withArchives = false) => { offset = 0; search.value = typeof query === 'string' ? query : ''; if (withArchives === true) archived.checked = true; if (!view.el.open) view.el.showModal(); search.focus(); view.run(refresh); };
     launch('Historique', () => open());
     document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === 'h') { event.preventDefault(); open(); } });
     window.ZaalisConversations = { open, refresh, menuFor };

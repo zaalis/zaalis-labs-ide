@@ -65,6 +65,7 @@ function createElectron(host, hooks = {}) {
   // ----- Sessions -----------------------------------------------------------
   class Cookies {
     constructor(session) { this.session = session; }
+    flushStore() { return Promise.resolve(); }
     get(filter) {
       const view = this.session.anyView();
       if (!view) return Promise.resolve([]);
@@ -81,7 +82,25 @@ function createElectron(host, hooks = {}) {
       this.permissionRequestHandler = null;
       this.permissionCheckHandler = null;
       this.protocol = { handle: (scheme, handler) => protocolHandlers.set(scheme, handler) };
+      const ignore = () => {};
+      this.webRequest = {
+        onBeforeRequest: ignore, onBeforeSendHeaders: ignore, onHeadersReceived: ignore,
+        onCompleted: ignore, onErrorOccurred: ignore, onSendHeaders: ignore, onResponseStarted: ignore, onBeforeRedirect: ignore,
+      };
+      this.serviceWorkers = new EventEmitter();
+      this.serviceWorkers.getWorkerFromVersionID = () => null;
+      this.serviceWorkers.startWorkerForScope = () => Promise.reject(new Error('service workers indisponibles dans le navigateur intégré'));
+      this.availableSpellCheckerLanguages = [];
     }
+    setUserAgent() {}
+    setDisplayMediaRequestHandler(handler) { this.displayMediaRequestHandler = handler; }
+    setCertificateVerifyProc(handler) { this.certificateVerifyProc = handler; }
+    registerPreloadScript() {}
+    setSpellCheckerEnabled() {}
+    setSpellCheckerLanguages() {}
+    flushStorageData() {}
+    downloadURL() {}
+    addWordToSpellCheckerDictionary() {}
     anyView() {
       for (const view of views.values()) {
         if (!view.webContents.isDestroyed() && view.session === this) return view;
@@ -401,6 +420,12 @@ function createElectron(host, hooks = {}) {
 
   // ----- ipcMain, app, dialogs ----------------------------------------------------
   const ipcMain = new EventEmitter();
+  const ipcHandlers = new Map();
+  // Electron invoke channels. The embedded browser registers them at load;
+  // the WebView2 shell still speaks postMessage, so handle only has to exist
+  // and keep the listener until something on this side calls it.
+  ipcMain.handle = (channel, listener) => { ipcHandlers.set(String(channel), listener); };
+  ipcMain.removeHandler = (channel) => { ipcHandlers.delete(String(channel)); };
 
   let resolveReady;
   const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
@@ -409,6 +434,9 @@ function createElectron(host, hooks = {}) {
   Object.assign(app, {
     whenReady: () => readyPromise,
     isReady: () => !!app.ready,
+    isPackaged: false,
+    getVersion: () => '1.0.16',
+    configureHostResolver() {},
     setName() {}, setAppUserModelId() {}, setPath() {},
     commandLine: { appendSwitch() {} },
     requestSingleInstanceLock: () => true,

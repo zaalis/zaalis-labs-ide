@@ -3,6 +3,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { frontend, settle } = require('./helpers/frontend-dom');
 
+test('pinning from the conversation menu persists through the canonical API', async () => {
+  const conv = { id: 'pin-chat', title: 'À conserver', kind: 'chat', messages: [] };
+  const ui = frontend(['conversation-actions.js'], ({ method, body }) => method === 'PATCH'
+    ? { conversation: { ...conv, ...body } } : { conversations: [conv], total: 1 });
+  ui.context.state.conversations.push(conv);
+  await ui.button('Historique').emit('click'); await ui.button('…').emit('click'); await ui.button('Épingler').emit('click');
+  const writes = ui.requests.filter(request => request.method === 'PATCH');
+  assert.equal(writes.length, 1); assert.deepEqual(writes[0].body, { pinned: true, kind: 'chat' });
+  assert.equal(ui.context.state.conversations[0].pinned, true);
+});
+
 test('memory edit submits one PATCH, preserving the global scope of a global memory', async () => {
   const ui = frontend(['task-center.js'], ({ path }) => path.startsWith('/api/knowledge')
     ? { records: [{ id: 'memory-1', title: 'Convention', content: 'Before', tags: ['team'], root: null }] }

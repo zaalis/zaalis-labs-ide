@@ -805,13 +805,17 @@ app.post('/api/internal/subscription/:provider/v1/chat/completions', async (req,
   try {
     const upstream = await withAccountToken(user.id, kind, (token) =>
       accountSubscriptions.openStream(kind, token, req.body, { signal: controller.signal }));
+    if (kind === 'xai') {
+      const limits = accountSubscriptions.xaiRateLimits(upstream.headers);
+      if (limits) rememberXaiRateLimits(user.id, limits);
+    }
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
     const reader = accountSubscriptions.createSseReader();
     const translator = kind === 'xai'
-      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''))
+      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''), { aliases: upstream.zaalisToolAliases })
       : accountSubscriptions.miniMaxTranslator(String(req.body?.model || ''));
     const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
     for await (const chunk of upstream.body) for (const event of reader.push(chunk)) write(translator.push(event));
@@ -1491,14 +1495,41 @@ function accountStatus(user, provider) {
 }
 const accountFlows = new Map();
 function accountKind(id) { return id === 'xai-sub' ? 'xai' : id === 'minimax-sub' ? 'minimax' : null; }
-// Plan usage limits for the composer's usage card. Only the ChatGPT
-// subscription exposes them; anything else answers { available: false }.
+// Usage limits for the composer's usage card, for the provider actually
+// selected (?provider=). Three subscriptions report something:
+// - ChatGPT: the plan's quota windows (`kind: 'plan'`); its public-API
+//   transport is refused by that endpoint and so answers unavailable.
+// - MiniMax: the plan's 5-hour and weekly windows (`kind: 'plan'`).
+// - Grok / xAI: rate limits read from the last response's headers
+//   (`kind: 'rate'`) — xAI does not expose the plan's quota.
+// Kept on disk so the last measure survives a restart of the IDE.
+const XAI_LIMITS_FILE = path.join(DATA_DIR, 'xai-rate-limits.json');
+const xaiRateLimitCache = new Map((() => {
+  try { return Object.entries(JSON.parse(fs.readFileSync(XAI_LIMITS_FILE, 'utf8')) || {}); } catch { return []; }
+})());
+function rememberXaiRateLimits(userId, limits) {
+  xaiRateLimitCache.set(userId, { ...limits, at: Date.now() });
+  try { fs.writeFileSync(XAI_LIMITS_FILE, JSON.stringify(Object.fromEntries(xaiRateLimitCache))); } catch {}
+}
 app.get('/api/plan-limits', async (req, res) => {
+  const provider = String(req.query.provider || '');
   try {
-    if (!chatgptSession(req.user)) return res.json({ available: false });
-    const limits = await withChatgptToken(req.user.id, token => chatgptSubscription.fetchUsageLimits(token));
-    res.json(limits ? { available: true, ...limits } : { available: false });
-  } catch { res.json({ available: false }); }
+    if (provider === 'compat:chatgpt') {
+      if (!chatgptSession(req.user)) return res.json({ available: false });
+      const limits = await withChatgptToken(req.user.id, token => chatgptSubscription.fetchUsageLimits(token));
+      return res.json(limits ? { available: true, kind: 'plan', ...limits } : { available: false });
+    }
+    if (provider === 'compat:minimax-sub') {
+      if (!accountSession(req.user, 'minimax')) return res.json({ available: false });
+      const limits = await withAccountToken(req.user.id, 'minimax', token => accountSubscriptions.fetchMiniMaxLimits(token));
+      return res.json(limits ? { available: true, kind: 'plan', ...limits } : { available: false });
+    }
+    if (provider === 'compat:xai-sub') {
+      const limits = xaiRateLimitCache.get(req.user.id);
+      return res.json(limits ? { available: true, kind: 'rate', windows: limits.windows, measuredAt: limits.at } : { available: false, pending: true });
+    }
+    return res.json({ available: false });
+  } catch { return res.json({ available: false }); }
 });
 app.get('/api/subscriptions/:provider/status', (req, res) => {
   const kind = accountKind(req.params.provider);
@@ -3672,6 +3703,17 @@ async function rustAgentHttp(req, res, next) {
       if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
       return res.status(400).json({ error: 'model/team and message are required' });
     }
+    // An image model has no agent loop: answer with the picture directly.
+    if (!Array.isArray(body.team) && isGrokImageRequest(model, body.submodel)) {
+      const result = { response: await generateGrokImage(req.user, { ...body, message }) };
+      if (wantsStream) { emit({ type: 'done', result }); return res.end(); }
+      return res.json(result);
+    }
+    // Say which key is missing instead of the core's bare "provider X non configuré".
+    const builtIn = !Array.isArray(body.team) && modelCatalog.PROVIDERS.find(entry => entry.id === model);
+    if (builtIn && builtIn.keyName && !userApiKeys(req.user)[builtIn.keyName]) {
+      throw Object.assign(new Error(`${builtIn.label} (${builtIn.vendor}) n’a pas de clé API configurée. Ajoutez-la dans Paramètres › Clés API, ou choisissez un autre fournisseur.`), { status: 400 });
+    }
     if (body.computerControl === true) {
       if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
       computerSession = await automationManager.start({ userId: req.user.id, permissionMode: body.permissionMode || 'supervised' });
@@ -3707,6 +3749,10 @@ async function rustAgentHttp(req, res, next) {
       conversationStore.beginTurn(req.user.id, conversation.id, kind, body, recordedTurn.turnId);
     }
     const remembered = generalMemory.recall(req.user.id, root, message);
+    // Every finished turn closes with a short report the user can scan.
+    const finalReport = body.language === 'en'
+      ? 'FINAL REPORT (mandatory): always end your final answer with a short section titled "**Mini report**": 2 to 5 bullets saying what you did (files created or changed, commands run, results, checks performed) and what is left or not verified. When you only answered a question without acting, one line is enough. Never invent an action you did not take.'
+      : 'RAPPORT FINAL (obligatoire) : termine toujours ta réponse finale par une courte section intitulée « **Mini rapport** » : 2 à 5 puces qui disent ce que tu as fait (fichiers créés ou modifiés, commandes lancées, résultats, vérifications) et ce qui reste à faire ou n’a pas été vérifié. Si tu as seulement répondu à une question sans agir, une ligne suffit. N’invente jamais une action que tu n’as pas faite.';
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -3716,7 +3762,7 @@ async function rustAgentHttp(req, res, next) {
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message: remembered ? `${remembered}\n\nDEMANDE ACTUELLE :\n${message}` : message,
       systemPrompt: [body.systemPrompt, `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`,
-        workspaceRun ? 'MÉMOIRE ET SKILLS AUTOMATIQUES : quand l’utilisateur exprime une préférence durable ou une convention, ou que tu établis un fait stable utile plus tard (commande de build, piège, configuration), enregistre-le sans demander avec workspace memory save (titre court, tags), après une recherche memory search pour éviter les doublons ; jamais de secret ni de donnée personnelle sensible. Après une tâche réussie de plusieurs étapes que l’utilisateur pourrait redemander, propose une procédure réutilisable avec workspace skills propose (name, description, instructions : étapes vérifiées, pièges, vérifications) ; consulte skills list pour ne pas créer de doublon.' : ''].filter(Boolean).join('\n\n'),
+        workspaceRun ? 'MÉMOIRE ET SKILLS AUTOMATIQUES : quand l’utilisateur exprime une préférence durable ou une convention, ou que tu établis un fait stable utile plus tard (commande de build, piège, configuration), enregistre-le sans demander avec workspace memory save (titre court, tags), après une recherche memory search pour éviter les doublons ; jamais de secret ni de donnée personnelle sensible. Après une tâche réussie de plusieurs étapes que l’utilisateur pourrait redemander, propose une procédure réutilisable avec workspace skills propose (name, description, instructions : étapes vérifiées, pièges, vérifications) ; consulte skills list pour ne pas créer de doublon.' : '', finalReport].filter(Boolean).join('\n\n'),
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -3786,13 +3832,68 @@ async function rustAgentHttp(req, res, next) {
 app.post('/api/agent-chat', rustAgentHttp);
 app.post('/api/rust-agent-team', rustAgentHttp);
 
+// xAI image models (grok-imagine-image, grok-imagine-image-2.0, grok-2-image…)
+// only exist on /images/generations: the chat endpoints reject them outright.
+function isGrokImageRequest(model, submodel) {
+  const provider = String(model || '');
+  if (provider !== 'grok' && provider !== 'compat:xai-sub') return false;
+  return /grok-imagine-image|grok-[\w.]*-image(?:$|[-.])/i.test(String(submodel || ''));
+}
+
+async function generateGrokImage(user, body) {
+  // The composer appends chat-only hints (/fast, /deep) that mean nothing to an image model.
+  const prompt = String(body.message || '').replace(/\n+\[STYLE\][^\n]*/g, '').trim();
+  const payload = JSON.stringify({ prompt, model: String(body.submodel), n: 1, response_format: 'b64_json' });
+  const call = async (url, headers) => {
+    const answer = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: payload, signal: AbortSignal.timeout(180000) });
+    const raw = await answer.text().catch(() => '');
+    if (!answer.ok) throw Object.assign(new Error(accountSubscriptions.xaiDetail(raw) || `xAI : HTTP ${answer.status}`), { status: answer.status });
+    try { return JSON.parse(raw); } catch { throw Object.assign(new Error('Réponse image xAI invalide.'), { status: 502 }); }
+  };
+  let data;
+  if (body.model === 'grok') {
+    const key = userApiKeys(user).grok;
+    if (!key) throw Object.assign(new Error('[Grok] Aucune clé API xAI configurée (Paramètres › Clés API).'), { status: 400 });
+    data = await call(`${accountSubscriptions.XAI_API}/images/generations`, { Authorization: `Bearer ${key}` });
+  } else {
+    data = await withAccountToken(user.id, 'xai', async (token) => {
+      try {
+        return await call(`${accountSubscriptions.XAI_API}/images/generations`, { Authorization: `Bearer ${token}` });
+      } catch (error) {
+        // Some subscription tokens are only honoured by the CLI proxy.
+        if (![400, 401, 403, 404].includes(error.status)) throw error;
+        try {
+          return await call(`${accountSubscriptions.XAI_PROXY}/images/generations`, {
+            Authorization: `Bearer ${token}`, 'X-XAI-Token-Auth': 'xai-grok-cli', 'x-grok-model-override': String(body.submodel),
+          });
+        } catch (proxyError) {
+          if (proxyError.status === 401) throw proxyError;
+          throw error;
+        }
+      }
+    });
+  }
+  const item = data && Array.isArray(data.data) ? data.data[0] : null;
+  let b64 = item && item.b64_json;
+  let mime = 'image/png';
+  if (!b64 && item && item.url) {
+    const image = await fetch(item.url, { signal: AbortSignal.timeout(60000) });
+    if (!image.ok) throw Object.assign(new Error(`Téléchargement de l'image impossible (HTTP ${image.status}).`), { status: 502 });
+    mime = (image.headers.get('content-type') || mime).split(';')[0];
+    b64 = Buffer.from(await image.arrayBuffer()).toString('base64');
+  }
+  if (!b64) throw Object.assign(new Error("Aucune image n'a été générée par l'API xAI."), { status: 502 });
+  if (/^\/9j\//.test(b64)) mime = 'image/jpeg';
+  const title = prompt.replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
+  return `![${title}](data:${mime};base64,${b64})`;
+}
+
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 async function rustChatHttp(req, res, next) {
   const status = rustAgentBridge.status();
   const body = req.body || {};
-  const grokImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
-  if (grokImage) return next();
+  if (isGrokImageRequest(body.model, body.submodel)) return next();
   if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
   if (!status.available) {
     return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
@@ -3853,22 +3954,11 @@ app.post('/api/chat', rustChatHttp);
 // xAI's image endpoint has no agent/tool loop to migrate.
 app.post('/api/chat', async (req, res) => {
   const body = req.body || {};
-  const isImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
-  if (!isImage) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
+  if (!isGrokImageRequest(body.model, body.submodel)) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
   try {
-    const key = userApiKeys(req.user).grok || (body.config && body.config.keys && body.config.keys.grok);
-    if (!key) return res.json({ response: '[Grok] Aucune cle API configuree.' });
-    const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ prompt: String(body.message || ''), model: body.submodel, n: 1, response_format: 'b64_json' }),
-    });
-    const b64 = data.data && data.data[0] && data.data[0].b64_json;
-    if (!b64) return res.json({ response: "Erreur: Aucune image n'a ete generee par l'API." });
-    const title = String(body.message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
-    return res.json({ response: `![${title}](data:image/png;base64,${b64})` });
+    return res.json({ response: await generateGrokImage(req.user, body) });
   } catch (error) {
-    return res.status(500).json({ error: error.message || String(error) });
+    return res.json({ error: error.message || String(error) });
   }
 });
 

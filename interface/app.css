@@ -1391,11 +1391,14 @@ details.ghost-tool-item>summary{
 details.ghost-tool-item>summary:hover .ghost-tool-name{color:var(--text-1);}
 .ghost-tool-item .file-card-chevron{margin-left:auto;color:var(--text-3);transition:transform .16s ease;}
 details.ghost-tool-item[open]>summary .file-card-chevron{transform:rotate(180deg);}
-.ghost-tool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.ghost-tool-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:12px;}
 .ghost-tool-badge{
     margin-left:auto;flex-shrink:0;color:var(--text-3);font-size:10px;
     font-family:var(--font-mono);opacity:.78;
 }
+details.ghost-tool-item.is-error .ghost-tool-badge{color:var(--red);opacity:1;}
+details.ghost-tool-item>summary:focus-visible,
+details.ghost-tool-group>summary:focus-visible{outline:1px solid var(--accent);outline-offset:2px;border-radius:4px;}
 .ghost-tool-pre{
     margin:6px 0 4px;padding:8px 8px;border-left:1px solid var(--border-subtle);
     background:transparent;color:var(--text-2);font-family:var(--font-mono);

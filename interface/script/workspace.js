@@ -25,6 +25,11 @@
         menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
         chevron: '<path d="m9 5 7 7-7 7"/>',
         collapse: '<path d="m5 9 7-5 7 5m-14 6 7 5 7-5"/>',
+        search: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4"/>',
+        pin: '<path d="m16 3 5 5-4 1-3 5-4 1-1-4 5-3zM9 15l-6 6"/>',
+        more: '<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',
+        tasks: '<rect x="4" y="5" width="16" height="16" rx="2"/><path d="M8 3v4m8-4v4M4 11h16m-11 5 2 2 4-4"/>',
+        settings: '<path d="M9 4h6l1 3 3 1 2 5-3 2-1 4-5 2-2-3-4-1-2-5 3-2z"/><circle cx="12" cy="12" r="3"/>',
     };
     function icon(name) {
         const span = el('span', 'ws-icon');
@@ -65,12 +70,51 @@
     const terminalAnchor = document.createComment('terminal home');
     terminal.before(terminalAnchor);
     const aiPanel = byId('ai-panel');
+    const editorContext = el('div', 'ws-editor-context');
+    const editorContextCopy = el('div', 'ws-editor-context-copy');
+    const editorContextTitle = el('strong'), editorContextProject = el('span');
+    editorContextCopy.append(editorContextTitle, editorContextProject);
+    editorContext.append(editorContextCopy,
+        button(text('Historique des conversations', 'Conversation history'), 'search', () => window.ZaalisConversations?.open(), 'ws-icon-button'),
+        button(text('Nouveau chat', 'New chat'), 'plus', () => safelyNavigate(() => newConversation(activeKind())), 'ws-icon-button'));
+    aiPanel.querySelector('.ai-panel-header').after(editorContext);
+    function refreshEditorContext() {
+        const root = state.projectRoot;
+        const title = currentConversation()?.title || text('Nouvelle conversation', 'New conversation');
+        editorContextTitle.textContent = title; editorContextTitle.title = title;
+        editorContextProject.textContent = root ? root.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : text('Sans projet', 'Without project');
+        editorContextProject.title = root || editorContextProject.textContent;
+    }
     const panes = {};
     let filesPaneRoot = null;
     const railButtons = {};
     const navigation = el('nav', 'workspace-navigation');
     navigation.setAttribute('aria-label', text('Projets et conversations', 'Projects and conversations'));
     byId('sidebar-stack').before(navigation);
+    const navToolbar = el('div', 'ws-nav-toolbar');
+    const navPrimary = el('div', 'ws-nav-primary');
+    navPrimary.append(button(text('Nouveau chat', 'New chat'), 'plus', () => safelyNavigate(() => newConversation(activeKind())), 'ws-button ws-new-chat'));
+    const searchToggle = button(text('Rechercher des conversations', 'Search conversations'), 'search', () => {
+        searchBox.hidden = !searchBox.hidden;
+        searchToggle.setAttribute('aria-expanded', String(!searchBox.hidden));
+        if (!searchBox.hidden) searchInput.focus();
+        else { searchInput.value = ''; renderNavigation(); }
+    }, 'ws-icon-button');
+    searchToggle.setAttribute('aria-expanded', 'false');
+    navPrimary.append(searchToggle);
+    const searchBox = el('div', 'ws-nav-search'); searchBox.hidden = true;
+    const searchInput = el('input'); searchInput.type = 'search';
+    searchInput.placeholder = text('Projets et conversations…', 'Projects and conversations…');
+    searchInput.setAttribute('aria-label', text('Filtrer les projets et conversations', 'Filter projects and conversations'));
+    searchInput.addEventListener('input', () => renderNavigation());
+    searchInput.addEventListener('keydown', event => {
+        if (event.key === 'Escape') { event.stopPropagation(); searchToggle.click(); searchToggle.focus(); }
+    });
+    searchBox.append(searchInput, button(text('Historique complet', 'Full history'), null, () => window.ZaalisConversations?.open(searchInput.value), 'ws-nav-link'));
+    const shortcuts = el('div', 'ws-nav-shortcuts');
+    shortcuts.append(button(text('Tâches et mémoire', 'Tasks and memory'), 'tasks', () => window.ZaalisTaskCenter?.open(), 'ws-nav-link'),
+        button(text('Personnaliser', 'Customize'), 'settings', () => { byId('settings-btn').click(); setSettingsSection('appearance'); }, 'ws-nav-link'));
+    navToolbar.append(navPrimary, searchBox, shortcuts); navigation.before(navToolbar);
     const chatsTitle = el('span', 'ws-sidebar-title', text('Conversations', 'Conversations'));
     byId('project-btn').after(chatsTitle);
     const filesEmpty = el('div', 'ws-files-empty');
@@ -333,19 +377,59 @@
         ...(state.conversations || []).filter(conv => !conv.archived).map(conv => ({ conv, kind: 'chat' })),
         ...(state.agentConversations || []).filter(conv => !conv.archived).map(conv => ({ conv, kind: 'agents' })),
     ];
+    function projectPreferences() {
+        const value = state.config.projectNavigation;
+        return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    }
+    function saveProjectPreference(key, field, value) {
+        const previous = state.config.projectNavigation;
+        state.config.projectNavigation = { ...projectPreferences(), [key]: { ...projectPreferences()[key], [field]: value } };
+        try { saveState(); } catch (error) { state.config.projectNavigation = previous; throw error; }
+        renderNavigation();
+    }
+    function renameProject(key, label) {
+        const modal = el('dialog', 'ui-palette'), form = el('form', 'ws-project-rename');
+        const title = text('Nom affiché du projet', 'Project display name'); modal.setAttribute('aria-label', title);
+        const field = el('label', 'ui-clone-field', title), input = el('input');
+        input.value = label; input.required = true; input.maxLength = 80; field.append(input);
+        const status = el('p', 'ui-status'); status.setAttribute('role', 'status');
+        const actions = el('div', 'collab-actions'), submit = button(text('Enregistrer', 'Save')); submit.type = 'submit';
+        actions.append(button(text('Annuler', 'Cancel'), null, () => modal.close()), submit);
+        form.append(el('h2', '', title), field, el('p', 'ws-path', text('Le dossier sur le disque conserve son nom.', 'The folder on disk keeps its name.')), status, actions);
+        form.addEventListener('submit', event => {
+            event.preventDefault(); if (!input.value.trim()) return;
+            try { saveProjectPreference(key, 'label', input.value.trim()); modal.close(); } catch (error) { status.textContent = error.message; }
+        });
+        modal.append(form); document.body.append(modal); modal.addEventListener('close', () => modal.remove()); modal.showModal(); input.focus(); input.select();
+    }
+    function conversationRow({ conv, kind }, pinned = false) {
+        const wrapper = el('div', 'ws-conversation-row');
+        const row = button(conv.title || 'Conversation', pinned ? 'pin' : null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
+        row.dataset.focusKey = `${pinned ? 'pinned:' : ''}${kind}:${conv.id}`;
+        const selected = kind === activeKind() && conv.id === state[kind === 'chat' ? 'currentConvId' : 'currentAgentConvId'];
+        wrapper.classList.toggle('is-active', selected); row.classList.toggle('active', selected);
+        if (selected) row.setAttribute('aria-current', 'page');
+        const updated = Number(conv.updatedAt || conv.contentUpdatedAt || conv.createdAt || conv.id);
+        if (Number.isFinite(updated) && updated > 0) {
+            const days = Math.max(0, Math.floor((Date.now() - updated) / 86400000));
+            const age = el('time', 'ws-conversation-age', days < 1 ? text('auj.', 'today') : days < 30 ? `${days} ${text('j', 'd')}` : `${Math.floor(days / 30)} ${text('mois', 'mo')}`);
+            age.dateTime = new Date(updated).toISOString(); age.title = new Date(updated).toLocaleString(state.language === 'en' ? 'en-GB' : 'fr-FR');
+            wrapper.append(age);
+        }
+        wrapper.prepend(row); wrapper.append(createConversationMenu(kind, conv)); return wrapper;
+    }
     const currentConversation = (kind = activeKind()) => (state[kind === 'agents' ? 'agentConversations' : 'conversations'] || []).find(c => c.id === state[kind === 'agents' ? 'currentAgentConvId' : 'currentConvId']);
     function createConversationMenu(kind, conv) {
         const control=button(text('Options de la conversation','Conversation options'), null,()=>window.ZaalisConversations?.menuFor(kind,conv,control),'ws-icon-button ws-conversation-options');
-        control.textContent='…';control.setAttribute('aria-haspopup','menu');control.setAttribute('aria-expanded','false');return control;
+        control.replaceChildren(icon('more'));control.setAttribute('aria-haspopup','menu');control.setAttribute('aria-expanded','false');return control;
     }
     function renderNavigation() {
+        refreshEditorContext();
         const focusKey = navigation.contains(document.activeElement) ? document.activeElement.dataset.focusKey : null;
         const scrollTop = navigation.scrollTop;
         navigation.replaceChildren();
-        const actions = el('div', 'ws-nav-actions');
-        actions.append(button(text('Nouveau chat', 'New chat'), 'plus', () => safelyNavigate(() => newConversation(activeKind()))));
-        actions.append(button(text('Ouvrir un projet', 'Open project'), 'files', () => byId('open-project-btn').click(), 'ws-icon-button'));
-        navigation.append(actions);
+        const needle = searchInput.value.trim().toLocaleLowerCase();
+        const matches = value => !needle || String(value || '').toLocaleLowerCase().includes(needle);
         const groups = new Map();
         groups.set('', { label: text('Sans projet', 'Without project'), path: null, items: [] });
         for (const path of getRecentProjects()) groups.set(normalizeProjectPath(path), { label: path.replace(/[\\/]+$/, '').split(/[\\/]/).pop(), path, items: [] });
@@ -355,30 +439,59 @@
             if (!groups.has(key)) groups.set(key, { label: item.conv.project || (path ? path.replace(/[\\/]+$/, '').split(/[\\/]/).pop() : text('Sans projet', 'Without project')), path, items: [] });
             groups.get(key).items.push(item);
         }
-        const allCollapsed = [...groups.keys()].every(key => expanded.get(key) === false);
+        const currentKey = normalizeProjectPath(state.projectRoot);
+        if (state.projectRoot && !groups.has(currentKey)) groups.set(currentKey, { label: state.projectRoot.replace(/[\\/]+$/, '').split(/[\\/]/).pop(), path: state.projectRoot, items: [] });
+        const pinned = allConversations().filter(item => item.conv.pinned && matches(item.conv.title));
+        if (pinned.length) {
+            navigation.append(el('h2', 'ws-nav-section-title', text('Épinglés', 'Pinned')));
+            pinned.forEach(item => navigation.append(conversationRow(item, true)));
+        }
+        const actions = el('div', 'ws-nav-section-head');
+        actions.append(el('h2', 'ws-nav-section-title', text('Projets', 'Projects')),
+            button(text('Ouvrir un projet', 'Open project'), 'plus', () => byId('open-project-btn').click(), 'ws-icon-button'));
+        navigation.append(actions);
+        const projectKeys = [...groups.keys()].filter(Boolean);
+        const allCollapsed = projectKeys.every(key => expanded.get(key) === false);
         const foldAll = button(allCollapsed ? text('Déplier tous les projets', 'Expand all projects') : text('Replier tous les projets', 'Collapse all projects'),
             'collapse', () => {
-                const collapse=[...groups.keys()].some(key=>expanded.get(key)!==false);
+                const collapse=projectKeys.some(key=>expanded.get(key)!==false);
                 for(const section of navigation.querySelectorAll('.ws-project-group')) section.setExpanded(!collapse);
             }, 'ws-icon-button');
         foldAll.dataset.focusKey = 'projects:fold-all';
         actions.append(foldAll);
         let groupIndex = 0;
-        for (const [key, group] of groups) {
+        const entries = [...groups].sort(([a], [b]) => a === '' ? 1 : b === '' ? -1 : Number(!!projectPreferences()[b]?.pinned) - Number(!!projectPreferences()[a]?.pinned));
+        let visibleGroups = 0;
+        for (const [key, group] of entries) {
+            const preference = projectPreferences()[key] || {};
+            group.label = preference.label || group.label;
+            const items = matches(group.label) || matches(group.path) ? group.items : group.items.filter(item => matches(item.conv.title));
+            if (needle && !matches(group.label) && !matches(group.path) && !items.length) continue;
+            if (!key && !items.length) continue;
+            visibleGroups++;
+            if (!key) {
+                const freeHead = el('div', 'ws-nav-section-head ws-free-title');
+                freeHead.append(el('h2', 'ws-nav-section-title', text('Conversations', 'Conversations')),
+                    button(text('Nouveau chat sans projet', 'New chat without project'), 'plus', () => safelyNavigate(() => { clearProject({ preserveConversation: true }); newConversation('chat'); }), 'ws-icon-button'));
+                navigation.append(freeHead);
+                for (const item of [...items].reverse()) navigation.append(conversationRow(item));
+                continue;
+            }
             const section = el('section', 'ws-project-group');
+            section.classList.toggle('is-current-project', !!group.path && key === currentKey);
             const head = el('div', 'ws-project-heading');
-            let open = expanded.get(key) !== false;
+            let open = !!needle || expanded.get(key) !== false;
             const setExpanded = value => {
                 open=value;expanded.set(key,value);saveLayout();
                 toggle.setAttribute('aria-expanded',String(value));
                 toggle.setAttribute('aria-label',`${value?text('Replier','Collapse'):text('Déplier','Expand')} ${group.label}`);
                 const body=section.querySelector('.ws-project-chats');body?.classList.toggle('is-collapsed',!value);
                 if(body){body.inert=!value;body.setAttribute('aria-hidden',String(!value));body.classList.add('is-animating');clearTimeout(body.motionTimer);body.motionTimer=setTimeout(()=>body.classList.remove('is-animating'),matchMedia('(prefers-reduced-motion: reduce)').matches?0:200);}
-                const collapsed=[...groups.keys()].every(k=>expanded.get(k)===false);
+                const collapsed=projectKeys.every(k=>expanded.get(k)===false);
                 foldAll.title=collapsed?text('Déplier tous les projets','Expand all projects'):text('Replier tous les projets','Collapse all projects');
                 foldAll.setAttribute('aria-label',foldAll.title);
             };section.setExpanded=setExpanded;
-            const toggle = button(group.label, group.path ? 'files' : 'chat', () => setExpanded(!open), 'ws-project-toggle');
+            const toggle = button(group.label, preference.pinned ? 'pin' : group.path ? 'files' : 'chat', () => setExpanded(!open), 'ws-project-toggle');
             toggle.lastElementChild.className = 'ws-project-name';
             const chevron = icon('chevron');
             chevron.classList.add('ws-project-chevron');
@@ -395,7 +508,18 @@
                 event.preventDefault();
                 setExpanded(event.key === 'ArrowRight');
             });
-            head.append(toggle, button(text('Nouveau chat dans ce projet', 'New chat in this project'), 'plus', () => safelyNavigate(async () => {
+            head.append(toggle);
+            if (group.path) {
+                const options = button(text('Options du projet', 'Project options'), 'more', () => window.ZaalisActionMenu.open(options, [
+                    { label: preference.pinned ? text('Désépingler le projet', 'Unpin project') : text('Épingler le projet', 'Pin project'), run: () => { try { saveProjectPreference(key, 'pinned', !preference.pinned); } catch (error) { showError(error); } } },
+                    { label: text('Modifier le nom affiché', 'Change display name'), run: () => renameProject(key, group.label) },
+                    { label: text('Ouvrir les fichiers', 'Open files'), run: () => safelyNavigate(async () => { if (await openProject(group.path, false, { preserveConversation: true })) setSidebarView('files'); }) },
+                    { label: text('Copier le chemin', 'Copy path'), run: () => navigator.clipboard.writeText(group.path).catch(showError) },
+                    { label: text('Historique et archives', 'History and archives'), run: () => window.ZaalisConversations?.open(group.path, true) },
+                ]), 'ws-icon-button ws-project-options');
+                options.setAttribute('aria-haspopup', 'menu'); options.setAttribute('aria-expanded', 'false'); head.append(options);
+            }
+            head.append(button(text('Nouveau chat dans ce projet', 'New chat in this project'), 'plus', () => safelyNavigate(async () => {
                 if (group.path) {
                     const opened = await openProject(group.path, false, { preserveConversation: true });
                     if (!opened) return;
@@ -413,17 +537,8 @@
                 list.id = `ws-project-chats-${groupIndex++}`;
                 body.id=list.id;list.removeAttribute('id');
                 toggle.setAttribute('aria-controls', body.id);
-                for (const { conv, kind } of [...group.items].reverse()) {
-                    const wrapper = el('div', 'ws-conversation-row');
-                    const row = button(conv.title || 'Conversation', null, () => safelyNavigate(() => loadConversation(kind, conv.id)), 'ws-conversation');
-                    row.dataset.focusKey = `${kind}:${conv.id}`;
-                    const selected = kind === activeKind() && conv.id === state[kind === 'chat' ? 'currentConvId' : 'currentAgentConvId'];
-                    row.classList.toggle('active', selected);
-                    if (selected) row.setAttribute('aria-current', 'page');
-                    wrapper.append(row, createConversationMenu(kind, conv));
-                    list.append(wrapper);
-                }
-                if (!group.items.length) {
+                for (const item of [...items].sort((a, b) => Number(b.conv.updatedAt || b.conv.createdAt || b.conv.id || 0) - Number(a.conv.updatedAt || a.conv.createdAt || a.conv.id || 0))) list.append(conversationRow(item));
+                if (!items.length) {
                     if (group.path) list.append(button(text('Ouvrir les fichiers', 'Open files'), null, () => safelyNavigate(() => openProject(group.path, false)), 'ws-empty-project'));
                     else list.append(el('p', 'ws-empty-project', text('Vos conversations libres apparaîtront ici.', 'Your conversations will appear here.')));
                 }
@@ -431,6 +546,7 @@
             }
             navigation.append(section);
         }
+        if (!visibleGroups) navigation.append(el('p', 'ws-nav-empty', needle ? text('Aucun résultat. Essayez l’historique complet.', 'No results. Try the full history.') : text('Ouvrez un dossier pour retrouver ici ses conversations.', 'Open a folder to keep its conversations here.')));
         navigation.scrollTop = scrollTop;
         if (focusKey) [...navigation.querySelectorAll('[data-focus-key]')].find(node => node.dataset.focusKey === focusKey)?.focus({ preventScroll: true });
     }

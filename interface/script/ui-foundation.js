@@ -22,6 +22,13 @@
         const mode = ['system','light','dark'].includes(state.config.theme) ? state.config.theme : 'system';
         document.body.classList.toggle('theme-light', mode === 'light' || mode === 'system' && system.matches);
         document.documentElement.style.colorScheme = document.body.classList.contains('theme-light') ? 'light' : 'dark';
+        const fonts = {
+            system: '"Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif',
+            inter: 'Inter, "Segoe UI Variable", "Segoe UI", system-ui, sans-serif',
+            humanist: 'Candara, Calibri, "Segoe UI", system-ui, sans-serif',
+            mono: '"JetBrains Mono", Consolas, "Cascadia Code", monospace',
+        };
+        document.documentElement.style.setProperty('--font-sans', fonts[state.config.fontFamily] || fonts.system);
     }
     system.addEventListener('change', () => { if (state.config.theme === 'system') appearance(); });
     function accessibility(root = document) {

@@ -21,6 +21,7 @@
       "interface/**/*",
       "zaalis-browser/app/interface/**/*",
       "zaalis-browser/app/assets/**/*",
+      "zaalis-browser/app/src/**/*",
       "zaalis-browser/app/UPSTREAM.json"
     ],
     "ignore": [

@@ -1,0 +1,87 @@
+/* Kit commun des pages internes zaalis://home/*.html (extensions, mots de
+   passe, gestionnaire de tâches, à propos…). Même palette que le panneau. */
+:root {
+  --bg:#f8f9fa; --card:#ffffff; --row-h:#f1f3f4; --text:#202124; --muted:#5f6368;
+  --border:#dadce0; --accent:#1a73e8; --accent-soft:#e8f0fe; --danger:#d93025;
+  --ok:#188038; --warn:#e37400; --shadow:0 1px 2px rgba(60,64,67,.15), 0 1px 3px 1px rgba(60,64,67,.08);
+}
+body.dark {
+  --bg:#202124; --card:#292a2d; --row-h:#35363a; --text:#e8eaed; --muted:#9aa0a6;
+  --border:#3c4043; --accent:#8ab4f8; --accent-soft:#394457; --danger:#f28b82;
+  --ok:#81c995; --warn:#fdd663; --shadow:0 1px 2px rgba(0,0,0,.4);
+}
+* { box-sizing:border-box; }
+html, body { margin:0; min-height:100%; }
+body { font:14px/1.45 "Segoe UI", system-ui, Arial, sans-serif; background:var(--bg); color:var(--text); }
+a { color:var(--accent); text-decoration:none; }
+a:hover { text-decoration:underline; }
+svg.i { width:20px; height:20px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; flex:none; }
+
+.zx-top { position:sticky; top:0; z-index:5; display:flex; align-items:center; gap:16px;
+  height:56px; padding:0 24px; background:var(--bg); border-bottom:1px solid var(--border); }
+.zx-top h1 { font-size:20px; font-weight:500; margin:0; flex:1; display:flex; align-items:center; gap:10px; }
+.zx-top .search { flex:0 1 420px; display:flex; align-items:center; gap:8px; height:38px; padding:0 12px;
+  border-radius:19px; background:var(--card); border:1px solid var(--border); }
+.zx-top .search input { border:0; outline:0; background:transparent; color:var(--text); flex:1; font:inherit; }
+
+.zx-main { max-width:880px; margin:0 auto; padding:24px 20px 60px; }
+.zx-section-title { font-size:15px; font-weight:600; margin:26px 4px 10px; }
+.zx-section-title:first-child { margin-top:4px; }
+.zx-card { background:var(--card); border-radius:10px; box-shadow:var(--shadow); overflow:hidden; }
+.zx-card + .zx-card { margin-top:14px; }
+.zx-row { display:flex; align-items:center; gap:14px; min-height:56px; padding:10px 18px; border-top:1px solid var(--border); }
+.zx-row:first-child { border-top:0; }
+.zx-row.click { cursor:pointer; }
+.zx-row.click:hover { background:var(--row-h); }
+.zx-row .grow { flex:1; min-width:0; }
+.zx-row .t { font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.zx-row .s { color:var(--muted); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; }
+.zx-row img.ic { width:24px; height:24px; border-radius:4px; flex:none; object-fit:contain; }
+.zx-empty { padding:28px 18px; text-align:center; color:var(--muted); }
+
+.zx-btn { display:inline-flex; align-items:center; gap:6px; height:34px; padding:0 16px; border-radius:17px;
+  border:1px solid var(--border); background:var(--card); color:var(--accent); font:500 13.5px "Segoe UI", sans-serif; cursor:pointer; white-space:nowrap; }
+.zx-btn:hover { background:var(--accent-soft); }
+.zx-btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+body.dark .zx-btn.primary { color:#202124; }
+.zx-btn.primary:hover { filter:brightness(1.07); }
+.zx-btn.danger { color:var(--danger); }
+.zx-btn[disabled] { opacity:.5; pointer-events:none; }
+.zx-icon-btn { width:34px; height:34px; border-radius:50%; border:0; background:transparent; color:var(--muted);
+  display:inline-flex; align-items:center; justify-content:center; cursor:pointer; }
+.zx-icon-btn:hover { background:var(--row-h); color:var(--text); }
+
+.zx-switch { position:relative; width:36px; height:20px; border-radius:10px; background:#bdc1c6; cursor:pointer; flex:none; transition:background .15s; }
+.zx-switch::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#fff; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.3); }
+.zx-switch.on { background:var(--accent); }
+.zx-switch.on::after { transform:translateX(16px); }
+
+.zx-input, .zx-select { height:36px; padding:0 12px; border-radius:6px; border:1px solid var(--border); background:var(--card); color:var(--text); font:inherit; outline:0; }
+.zx-input:focus, .zx-select:focus { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent); }
+.zx-badge { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11.5px; background:var(--accent-soft); color:var(--accent); }
+.zx-badge.ok { background:rgba(24,128,56,.12); color:var(--ok); }
+.zx-badge.warn { background:rgba(227,116,0,.14); color:var(--warn); }
+.zx-badge.err { background:rgba(217,48,37,.12); color:var(--danger); }
+.zx-muted { color:var(--muted); }
+.zx-mono { font-family:Consolas, "Cascadia Mono", monospace; font-size:12.5px; }
+
+table.zx-table { width:100%; border-collapse:collapse; }
+table.zx-table th { text-align:left; font-weight:600; font-size:12.5px; color:var(--muted); padding:10px 14px; border-bottom:1px solid var(--border); position:sticky; top:56px; background:var(--card); cursor:default; }
+table.zx-table td { padding:9px 14px; border-top:1px solid var(--border); }
+table.zx-table tr.sel td { background:var(--accent-soft); }
+
+.zx-dialog-back { position:fixed; inset:0; background:rgba(0,0,0,.32); display:flex; align-items:center; justify-content:center; z-index:50; }
+.zx-dialog { width:min(460px, calc(100vw - 32px)); background:var(--card); border-radius:12px; padding:22px 24px; box-shadow:0 8px 28px rgba(0,0,0,.28); }
+.zx-dialog h2 { margin:0 0 12px; font-size:18px; font-weight:500; }
+.zx-dialog .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:20px; }
+.zx-dialog label { display:block; font-size:12.5px; color:var(--muted); margin:12px 0 4px; }
+.zx-dialog .zx-input { width:100%; }
+
+.zx-toast { position:fixed; left:50%; bottom:24px; transform:translateX(-50%) translateY(20px); opacity:0; background:#323232; color:#fff; padding:10px 18px; border-radius:6px; transition:.2s; pointer-events:none; z-index:60; }
+.zx-toast.show { opacity:1; transform:translateX(-50%); }
+
+@media (max-width:640px) {
+  .zx-top { padding:0 14px; gap:10px; }
+  .zx-top .search { flex-basis:200px; }
+  .zx-main { padding:16px 10px 40px; }
+}

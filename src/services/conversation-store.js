@@ -78,6 +78,7 @@ class ConversationStore {
       current.title = title.slice(0, 200);
     }
     if ('archived' in input) current.archived = Boolean(input.archived);
+    if ('pinned' in input) current.pinned = Boolean(input.pinned);
     current.metadataRevision = (current.metadataRevision || 0) + 1;
     current.updatedAt = Date.now(); this.write(user, kind, list); return copy(current);
   }
@@ -119,7 +120,7 @@ class ConversationStore {
       if (!old) return item;
       const fresh = Number(item.contentUpdatedAt || 0) >= Number(old.contentUpdatedAt || 0);
       const value = fresh ? { ...old, ...item } : { ...item, ...old };
-      if (old.metadataRevision) for (const key of ['title', 'archived', 'metadataRevision', 'parentId', 'source']) value[key] = old[key];
+      if (old.metadataRevision) for (const key of ['title', 'archived', 'pinned', 'metadataRevision', 'parentId', 'source']) value[key] = old[key];
       for (const key of ['sessionId', 'status', 'activeTurnId', 'lastError', 'execution', 'remoteRunning']) if (key in old) value[key] = old[key];
       value.updatedAt = Math.max(Number(old.updatedAt) || 0, Number(item.updatedAt) || 0, Number(item.contentUpdatedAt) || 0);
       return value;

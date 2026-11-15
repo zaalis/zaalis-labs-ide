@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>Langues</title>
+<link rel="stylesheet" href="zx.css">
+</head>
+<body>
+  <div class="zx-top"><h1>Langues</h1></div>
+  <div class="zx-main">
+    <div class="zx-section-title">Traduction de pages</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <div class="grow"><div class="t">Proposer de traduire les pages dans une autre langue</div>
+          <div class="s">Une icône apparaît dans la barre d'adresse et une bulle est proposée une fois par site.</div></div>
+        <div class="zx-switch" id="offer"></div>
+      </div>
+      <div class="zx-row">
+        <div class="grow"><div class="t">Traduire vers</div></div>
+        <select class="zx-select" id="target"></select>
+      </div>
+      <div class="zx-row"><div class="grow"><div class="t">Toujours traduire</div><div class="s" id="always"></div></div></div>
+      <div class="zx-row"><div class="grow"><div class="t">Ne jamais traduire ces langues</div><div class="s" id="never"></div></div></div>
+      <div class="zx-row"><div class="grow"><div class="t">Ne jamais traduire ces sites</div><div class="s" id="sites"></div></div></div>
+    </div>
+
+    <div class="zx-section-title">Correcteur orthographique</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <div class="grow"><div class="t">Vérifier l'orthographe lors de la saisie</div>
+          <div class="s" id="spell-hint">Les mots mal orthographiés sont soulignés ; clic droit pour les suggestions.</div></div>
+        <div class="zx-switch" id="spell-on"></div>
+      </div>
+      <div id="spell-langs"></div>
+    </div>
+
+    <div class="zx-section-title">Dictionnaire personnel</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <input class="zx-input" id="word" placeholder="Ajouter un mot" style="flex:1">
+        <button class="zx-btn" id="add-word">Ajouter</button>
+      </div>
+      <div id="words"></div>
+    </div>
+  </div>
+<script src="zx.js"></script>
+<script src="languages.js"></script>
+</body>
+</html>

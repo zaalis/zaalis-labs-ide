@@ -364,8 +364,10 @@ impl AgentSession {
             prompt: prompt.clone(),
         });
         self.prepare_turn(&prompt, images, target).await?;
-        { let spent=self.inner.tree.lock().await.total_usage().total_tokens();
-          let mut e=self.inner.envelope.lock().await;e.spent=e.spent.max(spent); }
+        // The shared envelope bounds the branches of ONE turn. Seeding it with the
+        // whole conversation's usage made every turn fail with budget_exceeded
+        // once a long conversation passed the root budget, with no way to extend.
+        { let mut e=self.inner.envelope.lock().await;e.spent=0;e.reserved=0; }
 
         let hook_root = {
             let tree = self.inner.tree.lock().await;

@@ -335,7 +335,7 @@
                         </optgroup>
                     </select>
                     <select id="ai-submodel">
-                        <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
+                        <option value="gpt-6-astra">GPT-6 Astra</option>
                     </select>
                     <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
                 </div>
@@ -441,7 +441,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="codex"><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select>
+                        <select class="agent-model-select" data-agent="codex"><option value="gpt-6-astra">GPT-6 Astra</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Claude -->
@@ -459,7 +459,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="claude"><option value="claude-fable-5">Claude Fable 5</option></select>
+                        <select class="agent-model-select" data-agent="claude"><option value="claude-fable-5-2">Claude Fable 5.2</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Gemini -->
@@ -495,7 +495,7 @@
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="grok"><option value="grok-4.5">Grok 4.5</option></select>
+                        <select class="agent-model-select" data-agent="grok"><option value="grok-4.7">Grok 4.7</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Le Chat (Mistral) -->
@@ -978,6 +978,18 @@
                         <select id="settings-density-select">
                             <option value="normal" data-i18n="settings-density-normal">Normale</option>
                             <option value="compact" data-i18n="settings-density-compact">Compacte</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
+                            <label for="settings-fontfamily-select" data-i18n="settings-fontfamily-label">Police de l’interface</label>
+                            <p data-i18n="settings-fontfamily-hint">Choisissez votre style de lecture. L’éditeur conserve sa police de code.</p>
+                        </div>
+                        <select id="settings-fontfamily-select">
+                            <option value="system" data-i18n="settings-fontfamily-system">Système — Segoe UI</option>
+                            <option value="inter">Inter</option>
+                            <option value="humanist" data-i18n="settings-fontfamily-humanist">Humaniste — Candara</option>
+                            <option value="mono">JetBrains Mono</option>
                         </select>
                     </div>
                     <div class="form-group settings-row-group">
@@ -1481,7 +1493,7 @@
 <script src="script/settings-persistence.js?v=20261015.7" defer></script>
 <script src="script/inline-approval.js?v=20261015.7" defer></script>
 <script src="script/command-palette.js?v=20261015.7" defer></script>
-<script src="script/model-picker.js?v=20261111.1" defer></script>
+<script src="script/model-picker.js?v=20261113.2" defer></script>
 <script src="script/project-actions.js?v=20261015.7" defer></script>
 <script src="script/shell-layout.js?v=20261015.7" defer></script>
 <script src="script/ui-accessibility.js?v=20261015.7" defer></script>
@@ -1489,5 +1501,6 @@
 <script src="script/skills.js?v=20261112.1" defer></script>
 <link rel="stylesheet" href="chat-simple.css?v=20261112.1">
 <script src="script/chat-simple.js?v=20261110.1" defer></script>
+<link rel="stylesheet" href="workspace-polish.css?v=20261113.4">
 </body>
 </html>

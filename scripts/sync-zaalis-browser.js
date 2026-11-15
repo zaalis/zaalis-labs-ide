@@ -24,6 +24,8 @@ const target = path.join(repo, 'zaalis-browser', 'app');
 
 const FILES = [
   'main.js',
+  'preload-chrome.js',
+  'preload-content.js',
   'LICENSE',
   'assets/logo-zaalis.png',
   'interface/aichat.html',
@@ -134,6 +136,24 @@ function main() {
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.writeFileSync(to, data);
     manifest.files[file] = sha256(data);
+  }
+  // The current browser splits its agent, search and Chrome-level features
+  // out of main.js. Those modules and the extra zaalis:// pages have to travel
+  // with the vendored copy or the integrated browser cannot boot.
+  for (const dir of ['src', 'assets']) {
+    const from = path.join(source, dir);
+    if (!fs.existsSync(from)) continue;
+    fs.cpSync(from, path.join(target, dir), { recursive: true });
+  }
+  const interfaceDir = path.join(source, 'interface');
+  if (fs.existsSync(interfaceDir)) {
+    for (const name of fs.readdirSync(interfaceDir)) {
+      const from = path.join(interfaceDir, name);
+      const to = path.join(target, 'interface', name);
+      if (!fs.statSync(from).isFile() || fs.existsSync(to)) continue;
+      fs.copyFileSync(from, to);
+      manifest.files[`interface/${name}`] = sha256(fs.readFileSync(to));
+    }
   }
   fs.writeFileSync(path.join(target, 'UPSTREAM.json'), JSON.stringify(manifest, null, 2) + '\n');
   console.log(`zaalis Browser ${manifest.commit.slice(0, 7) || '(hors git)'} synchronisé dans ${path.relative(repo, target)}` +
