@@ -1,0 +1,131 @@
+/* Project navigation and editor conversation share the app's appearance tokens. */
+body{--nav-row:38px;--nav-type:13px;--chat-type:14px}
+body.font-small{--nav-type:12px;--chat-type:13px}
+body.font-large{--nav-type:15px;--chat-type:16px}
+body.density-compact{--nav-row:32px}
+.ws-nav-toolbar{flex:none;padding:14px 14px 6px}
+.ws-nav-primary{display:flex;align-items:center;gap:6px}
+.ws-new-chat{flex:1;justify-content:flex-start;min-height:36px;padding:8px 12px;background:var(--bg-2);border-color:transparent;font-size:14px;font-weight:600;border-radius:12px;letter-spacing:-.01em}
+.ws-nav-primary>.ws-icon-button{width:36px;min-height:36px;color:var(--text-1)}
+.ws-nav-footer{flex:none;display:flex;flex-direction:column;gap:1px;margin-top:auto;padding:8px 10px 10px;border-top:1px solid var(--border-subtle)}
+.ws-nav-link{display:flex;align-items:center;gap:10px;min-height:34px;padding:6px 10px;border-radius:8px;text-align:left;color:var(--text-2);font:13px/1.4 var(--font-sans)}
+.ws-nav-link:hover{background:var(--bg-hover);color:var(--text-0)}
+.ws-nav-link .ws-icon{color:var(--text-2)}
+.ws-nav-search{padding-top:10px}
+.ws-nav-search input{width:100%;min-width:0;min-height:34px;padding:7px 10px;border:1px solid transparent;border-radius:10px;background:var(--bg-2);font:13px var(--font-sans);color:var(--text-0)}
+.ws-nav-search input:focus{border-color:var(--focus-ring);outline:none}
+.ws-nav-search .ws-nav-link{font-size:12px;color:var(--text-2)}
+body[data-sidebar-view="files"] .ws-nav-toolbar,body[data-sidebar-view="files"] .ws-nav-footer{display:none}
+body[data-sidebar-view="chats"] .ws-sidebar-title{display:none}
+.workspace-navigation{padding:8px 10px 24px;gap:0;scrollbar-gutter:stable;overscroll-behavior:contain}
+.ws-nav-section-head{display:flex;align-items:center;gap:2px;flex:none;margin:10px 2px 6px}
+.ws-nav-section-head .ws-nav-section-title{flex:1;margin:0}
+.ws-nav-section-title{margin:18px 12px 4px;font-size:12px;font-weight:600;line-height:1.4;color:var(--text-2)}
+.ws-nav-note{margin:0 12px 8px;font-size:12px;line-height:1.45;color:var(--text-2)}
+.ws-nav-section-head .ws-icon-button{width:28px;min-width:28px;min-height:28px;color:var(--text-2)}
+.ws-project-group{margin:0 0 12px}
+.ws-project-heading{gap:0;border-radius:8px;padding-right:3px}
+.ws-project-heading:hover,.ws-project-heading:focus-within{background:var(--bg-hover)}
+.ws-project-toggle{gap:8px;min-height:var(--nav-row);font-size:var(--nav-type);font-weight:500;padding:6px;color:var(--text-1);border-radius:8px}
+.ws-project-toggle:hover{background:transparent}
+.ws-project-toggle>.ws-icon:not(.ws-project-chevron){color:var(--text-2)}
+.is-current-project>.ws-project-heading{background:var(--bg-2)}
+.is-current-project>.ws-project-heading .ws-project-name{color:var(--text-0)}
+.ws-project-chevron{width:8px}
+.ws-project-count{display:inline;margin-left:auto;min-width:0;padding:0 2px;background:transparent;color:var(--text-2);font-size:12px;font-weight:500;font-variant-numeric:tabular-nums}
+.ws-project-heading>.ws-icon-button{width:26px;min-width:26px;min-height:30px}
+.ws-project-heading>.ws-icon-button svg{width:15px;height:15px}
+.ws-project-chats-inner{padding-top:3px}
+.ws-conversation-row{display:flex;width:auto;max-width:none;gap:2px;border-radius:10px;margin:1px 4px 1px 18px;min-height:34px;padding-right:2px}
+.ws-conversation-row:hover,.ws-conversation-row:focus-within,.ws-conversation-row.is-active{background:var(--bg-hover)}
+.ws-conversation-row .ws-conversation{padding:7px 8px;min-height:var(--nav-row);font-size:var(--nav-type);font-weight:400;line-height:1.45;background:transparent}
+.ws-conversation-row .ws-conversation-options{flex:none;width:24px;min-width:24px;min-height:28px;color:var(--text-2);display:inline-flex;align-items:center;justify-content:center}
+.ws-conversation-row .ws-conversation-options svg{width:15px;height:15px}
+.ws-conversation-age{flex:none;font-size:11px;line-height:1.5;color:var(--text-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+.workspace-navigation>.ws-conversation-row{margin-left:4px}
+.ws-empty-project{font-size:12px;padding:6px 10px 6px 34px;color:var(--text-2);min-height:32px}
+.ws-nav-empty{padding:16px 10px;font-size:13px;line-height:1.6;color:var(--text-2)}
+.ws-nav-toolbar :is(button,input):focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.ws-editor-context{display:none}
+body[data-workspace-mode="editor"] .ws-editor-context{display:flex;flex:none;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid var(--border-subtle);background:var(--bg-1)}
+.ws-editor-context-copy{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.ws-editor-context-copy strong{font-size:14px;font-weight:600;color:var(--text-0);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+.ws-editor-context-copy>span{font-size:12px;line-height:1.4;color:var(--text-2);overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+body[data-workspace-mode="editor"] .ai-panel-header{min-height:44px;padding:0 12px;background:var(--bg-1)}
+body[data-workspace-mode="editor"] :is(.chat-messages,.agents-log){padding:20px 18px;gap:20px}
+body[data-workspace-mode="editor"] .msg-ai>.msg-body{padding:0;background:transparent;border:0;line-height:1.7;font-size:var(--chat-type);color:var(--text-0)}
+body[data-workspace-mode="editor"] .msg-user{align-self:flex-end;max-width:94%}
+body[data-workspace-mode="editor"] .msg-user>.msg-label{display:none}
+body[data-workspace-mode="editor"] .msg-user>.msg-body{padding:10px 14px;background:var(--bg-3);border:1px solid var(--border-subtle);border-radius:14px;font-size:var(--chat-type);line-height:1.6}
+body[data-workspace-mode="editor"] .launch-welcome{padding:24px 12px;min-height:150px;text-align:left;align-items:flex-start;gap:8px}
+body[data-workspace-mode="editor"] .launch-welcome h2{font-size:21px;line-height:1.3}
+body[data-workspace-mode="editor"] .launch-welcome p{font-size:13px;line-height:1.6}
+body[data-workspace-mode="editor"] .chat-input-area{margin:8px 12px 14px;padding:12px;background:var(--bg-2);border-radius:14px;box-shadow:0 4px 18px #00000012}
+body[data-workspace-mode="editor"] .chat-input-area textarea{min-height:72px;font-size:var(--chat-type);line-height:1.6;padding:2px}
+.chat-input-area:focus-within{border-color:var(--focus-ring);box-shadow:0 0 0 1px var(--focus-ring)}
+/* Brand, model and context ring sit on the send row, just left of the mic. */
+.chat-input-bottom{flex-wrap:nowrap}
+.chat-input-bottom-left{flex:none}
+.chat-input-bottom-right{flex:1 1 auto;min-width:0;flex-wrap:nowrap!important;justify-content:flex-end}
+.chat-input-bottom-right>:is(.voice-btn,.send-btn){flex:none}
+.ws-composer-meta:empty{display:none}
+.ui-model-controls{display:flex;align-items:center;gap:0;min-width:0;flex:0 1 auto;margin-right:2px}
+.ui-model-controls>.ui-model-picker{flex:0 1 auto;min-width:0}
+.ui-model-controls .ui-vendor-picker{flex-shrink:2}
+.ui-model-controls>.ui-model-picker>summary.ui-mp-summary{max-width:100%;min-height:30px;padding:5px 8px;font-size:12px}
+.ui-model-controls .ui-vendor-picker>summary .ui-mp-model{font-weight:400;color:var(--text-1)}
+.ui-model-controls .ui-usage{flex:none;margin:0 2px}
+.ui-model-controls .opens-down>:is(.ui-menu,.ui-usage-card){bottom:auto;top:calc(100% + 8px)}
+.ui-model-controls .ui-mp-effort{flex:none;font-size:11px}
+.ui-model-controls .ui-mp-model{min-width:0}
+.ui-model-controls .ui-model-picker>.ui-menu{max-width:min(340px,calc(100vw - 32px))}
+/* The editor's AI panel is narrow: keep the reasoning level in the menu only. */
+body[data-workspace-mode="editor"] .ui-model-controls .ui-mp-effort{display:none}
+body[data-workspace-mode="editor"] .ui-model-controls>.ui-model-picker>summary.ui-mp-summary{padding:5px 6px;gap:0}
+body[data-workspace-mode="editor"] .ui-model-controls .ui-mp-caret{display:none}
+.ui-model-controls .ui-vendor-picker{min-width:52px}
+.ui-model-controls>.ui-model-picker:not(.ui-vendor-picker){min-width:72px}
+/* In the editor, the permission mode shows its icon only (label in its menu
+   and tooltip) so brand and model names stay readable beside the mic. */
+body[data-workspace-mode="editor"] #ai-panel .chat-input-bottom-left{gap:4px}
+body[data-workspace-mode="editor"] #ai-panel .mode-select-wrap .mode-select-label{display:none}
+body[data-workspace-mode="chat"] .chat-input-area textarea{font-size:var(--chat-type)}
+@media(min-width:1201px){#sidebar:not(.collapsed){width:284px}body[data-workspace-mode="editor"] #ai-panel{width:430px;min-width:320px;max-width:55vw}}
+@media(hover:hover) and (pointer:fine){
+  .ws-conversation-row .ws-conversation-options,.ws-project-heading>.ws-project-options{opacity:0}
+  .ws-conversation-row:hover .ws-conversation-options,.ws-conversation-row:focus-within .ws-conversation-options,.ws-project-heading:hover>.ws-project-options,.ws-project-heading:focus-within>.ws-project-options{opacity:1}
+}
+@media(min-width:901px){#sidebar.collapsed .ws-nav-toolbar,#sidebar.collapsed .ws-nav-footer{display:none}}
+@media(max-width:1200px) and (min-width:901px){.ws-project-heading>.ws-icon-button{width:24px;min-width:24px}.ws-conversation-age{display:none}.ws-conversation-row{margin-left:18px}}
+/* On phones the icon rail overlays the editor's AI panel: keep the composer
+   (and its send button) clear of it. */
+@media(max-width:760px){body[data-workspace-mode="editor"] #ai-panel{box-sizing:border-box;padding-right:48px}}
+/* Phones: one line cannot hold readable names. The brand · model · context ·
+   mic · send group keeps its order and moves under the attach/mode buttons. */
+@media(max-width:580px){.chat-input-bottom{flex-wrap:wrap;row-gap:6px}.chat-input-bottom-right{flex:1 1 100%}}
+@media(max-width:580px){.ws-nav-toolbar{padding-top:8px}.ui-model-controls{gap:0}body[data-workspace-mode="editor"] .chat-input-area{margin:6px 8px 10px}.ui-model-controls .ui-mp-effort{display:none}}
+@media(prefers-reduced-motion:reduce){.ws-nav-toolbar *,.ws-editor-context *{transition:none!important;animation:none!important}}
+.ui-work-center .auto-editor{display:flex;flex-direction:column;gap:0;padding-top:2px}
+.ui-work-center .auto-title{color:var(--text-2);font-size:12px}
+.ui-work-center .auto-title input{width:100%;border:0;background:transparent;padding:2px 0 0;color:var(--text-0);font-size:28px;font-weight:600;letter-spacing:-.02em;line-height:1.15}
+.ui-work-center .auto-status{margin:10px 0 0;color:var(--text-2);font-size:13px}
+.ui-work-center .auto-status::before{content:"";display:inline-block;width:7px;height:7px;margin-right:6px;border-radius:50%;background:var(--text-2);vertical-align:1px}
+.ui-work-center .auto-status[data-state="active"]::before{background:var(--accent)}
+.ui-work-center .auto-sentence{margin:2px 0 16px;color:var(--text-1);font-size:15px;line-height:1.4}
+.ui-work-center .auto-prompt textarea{width:100%;min-height:148px;padding:12px 14px;border:1px solid var(--border-subtle);border-radius:12px;background:var(--bg-0);color:var(--text-0);font:15px/1.5 var(--font-sans);resize:vertical}
+.ui-work-center .auto-group{margin-top:16px;overflow:hidden;border-radius:12px;background:var(--bg-0)}
+.ui-work-center .auto-row{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;padding:0 14px;border-top:1px solid var(--border-subtle);font-size:15px}
+.ui-work-center .auto-row[hidden]{display:none}
+.ui-work-center .auto-group>.auto-row:first-child{border-top:0}
+.ui-work-center .auto-row select,.ui-work-center .auto-row input{max-width:62%;border:0;background:transparent;color:var(--text-2);font:inherit;text-align:end}
+.ui-work-center .auto-row :focus-visible{outline:2px solid var(--focus-ring);outline-offset:2px}
+.ui-work-center .auto-advanced{margin-top:14px}
+.ui-work-center .auto-advanced>summary{min-height:32px;color:var(--text-2);font-size:13px;cursor:pointer}
+.ui-work-center .auto-advanced-field{display:flex;flex-direction:column;gap:4px;margin-top:8px;color:var(--text-2);font-size:12px}
+.ui-work-center .auto-advanced-field input{min-height:34px;padding:6px 10px;border:1px solid var(--border-subtle);border-radius:8px;background:var(--bg-0);color:var(--text-0);font:14px var(--font-sans)}
+.ui-work-center .auto-editor>small{margin-top:12px;color:var(--text-2);font-size:12px;line-height:1.45}
+.ui-work-center .auto-footer{display:flex;justify-content:flex-end;gap:8px;margin-top:16px}
+.ui-work-center .auto-resume,.ui-work-center .auto-save{min-height:36px;padding:0 16px;border:0;border-radius:999px;font-weight:600}
+.ui-work-center .auto-resume{background:transparent;color:var(--text-1)}
+.ui-work-center .auto-save{background:var(--accent);color:var(--on-accent,#fff)}
+.ui-work-center .auto-card small{color:var(--text-2)}

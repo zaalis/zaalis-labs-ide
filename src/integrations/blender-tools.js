@@ -546,8 +546,34 @@ const TOOLS = [
     description: 'Annule les dernières étapes de l’historique de Blender (1 par défaut, 20 au plus) : chaque appel à execute_python ou focus_object en est une. Pour revenir sur une action ratée.' },
   { name: 'execute_python', raw: true, after: UNDO_PUSH('execute_python'), inputSchema: object({ code: { type: 'string' } }, ['code']),
     description: 'Exécute du code Python dans Blender (module bpy), sur le fil principal. Pour renvoyer une valeur, l’affecter à la variable `result` (dictionnaire sérialisable en JSON). Ce qui est imprimé avec print() est renvoyé aussi. Sert à tout ce que les autres outils ne font pas : créer, modifier, animer, enregistrer.' },
+  { name: 'execute_python_background', local: true, inputSchema: object({ code: { type: 'string' }, path: { type: 'string' }, save: { type: 'boolean' }, timeout_seconds: { type: 'integer', minimum: 5, maximum: 600 } }, ['code']),
+    description: 'Exécute du code Python arbitraire dans un Blender sans fenêtre, séparé de celui de l’utilisateur : sur un fichier .blend (chemin absolu dans `path`, ses scripts intégrés désactivés) ou sur une scène vide. Affecter la valeur de retour à `result` ; print() est renvoyé. `save=true` enregistre le fichier ouvert à la fin. Pour traiter des fichiers en lot, faire des rendus ou des conversions sans toucher la scène ouverte.' },
   { name: 'inspect_blend_file', local: true, inputSchema: object({ path: { type: 'string' } }, ['path']),
     description: 'Analyse un autre fichier .blend sans l’ouvrir dans Blender (un Blender sans fenêtre le lit, ses scripts désactivés) : état du fichier, inventaire des données, fichiers manquants, bibliothèques liées. Chemin absolu requis.' },
 ];
+
+TOOLS.push(...require('./blender-advanced-tools').TOOLS.map((tool) => ({
+  ...tool, code: tool.code + (tool.mutates ? UNDO_PUSH(tool.name) : ''),
+})));
+
+// A single socket round trip for a coherent diagnostic, with independent
+// failures reported per section. Only read-only tools are allowed here.
+const batchNames = ['scene_summary', 'file_info', 'missing_files', 'scene_audit', 'performance_report'];
+const batchCodes = Object.fromEntries(TOOLS.filter((t) => batchNames.includes(t.name)).map((t) => [t.name, t.code]));
+TOOLS.push({ name: 'inspect_batch', description: 'Exécute plusieurs diagnostics de lecture en un échange : scene_summary, file_info, missing_files, scene_audit, performance_report. Réduit les allers-retours ; n’accélère pas les calculs de Blender.',
+  inputSchema: object({ sections: { type: 'array', items: { type: 'string', enum: batchNames }, minItems: 1, maxItems: 5, uniqueItems: true } }, ['sections']),
+  code: `import json\n_codes = json.loads(${JSON.stringify(JSON.stringify(batchCodes))})\n` + String.raw`
+sections = params.get('sections', [])
+if not sections or len(sections) > 5 or len(set(sections)) != len(sections) or any(s not in _codes for s in sections):
+    raise ValueError('Choose 1-5 unique supported read-only sections')
+result = {}
+for section in sections:
+    namespace = {'params': {}}
+    try:
+        exec(_codes[section], namespace)
+        result[section] = {'ok': True, 'result': namespace.get('result')}
+    except Exception as error:
+        result[section] = {'ok': False, 'error': str(error)}
+` });
 
 module.exports = { TOOLS, HELPERS, FILE_SUMMARIES };

@@ -16,7 +16,7 @@
         const status = node('p', '', 'collab-status'); status.setAttribute('role', 'status');
         const content = node('div', undefined, 'collab-content'); el.append(header, status, content); document.body.append(el);
         el.addEventListener('click', event => { if (event.target === el) { const rect = el.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) el.close(); } });
-        return { el, content, status, async run(action) { status.textContent = ''; try { return await action(); } catch (error) { status.textContent = error.message; return undefined; } } };
+        return { el, content, status, async run(action) { status.textContent = ''; try { return await action(); } catch (error) { status.textContent = error.message; if(!el.open&&typeof showToast==='function')showToast('Action impossible',error.message,{duration:5000});return undefined; } } };
     }
     function field(form, label, type = 'text', value = '') {
         const wrap = node('label', label); const input = node(type === 'textarea' ? 'textarea' : 'input');

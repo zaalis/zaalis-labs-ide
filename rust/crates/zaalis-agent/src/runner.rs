@@ -31,11 +31,11 @@ const MAX_IMAGES_PER_ROUND: usize = 8;
 const DESKTOP_TOOLS: [&str; 7] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call", "request_user_input"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
-const ESSENTIAL_TOOLS: [&str; 22] = [
+const ESSENTIAL_TOOLS: [&str; 23] = [
     "read", "list", "tree", "glob", "grep", "code_search", "edit", "write", "apply_patch", "run",
     "todo", "workspace", "enter_plan_mode", "exit_plan_mode",
     "tool_search", "tool_describe", "tool_call", "request_user_input",
-    "spawn_agent", "agent_status", "agent_wait", "agent_cancel",
+    "spawn_agent", "spawn_agents", "agent_status", "agent_wait", "agent_cancel",
 ];
 const REDUCED_TOOLS_NOTE: &str = "\n\nCONTEXTE RÉDUIT : la fenêtre de contexte du modèle est petite, seuls les outils essentiels sont proposés pour ce tour.";
 /// Corrections a model without native tools may get, in a row, for an
@@ -407,6 +407,20 @@ pub(crate) async fn run_agent(
             // Images returned during this round, by the tool that returned them.
             let mut round_images: Vec<(String, Vec<zaalis_providers::ImagePart>)> = Vec::new();
             for call in calls {
+                // A provider can return many calls in one round. Checking only
+                // at the next inference lets that batch overrun the tool limit.
+                if partial_reason.is_none() && node.budget.max_tool_calls.is_some_and(|limit| usage.tool_calls >= limit)
+                    && !request_budget(&session, &mut node, &mut usage, zaalis_core::BudgetLimit::ToolCalls, &cancel).await?
+                {
+                    partial_reason = Some("budget tool_calls non prolongé".into());
+                }
+                if let Some(reason) = &partial_reason {
+                    let outcome = ToolOutcome::Denied { summary: "Outil non exécuté".into(), reason: reason.clone() };
+                    history.push(Message::Tool { call_id: call.id, name: call.name,
+                        content: serde_json::to_string(&outcome)?, is_error: true });
+                    session.checkpoint_history(&node.id, &history).await;
+                    continue;
+                }
                 usage.tool_calls = usage.tool_calls.saturating_add(1);
                 let effective_name = if call.name == "tool_call" {
                     call.arguments.get("name").and_then(serde_json::Value::as_str).unwrap_or("tool_call").to_owned()
@@ -475,6 +489,7 @@ pub(crate) async fn run_agent(
                 history.retain(|message| !is_tool_images_message(message));
                 history.push(message);
             }
+            if partial_reason.is_some() { break; }
             continue;
         }
 
@@ -933,7 +948,9 @@ async fn request_budget(
                     .saturating_add(additional),
             );
         }
-        None => node.budget.max_tokens = None,
+        None if limit == zaalis_core::BudgetLimit::Tokens => node.budget.max_tokens = None,
+        // Extending tools/rounds/time does not grant unlimited tokens.
+        None => {},
     }
     // Non-token limits receive one conservative extra tranche as well; the
     // client protocol currently carries token increments only.

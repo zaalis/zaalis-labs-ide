@@ -70,7 +70,16 @@ def verify(arch):
                     relative = source.relative_to(ROOT / 'interface')
                     assert digest(source) == digest(bundle / 'interface' / relative), f'UI differs: {relative}'
                     checked += 1
-            assert (bundle / 'native/blender/mcp-1.0.3.zip').stat().st_size > 0
+            release = json.loads(run('node', '-p', f'JSON.stringify(require({json.dumps(str(ROOT / "src/integrations/blender-bridge-release.js"))}))'))
+            bridge = bundle / 'native/blender' / release['file']
+            assert digest(bridge) == release['sha256'], 'Blender extension differs from the declared release'
+            browser = ROOT / 'zaalis-browser'
+            browser_checked = 0
+            for source in browser.rglob('*'):
+                if source.is_file():
+                    relative = source.relative_to(browser)
+                    assert digest(source) == digest(bundle / 'zaalis-browser' / relative), f'Browser payload differs: {relative}'
+                    browser_checked += 1
             executed = platform.machine() == cpu
             if executed:
                 setup_exe = str(setup / 'Contents/MacOS/zaalis-setup')
@@ -80,6 +89,7 @@ def verify(arch):
             return {'architecture': arch, 'version': info['CFBundleShortVersionString'],
                     'dmg': dmg.name, 'bytes': dmg.stat().st_size, 'sha256': digest(dmg),
                     'signatureVerified': True, 'verifiedInterfaceFiles': checked,
+                    'verifiedBrowserFiles': browser_checked, 'blenderBridgeVersion': release['version'],
                     'installerSignatureVerified': True, 'applicationPayloadUnchanged': True,
                     'installerExecuted': executed, 'installerCopyVerified': executed,
                     'payloadArchitectures': architectures}

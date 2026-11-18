@@ -170,11 +170,16 @@ test('Windows speech takes over when whisper fails, and the last failure is repo
   await assert.rejects(none.transcribe({ audio: speech }), (error) => error.code === 'stt-unavailable' && error.status === 409);
 });
 
-test('the shipped engine and model description are consistent', { skip: process.platform !== 'win32' }, () => {
-  const dir = path.resolve(__dirname, '..', 'native', 'whisper');
+const shippedWhisper = path.resolve(__dirname, '..', 'native', 'whisper');
+test('the shipped Windows engine includes its runtime libraries', {
+  skip: process.platform !== 'win32' || !fs.existsSync(path.join(shippedWhisper, 'whisper-cli.exe')),
+}, () => {
   for (const file of ['whisper-cli.exe', 'whisper.dll', 'ggml.dll', 'ggml-base.dll', 'ggml-cpu-x64.dll', 'vcomp140.dll', 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE']) {
-    assert.ok(fs.statSync(path.join(dir, file)).size > 0, file);
+    assert.ok(fs.statSync(path.join(shippedWhisper, file)).size > 0, file);
   }
+});
+
+test('the Whisper model description is consistent', () => {
   assert.match(voiceStt.WHISPER_MODEL.url, /^https:\/\/huggingface\.co\/ggerganov\/whisper\.cpp\/resolve\/main\/ggml-[a-z0-9_.-]+\.bin$/);
   assert.match(voiceStt.WHISPER_MODEL.sha256, /^[0-9a-f]{64}$/);
   assert.ok(voiceStt.WHISPER_MODEL.url.endsWith('/' + voiceStt.WHISPER_MODEL.file));

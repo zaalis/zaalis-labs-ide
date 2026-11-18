@@ -3,6 +3,17 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { frontend, settle } = require('./helpers/frontend-dom');
 
+test('pinning from the conversation menu persists through the canonical API', async () => {
+  const conv = { id: 'pin-chat', title: 'À conserver', kind: 'chat', messages: [] };
+  const ui = frontend(['conversation-actions.js'], ({ method, body }) => method === 'PATCH'
+    ? { conversation: { ...conv, ...body } } : { conversations: [conv], total: 1 });
+  ui.context.state.conversations.push(conv);
+  await ui.button('Historique').emit('click'); await ui.button('…').emit('click'); await ui.button('Épingler').emit('click');
+  const writes = ui.requests.filter(request => request.method === 'PATCH');
+  assert.equal(writes.length, 1); assert.deepEqual(writes[0].body, { pinned: true, kind: 'chat' });
+  assert.equal(ui.context.state.conversations[0].pinned, true);
+});
+
 test('memory edit submits one PATCH, preserving the global scope of a global memory', async () => {
   const ui = frontend(['task-center.js'], ({ path }) => path.startsWith('/api/knowledge')
     ? { records: [{ id: 'memory-1', title: 'Convention', content: 'Before', tags: ['team'], root: null }] }
@@ -34,7 +45,7 @@ test('agents history actions send the kind and hydrate a fork into the correct s
     if (path.startsWith('/api/conversations/branch')) return { conversation: branch };
     return { conversations: [original], total: 1 };
   });
-  await ui.button('Historique').emit('click'); await ui.button('Créer une branche').emit('click');
+  await ui.button('Historique').emit('click');await ui.button('…').emit('click'); await ui.button('Créer une branche').emit('click');
   const fork = ui.requests.find(request => request.method === 'POST');
   assert.equal(fork.body.kind, 'agents'); assert.equal(ui.context.state.agentConversations[0].id, 'branch');
   assert.equal(ui.opened[0].kind, 'agents'); assert.equal(ui.opened[0].id, 'branch');
@@ -52,7 +63,7 @@ test('archiving a legacy agents conversation updates the agents store even witho
     ? { conversation: { ...conversation, archived: true, metadataRevision: 1 } }
     : { conversations: [{ ...conversation, kind: 'agents' }], total: 1 });
   ui.context.state.agentConversations.push(conversation);
-  await ui.button('Historique').emit('click'); await ui.button('Archiver').emit('click');
+  await ui.button('Historique').emit('click');await ui.button('…').emit('click'); await ui.button('Archiver').emit('click');
   const write = ui.requests.find(request => request.method === 'PATCH');
   assert.equal(write.body.kind, 'agents'); assert.equal(write.body.archived, true);
   assert.equal(ui.context.state.agentConversations[0].archived, true);
@@ -68,6 +79,17 @@ test('queue edits affect the draft delivered after reordering, preserving attach
   await ui.all().find(el => el.tagName === 'BUTTON' && el.textContent === '↑' && !el.disabled).emit('click');
   assert.equal(queue.take().message, 'Edited');
   assert.equal(queue.take().attachments[0].name, 'context.txt'); await settle();
+});
+
+test('conversation overflow menu renames the selected agents chat with one PATCH',async()=>{
+  const conversation={id:'rename-team',title:'Before',kind:'agents',messages:[]};
+  const ui=frontend(['conversation-actions.js'],({method,body})=>method==='PATCH'?{conversation:{...conversation,title:body.title}}:{conversations:[conversation],total:1});
+  ui.context.state.agentConversations.push(conversation);
+  await ui.button('Historique').emit('click');await ui.button('…').emit('click');await ui.button('Renommer').emit('click');
+  ui.input('Nouveau titre').value='After';
+  const form=ui.all().find(el=>el.tagName==='FORM'&&el.className==='ui-rename-form');await form.emit('submit');
+  const writes=ui.requests.filter(request=>request.method==='PATCH');assert.equal(writes.length,1);assert.equal(writes[0].body.kind,'agents');assert.equal(writes[0].body.title,'After');
+  assert.equal(ui.context.state.agentConversations[0].title,'After');
 });
 test('tool inventory renders the native Rust input_schema', async () => {
   const schema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] };

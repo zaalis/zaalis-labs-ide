@@ -42,19 +42,19 @@
         const lang = state.language || 'fr';
         if (intro) intro.textContent = lang === 'en'
             ? 'Connect your phone to this zaalis session. A private encrypted link opens to this PC so you can use chat remotely without exposing your files or terminal.'
-            : 'Connectez votre telephone a cette session zaalis. Un lien prive et chiffre est ouvert vers ce PC, pour utiliser le chat a distance sans exposer vos fichiers ni votre terminal.';
+            : 'Connectez votre téléphone à cette session zaalis. Un lien privé et chiffré est ouvert vers ce PC pour utiliser le chat à distance sans exposer vos fichiers ni votre terminal.';
         if (points) {
             const items = lang === 'en'
                 ? ['The phone can only access chat.', 'Files, commands, and settings stay blocked on the PC.', 'You can cut access from this PC or from the phone.']
-                : ['Le telephone accede uniquement au chat.', 'Vos fichiers, commandes et reglages restent bloques cote PC.', "Vous pouvez couper l'acces depuis ce PC ou depuis le telephone."];
+                : ['Le téléphone accède uniquement au chat.', 'Vos fichiers, commandes et réglages restent bloqués côté PC.', "Vous pouvez couper l’accès depuis ce PC ou depuis le téléphone."];
             points.innerHTML = items.map((text, i) => `<li>${i === 0 ? text.replace('chat', '<b>chat</b>') : text}</li>`).join('');
         }
         if (scanHint) scanHint.textContent = lang === 'en'
             ? 'Scan this code with your phone camera to open chat.'
-            : "Scannez ce code avec l'appareil photo du telephone pour ouvrir le chat.";
+            : "Scannez ce code avec l’appareil photo du téléphone pour ouvrir le chat.";
         if (statusText) statusText.textContent = lang === 'en' ? 'Mobile access active' : 'Acces mobile actif';
         if (stopBtn) stopBtn.textContent = lang === 'en' ? 'Cut access' : "Couper l'acces";
-        if (genBtn && !working) genBtn.textContent = lang === 'en' ? 'Connect my phone' : 'Connecter mon telephone';
+        if (genBtn && !working) genBtn.textContent = lang === 'en' ? 'Connect my phone' : 'Connecter mon téléphone';
     }
 
     function showError(msg) {
@@ -128,7 +128,7 @@
         } finally {
             working = false;
             genBtn.disabled = false;
-            genBtn.textContent = lang === 'en' ? 'Connect my phone' : 'Connecter mon telephone';
+            genBtn.textContent = lang === 'en' ? 'Connect my phone' : 'Connecter mon téléphone';
         }
     }
 

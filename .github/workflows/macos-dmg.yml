@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - "main"
+      - "Macos"
     tags:
       - "v*"
 
@@ -19,11 +19,13 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14   # Apple Silicon runner; cross-builds both archs.
+    runs-on: macos-14   # Cross-builds both architectures.
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -37,6 +39,20 @@ jobs:
         run: |
           set -o pipefail
           sh native/build_macos_dmg.sh 2>&1 | tee native/macos-build.log
+
+      - name: Verify both DMGs
+        run: python3 scripts/release/verify-macos.py
+
+      - name: Smoke test the packaged application services
+        shell: bash
+        run: |
+          arch=$(node -p process.arch)
+          bundle="$PWD/native/dist-macos-$arch/zaalis IDE.app/Contents/Resources/app/bundle"
+          export ZAALIS_TEST_SERVER_EXE="$bundle/zaalis-server"
+          export ZAALIS_AGENTD_PATH="$bundle/zaalis-agentd"
+          export ZAALIS_TEST_CLI_EXE="$bundle/bin/zaalis"
+          node test/package-smoke.js
+          node --test test/cli-parity.test.js test/conversation-runtime.test.js
 
       - name: Upload macOS build log
         if: always()
@@ -58,6 +74,13 @@ jobs:
         with:
           name: zaalis-macos-dmg
           path: native/installer/*.dmg
+          if-no-files-found: error
+
+      - name: Upload DMG verification report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaalis-macos-validation
+          path: native/installer/validation-macos.json
           if-no-files-found: error
 
       - name: Attach DMGs to release

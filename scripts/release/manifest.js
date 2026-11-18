@@ -38,13 +38,15 @@ async function main() {
   for (const [sourceName, artifactName] of [['zaalis.exe', 'zaalis-cli.exe'], ['zaalis-agentd.exe', 'zaalis-agentd.exe']]) {
     if (await digest(path.join(root, 'rust/target/release', sourceName)) !== await digest(path.join(dist, artifactName))) throw new Error(`Staged Rust binary differs: ${artifactName}`);
   }
-  const nodeLog = fs.readFileSync(path.join(root, '.tmp/parity-final-node-tests.log'), 'utf8');
-  const rustLog = fs.readFileSync(path.join(root, '.tmp/parity-final-rust-tests.log'), 'utf8');
+  const nodeLog = fs.readFileSync(path.resolve(root, process.env.ZAALIS_NODE_TEST_LOG || '.tmp/parity-final-node-tests.log'), 'utf8');
+  const rustLog = fs.readFileSync(path.resolve(root, process.env.ZAALIS_RUST_TEST_LOG || '.tmp/parity-final-rust-tests.log'), 'utf8');
+  const nodePassed = Number(nodeLog.match(/\bpass (\d+)/)?.[1] || 0);
+  const rustPassed = [...rustLog.matchAll(/test result: ok\. (\d+) passed/g)].reduce((total, match) => total + Number(match[1]), 0);
+  if (!nodePassed || !rustPassed || !/\bfail 0\b/.test(nodeLog) || /test result: FAILED/.test(rustLog)) throw new Error('Passing Node and Rust test logs are required');
   const manifest = { generatedAt: new Date().toISOString(), version: require('../../package.json').version,
     baseCommit: git(['rev-parse', 'HEAD']), upstreamCommit: git(['rev-parse', 'origin/main']),
     hasLocalChanges: Boolean(git(['status', '--porcelain'])), platform: process.platform, arch: process.arch,
-    sourceTests: { nodePassed: Number(nodeLog.match(/tests (\d+)/)?.[1] || 0),
-      rustPassed: [...rustLog.matchAll(/test result: ok\. (\d+) passed/g)].reduce((total, match) => total + Number(match[1]), 0) },
+    sourceTests: { nodePassed, nodeSkipped: Number(nodeLog.match(/\bskipped (\d+)/)?.[1] || 0), rustPassed },
     verifiedStagedInterfaceFiles: stagedAssets, artifacts };
   fs.writeFileSync(path.join(dist, 'validation-manifest.json'), JSON.stringify(manifest, null, 2));
   console.log(`Manifest: ${names.length} artifacts; ${stagedAssets} interface files match source; Rust staging matches release.`);

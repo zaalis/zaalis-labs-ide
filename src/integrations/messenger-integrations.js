@@ -37,7 +37,7 @@ class MessengerIntegrations {
       trigger: this.prefix(id, provider).trim(), activity: this.activity.get(this.key(id, provider)) || null,
       binding: stored[provider]?.binding || null, conversations: this.continuation?.choices(id) || [],
       gateway: true, mode: stored.whatsapp?.mode || 'self-chat', allowedUsers: stored.whatsapp?.allowedUsers || [],
-      model: stored.model || 'codex', submodel: stored.submodel || 'gpt-5.6-sol', language: stored.language || 'fr' };
+      model: stored.model || 'codex', submodel: stored.submodel || 'gpt-6-astra', language: stored.language || 'fr' };
   }
   settings(id, input) {
     if (this.continuation) {
@@ -206,7 +206,7 @@ class MessengerIntegrations {
             } });
           return delivery && await delivery.finish(reply) ? '' : reply;
         }
-        const answer = await this.answer(id, { model: config.model || 'codex', submodel: config.submodel || 'gpt-5.6-sol', language: config.language || 'fr', message: text, history, signal: owner?.controller?.signal });
+        const answer = await this.answer(id, { model: config.model || 'codex', submodel: config.submodel || 'gpt-6-astra', language: config.language || 'fr', message: text, history, signal: owner?.controller?.signal });
         if (!valid()) return '';
         const reply = String(answer || '').trim() || 'L’IA n’a pas renvoyé de réponse.';
         const next = [...history, { role: 'user', content: text }, { role: 'assistant', content: reply }].slice(-20);

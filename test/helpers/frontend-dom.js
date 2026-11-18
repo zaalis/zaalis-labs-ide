@@ -18,6 +18,9 @@ function frontend(files, api) {
         if (value ?? !classes.has(name)) classes.add(name); else classes.delete(name);
         this.className = [...classes].join(' ');
       }, contains: name => this.className.split(/\s+/).includes(name) };
+      this.classList.add=(...names)=>names.forEach(name=>this.classList.toggle(name,true));
+      this.classList.remove=(...names)=>names.forEach(name=>this.classList.toggle(name,false));
+      this.style={};
     }
     set textContent(value) { this._text = String(value); this.children = []; }
     get textContent() { return this._text + this.children.map(child => child.textContent).join(''); }
@@ -34,6 +37,12 @@ function frontend(files, api) {
     }
     focus() { document.activeElement = this; }
     setSelectionRange() {}
+    select() {}
+    get isConnected(){return walk(document.body).includes(this);}
+    contains(element){return walk(this).includes(element);}
+    getBoundingClientRect(){return {left:10,right:210,top:20,bottom:60,width:200,height:40};}
+    showPopover(){this.open=true;}
+    hidePopover(){this.open=false;}
     showModal() { this.open = true; }
     close() { this.open = false; this.emit('close'); }
     closest(selector) { let el = this; while (el && !matches(el, selector)) el = el.parentElement; return el; }
@@ -58,9 +67,10 @@ function frontend(files, api) {
   document.querySelector = selector => document.body.querySelector(selector);
   document.getElementById = id => walk(document.body).find(el => el.id === id) || null;
   document.addEventListener = (name, action) => listeners.set(name, action);
+  document.removeEventListener=(name,action)=>{if(listeners.get(name)===action)listeners.delete(name);};
   const requests = [], opened = [], decisions = [];
   const context = {
-    window: {}, document, setTimeout, clearTimeout, console,
+    window: {addEventListener(){},removeEventListener(){}}, document, setTimeout, clearTimeout, console,innerWidth:1000,innerHeight:800,
     state: { projectRoot: 'C:\\project', permissionMode: 'supervised', conversations: [], agentConversations: [] },
     HIST: { chat: { store: 'conversations' }, agents: { store: 'agentConversations' } },
     customConfirm: async () => true, renderHistory() {},
@@ -74,7 +84,7 @@ function frontend(files, api) {
     },
   };
   vm.createContext(context);
-  for (const file of ['collaboration-ui.js', ...files]) vm.runInContext(fs.readFileSync(path.join(__dirname, '../../interface/script', file), 'utf8'), context, { filename: file });
+  for (const file of ['collaboration-ui.js','action-menu.js', ...files]) vm.runInContext(fs.readFileSync(path.join(__dirname, '../../interface/script', file), 'utf8'), context, { filename: file });
   return { context, document, requests, opened, decisions,
     all: () => walk(document.body),
     button(label) { return walk(document.body).find(el => el.tagName === 'BUTTON' && el.textContent === label); },

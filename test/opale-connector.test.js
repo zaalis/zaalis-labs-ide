@@ -194,7 +194,8 @@ test('a present Opale is linked by default: the real agent gets the vault, until
     const after = await (await fetch(`${base}/api/opale/connect`, { method: 'DELETE', headers })).json();
     assert.equal(after.connected, false);
     await run('Bonjour encore');
-    assert.doesNotMatch(systemPrompt(), /Coffre de notes Opale|SKILLS DISPONIBLES/, 'cutting the link withdraws the vault from the next run');
+    assert.doesNotMatch(systemPrompt(), /Coffre de notes Opale/, 'cutting the link withdraws the vault from the next run');
+    assert.match(systemPrompt(), /revers:/, 'the built-in skill remains available after disconnecting Opale');
     assert.equal((await (await fetch(`${base}/api/opale/status`, { headers })).json()).connected, false, 'the choice is remembered');
 
     const relinked = await (await fetch(`${base}/api/opale/connect`, { method: 'POST', headers })).json();

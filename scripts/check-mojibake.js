@@ -10,7 +10,7 @@ const TARGETS = [
   'src/accounts/model-catalog.js',
   'README.md',
   'interface',
-  path.join('scripts', 'stage-rust-binaries.ps1'),
+  path.join('scripts', 'stage-rust-binaries.js'),
   path.join('scripts', 'stage-rust-binaries.sh'),
   path.join('native', 'README.md'),
   // Windows shell (C++ / WebView2 / Inno Setup)

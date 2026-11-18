@@ -38,6 +38,17 @@ function taskFixture(t, concurrency = 2) {
     done: (user, id) => tasks.active.get(`${user}:${id}`).done };
 }
 
+test('conversation pins survive legacy transcript saves and remain scoped to account and kind', t => {
+  const { conversations: store } = fixture(t);
+  const original = store.create('alice', { kind: 'agents', title: 'Analyse' }, 'pinned-team');
+  assert.equal(store.update('alice', original.id, { kind: 'agents', pinned: true }).pinned, true);
+  store.mergeLegacy('alice', 'agents', [{ ...original, contentUpdatedAt: Date.now() + 1000, pinned: false }]);
+  assert.equal(store.find('alice', original.id, 'agents').pinned, true);
+  assert.throws(() => store.update('bob', original.id, { kind: 'agents', pinned: false }), { status: 404 });
+  assert.throws(() => store.update('alice', original.id, { kind: 'chat', pinned: false }), { status: 404 });
+  assert.equal(store.update('alice', original.id, { kind: 'agents', pinned: false }).pinned, false);
+});
+
 test('legacy saves preserve canonical metadata and conversations from another window', t => {
   const { conversations: store, root } = fixture(t);
   const chat = store.create('alice', { root, source: 'cli' }, 'chat-a');

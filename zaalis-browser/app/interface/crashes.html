@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plantages</title>
+<link rel="stylesheet" href="zx.css">
+</head>
+<body>
+  <div class="zx-top">
+    <h1>Plantages</h1>
+    <button class="zx-btn" id="folder">Ouvrir le dossier</button>
+    <button class="zx-btn danger" id="clear">Tout effacer</button>
+  </div>
+  <div class="zx-main">
+    <p class="zx-muted" id="intro">Les rapports de plantage restent sur cet ordinateur : ils ne sont jamais envoyés.</p>
+
+    <div class="zx-section-title">Rapports de plantage</div>
+    <div class="zx-card" id="dumps"></div>
+
+    <div class="zx-section-title">Journal des arrêts anormaux</div>
+    <div class="zx-card" id="log"></div>
+  </div>
+<script src="zx.js"></script>
+<script>
+  const REASONS = {
+    crashed: 'Plantage', killed: 'Arrêté', oom: 'Mémoire insuffisante', 'launch-failed': 'Échec du lancement',
+    'integrity-failure': 'Contrôle d\'intégrité échoué', 'abnormal-exit': 'Fin anormale', 'memory-eviction': 'Libéré par le système',
+  };
+  const KINDS = { renderer: 'Onglet', GPU: 'GPU', Utility: 'Utilitaire', Zygote: 'Zygote', 'Sandbox helper': 'Bac à sable', Pepper: 'Plug-in' };
+  const SVG_DEL = '<svg class="i" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></svg>';
+  const SVG_DIR = '<svg class="i" viewBox="0 0 24 24"><path d="M3 7h6l2 2h10v10H3z"/></svg>';
+
+  async function load() {
+    let d;
+    try { d = await zx.call('crashList'); } catch (e) { zx.toast(e.message); return; }
+    zx.$('intro').textContent = (d.collector ? 'Collecteur de plantages actif. ' : 'Collecteur de plantages indisponible. ') +
+      'Les rapports restent sur cet ordinateur et ne sont jamais envoyés' + (d.dir ? ' (' + d.dir + ').' : '.');
+    const dumps = d.dumps || [];
+    zx.$('dumps').innerHTML = dumps.length ? dumps.map(x =>
+      '<div class="zx-row"><div class="grow"><div class="t zx-mono">' + zx.esc(x.name) + '</div>' +
+      '<div class="s">' + zx.esc(zx.fmtDate(x.at)) + ' · ' + zx.esc(x.type) + ' · ' + zx.esc(zx.fmtBytes(x.size)) + ' · ' + zx.esc(x.state) + '</div></div>' +
+      '<button class="zx-icon-btn" title="Afficher dans le dossier" data-show="' + zx.esc(x.id) + '">' + SVG_DIR + '</button>' +
+      '<button class="zx-icon-btn" title="Supprimer" data-del="' + zx.esc(x.id) + '">' + SVG_DEL + '</button></div>').join('')
+      : '<div class="zx-empty">Aucun rapport de plantage.</div>';
+    const log = d.log || [];
+    zx.$('log').innerHTML = log.length ? log.map(x =>
+      '<div class="zx-row"><div class="grow"><div class="t">' + zx.esc((KINDS[x.kind] || x.kind || 'Processus') + ' — ' + (REASONS[x.reason] || x.reason || '')) + '</div>' +
+      '<div class="s">' + zx.esc(zx.fmtDate(x.at)) + (x.title || x.url ? ' · ' + zx.esc(x.title || x.url) : '') + (x.name ? ' · ' + zx.esc(x.name) : '') +
+      (x.exitCode != null ? ' · code ' + zx.esc(x.exitCode) : '') + '</div></div></div>').join('')
+      : '<div class="zx-empty">Aucun arrêt anormal enregistré.</div>';
+  }
+  document.body.addEventListener('click', async (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.del) { await zx.call('crashDelete', { id: b.dataset.del }).catch(err => zx.toast(err.message)); load(); }
+    else if (b.dataset.show) zx.call('crashOpenFolder', { id: b.dataset.show }).catch(err => zx.toast(err.message));
+  });
+  zx.$('folder').onclick = () => zx.call('crashOpenFolder', {}).catch(err => zx.toast(err.message));
+  zx.$('clear').onclick = async () => {
+    if (await zx.confirm('Tout effacer ?', 'Les rapports de plantage et le journal seront supprimés.', { ok: 'Effacer', danger: true })) {
+      await zx.call('crashDelete', { all: true }).catch(err => zx.toast(err.message)); load();
+    }
+  };
+  load();
+</script>
+</body>
+</html>

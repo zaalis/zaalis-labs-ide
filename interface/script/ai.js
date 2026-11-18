@@ -164,6 +164,7 @@ const approvalQueue = [];
 function showNextApproval() {
     if (pendingApproval || !approvalQueue.length) return;
     pendingApproval = approvalQueue.shift();
+    window.ZaalisInlineApproval?.prepare();
     $('#approval-desc').textContent = pendingApproval.description;
     $('#approval-content').textContent = pendingApproval.content;
     const plan = !!pendingApproval.plan;
@@ -172,13 +173,14 @@ function showNextApproval() {
     $('#plan-feedback').value = '';
     $('#approve-action').textContent = plan ? (state.language === 'en' ? 'Approve and implement' : 'Approuver et réaliser') : (state.language === 'en' ? 'Allow' : 'Autoriser');
     $('#deny-action').textContent = plan ? (state.language === 'en' ? 'Revise plan' : 'Réviser le plan') : (state.language === 'en' ? 'Deny' : 'Refuser');
-    $('#approval-modal').classList.add('active');
+    if (window.ZaalisInlineApproval) window.ZaalisInlineApproval.open(pendingApproval);
+    else $('#approval-modal').classList.add('active');
     $('#approve-action').focus();
 }
 
 function requestApproval(description, content, options = {}) {
     return new Promise((resolve) => {
-        approvalQueue.push({ description, content, resolve, plan: !!options.plan });
+        approvalQueue.push({ ...options, description, content, resolve, plan: !!options.plan });
         showNextApproval();
     });
 }
@@ -186,6 +188,7 @@ function requestApproval(description, content, options = {}) {
 function answerApproval(allow) {
     const current = pendingApproval;
     pendingApproval = null;
+    window.ZaalisInlineApproval?.close();
     $('#approval-modal').classList.remove('active');
     if (current) current.resolve(current.plan ? { allow, feedback: allow ? '' : $('#plan-feedback').value.trim() } : allow);
     showNextApproval();
@@ -222,7 +225,7 @@ $$('.ai-tab').forEach(tab => {
                 addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
                 state.agentMode = false;
             } else {
-                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents active.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prets.')));
+                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents activé.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prêts.')));
             }
         } else if (!isAgentsTab && state.agentMode) {
             state.agentMode = false;
@@ -466,10 +469,7 @@ document.addEventListener('click', async e => {
 });
 
 function formatAIResponse(text) {
-    const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
-
-    if (isImageGen) {
+    if (isImageGenModel()) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
         if (imgMatch) return imageBubble(imgMatch[2], imgMatch[1] || '');
     }
@@ -663,16 +663,16 @@ async function performRustInteractiveDecision(event) {
     let body = null;
     if (event.type === 'permission_required') {
         const detail = [event.target, ...(event.risks || [])].filter(Boolean).join('\n');
-        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail);
+        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail, { host: event.approvalHost });
         body = { kind: 'permission', allow, scope: 'once' };
     } else if (event.type === 'plan_required') {
-        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true });
+        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true, host: event.approvalHost });
         body = { kind: 'plan', ...decision };
     } else if (event.type === 'clarification_required') {
         const answers = await window.ZaalisClarification.request(event.questions || []);
         body = { kind: 'clarification', answers };
     } else if (event.type === 'budget_required') {
-        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '');
+        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '', { host: event.approvalHost });
         body = { kind: 'budget', stop: !allow, additionalTokens: allow ? 50000 : undefined };
     }
     if (!body) return;
@@ -1097,7 +1097,7 @@ function toolRunDetailsHTML(results) {
         const name = toolDisplayName(r);
         const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
         const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
-        return `<details class="ghost-tool-item">
+        return `<details class="ghost-tool-item${failed ? ' is-error' : ''}">
             <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
             <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
         </details>`;
@@ -2003,7 +2003,7 @@ const HIST = {
     chat: {
         store: 'conversations', current: 'currentConvId',
         container: '#chat-messages', list: '#history-list', tab: 'chat',
-        defaultKey: 'chat-default-msg', defaultMsg: uiText('Selectionnez un modele et posez votre question.')
+        defaultKey: 'chat-default-msg', defaultMsg: uiText('Sélectionnez un modèle et posez votre question.')
     },
     agents: {
         store: 'agentConversations', current: 'currentAgentConvId',
@@ -2345,8 +2345,6 @@ async function applyWorkspaceSelection(selection, conv) {
     }
 }
 
-const PH_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
-
 // The AI tab currently shown (chat | agents) drives which conversations show.
 function activeKind() {
     const t = document.querySelector('.ai-tab.active');
@@ -2385,18 +2383,8 @@ function renderProjectPanelHistory(kind = activeKind()) {
         titleEl.textContent = conv.title;
         titleEl.addEventListener('click', () => loadConversation(kind, conv.id));
 
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = PH_TRASH;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            deleteConversation(kind, conv.id);
-        });
-
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
+        row.addEventListener('click', event => { if (event.target === row) loadConversation(kind, conv.id); });
         list.appendChild(row);
     });
 }
@@ -2463,6 +2451,35 @@ async function deleteConversation(kind, id) {
     }
     persistChats(kind);
     renderHistory();
+}
+
+async function deleteProjectConversations(projectPath) {
+    const lang = state.language || 'fr';
+    const folderName = String(projectPath || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    const items = ['chat', 'agents'].flatMap(kind => (typeof conversationsForProject === 'function' ? conversationsForProject(projectPath, folderName, kind) : []).map(conv => ({ kind, conv })));
+    for (const { kind, conv } of items) {
+        if (state[HIST[kind].current] === conv.id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+            toast(lang === 'en' ? 'Stop the running task before deleting this project.' : 'Arrêtez la tâche en cours avant de supprimer ce projet.');
+            return false;
+        }
+    }
+    for (const { kind, conv } of items) {
+        try {
+            const response = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}?kind=${encodeURIComponent(kind)}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+        } catch (error) { toast(error.message); return false; }
+        const cfg = HIST[kind];
+        state[cfg.store] = (state[cfg.store] || []).filter(item => item.id !== conv.id);
+        if (state[cfg.current] === conv.id) {
+            state[cfg.current] = null;
+            const box = $(cfg.container);
+            if (box) { box.innerHTML = ''; addMsg(box, 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg); }
+            if (kind === 'chat') { state.chatHistory = []; resetContextMeasure(); updateTokenMeter(); }
+        }
+        persistChats(kind);
+    }
+    renderHistory();
+    return true;
 }
 
 const newChatBtn = $('#new-chat-btn');
@@ -2642,7 +2659,7 @@ function isVisionCompatible(model, submodel) {
             if (model === 'compat:xai-sub') return true;
             if (model === 'compat:minimax-sub') return /^minimax-m3/i.test(s);
             return String(model || '').startsWith('compat:')
-                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-[56]/.test(s);
     }
 }
 function chatImagesAllowed() {

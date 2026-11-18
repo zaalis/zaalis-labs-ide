@@ -254,7 +254,7 @@ test('sign-in with a code, encrypted session, renewal and chat through the Rust 
     await new Promise((resolve) => setTimeout(resolve, 2600));
     const connected = await (await post('/api/chatgpt/device-poll', { flowId: start.flowId })).json();
     assert.equal(connected.status, 'connected');
-    assert.deepEqual({ ...connected.account, connectedAt: '' }, { connected: true, email: 'abonne@example.com', plan: 'plus', connectedAt: '' });
+    assert.deepEqual({ ...connected.account, connectedAt: '' }, { connected: true, transport: 'legacy', email: 'abonne@example.com', plan: 'plus', connectedAt: '' });
     assert.equal(connected.providers.find((p) => p.id === 'chatgpt').configured, true);
     const exchange = fake.seen.find((r) => r.url === '/oauth/token').body;
     assert.deepEqual(exchange, { grant_type: 'authorization_code', code: 'code-1', code_verifier: 'verifier-1',

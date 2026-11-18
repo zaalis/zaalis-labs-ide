@@ -11,13 +11,20 @@ protocol.registerSchemesAsPrivileged([{ scheme: 'zaalis', privileges: { standard
 class ElectronBrowserBridge {
   constructor() {
     this.token = crypto.randomBytes(32).toString('hex');
-    this.pipe = path.join(os.tmpdir(), `zaalis-browser-${process.pid}-${crypto.randomBytes(8).toString('hex')}.sock`);
+    // Darwin limits Unix socket paths to 103 bytes. A private short directory
+    // also keeps the endpoint inaccessible before listen() completes.
+    this.socketDirectory = fs.mkdtempSync(path.join(process.platform === 'darwin' ? '/tmp' : os.tmpdir(), 'zaalis-browser-'));
+    this.pipe = path.join(this.socketDirectory, 'browser.sock');
     this.views = new Map(); this.pending = new Map(); this.counter = 0;
     this.window = null; this.panel = { x: 0, y: 0, width: 0, height: 0 }; this.visible = false;
     this.sessions = new Set(); this.socket = null;
     ipcMain.on('browser-view-message', (event, message) => {
       const entry = [...this.views.values()].find(v => v.view.webContents === event.sender);
-      if (entry) this.send({ ev: 'webMessage', view: entry.id, message: String(message) });
+      if (!entry || event.senderFrame !== event.sender.mainFrame || !URL.canParse(event.senderFrame?.url)) return;
+      const sender = new URL(event.senderFrame.url);
+      if (sender.protocol === 'zaalis:' && sender.hostname === 'home') {
+        this.send({ ev: 'webMessage', view: entry.id, message: String(message) });
+      }
     });
     ipcMain.on('ide-native-message', (event, message) => {
       if (event.sender !== this.window?.webContents || message?.type !== 'browser') return;
@@ -130,21 +137,30 @@ class ElectronBrowserBridge {
     this.window.contentView.addChildView(view); view.setVisible(false);
     const wc = view.webContents;
     const emit = (ev, fields = {}) => this.send({ ev, view: msg.view, ...fields });
-    wc.on('did-start-navigation', (_e, url, inPlace, main) => { if (main) emit('navStarting', { url, self: true }); });
-    wc.on('will-navigate', (_e, url) => emit('navStarting', { url, self: false }));
-    wc.on('did-navigate', (_e, url, code) => emit('committed', { url, httpStatus: code }));
+    wc.on('did-start-navigation', ({ url, isMainFrame }) => { if (isMainFrame) emit('navStarting', { url, self: true }); });
+    wc.on('will-navigate', ({ url }) => emit('navStarting', { url, self: false }));
+    wc.on('did-navigate', (_e, url, code) => {
+      v.httpStatus = code;
+      emit('committed', { url, httpStatus: code });
+    });
     wc.on('did-navigate-in-page', (_e, url, main) => { if (main) emit('sourceChanged', { url, newDocument: false }); });
     wc.on('dom-ready', () => emit('domReady'));
-    wc.on('did-finish-load', () => { emit('completed', { url: wc.getURL(), ok: true, httpStatus: 200 }); emit('history', { canBack: wc.navigationHistory.canGoBack(), canForward: wc.navigationHistory.canGoForward() }); });
+    wc.on('found-in-page', (_event, result) => emit('foundInPage', { result }));
+    wc.on('did-finish-load', () => { emit('completed', { url: wc.getURL(), ok: true, httpStatus: v.httpStatus }); emit('history', { canBack: wc.navigationHistory.canGoBack(), canForward: wc.navigationHistory.canGoForward() }); });
     wc.on('did-fail-load', (_e, code, error, url, main) => { if (main) emit('completed', { url, ok: false, error, code }); });
     wc.on('page-title-updated', (_e, title) => emit('title', { title }));
     wc.on('audio-state-changed', () => emit('audible', { audible: wc.isCurrentlyAudible() }));
-    wc.on('console-message', (_e, details) => emit('console', { level: details.level, text: details.message, line: details.lineNumber, source: details.sourceId }));
+    wc.on('console-message', details => emit('console', { level: details.level, text: details.message, line: details.lineNumber, source: details.sourceId }));
     wc.on('context-menu', (_e, p) => emit('contextMenu', { x: p.x, y: p.y, link: p.linkURL, selection: p.selectionText, editable: p.isEditable }));
     wc.setWindowOpenHandler(({ url }) => { emit('newWindow', { url }); return { action: 'deny' }; });
     wc.on('render-process-gone', () => emit('crashed'));
     wc.on('before-input-event', (event, input) => {
       if (input.type !== 'keyDown') return;
+      if ((input.control || input.meta) && !input.alt) {
+        const key = input.key.toLowerCase();
+        const command = input.shift ? ({p:'palette',e:'mode'})[key] : ({',':'settings',n:'new-chat',o:'open-folder',b:'sidebar'})[key];
+        if (command) { event.preventDefault(); this.window?.webContents.executeJavaScript('window.ZaalisCommands?.run(' + JSON.stringify(command) + ')').catch(() => {}); return; }
+      }
       const aliases = { arrowleft: 'Left', arrowright: 'Right', tab: 'Tab', '+': '=', '=': '=' };
       const shortcut = { key: aliases[input.key.toLowerCase()] || input.key.toUpperCase(), ctrl: !!(input.control || input.meta), alt: !!input.alt, shift: !!input.shift };
       if ((this.accelerators || []).some(k => k.key === shortcut.key && k.ctrl === shortcut.ctrl && k.alt === shortcut.alt && k.shift === shortcut.shift)) {
@@ -166,6 +182,8 @@ class ElectronBrowserBridge {
       case 'reload': wc?.reload(); return;
       case 'stop': wc?.stop(); return;
       case 'focus': wc?.focus(); return;
+      case 'findInPage': if (wc && m.text) wc.findInPage(m.text, { forward: !!m.forward, findNext: !!m.findNext }); return;
+      case 'stopFindInPage': wc?.stopFindInPage(m.action === 'keepSelection' ? 'keepSelection' : 'clearSelection'); return;
       case 'post': wc?.send('browser-post', m.json); return;
       case 'setZoom': wc?.setZoomFactor(m.factor); return;
       case 'setMuted': wc?.setAudioMuted(m.muted); return;
@@ -186,6 +204,7 @@ class ElectronBrowserBridge {
       });
       case 'messageBox': return dialog.showMessageBox(this.window, m);
       case 'openFile': { const result = await dialog.showOpenDialog(this.window, { title: m.title, properties: ['openFile'], filters: m.filters }); return { path: result.canceled ? '' : result.filePaths[0] }; }
+      case 'saveFile': { const result = await dialog.showSaveDialog(this.window, { title: m.title, defaultPath: m.defaultPath, filters: m.filters }); return { path: result.canceled ? '' : result.filePath }; }
       case 'fileIcon': return { dataUrl: (await app.getFileIcon(m.path)).toDataURL() };
       case 'squareImage': { const img = nativeImage.createFromPath(m.source).resize({ width: m.size, height: m.size }); fs.writeFileSync(m.target, img.toPNG()); return { ok: true }; }
       case 'shell': if (m.action === 'openExternal') { if (/^https?:\/\//i.test(m.path)) await shell.openExternal(m.path); } else if (m.action === 'showItemInFolder') shell.showItemInFolder(m.path); else if (m.action === 'openPath') await shell.openPath(m.path); return;
@@ -199,7 +218,9 @@ class ElectronBrowserBridge {
   close() {
     this.socket?.destroy(); this.server?.close();
     for (const v of this.views.values()) { try { v.view.webContents.close(); } catch {} }
-    this.views.clear(); try { fs.unlinkSync(this.pipe); } catch {}
+    this.views.clear();
+    try { fs.unlinkSync(this.pipe); } catch {}
+    try { fs.rmdirSync(this.socketDirectory); } catch {}
   }
 }
 module.exports = { ElectronBrowserBridge };

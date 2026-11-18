@@ -1,5 +1,57 @@
 // Included by the scripted runtime fixture to keep feature scenarios separate.
 #[tokio::test]
+async fn tool_budget_extension_keeps_the_token_ceiling_and_resumes_the_batch() {
+    let calls = (0..2).map(|index| TurnEvent::ToolCallCompleted { call: ProviderToolCall {
+        id: format!("extension-{index}"), name: "read".into(), arguments: serde_json::json!({"path":"input.txt"}),
+    }}).chain(std::iter::once(TurnEvent::Completed { reason: StopReason::ToolUse })).collect();
+    let provider = Arc::new(ScriptedProvider::new(ProviderId::Mistral, vec![calls, vec![
+        TurnEvent::TextDelta { text: "Lectures terminées".into() }, TurnEvent::Completed { reason: StopReason::EndTurn },
+    ]]));
+    let f = fixture(SessionRunMode::Chat, vec![provider]);
+    let mut root = node(&f.session, ProviderId::Mistral, PermissionMode::ReadOnly);
+    root.budget.max_tool_calls = Some(1); root.budget.max_tokens = Some(100_000);
+    let id = f.session.add_root(root).await.unwrap();
+    let mut events = f.session.subscribe();
+    let running = { let session = f.session.clone(); tokio::spawn(async move { session.run_turn("Lis deux fichiers").await }) };
+    let frame = next_matching(&mut events, |event| matches!(event, Event::BudgetExhausted { .. })).await;
+    let Event::BudgetExhausted { request_id, limit, .. } = frame.event else { unreachable!() };
+    assert_eq!(limit, "tool_calls");
+    f.session.decide_budget(&request_id, BudgetAnswer { additional_tokens: None, stop: false }).unwrap();
+    running.await.unwrap().unwrap();
+    let snapshot = f.session.snapshot().await;
+    assert_eq!(snapshot.histories.get(&id).unwrap().iter().filter(|m| matches!(m, Message::Tool { is_error: false, .. })).count(), 2);
+    let tree = f.session.tree().await;
+    assert_eq!(tree.get(&id).unwrap().budget.max_tokens, Some(100_000));
+    assert_eq!(tree.get(&id).unwrap().budget.max_tool_calls, Some(101));
+}
+
+#[tokio::test]
+async fn tool_budget_stops_inside_one_batch_without_orphaned_calls() {
+    let calls = (0..3).map(|index| TurnEvent::ToolCallCompleted { call: ProviderToolCall {
+        id: format!("budget-{index}"), name: "read".into(), arguments: serde_json::json!({"path":"input.txt"}),
+    }}).chain(std::iter::once(TurnEvent::Completed { reason: StopReason::ToolUse })).collect();
+    let provider = Arc::new(ScriptedProvider::new(ProviderId::Mistral, vec![calls]));
+    let f = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+    let mut root = node(&f.session, ProviderId::Mistral, PermissionMode::ReadOnly);
+    root.budget.max_tool_calls = Some(1);
+    let id = f.session.add_root(root).await.unwrap();
+    let mut events = f.session.subscribe();
+    let running = { let session = f.session.clone(); tokio::spawn(async move { session.run_turn("Lis les trois fichiers").await }) };
+    let frame = next_matching(&mut events, |event| matches!(event, Event::BudgetExhausted { .. })).await;
+    let Event::BudgetExhausted { request_id, limit, .. } = frame.event else { unreachable!() };
+    assert_eq!(limit, "tool_calls");
+    f.session.decide_budget(&request_id, BudgetAnswer { additional_tokens: None, stop: true }).unwrap();
+    running.await.unwrap().unwrap();
+    let snapshot = f.session.snapshot().await;
+    let history = snapshot.histories.get(&id).unwrap();
+    assert_eq!(history.iter().filter(|m| matches!(m, Message::Tool { is_error: false, .. })).count(), 1);
+    assert_eq!(history.iter().filter(|m| matches!(m, Message::Tool { is_error: true, .. })).count(), 2);
+    let mut repaired = history.clone(); crate::context::repair_interrupted_tools(&mut repaired);
+    assert_eq!(&repaired, history);
+    assert_eq!(provider.requests.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
 async fn progress_is_bounded_but_detailed_final_and_model_history_are_complete() {
     let progress = "Lecture é🚀 ".repeat(100);
     let final_answer = "Explication détaillée 🧪 ".repeat(100);

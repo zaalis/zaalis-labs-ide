@@ -1,0 +1,20 @@
+/* Bulles ancrées sous le chrome (traduire, code QR, Cast). Complète zx.css. */
+html, body { background: transparent !important; overflow: hidden; }
+body { margin: 0; user-select: none; -webkit-user-select: none; }
+.bubble { margin: 0 8px 8px; background: var(--card); color: var(--text); border-radius: 12px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.22), 0 6px 22px rgba(0,0,0,.18); border: 1px solid var(--border); overflow: hidden; }
+.b-head { display: flex; align-items: center; gap: 10px; padding: 14px 16px 6px; }
+.b-head .t { flex: 1; font-size: 15px; font-weight: 500; }
+.b-body { padding: 6px 16px 14px; }
+.b-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 0 16px 14px; flex-wrap: wrap; }
+.b-tabs { display: flex; gap: 4px; padding: 0 12px; border-bottom: 1px solid var(--border); }
+.b-tab { padding: 9px 10px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; font-weight: 500; font-size: 13px; }
+.b-tab.on { color: var(--accent); border-bottom-color: var(--accent); }
+.b-menu { padding: 4px 0; border-top: 1px solid var(--border); }
+.b-item { display: flex; align-items: center; gap: 10px; padding: 8px 16px; cursor: pointer; font-size: 13px; }
+.b-item:hover { background: var(--row-h); }
+.b-item .chk { width: 16px; color: var(--accent); }
+.b-status { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+.b-status.err { color: var(--danger); }
+.b-progress { height: 3px; border-radius: 2px; background: var(--border); overflow: hidden; margin-top: 8px; }
+.b-progress > div { height: 100%; background: var(--accent); width: 0; transition: width .25s; }

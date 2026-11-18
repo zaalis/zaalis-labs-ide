@@ -7,6 +7,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
+const blenderRelease = require('../src/integrations/blender-bridge-release');
 
 const exe = process.env.ZAALIS_TEST_SERVER_EXE || path.resolve(__dirname, '..', 'native',
   process.platform === 'darwin' ? `dist-macos-${process.arch}-server` : 'dist',
@@ -44,7 +45,7 @@ async function main() {
   const cookie = register.headers.get('set-cookie');
   const headers = { cookie, 'content-type': 'application/json' };
   // Verify that the new modules are included in the actual packaged binary.
-  for (const asset of ['collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
+  for (const asset of ['interaction-polish.css', 'script/action-menu.js', 'design-system.css', 'script/ui-foundation.js', 'script/settings-layout.js', 'script/settings-persistence.js', 'script/model-picker.js', 'script/command-palette.js', 'script/project-actions.js', 'script/shell-layout.js', 'script/inline-approval.js', 'script/ui-accessibility.js', 'collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
     assert.equal((await fetch(`${base}/${asset}`)).status, 200, asset);
   }
   const canonical = await (await fetch(`${base}/api/conversations`, { method: 'POST', headers,
@@ -88,7 +89,7 @@ async function main() {
   // are in the packaged server; the entries of the former Blender preset are
   // dropped, and nothing is installed into Blender without consent.
   assert.equal((await fetch(base + '/image/blender.png')).status, 200);
-  assert.ok(fs.statSync(path.join(path.dirname(exe), process.platform === 'darwin' ? 'native/blender' : 'blender', 'mcp-1.0.3.zip')).size > 0);
+  assert.ok(fs.statSync(path.join(path.dirname(exe), process.platform === 'darwin' ? 'native/blender' : 'blender', blenderRelease.file)).size > 0);
   const legacy = await (await fetch(`${base}/api/mcp`, { method: 'PUT', headers,
     body: JSON.stringify({ servers: [{ id: 'blender', name: 'Blender MCP', endpoint: 'http://127.0.0.1:9876/mcp' }, { id: 'notes', name: 'Notes', command: 'npx', args: ['-y', 'x'] }] }) })).json();
   assert.deepEqual(legacy.servers.map((server) => [server.id, server.transport]), [['notes', 'stdio']]);

@@ -24,6 +24,8 @@ const target = path.join(repo, 'zaalis-browser', 'app');
 
 const FILES = [
   'main.js',
+  'preload-chrome.js',
+  'preload-content.js',
   'LICENSE',
   'assets/logo-zaalis.png',
   'interface/aichat.html',
@@ -32,6 +34,7 @@ const FILES = [
   'interface/incognito.html',
   'interface/index.html',
   'interface/panel.html',
+  'src/features/index.js',
 ];
 
 const PATCHES = [
@@ -57,6 +60,24 @@ const PATCHES = [
     name: 'pas de réserve pour les boutons de fenêtre',
     find: '    chromeView.webContents.insertCSS(`',
     replace: '    if (!process.env.ZAALIS_BROWSER_EMBEDDED) chromeView.webContents.insertCSS(`',
+  },
+  {
+    name: 'signaler le mode embarqué au panneau',
+    find: "    ...featureState('panel'),",
+    replace: "    ...featureState('panel'),\n    embedded: !!process.env.ZAALIS_BROWSER_EMBEDDED,",
+  },
+  {
+    name: 'charger les modules compatibles avec la session embarquée',
+    from: '  let list = [];\n  try { list = require(\'./src/features\');',
+    to: "      const mod = require('./src/features/' + name);",
+    replace: [
+      "  const embeddedModules = new Set(['tabgroups', 'crashes', 'safebrowsing', 'translate', 'reader', 'qrcode', 'cast']);",
+      "  const modules = require('./src/features');",
+      '  for (const [name, load] of Object.entries(modules)) {',
+      '    if (process.env.ZAALIS_BROWSER_EMBEDDED && !embeddedModules.has(name)) continue;',
+      '    try {',
+      '      const mod = load();',
+    ].join('\n'),
   },
   {
     name: 'photo de profil recadrée par l’hôte natif',
@@ -88,6 +109,23 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
+function packagedFeatures(text) {
+  const names = [...text.matchAll(/^\s*'([a-z]+)',/gm)].map(match => match[1]);
+  if (!names.includes('tabgroups')) throw new Error('Index des modules du navigateur introuvable.');
+  return 'module.exports = {\n' + names.map(name => `  ${name}: () => require('./${name}'),\n`).join('') + '};\n';
+}
+
+function embeddedPanel(text) {
+  const marker = '    state = d || state;';
+  if (text.split(marker).length !== 2) throw new Error('Point d’insertion du panneau embarqué introuvable.');
+  return text.replace(marker, `${marker}
+    for (const row of document.querySelectorAll('[data-internal="extensions"], [data-internal="passwords"], [data-internal="import"], [data-internal="sync"], [data-internal="languages"], [data-internal="about"], #open-taskmanager')) {
+      row.style.display = state.embedded ? 'none' : '';
+    }
+    const performance = document.getElementById('perf-menu-hint');
+    if (performance) performance.closest('.menu-row').style.display = state.embedded ? 'none' : '';`);
+}
+
 function git(args) {
   try { return execFileSync('git', args, { cwd: source, encoding: 'utf8' }).trim(); }
   catch { return ''; }
@@ -106,7 +144,7 @@ function main() {
     patches: PATCHES.map((patch) => patch.name),
     files: {},
   };
-  fs.rmSync(target, { recursive: true, force: true });
+  const staged = new Map();
   for (const file of FILES) {
     const from = path.join(source, file);
     let data = fs.readFileSync(from);
@@ -130,10 +168,34 @@ function main() {
       }
       data = Buffer.from(text, 'utf8');
     }
+    if (file === 'interface/panel.html') data = Buffer.from(embeddedPanel(data.toString('utf8')));
+    if (file === 'src/features/index.js') data = Buffer.from(packagedFeatures(data.toString('utf8')));
+    staged.set(file, data);
+  }
+  fs.rmSync(target, { recursive: true, force: true });
+  // The current browser splits its agent, search and Chrome-level features
+  // out of main.js. Those modules and the extra zaalis:// pages have to travel
+  // with the vendored copy or the integrated browser cannot boot.
+  for (const dir of ['src', 'assets']) {
+    const from = path.join(source, dir);
+    if (!fs.existsSync(from)) continue;
+    fs.cpSync(from, path.join(target, dir), { recursive: true });
+  }
+  for (const [file, data] of staged) {
     const to = path.join(target, file);
     fs.mkdirSync(path.dirname(to), { recursive: true });
     fs.writeFileSync(to, data);
     manifest.files[file] = sha256(data);
+  }
+  const interfaceDir = path.join(source, 'interface');
+  if (fs.existsSync(interfaceDir)) {
+    for (const name of fs.readdirSync(interfaceDir)) {
+      const from = path.join(interfaceDir, name);
+      const to = path.join(target, 'interface', name);
+      if (!fs.statSync(from).isFile() || fs.existsSync(to)) continue;
+      fs.copyFileSync(from, to);
+      manifest.files[`interface/${name}`] = sha256(fs.readFileSync(to));
+    }
   }
   fs.writeFileSync(path.join(target, 'UPSTREAM.json'), JSON.stringify(manifest, null, 2) + '\n');
   console.log(`zaalis Browser ${manifest.commit.slice(0, 7) || '(hors git)'} synchronisé dans ${path.relative(repo, target)}` +

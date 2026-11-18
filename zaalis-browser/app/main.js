@@ -1,30 +1,48 @@
 /* =============================================================================
- *  zaalis browser — port macOS (Electron)
+ *  zaalis browser — Windows / macOS (Electron for Content Security)
  * -----------------------------------------------------------------------------
  *  Reproduit le comportement du navigateur natif Windows :
  *   - Fenêtre unique avec chrome custom (chrome.html) en haut, contenu par onglet
  *     en dessous (WebContentsView par onglet, seul l'actif visible).
  *   - Page d'accueil zaalis (index.html) via protocole zaalis://.
  *   - Panneau latéral droit (panel.html) pour paramètres / historique.
- *   - Favoris, historique, raccourcis, réglages persistés dans
- *     ~/Library/Application Support/zaalis browser/.
+ *   - Favoris, historique, raccourcis, réglages persistés dans le dossier
+ *     de données de l'app (%APPDATA%\zaalis browser sous Windows).
  *   - API locale HTTP sur 127.0.0.1:8715 (search / open / newtab).
  *   - Bus de messages entre chrome/panel et le main via IPC, compatible avec
  *     le protocole 'action\x1farg' des pages HTML d'origine.
+ *   - Widevine (Prime Video, Netflix, Disney+…) via le build castlabs ECS.
  * =========================================================================== */
 
 'use strict';
 
+const electron = require('electron');
 const {
-  app, BaseWindow, WebContentsView, ipcMain, Menu, shell,
-  protocol, net, session, nativeImage, dialog
-} = require('electron');
+  app, BaseWindow, BrowserWindow, WebContentsView, ipcMain, Menu, shell,
+  protocol, net, session, nativeImage, dialog, clipboard, desktopCapturer,
+  safeStorage, screen
+} = electron;
+// API propre au build castlabs (Widevine). Absente d'un Electron standard.
+const components = electron.components || null;
+
+// Version installée : les variables d'environnement réservées aux tests
+// (profil jetable, contournement de Windows Hello, sources de listes, flux de
+// mise à jour en http…) sont ignorées. Fait avant tout chargement de module.
+if (electron.app.isPackaged) {
+  for (const k of ['ZAALIS_E2E', 'ZAALIS_E2E_DIR', 'ZAALIS_IMPORT_ROOTS', 'ZAALIS_SB_SOURCES', 'ZAALIS_UPDATE_FORCE', 'ZAALIS_AGENT_SELFTEST', 'ZAALIS_SELFTEST_SUBMODEL']) delete process.env[k];
+}
 const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
 const http = require('http');
 const url  = require('url');
 const crypto = require('crypto');
+
+// Blocs autonomes extraits dans src/core/ (scripts injectés, catalogue IA…).
+const { TOOL_RESULT_MAX, A11Y_TREE_MAX, AGENT_SYSTEM, parseToolCall, toolLabel, clampResult, a11ySnapshotJs, resolveTargetJs, AGENT_OVERLAY_JS, FOCUS_SELECT_JS, READ_VALUE_JS, legacyFillJs, DISPATCH_CHANGE_JS, parseModifiers, KEY_ALIASES, keyCodeFor, stripHtml, findElementsJs, PAGE_TEXT_JS, formInputJs, waitForJs, agentUrl, TRANSLATE_EXTRACT_JS, MEDIA_STATE_JS, mediaCommandJS } = require('./src/core/page-scripts');
+const { AI_PROVIDER_GROUPS, AI_PROVIDERS, AI_MODEL_LABELS, GST, WORK_APPS } = require('./src/core/ai-catalog');
+const { describeNetError, wrappedLinkTarget, UNREACHABLE_NET_ERRORS } = require('./src/core/net-errors');
+const { decodeEntities, stripTags, parseDuckDuckGo, dedupeResults, fallbackResults, buildOverview } = require('./src/core/search-parse');
 
 // ----- Constantes ------------------------------------------------------------
 
@@ -34,10 +52,20 @@ const PANEL_URL  = 'zaalis://home/panel.html';
 const SEP        = '\x1f';
 const API_PORT   = 8715;
 const PANEL_WIDTH = 340;
-// Au retour sur un onglet web laisse en arriere-plan, on revalide la page
-// apres ce delai. Cela rend visibles les publications/deploiements recents
-// sans vider la session (cookies, connexion et formulaires restent intacts).
+// Au retour sur un onglet de serveur de développement local (localhost…)
+// laissé en arrière-plan, on revalide la page après ce délai pour voir la
+// dernière version publiée par l'IDE. Jamais pour les sites ordinaires :
+// comme dans Chrome, une vidéo en pause, un formulaire ou une conversation
+// doivent retrouver exactement leur état au retour sur l'onglet.
 const STALE_TAB_REFRESH_MS = 4000;
+
+function isLocalDevUrl(u) {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.test') ||
+           h === '127.0.0.1' || h === '[::1]' || h === '::1';
+  } catch { return false; }
+}
 
 // ----- État global -----------------------------------------------------------
 
@@ -80,6 +108,9 @@ const settings = {
   blockPopups:    false,
   contextMenus:   true,
   devTools:       true,
+  devToolsDock:   'right',   // right | bottom | window (fenêtre séparée)
+  devToolsWidth:  520,
+  devToolsHeight: 320,
   statusBar:      true,
   zoomControls:   true,
   restoreTabs:    false,
@@ -97,43 +128,6 @@ const settings = {
   aiConnectEnabled: true,
 };
 
-// Providers + sous-modeles disponibles pour la recherche/chat IA.
-// Miroir du catalogue de zaalis labs ide (interface/script/state.js) : le
-// navigateur envoie { model: provider, submodel } au serveur IDE local.
-// Miroir fidèle du catalogue de zaalis labs ide (interface/script/state.js).
-// « local » (Ollama) et « gguf » (llama.cpp) sont des listes ouvertes : leur
-// contenu réel est récupéré en direct auprès du serveur IDE (voir
-// refreshLocalModels + aiProvidersSnapshot), si bien qu'un modèle Ollama ou un
-// fichier .gguf ajouté côté IDE apparaît automatiquement ici.
-const AI_PROVIDERS = {
-  codex:  { label: 'ChatGPT (OpenAI)',   submodels: ['gpt-5.6-sol','gpt-5.6-terra','gpt-5.6-luna','gpt-5.5','gpt-5.4','gpt-5.4-mini','gpt-5.4-nano','gpt-5.2','gpt-5.1','o3-mini','o1','gpt-4o-mini','gpt-3.5-turbo','gpt-4'] },
-  claude: { label: 'Claude (Anthropic)', submodels: ['claude-fable-5','claude-opus-4-8','claude-sonnet-5','claude-haiku-4-5'] },
-  gemini: { label: 'Gemini (Google)',    submodels: ['gemini-3.5-flash','gemini-3.1-pro-preview','gemini-3.1-flash-lite','gemini-3-flash-preview','gemini-2.5-pro','gemini-2.5-flash','gemini-2.5-flash-lite'] },
-  grok:   { label: 'Grok (xAI)',         submodels: ['grok-4.5','grok-4.3','grok-4.20-multi-agent-0309','grok-4.20-0309-reasoning','grok-4.20-0309-non-reasoning','grok-build-0.1','grok-imagine-image-quality','grok-imagine-image'] },
-  mistral:{ label: 'Mistral',            submodels: ['mistral-medium-3-5','mistral-small-latest','mistral-large-latest','ministral-14b-2512','ministral-8b-2512','ministral-3b-2512','codestral-latest'] },
-  kimi:   { label: 'Kimi (Moonshot AI)', submodels: ['kimi-k3','kimi-k2.7-code','kimi-k2.7-code-highspeed','kimi-k2.6'] },
-  local:  { label: 'Local (Ollama)',     submodels: ['qwen3:8b','llama3.2','gemma3:4b','deepseek-r1:8b','qwen2.5-coder:7b'] },
-  gguf:   { label: 'GGUF (llama.cpp)',   submodels: [] },
-};
-const AI_MODEL_LABELS = {
-  'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
-  'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
-  'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
-  'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-  'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5',
-  'claude-haiku-4-5': 'Claude Haiku 4.5',
-  'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
-  'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
-  'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
-  'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
-  'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-  'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
-  'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
-  'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
-  'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
-  'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
-  'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6',
-};
 // Modèles locaux vivants récupérés du serveur IDE (Ollama installés + .gguf
 // présents). Remplacent les valeurs par défaut ci-dessus dès qu'ils sont connus.
 let liveOllamaModels = [];
@@ -146,7 +140,7 @@ function aiProvidersSnapshot() {
     let submodels = p.submodels;
     if (k === 'local' && liveOllamaModels.length) submodels = liveOllamaModels.slice();
     else if (k === 'gguf') submodels = liveGgufModels.slice();
-    out[k] = { label: p.label, submodels };
+    out[k] = { label: p.label, group: p.group, hint: p.hint || '', submodels };
   }
   return out;
 }
@@ -167,29 +161,6 @@ let shortcuts = [];   // { url, title } — home page tiles
 let history   = [];   // { url, title }
 
 // ----- Lanceur d'applications (facon Google) --------------------------------
-// Deux modes par profil : « travail » = grille preremplie d'apps Google (icones
-// via favicon, non modifiable) ; « creatif » = raccourcis ajoutes/supprimes par
-// l'utilisateur. Persiste par profil dans launcher.json.
-// Icones officielles Google chargees EN DIRECT depuis gstatic (pas embarquees
-// dans l'app -> usage nominatif comme une favicon, pas de redistribution).
-// `icon` vide => repli favicon cote UI (les favicons de ces domaines sont deja
-// correctes : YouTube, Gemini, Maps, Actualites...).
-const GST = 'https://www.gstatic.com/images/branding/product/2x/';
-const WORK_APPS = [
-  { url: 'https://myaccount.google.com', title: 'Compte',     icon: GST + 'googleg_48dp.png' },
-  { url: 'https://drive.google.com',     title: 'Drive',      icon: GST + 'drive_2020q4_48dp.png' },
-  { url: 'https://mail.google.com',      title: 'Gmail',      icon: GST + 'gmail_2020q4_48dp.png' },
-  { url: 'https://www.youtube.com',      title: 'YouTube',    icon: GST + 'youtube_48dp.png' },
-  { url: 'https://gemini.google.com',    title: 'Gemini',     icon: '' },
-  { url: 'https://maps.google.com',      title: 'Maps',       icon: '' },
-  { url: 'https://www.google.com',       title: 'Recherche',  icon: GST + 'googleg_48dp.png' },
-  { url: 'https://calendar.google.com',  title: 'Agenda',     icon: GST + 'calendar_2020q4_48dp.png' },
-  { url: 'https://news.google.com',      title: 'Actualités', icon: '' },
-  { url: 'https://photos.google.com',    title: 'Photos',     icon: GST + 'photos_48dp.png' },
-  { url: 'https://meet.google.com',      title: 'Meet',       icon: GST + 'meet_2020q4_48dp.png' },
-  { url: 'https://translate.google.com', title: 'Traduction', icon: 'https://ssl.gstatic.com/images/branding/product/2x/translate_24dp.png' },
-  { url: 'https://docs.google.com',      title: 'Docs',       icon: GST + 'docs_2020q4_48dp.png' },
-];
 let launcherMode = 'travail';   // 'travail' | 'creatif'
 let launcherApps = [];          // mode creatif : { url, title }
 
@@ -389,10 +360,37 @@ function profileDataDir() {
   return d;
 }
 
+// ----- Fichiers locaux chiffrés ---------------------------------------------
+// Historique, favoris, onglets à restaurer, téléchargements, autorisations et
+// conversations IA sont chiffrés sur disque avec la clé du compte Windows
+// (DPAPI, via safeStorage) — la même protection que les cookies. Un fichier
+// copié hors de la session de l'utilisateur est illisible. Les anciens
+// fichiers en clair sont relus tels quels puis chiffrés à la prochaine écriture.
+const SEAL_PREFIX = 'ZSEAL1:';
+function sealAvailable() {
+  try { return app.isReady() && safeStorage.isEncryptionAvailable(); } catch { return false; }
+}
+function sealWrite(file, text) {
+  let out = String(text);
+  if (sealAvailable()) {
+    try { out = SEAL_PREFIX + safeStorage.encryptString(out).toString('base64'); } catch {}
+  }
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, out, 'utf8');
+  fs.renameSync(tmp, file);   // écriture atomique
+}
+function sealRead(file) {
+  const raw = fs.readFileSync(file, 'utf8');
+  if (!raw.startsWith(SEAL_PREFIX)) return raw;
+  return safeStorage.decryptString(Buffer.from(raw.slice(SEAL_PREFIX.length), 'base64'));
+}
+
 function readTsv(name) {
   const p = path.join(profileDataDir(), name);
   if (!fs.existsSync(p)) return [];
-  return fs.readFileSync(p, 'utf8').split(/\r?\n/).map(l => {
+  let text = '';
+  try { text = sealRead(p); } catch { return []; }
+  return text.split(/\r?\n/).map(l => {
     const t = l.indexOf('\t');
     if (t < 0) return null;
     const url = l.slice(0, t), title = l.slice(t + 1);
@@ -402,7 +400,7 @@ function readTsv(name) {
 
 function writeTsv(name, list) {
   const p = path.join(profileDataDir(), name);
-  fs.writeFileSync(p, list.map(e => e.url + '\t' + (e.title || '')).join('\n'), 'utf8');
+  sealWrite(p, list.map(e => e.url + '\t' + (e.title || '')).join('\n'));
 }
 
 // ----- Lanceur : persistance par profil -------------------------------------
@@ -434,7 +432,7 @@ let saveTabsTimer = null;
 function tabUrlForSession(t) {
   if (t.incognito) return '';   // la navigation privée n'est jamais persistée
   try {
-    const u = t.view.webContents.getURL() || '';
+    const u = (t.discarded ? t.discarded.url : t.view.webContents.getURL()) || '';
     return isInternal(u) ? '' : u;
   } catch { return ''; }
 }
@@ -442,7 +440,7 @@ function saveOpenTabsNow() {
   if (!settings.restoreTabs) return;
   try {
     const urls = tabs.map(tabUrlForSession);
-    fs.writeFileSync(sessionTabsFile(), JSON.stringify({ active, urls }), 'utf8');
+    sealWrite(sessionTabsFile(), JSON.stringify({ active, urls, ...featureState('session') }));
   } catch {}
 }
 function scheduleSaveOpenTabs() {
@@ -452,9 +450,9 @@ function scheduleSaveOpenTabs() {
 }
 function loadSessionTabs() {
   try {
-    const d = JSON.parse(fs.readFileSync(sessionTabsFile(), 'utf8'));
+    const d = JSON.parse(sealRead(sessionTabsFile()));
     const urls = Array.isArray(d.urls) ? d.urls.map(u => String(u || '')).slice(0, 40) : [];
-    return { active: Math.max(0, Math.min(urls.length - 1, parseInt(d.active, 10) || 0)), urls };
+    return { active: Math.max(0, Math.min(urls.length - 1, parseInt(d.active, 10) || 0)), urls, data: d };
   } catch { return null; }
 }
 function clearSessionTabs() {
@@ -499,6 +497,9 @@ function loadSettings() {
       else if (k === 'blockPopups')            settings.blockPopups = v === '1';
       else if (k === 'contextMenus')           settings.contextMenus = v !== '0';
       else if (k === 'devTools')               settings.devTools = v !== '0';
+      else if (k === 'devToolsDock')           settings.devToolsDock = ['right', 'bottom', 'window'].includes(v) ? v : 'right';
+      else if (k === 'devToolsWidth')          settings.devToolsWidth = Math.max(DEVTOOLS_MIN, parseInt(v, 10) || 520);
+      else if (k === 'devToolsHeight')         settings.devToolsHeight = Math.max(DEVTOOLS_MIN, parseInt(v, 10) || 320);
       else if (k === 'statusBar')              settings.statusBar = v !== '0';
       else if (k === 'zoomControls')           settings.zoomControls = v !== '0';
       else if (k === 'restoreTabs')            settings.restoreTabs = v === '1';
@@ -539,6 +540,9 @@ function saveSettings() {
     `blockPopups=${settings.blockPopups ? 1 : 0}`,
     `contextMenus=${settings.contextMenus ? 1 : 0}`,
     `devTools=${settings.devTools ? 1 : 0}`,
+    `devToolsDock=${settings.devToolsDock}`,
+    `devToolsWidth=${settings.devToolsWidth}`,
+    `devToolsHeight=${settings.devToolsHeight}`,
     `statusBar=${settings.statusBar ? 1 : 0}`,
     `zoomControls=${settings.zoomControls ? 1 : 0}`,
     `restoreTabs=${settings.restoreTabs ? 1 : 0}`,
@@ -579,6 +583,10 @@ function allowedPageUrl(raw, allowInternal) {
     const u = new URL(String(raw || '').trim());
     if (u.protocol === 'http:' || u.protocol === 'https:') return u.toString();
     if (allowInternal && isAllowedInternalUrl(u.toString())) return u.toString();
+    // Fichier local ouvert depuis Windows (ligne de commande) : jamais depuis une page.
+    if (allowInternal && u.protocol === 'file:' && trustedFileUrls.has(u.href)) return u.href;
+    // Pages d'extension (options, onglets ouverts par chrome.tabs.create).
+    if (u.protocol === 'chrome-extension:' && featureUrlAllowed(u.href)) return u.href;
   } catch {}
   return null;
 }
@@ -586,6 +594,9 @@ function allowedPageUrl(raw, allowInternal) {
 function resolveQuery(q) {
   q = (q || '').trim();
   if (!q) return HOME_URL;
+  const alias = internalAlias(q);
+  if (alias) return alias;
+  if (trustedFileUrls.has(q)) return q;
   if (isAllowedInternalUrl(q)) return q;
   // Les URL saisies ne peuvent ouvrir que des pages web. Les autres schémas
   // (javascript:, data:, file:, etc.) deviennent une recherche ordinaire.
@@ -612,8 +623,20 @@ function resolveQuery(q) {
 // libelle et la synthese. Aucune cle secrete n'est embarquee : la synthese est
 // construite localement a partir des extraits des sources.
 
-const AI_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-              '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+// User-Agent identique à celui de Google Chrome (version réduite « 150.0.0.0 »).
+// L'UA par défaut d'Electron contient « zaalisbrowser/x » et « Electron/x » :
+// Google refuse alors la connexion (« navigateur non sécurisé ») et des sites
+// comme Prime Video, Netflix ou WhatsApp Web servent une page d'incompatibilité.
+function chromeUserAgent() {
+  const major = String(process.versions.chrome || '150').split('.')[0];
+  const platform = process.platform === 'darwin' ? 'Macintosh; Intel Mac OS X 10_15_7'
+                 : process.platform === 'win32'  ? 'Windows NT 10.0; Win64; x64'
+                 : 'X11; Linux x86_64';
+  return `Mozilla/5.0 (${platform}) AppleWebKit/537.36 (KHTML, like Gecko) ` +
+         `Chrome/${major}.0.0.0 Safari/537.36`;
+}
+
+const AI_UA = chromeUserAgent();
 
 function httpGet(urlStr, headers) {
   return new Promise((resolve, reject) => {
@@ -674,7 +697,7 @@ let ideStatusTimer = null;
 
 // Valeurs de repli affichées avant le premier contact avec l'IDE. Dès que
 // l'IDE répond, cette liste est remplacée par les voix réellement disponibles
-// sur ce Mac, sans redémarrer le navigateur.
+// sur cet ordinateur, sans redémarrer le navigateur.
 
 function setIdeStatus(status, message) {
   if (ideStatus === status && ideStatusMessage === (message || '')) return;
@@ -723,7 +746,7 @@ async function refreshIdeStatus(force) {
     if (!settings.aiConnectEnabled) { setIdeStatus('disabled'); return; }
     if (settings.offline)            { setIdeStatus('offline');  return; }
     const secret = ideSecret();
-    // Aucun secret : l'IDE n'a jamais ete lance sur ce Mac.
+    // Aucun secret : l'IDE n'a jamais ete lance sur cet ordinateur.
     if (!secret) { setIdeStatus('unreachable', 'zaalis labs ide n\'est pas installé ou n\'a jamais été lancé.'); return; }
     // 1) L'IDE est-il joignable ? /api/auth/me est public.
     let alive;
@@ -809,13 +832,15 @@ function idePost(pathname, body, timeoutMs) {
 }
 
 // Appel chat au modèle choisi dans les réglages. Retourne { response, thinking }.
-async function ideChat({ message, systemPrompt, history: turns, timeoutMs, provider, submodel }) {
+async function ideChat({ message, systemPrompt, history: turns, timeoutMs, provider, submodel, images }) {
   const data = await idePost('/api/chat', {
     model: provider || settings.aiProvider,
     submodel: submodel || settings.aiSubmodel,
     message,
     systemPrompt: systemPrompt || '',
     history: Array.isArray(turns) ? turns : [],
+    // Captures d'écran de l'agent (vision) : [{ mime, data(base64) }].
+    images: Array.isArray(images) ? images : [],
   }, timeoutMs);
   const text = String(data.response || '').trim();
   if (!text) throw new Error('empty-response');
@@ -824,37 +849,6 @@ async function ideChat({ message, systemPrompt, history: turns, timeoutMs, provi
   return { response: text, thinking: String(data.thinking || '') };
 }
 
-function decodeEntities(s) {
-  return String(s)
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&#x27;/gi, "'")
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&#(\d+);/g, (_m, d) => { try { return String.fromCharCode(parseInt(d, 10)); } catch { return _m; } });
-}
-
-function stripTags(s) { return decodeEntities(String(s).replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim(); }
-
-function parseDuckDuckGo(html) {
-  const results = [];
-  // Bloc par resultat : de result__a (lien+titre) a la fin du snippet.
-  const blockRe = /<a[^>]*class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>([\s\S]*?)(?=<a[^>]*class="[^"]*result__a|<\/html>|$)/g;
-  let m;
-  while ((m = blockRe.exec(html)) && results.length < 10) {
-    let href = m[1];
-    const uddg = href.match(/[?&]uddg=([^&]+)/);
-    if (uddg) { try { href = decodeURIComponent(uddg[1]); } catch {} }
-    else if (href.startsWith('//')) href = 'https:' + href;
-    if (!/^https?:\/\//i.test(href)) continue;
-    // Ecarte les publicites DuckDuckGo (redirections y.js / ad_domain).
-    if (/duckduckgo\.com\/y\.js/i.test(href) || /[?&]ad_domain=/i.test(href)) continue;
-    const title = stripTags(m[2]);
-    if (!title) continue;
-    const sn = m[3].match(/class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/);
-    const snippet = sn ? stripTags(sn[1]) : '';
-    results.push({ url: href, title, snippet });
-  }
-  return results;
-}
 
 // Repli 1 : API JSON DuckDuckGo (pas de captcha). Fournit un resume "Abstract"
 // et des sujets connexes. On l'utilise quand le scraping HTML est bloque.
@@ -916,30 +910,6 @@ async function fetchSuggest(q) {
   return [];
 }
 
-// Deduplique par URL en preservant l'ordre.
-function dedupeResults(list) {
-  const seen = new Set(), out = [];
-  for (const r of list) { if (r && r.url && !seen.has(r.url)) { seen.add(r.url); out.push(r); } }
-  return out;
-}
-
-// Resultats de repli quand le reseau echoue : liens vers les moteurs reels.
-function fallbackResults(q) {
-  const e = encodeURIComponent(q);
-  return [
-    { url: 'https://www.google.com/search?q=' + e,  title: 'Rechercher « ' + q + ' » sur Google',     snippet: 'Ouvrir les resultats Google pour cette requete.' },
-    { url: 'https://duckduckgo.com/?q=' + e,         title: 'Rechercher « ' + q + ' » sur DuckDuckGo', snippet: 'Ouvrir les resultats DuckDuckGo pour cette requete.' },
-    { url: 'https://en.wikipedia.org/w/index.php?search=' + e, title: 'Wikipedia — ' + q,               snippet: 'Chercher un article encyclopedique correspondant.' },
-  ];
-}
-
-function buildOverview(q, results) {
-  const parts = results.slice(0, 3).map(r => r.snippet).filter(Boolean);
-  let txt = parts.join(' ');
-  if (txt.length > 620) txt = txt.slice(0, 620).replace(/\s+\S*$/, '') + '…';
-  if (!txt) txt = 'Voici les resultats les plus pertinents trouves pour « ' + q +' ».';
-  return txt;
-}
 
 // Navigation d'une requete IA : URL directe -> navigation normale ;
 // sinon on ouvre la page de resultats interne (la requete voyage via le hash).
@@ -1016,8 +986,9 @@ async function runAiSearch(q, sender) {
   }
 }
 
+
 // Page d'erreur maison (chargée quand une navigation échoue).
-function errorPageHtml(u, code, desc) {
+function errorPageHtml(u, code, desc, override) {
   let host = u;
   try { host = new URL(u).host || u; } catch {}
   const dark = settings.theme === 'dark';
@@ -1025,20 +996,25 @@ function errorPageHtml(u, code, desc) {
   const fg   = dark ? '#e8eaed' : '#202124';
   const mut  = dark ? '#9aa0a6' : '#5f6368';
   const accent = dark ? '#8ab4f8' : '#1a73e8';
-  // Petite table code -> libellé
-  const knownCodes = {
-    '-105': 'DNS_INTROUVABLE',
-    '-106': 'CONNEXION_INTERROMPUE',
-    '-109': 'ADRESSE_INJOIGNABLE',
-    '-137': 'DNS_INTROUVABLE',
-    '-118': 'DELAI_DE_CONNEXION_DEPASSE',
-    '-501': 'CERTIFICAT_NON_VALIDE',
-    '-200': 'CERTIFICAT_NON_VALIDE',
-  };
-  const shortCode = knownCodes[String(code)] || `ERREUR_${code}`;
-  const encHost = String(host).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
-  const encUrl  = String(u).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
-  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>Page inaccessible</title>
+  const esc = s => String(s).replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+  const encHost = esc(host);
+  const encUrl  = esc(u);
+  const [shortCode, title, message] = override || describeNetError(code, encHost);
+  // « Réessayer » recharge l'adresse d'origine : un simple location.reload()
+  // rechargerait la page d'erreur elle-même (document data:).
+  const retry = /^https?:/i.test(String(u)) ? JSON.stringify(String(u)).replace(/</g, '\\u003c') : 'null';
+  // Lien Safe Links injoignable : accès direct à la destination, sauf si elle
+  // est signalée comme dangereuse.
+  let direct = (!override && UNREACHABLE_NET_ERRORS.has(Number(code))) ? wrappedLinkTarget(u) : null;
+  if (direct && safeBrowsingVerdict(direct)) direct = null;
+  let directHost = '';
+  try { if (direct) directHost = new URL(direct).host; } catch {}
+  const directJs = direct ? JSON.stringify(direct).replace(/</g, '\\u003c') : 'null';
+  const directNote = direct
+    ? `<p>Ce lien passe par le filtre Microsoft Safe Links, injoignable depuis votre réseau. Sa destination réelle est <code>${esc(directHost)}</code> : vous pouvez l'ouvrir directement, sans la vérification de Microsoft. Ne continuez que si vous faites confiance à l'expéditeur.</p>`
+    : '';
+  const directBtn = direct ? `<button id="direct">Ouvrir ${esc(directHost)}</button>` : '';
+  return `<!DOCTYPE html><html lang="fr"><head><meta charset="utf-8"><title>${esc(title)}</title>
 <style>
   html,body{margin:0;height:100%;background:${bg};color:${fg};font-family:-apple-system,"Segoe UI",Arial,sans-serif;}
   .wrap{max-width:640px;margin:0 auto;padding:96px 32px;}
@@ -1051,14 +1027,23 @@ function errorPageHtml(u, code, desc) {
   .details{margin-top:36px;font-size:13px;color:${mut};}
   .details b{color:${fg};font-weight:600;}
 </style></head><body><div class="wrap">
-  <h1>Ce site est inaccessible</h1>
-  <p>Vérifiez que l'adresse <code>${encHost}</code> est correcte.</p>
+  <h1>${esc(title)}</h1>
+  <p>${message}</p>
+  ${directNote}
   <div class="actions">
-    <button onclick="location.reload()">Réessayer</button>
-    <button class="ghost" onclick="history.back()">Retour</button>
+    ${directBtn}
+    <button${direct ? ' class="ghost"' : ''} id="retry">Réessayer</button>
+    <button class="ghost" id="back">Retour</button>
   </div>
-  <div class="details"><b>${shortCode}</b><br>${encUrl}</div>
-</div></body></html>`;
+  <div class="details"><b>${esc(shortCode)}</b><br>${encUrl}</div>
+</div><script>
+  const target = ${retry};
+  document.getElementById('retry').onclick = () => { if (target) location.href = target; else location.reload(); };
+  document.getElementById('back').onclick = () => history.back();
+  const direct = ${directJs};
+  const directBtn = document.getElementById('direct');
+  if (directBtn && direct) directBtn.onclick = () => { location.href = direct; };
+</script></body></html>`;
 }
 
 function activeTab() { return active >= 0 ? tabs[active] : null; }
@@ -1082,12 +1067,46 @@ function removeHistoryUrl(u) {
 
 // ----- Layout ---------------------------------------------------------------
 
+// Plein écran : vidéo HTML5 (YouTube, Prime Video…) ou F11. Comme Chrome, la
+// barre d'onglets et d'outils disparaît et la page occupe tout l'écran.
+let htmlFullscreenTabId = null;
+
+function fullscreenTab() {
+  if (htmlFullscreenTabId == null) return null;
+  const t = tabs.find(x => x.id === htmlFullscreenTabId);
+  if (!t || t.view.webContents.isDestroyed()) { htmlFullscreenTabId = null; return null; }
+  return t;
+}
+
+function windowFullscreen() {
+  try { return !!(mainWin && mainWin.isFullScreen()); } catch { return false; }
+}
+
 function layoutAll() {
   if (!mainWin || !chromeView) return;
   const [w, h] = mainWin.getContentSize();
-  chromeView.setBounds({ x: 0, y: 0, width: w, height: chromeHeight });
 
-  const bodyTop = contentTop;
+  const fsTab = fullscreenTab();
+  if (fsTab) {
+    // Seul l'onglet en plein écran reste visible, sur toute la fenêtre.
+    chromeView.setVisible(false);
+    for (const t of tabs) {
+      if (t === fsTab) { t.view.setBounds({ x: 0, y: 0, width: w, height: h }); t.view.setVisible(true); hideDevViews(t); }
+      else hideTab(t);
+    }
+    if (panelView && panelViewVisible) panelView.setVisible(false);
+    if (aiPanelView && aiPanelVisible) aiPanelView.setVisible(false);
+    if (findView) findView.setVisible(false);
+    return;
+  }
+
+  const immersive = windowFullscreen();     // F11 : pas de barre, comme Chrome
+  chromeView.setVisible(!immersive);
+  chromeView.setBounds({ x: 0, y: 0, width: w, height: chromeHeight });
+  if (panelView && panelViewVisible) panelView.setVisible(true);
+  if (aiPanelView && aiPanelVisible) aiPanelView.setVisible(true);
+
+  const bodyTop = immersive ? 0 : contentTop;
   const bodyHeight = Math.max(0, h - bodyTop);
   // Le chat IA est un panneau ancré : sa largeur est réservée à droite
   // dès son ouverture. Ainsi, les pages (et les vues fractionnées) se
@@ -1106,24 +1125,203 @@ function layoutAll() {
       // La vue de droite deborde d'1px sous celle de gauche : sans ce
       // recouvrement, le fond de fenetre transparait sur le joint sub-pixel
       // (trait noir). Chrome n'a aucune demarcation -> on l'imite.
-      t.view.setBounds({
+      placeTab(t, {
         x: isLeft ? 0 : half - 1,
         y: bodyTop,
         width: isLeft ? half : Math.max(0, bodyWidth - half + 1),
         height: bodyHeight,
       });
-      t.view.setVisible(true);
     } else if (!pair && i === active) {
-      t.view.setBounds({ x: 0, y: bodyTop, width: bodyWidth, height: bodyHeight });
-      t.view.setVisible(true);
+      placeTab(t, { x: 0, y: bodyTop, width: bodyWidth, height: bodyHeight });
     } else {
-      t.view.setVisible(false);
+      hideTab(t);
     }
   }
 
   layoutPanel();
 
   layoutAiPanel();
+
+  layoutFindBar(bodyTop, bodyWidth);
+}
+
+// ----- Outils de développement ancrés (F12) ---------------------------------
+// Comme Chrome : F12 ouvre les DevTools dans la fenêtre, à droite ou en bas de
+// la page, avec une poignée pour les redimensionner. Chaque onglet a les siens
+// (tab.dev = { view, grip, rect }). Clic droit sur la poignée : choix de
+// l'ancrage (droite, bas, fenêtre séparée).
+const DEVTOOLS_MIN = 160;
+const DEVTOOLS_GRIP = 5;
+const DEVGRIP_URL = 'zaalis://home/devgrip.html';
+
+function hideDevViews(t) {
+  if (!t.dev) return;
+  try { t.dev.view.setVisible(false); t.dev.grip.setVisible(false); } catch {}
+}
+function hideTab(t) {
+  t.view.setVisible(false);
+  hideDevViews(t);
+}
+// Place un onglet dans `rect` en réservant, s'ils sont ouverts, la zone des
+// outils de développement et de leur poignée.
+// Découpe le rectangle de l'onglet entre la page, la poignée et les outils (à droite ou en bas).
+function devToolsLayout(rect) {
+  const bottom = settings.devToolsDock === 'bottom';
+  const total = bottom ? rect.height : rect.width;
+  const wanted = bottom ? settings.devToolsHeight : settings.devToolsWidth;
+  // La page garde toujours une zone visible, les outils aussi.
+  const size = Math.max(0, Math.min(Math.max(DEVTOOLS_MIN, wanted), total - DEVTOOLS_MIN - DEVTOOLS_GRIP));
+  const grip = Math.min(DEVTOOLS_GRIP, Math.max(0, total - size));
+  const page = Math.max(0, total - size - grip);
+  return bottom ? {
+    page: { x: rect.x, y: rect.y, width: rect.width, height: page },
+    grip: { x: rect.x, y: rect.y + page, width: rect.width, height: grip },
+    dev:  { x: rect.x, y: rect.y + page + grip, width: rect.width, height: size },
+  } : {
+    page: { x: rect.x, y: rect.y, width: page, height: rect.height },
+    grip: { x: rect.x + page, y: rect.y, width: grip, height: rect.height },
+    dev:  { x: rect.x + page + grip, y: rect.y, width: size, height: rect.height },
+  };
+}
+function placeTab(t, rect) {
+  const d = t.dev;
+  if (!d) { t.view.setBounds(rect); t.view.setVisible(true); return; }
+  d.rect = rect;
+  const parts = devToolsLayout(rect);
+  t.view.setBounds(parts.page);
+  d.grip.setBounds(parts.grip);
+  d.view.setBounds(parts.dev);
+  t.view.setVisible(true);
+  d.grip.setVisible(true);
+  d.view.setVisible(true);
+}
+
+// Les vues d'interface restent au-dessus des onglets et de leurs outils.
+function raiseOverlays() {
+  if (!mainWin) return;
+  if (chromeView) { mainWin.contentView.addChildView(chromeView); }
+  if (panelView && panelOpen) { mainWin.contentView.addChildView(panelView); }
+  if (aiPanelView && aiPanelOpen) { mainWin.contentView.addChildView(aiPanelView); }
+  if (findView) { mainWin.contentView.addChildView(findView); }
+}
+
+function disposeDevTools(tab) {
+  const d = tab && tab.dev;
+  if (!d) return;
+  tab.dev = null;
+  for (const v of [d.view, d.grip]) {
+    try { if (mainWin) mainWin.contentView.removeChildView(v); } catch {}
+    try { if (!v.webContents.isDestroyed()) v.webContents.close(); } catch {}
+  }
+}
+
+// inspectAt : { x, y } pour « Inspecter » (sélectionne l'élément sous le curseur).
+function openDevToolsFor(tab, inspectAt) {
+  if (!tab || !mainWin) return;
+  const wc = tab.view.webContents;
+  if (wc.isDestroyed()) return;
+  const inspect = () => { if (inspectAt) { try { wc.inspectElement(inspectAt.x, inspectAt.y); } catch {} } };
+
+  if (settings.devToolsDock === 'window') {
+    if (tab.dev) { wc.once('devtools-closed', () => openDevToolsFor(tab, inspectAt)); wc.closeDevTools(); return; }
+    if (inspectAt) inspect(); else wc.openDevTools({ mode: 'detach' });
+    return;
+  }
+  if (tab.dev) { inspect(); try { tab.dev.view.webContents.focus(); } catch {} return; }
+  // Des outils ouverts en fenêtre séparée doivent d'abord être fermés : leur
+  // vue d'accueil ne peut être définie qu'avant l'ouverture.
+  if (wc.isDevToolsOpened()) { wc.once('devtools-closed', () => openDevToolsFor(tab, inspectAt)); wc.closeDevTools(); return; }
+
+  const view = new WebContentsView();
+  const grip = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-chrome.js'),
+      contextIsolation: true, nodeIntegration: false, sandbox: true,
+    },
+  });
+  lockInternalView(grip.webContents, DEVGRIP_URL);
+  grip.webContents.loadURL(DEVGRIP_URL + '?theme=' + (settings.theme === 'dark' ? 'dark' : 'light'));
+  // F12 referme les outils même quand le clavier est dans les DevTools.
+  view.webContents.on('before-input-event', (event, input) => {
+    if (input.type === 'keyDown' && input.key === 'F12' && !input.control && !input.alt && !input.meta) {
+      event.preventDefault();
+      closeDevToolsFor(tab);
+    }
+  });
+  tab.dev = { view, grip, rect: null };
+  try {
+    wc.setDevToolsWebContents(view.webContents);
+    mainWin.contentView.addChildView(view);
+    mainWin.contentView.addChildView(grip);
+    raiseOverlays();
+    wc.openDevTools({ mode: 'detach' });
+  } catch {
+    disposeDevTools(tab);
+    try { wc.openDevTools({ mode: 'detach' }); } catch {}
+    return;
+  }
+  layoutAll();
+  inspect();
+}
+
+function closeDevToolsFor(tab) {
+  if (!tab) return;
+  const wc = tab.view.webContents;
+  // « devtools-closed » retire la zone ancrée ; le retrait direct ne sert que
+  // de filet si les outils n'étaient plus ouverts.
+  // (isDevToolsOpened() vaut toujours false pour des outils ancrés dans une
+  // vue fournie par l'application : on se fie à tab.dev.)
+  const docked = tab.dev;
+  try { if (!wc.isDestroyed() && (docked || wc.isDevToolsOpened())) wc.closeDevTools(); } catch {}
+  if (docked) setTimeout(() => { if (tab.dev === docked) { disposeDevTools(tab); layoutAll(); } }, 500);
+  try { if (!wc.isDestroyed() && tab === activeTab()) wc.focus(); } catch {}
+}
+
+function devToolsShown(tab) {
+  if (!tab) return false;
+  try { return !!tab.dev || tab.view.webContents.isDevToolsOpened(); } catch { return false; }
+}
+
+function setDevToolsDock(mode, tab) {
+  if (!['right', 'bottom', 'window'].includes(mode)) return;
+  const previous = settings.devToolsDock;
+  settings.devToolsDock = mode;
+  saveSettings();
+  if (mode === 'window' || previous === 'window') { if (tab) openDevToolsFor(tab); }
+  layoutAll();
+}
+
+function tabOfDevGrip(sender) {
+  return tabs.find(t => t.dev && t.dev.grip.webContents === sender) || null;
+}
+
+// La poignée ne transmet que « je bouge » : la position vient du curseur
+// système, fiable quel que soit le facteur d'échelle de l'écran.
+function dragDevGrip(tab) {
+  if (!tab || !tab.dev || !tab.dev.rect || !mainWin) return;
+  const rect = tab.dev.rect;
+  const origin = mainWin.getContentBounds();
+  const cursor = screen.getCursorScreenPoint();
+  if (settings.devToolsDock === 'bottom') {
+    const max = Math.max(DEVTOOLS_MIN, rect.height - DEVTOOLS_MIN - DEVTOOLS_GRIP);
+    settings.devToolsHeight = Math.round(Math.max(DEVTOOLS_MIN, Math.min(max, origin.y + rect.y + rect.height - cursor.y)));
+  } else {
+    const max = Math.max(DEVTOOLS_MIN, rect.width - DEVTOOLS_MIN - DEVTOOLS_GRIP);
+    settings.devToolsWidth = Math.round(Math.max(DEVTOOLS_MIN, Math.min(max, origin.x + rect.x + rect.width - cursor.x)));
+  }
+  layoutAll();
+}
+
+function showDevGripMenu(tab) {
+  if (!tab) return;
+  const dock = settings.devToolsDock;
+  Menu.buildFromTemplate([
+    { label: 'Ancrer à droite', type: 'radio', checked: dock === 'right', click: () => setDevToolsDock('right', tab) },
+    { label: 'Ancrer en bas', type: 'radio', checked: dock === 'bottom', click: () => setDevToolsDock('bottom', tab) },
+    { label: 'Ouvrir dans une fenêtre séparée', type: 'radio', checked: dock === 'window', click: () => setDevToolsDock('window', tab) },
+    { type: 'separator' },
+    { label: 'Fermer les outils de développement', accelerator: 'F12', registerAccelerator: false, click: () => closeDevToolsFor(tab) },
+  ]).popup({ window: mainWin || undefined });
 }
 
 // Le panneau de réglages est une surcouche : son animation ne doit jamais
@@ -1176,6 +1374,7 @@ function pushState() {
       active: i === active,
       pinned: !!t.pinned,
       incognito: !!t.incognito,
+      ...featureTabState(t),
     })),
     incognito: !!(a && a.incognito),
     active: {
@@ -1206,12 +1405,15 @@ function pushState() {
     panelOpen,
     aiPanelOpen,
   };
+  Object.assign(msg, featureState('chrome'));
   chromeView.webContents.send('zaalis:message', msg);
 }
 
 function pushPanelState() {
   if (!panelView) return;
   panelView.webContents.send('zaalis:message', {
+    ...featureState('panel'),
+    embedded: !!process.env.ZAALIS_BROWSER_EMBEDDED,
     type: 'state',
     theme: settings.theme,
     searchEngine: settings.searchEngine,
@@ -1233,6 +1435,7 @@ function pushPanelState() {
     voiceSubmodel: settings.voiceSubmodel,
     aiOverview: settings.aiOverview,
     aiProviders: aiProvidersSnapshot(),
+    aiProviderGroups: AI_PROVIDER_GROUPS,
     aiModelLabels: AI_MODEL_LABELS,
     aiConnectEnabled: settings.aiConnectEnabled,
     aiStatus: ideStatus,
@@ -1306,7 +1509,7 @@ function downloadsFile() { return path.join(profileDataDir(), 'downloads.json');
 function loadDownloads() {
   downloads = [];
   try {
-    const d = JSON.parse(fs.readFileSync(downloadsFile(), 'utf8'));
+    const d = JSON.parse(sealRead(downloadsFile()));
     if (Array.isArray(d)) downloads = d.filter(x => x && x.id && x.name).slice(0, DOWNLOAD_KEEP);
   } catch {}
   // Anciennes entrees sans icone (ou fichier remplace) : on la relit du systeme.
@@ -1317,7 +1520,7 @@ function saveDownloads() {
   // On ne persiste que les elements termines : un telechargement en cours n'a
   // aucun sens apres un redemarrage.
   const done = downloads.filter(d => d.state !== 'progressing').slice(0, DOWNLOAD_KEEP);
-  try { fs.writeFileSync(downloadsFile(), JSON.stringify(done), 'utf8'); } catch {}
+  try { sealWrite(downloadsFile(), JSON.stringify(done)); } catch {}
 }
 
 function downloadsPayload() {
@@ -1339,13 +1542,30 @@ function scheduleDownloadsPush() {
   downloadsPushTimer = setTimeout(() => { downloadsPushTimer = null; pushDownloads(); }, 120);
 }
 
-// ~/Telechargements/nom.zip -> nom-2.zip si le fichier existe deja.
+// Chemins déjà attribués à un téléchargement en cours : Chromium n'écrit le
+// fichier final qu'à la fin (.crdownload avant), donc deux fichiers homonymes
+// lancés ensemble recevraient sinon le même chemin et s'écraseraient.
+const reservedDownloadPaths = new Set();
+// URL pour lesquelles l'utilisateur a demandé « Enregistrer sous… ».
+const saveAsRequests = new Set();
+
+// Caractères interdits par Windows dans un nom de fichier (et noms réservés).
+function safeDownloadName(filename) {
+  // Pas de path.basename : sous Windows, « a:b.txt » serait lu comme un lecteur.
+  let name = String(filename || '').replace(/[\\/]/g, '_');
+  name = name.replace(/[<>:"|?*\x00-\x1f]/g, '_').replace(/^\s+|[. ]+$/g, '').slice(0, 200);
+  if (/^(con|prn|aux|nul|com\d|lpt\d)(\..*)?$/i.test(name)) name = '_' + name;
+  return name || 'telechargement';
+}
+
+// Telechargements/nom.zip -> nom (1).zip si le fichier existe deja (comme Chrome).
 function uniqueDownloadPath(dir, filename) {
-  filename = path.basename(String(filename || '').replace(/[\\/]/g, '_')) || 'telechargement';
+  filename = safeDownloadName(filename);
   const ext  = path.extname(filename);
   const base = path.basename(filename, ext);
+  const taken = p => fs.existsSync(p) || reservedDownloadPaths.has(p.toLowerCase());
   let p = path.join(dir, filename);
-  for (let i = 2; fs.existsSync(p); i++) p = path.join(dir, `${base}-${i}${ext}`);
+  for (let i = 1; taken(p); i++) p = path.join(dir, `${base} (${i})${ext}`);
   return p;
 }
 
@@ -1369,18 +1589,27 @@ function attachDownloads(ses) {
   ses.on('will-download', (_e, item) => {
     const id = 'd' + Date.now() + '-' + (++downloadSeq);
     const dir = app.getPath('downloads');
+    const itemUrl = item.getURL();
+    const askWhere = saveAsRequests.delete(itemUrl);
     let savePath = '';
     try {
       fs.mkdirSync(dir, { recursive: true });
       savePath = uniqueDownloadPath(dir, item.getFilename());
-      item.setSavePath(savePath);
+      if (askWhere) {
+        // « Enregistrer sous… » : boîte de dialogue native, comme Chrome.
+        item.setSaveDialogOptions({ defaultPath: savePath, title: 'Enregistrer sous' });
+        savePath = '';
+      } else {
+        item.setSavePath(savePath);
+      }
     } catch { savePath = ''; }
+    if (savePath) reservedDownloadPaths.add(savePath.toLowerCase());
 
     const entry = {
       id,
-      name: savePath ? path.basename(savePath) : item.getFilename(),
+      name: savePath ? path.basename(savePath) : safeDownloadName(item.getFilename()),
       path: savePath,
-      url: item.getURL(),
+      url: itemUrl,
       state: 'progressing',
       received: 0,
       total: item.getTotalBytes() || 0,
@@ -1391,7 +1620,14 @@ function attachDownloads(ses) {
     liveDownloads.set(id, item);
     pushDownloads();
 
+    // Avec « Enregistrer sous… », le chemin n'est connu qu'après la boîte.
+    const syncPath = () => {
+      const p = item.getSavePath();
+      if (p && p !== entry.path) { entry.path = p; entry.name = path.basename(p); }
+    };
+
     item.on('updated', (__e, state) => {
+      syncPath();
       entry.received = item.getReceivedBytes();
       entry.total    = item.getTotalBytes() || entry.total;
       entry.state    = state === 'interrupted' ? 'interrupted' : 'progressing';
@@ -1400,16 +1636,37 @@ function attachDownloads(ses) {
     });
 
     item.once('done', (__e, state) => {
+      syncPath();
       liveDownloads.delete(id);
+      if (savePath) reservedDownloadPaths.delete(savePath.toLowerCase());
       entry.received = item.getReceivedBytes();
       entry.total    = item.getTotalBytes() || entry.received;
       entry.state    = state === 'completed' ? 'completed'
                      : state === 'cancelled' ? 'cancelled' : 'interrupted';
       if (entry.state === 'completed') attachFileIcon(entry);
+      // Boîte « Enregistrer sous » annulée : rien n'a été téléchargé.
+      if (entry.state === 'cancelled' && askWhere && !entry.path) downloads = downloads.filter(d => d !== entry);
       saveDownloads();
       pushDownloads();
     });
   });
+}
+
+// Reprend un téléchargement interrompu (réseau coupé…) ou le relance depuis
+// son URL s'il ne peut plus être repris, comme le bouton « Reprendre » de Chrome.
+function resumeDownload(id) {
+  const item = liveDownloads.get(id);
+  if (item) {
+    try { if (item.canResume()) { item.resume(); return; } } catch {}
+  }
+  const d = downloadById(id);
+  if (!d || !/^https?:/i.test(d.url || '') || d.state === 'progressing') return;
+  downloads = downloads.filter(x => x.id !== id);
+  const t = activeTab();
+  const ses = t ? t.view.webContents.session : session.fromPartition(browserPartition());
+  try { ses.downloadURL(d.url); } catch {}
+  saveDownloads();
+  pushDownloads();
 }
 
 /* =============================================================================
@@ -1433,86 +1690,445 @@ function setupSession(partition) {
   if (readyPartitions.has(partition)) return ses;
   readyPartitions.add(partition);
   try { ses.protocol.handle('zaalis', zaalisProtocolHandler); } catch {}
+  try { ses.setUserAgent(chromeUserAgent()); } catch {}
   attachDownloads(ses);
   attachPermissions(ses, partition);
+  attachDisplayCapture(ses, partition);
+  attachDeviceChoosers(ses);
+  runFeatureHooks('session', ses, partition);
   return ses;
 }
 
+// Écrit sur disque les cookies et le stockage des sessions ouvertes (fermeture
+// de l'application) : aucune connexion n'est perdue, rien ne reste en attente.
+function flushSessions() {
+  for (const partition of readyPartitions) {
+    if (partition === INCOGNITO_PARTITION) continue;   // jamais persistée
+    try {
+      const ses = session.fromPartition(partition);
+      ses.cookies.flushStore().catch(() => {});
+      ses.flushStorageData();
+    } catch {}
+  }
+}
+
+// DNS chiffré (DNS-over-HTTPS), comme le « DNS sécurisé » de Chrome : les noms
+// des sites visités ne circulent plus en clair sur le réseau local et un DNS
+// de box défaillant ou filtrant n'empêche plus d'ouvrir un site. Mode
+// automatique : en cas d'échec, Chromium retombe sur le DNS du système (noms
+// internes d'entreprise, portails captifs…).
+function configureSecureDns() {
+  try {
+    app.configureHostResolver({
+      secureDnsMode: 'automatic',
+      secureDnsServers: ['https://cloudflare-dns.com/dns-query', 'https://dns.google/dns-query'],
+    });
+  } catch {}
+}
+
 // ----- Permissions par site (caméra, micro, géoloc, notifications…) ---------
-// Mémorisées par profil + origine dans permissions.json. L'incognito garde ses
-// choix uniquement en mémoire. Une demande inconnue ouvre un dialogue natif.
+// Même modèle que Chrome : les autorisations sans risque sont accordées
+// d'office, les autres ouvrent une demande « Bloquer / Autoriser » dont le
+// choix peut être mémorisé par profil + origine (permissions.json). Sans
+// mémorisation, l'accord vaut pour la session (« autoriser cette fois »).
+// La navigation privée ne garde ses choix qu'en mémoire.
 let sitePermissions = {};        // "partition|origin|permission" -> allow|deny
-const pendingPermPrompts = new Set();
+
+// Accordées d'office, comme dans Chrome : plein écran, verrouillage du pointeur
+// et du clavier (jeux, visio), écriture dans le presse-papiers, contenu protégé
+// (Widevine : Prime Video, Netflix, Disney+…), choix de la sortie audio et
+// accès au stockage tiers (les cookies tiers restent autorisés, comme Chrome).
+const AUTO_GRANTED_PERMISSIONS = new Set([
+  'fullscreen', 'pointerLock', 'keyboardLock', 'clipboard-sanitized-write',
+  'mediaKeySystem', 'speaker-selection', 'storage-access', 'top-level-storage-access',
+]);
 
 const PERMISSION_LABELS = {
-  media: 'utiliser votre caméra / micro',
-  geolocation: 'accéder à votre position',
+  camera: 'utiliser votre caméra',
+  microphone: 'utiliser votre micro',
+  geolocation: 'connaître votre position',
   notifications: 'afficher des notifications',
-  midi: 'utiliser vos appareils MIDI',
-  midiSysex: 'utiliser vos appareils MIDI (SysEx)',
-  pointerLock: 'masquer le curseur',
-  'clipboard-read': 'lire le presse-papiers',
-  'display-capture': 'capturer votre écran',
+  midi: 'accéder à vos appareils MIDI',
+  midiSysex: 'contrôler et reprogrammer vos appareils MIDI',
+  'clipboard-read': 'voir le texte et les images copiés dans le presse-papiers',
+  'idle-detection': 'savoir quand vous utilisez activement cet appareil',
+  'window-management': 'gérer les fenêtres sur tous vos écrans',
 };
+
+// Libellés courts du popup « informations du site » (barre d'adresse).
+const PERMISSION_NAMES = {
+  camera: 'Caméra', microphone: 'Micro', media: 'Caméra et micro',
+  geolocation: 'Position', notifications: 'Notifications', midi: 'Appareils MIDI',
+  midiSysex: 'Appareils MIDI (SysEx)', 'clipboard-read': 'Presse-papiers',
+  'idle-detection': 'Détection d\'inactivité', 'window-management': 'Gestion des fenêtres',
+};
+function permissionDisplayName(name) {
+  if (name.startsWith('openExternal:')) return 'Ouvrir les liens « ' + name.slice(13) + ': »';
+  return PERMISSION_NAMES[name] || name;
+}
 
 function permissionsFile() { return path.join(dataFolder, 'permissions.json'); }
 function loadSitePermissions() {
-  try { const d = JSON.parse(fs.readFileSync(permissionsFile(), 'utf8')); sitePermissions = (d && typeof d === 'object') ? d : {}; }
+  try { const d = JSON.parse(sealRead(permissionsFile())); sitePermissions = (d && typeof d === 'object') ? d : {}; }
   catch { sitePermissions = {}; }
 }
 function saveSitePermissions() {
-  try { fs.writeFileSync(permissionsFile(), JSON.stringify(sitePermissions), 'utf8'); } catch {}
+  try { sealWrite(permissionsFile(), JSON.stringify(sitePermissions)); } catch {}
 }
 function originOf(u) { try { return new URL(u).origin; } catch { return ''; } }
+function hostOf(u) { try { return new URL(u).host || String(u); } catch { return String(u || ''); } }
+
+// Contexte de décisions d'une partition (profil, invité ou navigation privée).
+const permissionContexts = new Map();
+function permissionContext(partition) {
+  let ctx = permissionContexts.get(partition);
+  if (ctx) return ctx;
+  const ephemeral = partition === INCOGNITO_PARTITION;
+  const privateStore = Object.create(null);
+  const onceGrants = new Set();                 // « autoriser cette fois »
+  const store = () => (ephemeral ? privateStore : sitePermissions);
+  const key = (origin, name) => partition + '|' + origin + '|' + name;
+  ctx = {
+    partition, ephemeral,
+    pending: new Map(),                         // demandes identiques regroupées
+    decision(origin, name) {
+      const s = store();
+      const v = s[key(origin, name)];
+      if (v === 'allow' || v === 'deny') return v;
+      // Anciennes décisions « media » : valent pour la caméra et le micro.
+      if (name === 'camera' || name === 'microphone') {
+        const legacy = s[key(origin, 'media')];
+        if (legacy === 'allow' || legacy === 'deny') return legacy;
+      }
+      return onceGrants.has(key(origin, name)) ? 'allow' : '';
+    },
+    record(origin, name, allow, remember) {
+      if (remember) {
+        store()[key(origin, name)] = allow ? 'allow' : 'deny';
+        if (!ephemeral) saveSitePermissions();
+      } else if (allow) {
+        onceGrants.add(key(origin, name));
+      }
+    },
+    forgetOnce(origin) {
+      if (!origin) { onceGrants.clear(); return; }
+      for (const k of [...onceGrants]) if (k.startsWith(partition + '|' + origin + '|')) onceGrants.delete(k);
+    },
+  };
+  permissionContexts.set(partition, ctx);
+  return ctx;
+}
+
+function isInternalOrigin(origin) { return String(origin || '').startsWith('zaalis://'); }
+
+// Boîte de dialogue native d'autorisation. Les demandes identiques arrivées
+// pendant qu'elle est ouverte reçoivent la même réponse (au lieu d'un refus).
+// opts.session : l'accord ne vaut que pour la session (jamais mémorisé).
+function askPermission(ctx, origin, names, what, opts) {
+  opts = opts || {};
+  const id = origin + '|' + names.join('+');
+  if (ctx.pending.has(id)) return ctx.pending.get(id);
+  const canRemember = !ctx.ephemeral && !opts.session;
+  const p = (async () => {
+    if (!mainWin) return false;
+    let r;
+    try {
+      r = await dialog.showMessageBox(mainWin, {
+        type: 'question',
+        title: 'zaalis Browser',
+        buttons: ['Bloquer', 'Autoriser'],
+        defaultId: 1, cancelId: 0, noLink: true,
+        message: hostOf(origin) + ' souhaite ' + what + '.',
+        detail: opts.detail || 'Vous pourrez modifier ce choix depuis l\'icône située à gauche de l\'adresse.',
+        checkboxLabel: canRemember ? 'Mémoriser ce choix pour ce site' : undefined,
+        checkboxChecked: canRemember,
+      });
+    } catch { return false; }
+    const allow = r.response === 1;
+    const remember = canRemember && !!r.checkboxChecked;
+    for (const n of names) ctx.record(origin, n, allow, remember);
+    return allow;
+  })();
+  ctx.pending.set(id, p);
+  p.finally(() => ctx.pending.delete(id));
+  return p;
+}
+
+function mediaPermissionNames(types) {
+  const names = [];
+  if (types && types.includes('video')) names.push('camera');
+  if (types && types.includes('audio')) names.push('microphone');
+  return names.length ? names : ['camera', 'microphone'];
+}
+
+function joinLabels(names) {
+  if (names.length === 2 && names.includes('camera') && names.includes('microphone')) return 'utiliser votre caméra et votre micro';
+  return names.map(n => PERMISSION_LABELS[n] || ('utiliser : ' + n)).join(' et ');
+}
+
+// ----- Liens vers des applications (mailto:, tel:, zoommtg:, msteams:…) -----
+// Chrome les confie au système après confirmation. Les schémas gérés par le
+// navigateur lui-même ne sortent jamais ; ceux connus pour être dangereux
+// (shell:, ms-msdt:, search-ms:…) sont refusés comme dans Chrome.
+const BROWSER_SCHEMES = new Set([
+  'http', 'https', 'about', 'blob', 'data', 'file', 'filesystem', 'javascript',
+  'zaalis', 'chrome', 'chrome-extension', 'devtools', 'view-source', 'ws', 'wss', 'ftp',
+]);
+const BLOCKED_EXTERNAL_SCHEMES = new Set([
+  'afp', 'disk', 'disks', 'hcp', 'ie.http', 'ms-help', 'nntp', 'res', 'shell',
+  'vbscript', 'vnd.ms.radio', 'ms-msdt', 'search-ms', 'search', 'ms-officecmd',
+  'ms-cxh', 'ms-cxh-full', 'its', 'mk', 'ms-its', 'mhtml', 'cdl',
+]);
+function urlScheme(u) {
+  const m = /^([a-z][a-z0-9+.\-]*):/i.exec(String(u || '').trim());
+  return m ? m[1].toLowerCase() : '';
+}
+function isExternalAppUrl(u) {
+  const s = urlScheme(u);
+  return !!s && !BROWSER_SCHEMES.has(s);
+}
+
+function confirmOpenExternal(ctx, origin, externalUrl) {
+  const scheme = urlScheme(externalUrl);
+  if (!scheme || BROWSER_SCHEMES.has(scheme) || BLOCKED_EXTERNAL_SCHEMES.has(scheme)) return Promise.resolve(false);
+  const name = 'openExternal:' + scheme;
+  const prior = origin ? ctx.decision(origin, name) : '';
+  if (prior === 'allow') return Promise.resolve(true);
+  if (prior === 'deny') return Promise.resolve(false);
+  if (!mainWin) return Promise.resolve(false);
+  const id = origin + '|' + name;
+  if (ctx.pending.has(id)) return ctx.pending.get(id);
+  const p = (async () => {
+    let r;
+    try {
+      r = await dialog.showMessageBox(mainWin, {
+        type: 'question',
+        title: 'zaalis Browser',
+        buttons: ['Annuler', 'Ouvrir'],
+        defaultId: 1, cancelId: 0, noLink: true,
+        message: 'Ouvrir l\'application associée aux liens « ' + scheme + ': » ?',
+        detail: (origin ? hostOf(origin) + ' souhaite ouvrir cette application.\n' : '') +
+                String(externalUrl).slice(0, 200),
+        checkboxLabel: origin && !ctx.ephemeral
+          ? 'Toujours autoriser ' + hostOf(origin) + ' à ouvrir ce type de lien' : undefined,
+        checkboxChecked: false,
+      });
+    } catch { return false; }
+    const allow = r.response === 1;
+    if (allow && r.checkboxChecked && origin) ctx.record(origin, name, true, true);
+    return allow;
+  })();
+  ctx.pending.set(id, p);
+  p.finally(() => ctx.pending.delete(id));
+  return p;
+}
+
+// Ouvre un lien d'application après confirmation (clic sur mailto:, etc.).
+function openExternalFromPage(wc, partition, targetUrl) {
+  const origin = originOf(wc && !wc.isDestroyed() ? wc.getURL() : '') || '';
+  confirmOpenExternal(permissionContext(partition), origin, targetUrl).then(ok => {
+    if (ok) shell.openExternal(targetUrl).catch(() => {});
+  });
+}
 
 function attachPermissions(ses, partition) {
-  // L'incognito ne réutilise et ne persiste jamais une autorisation. Les
-  // profils normaux disposent chacun de leur propre espace de décisions.
-  const ephemeral = partition === INCOGNITO_PARTITION;
-  const permissionStore = ephemeral ? Object.create(null) : sitePermissions;
-  const permissionKey = (origin, permission) => partition + '|' + origin + '|' + permission;
-  // Vérification synchrone (utilisée par certaines API) : suit la mémoire.
+  const ctx = permissionContext(partition);
+  const isLocal = o => /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i.test(o);
+
+  // Vérification synchrone (enumerateDevices, Notification.permission…).
   // Le micro des pages internes (zaalis://home) sert au mode vocal : c'est
   // notre propre UI, pas un site — accord direct, sans dialogue site web.
-  const internalMic = (origin, permission) =>
-    (permission === 'media' || permission === 'audioCapture') &&
-    String(origin || '').startsWith('zaalis://');
-  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
-    if (internalMic(requestingOrigin, permission)) return true;
-    const key = permissionKey(requestingOrigin || '', permission);
-    if (permissionStore[key] === 'allow') return true;
-    if (permissionStore[key] === 'deny')  return false;
-    // Autorise d'office les permissions non sensibles courantes.
-    return ['fullscreen', 'clipboard-sanitized-write', 'pointerLock'].includes(permission);
+  ses.setPermissionCheckHandler((_wc, permission, requestingOrigin, details) => {
+    const origin = originOf(requestingOrigin || (details && details.requestingUrl) || '') || String(requestingOrigin || '');
+    if (isInternalOrigin(origin)) return permission === 'media' || AUTO_GRANTED_PERMISSIONS.has(permission);
+    if (AUTO_GRANTED_PERMISSIONS.has(permission)) return true;
+    // WebHID / WebSerial / WebUSB : le sélecteur d'appareil fait office de
+    // consentement (comme Chrome), réservé aux contextes sécurisés.
+    if (permission === 'hid' || permission === 'serial' || permission === 'usb') {
+      return /^https:/i.test(origin) || isLocal(origin);
+    }
+    if (permission === 'media') {
+      const t = details && details.mediaType;
+      const names = t === 'audio' ? ['microphone'] : t === 'video' ? ['camera'] : ['camera', 'microphone'];
+      return names.every(n => ctx.decision(origin, n) === 'allow');
+    }
+    return ctx.decision(origin, permission) === 'allow';
   });
 
-  ses.setPermissionRequestHandler((_wc, permission, callback, details) => {
-    const origin = originOf(details && (details.requestingUrl || '')) || '';
-    if (internalMic(origin, permission)) return callback(true);
-    // Non sensible : accord direct (comportement navigateur classique).
-    if (['fullscreen', 'clipboard-sanitized-write', 'pointerLock'].includes(permission)) return callback(true);
-    const key = permissionKey(origin, permission);
-    if (permissionStore[key] === 'allow') return callback(true);
-    if (permissionStore[key] === 'deny')  return callback(false);
-    if (!mainWin || !origin) return callback(false);
-    // Évite d'empiler plusieurs dialogues identiques.
-    if (pendingPermPrompts.has(key)) return callback(false);
-    pendingPermPrompts.add(key);
-    const what = PERMISSION_LABELS[permission] || ('utiliser : ' + permission);
-    dialog.showMessageBox(mainWin, {
-      type: 'question',
-      buttons: ['Bloquer', 'Autoriser'],
-      defaultId: 0, cancelId: 0,
-      message: origin + '\nsouhaite ' + what + '.',
-      detail: 'Votre choix sera mémorisé pour ce site.',
-    }).then(r => {
-      pendingPermPrompts.delete(key);
-      const allow = r.response === 1;
-      permissionStore[key] = allow ? 'allow' : 'deny';
-      if (!ephemeral) saveSitePermissions();
-      callback(allow);
-    }).catch(() => { pendingPermPrompts.delete(key); callback(false); });
+  ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+    details = details || {};
+    const origin = originOf(details.requestingUrl || '') || '';
+    let answered = false;
+    const done = ok => { if (answered) return; answered = true; try { callback(!!ok); } catch {} };
+
+    if (isInternalOrigin(origin)) return done(permission === 'media' || AUTO_GRANTED_PERMISSIONS.has(permission));
+    if (AUTO_GRANTED_PERMISSIONS.has(permission)) return done(true);
+    if (permission === 'openExternal') {
+      confirmOpenExternal(ctx, origin, details.externalURL).then(done, () => done(false));
+      return;
+    }
+    // display-capture est arbitré par le sélecteur (setDisplayMediaRequestHandler).
+    if (permission === 'display-capture') return done(true);
+    if (permission === 'unknown' || !origin || !/^https?:/i.test(origin)) return done(false);
+    // Comme Chrome : pas de notifications en navigation privée.
+    if (permission === 'notifications' && ctx.ephemeral) return done(false);
+
+    if (permission === 'fileSystem') {
+      // Un fichier choisi dans le sélecteur est lisible d'office ; modifier un
+      // fichier ou parcourir un dossier demande confirmation (pour la session).
+      if (details.fileAccessType !== 'writable' && !details.isDirectory) return done(true);
+      const target = details.filePath ? path.basename(details.filePath) : 'ce fichier';
+      const writable = details.fileAccessType === 'writable';
+      const name = 'fileSystem:' + (writable ? 'write:' : 'read:') + (details.filePath || '');
+      if (ctx.decision(origin, name) === 'allow') return done(true);
+      const what = writable
+        ? (details.isDirectory ? 'modifier les fichiers du dossier « ' + target + ' »'
+                               : 'enregistrer les modifications dans « ' + target + ' »')
+        : 'afficher les fichiers du dossier « ' + target + ' »';
+      askPermission(ctx, origin, [name], what, { session: true, detail: details.filePath || '' })
+        .then(done, () => done(false));
+      return;
+    }
+
+    const names = permission === 'media' ? mediaPermissionNames(details.mediaTypes) : [permission];
+    if (names.some(n => ctx.decision(origin, n) === 'deny')) return done(false);
+    const missing = names.filter(n => ctx.decision(origin, n) !== 'allow');
+    if (!missing.length) return done(true);
+    askPermission(ctx, origin, missing, joinLabels(missing)).then(done, () => done(false));
   });
+}
+
+// ----- Partage d'écran (getDisplayMedia : Meet, Teams, Discord…) -----------
+// Sans ce gestionnaire, Electron refuse tout partage d'écran. Comme Chrome, on
+// propose l'écran entier, une fenêtre ou un onglet, avec l'audio du système.
+function attachDisplayCapture(ses, partition) {
+  ses.setDisplayMediaRequestHandler((request, callback) => {
+    let answered = false;
+    const reply = s => { if (answered) return; answered = true; try { callback(s || null); } catch {} };
+    pickDisplaySource(request, partition).then(reply, () => reply(null));
+  });
+}
+
+async function pickDisplaySource(request, partition) {
+  if (!mainWin || !request.videoRequested) return null;
+  const origin = request.securityOrigin || (request.frame && request.frame.url) || '';
+  let sources = [];
+  try {
+    sources = await desktopCapturer.getSources({ types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 } });
+  } catch {}
+  const screens = sources.filter(s => s.id.startsWith('screen:'));
+  const windows = sources.filter(s => s.id.startsWith('window:') && s.name).slice(0, 10);
+  const incognito = partition === INCOGNITO_PARTITION;
+  const shareableTabs = tabs.filter(t => !!t.incognito === incognito &&
+    isWebPageUrl(t.view.webContents.getURL()) &&
+    (!request.frame || t.view.webContents.mainFrame !== request.frame)).slice(0, 8);
+
+  const choices = [];
+  screens.forEach((s, i) => choices.push({
+    label: screens.length > 1 ? 'Écran entier ' + (i + 1) : 'Écran entier', video: s,
+  }));
+  windows.forEach(s => choices.push({ label: 'Fenêtre : ' + s.name.slice(0, 80), video: s }));
+  shareableTabs.forEach(t => choices.push({
+    label: 'Onglet : ' + (t.view.webContents.getTitle() || t.view.webContents.getURL()).slice(0, 80),
+    frame: t.view.webContents.mainFrame,
+  }));
+  if (!choices.length) return null;
+
+  const withAudio = request.audioRequested && process.platform !== 'darwin';
+  const r = await dialog.showMessageBox(mainWin, {
+    type: 'none',
+    title: 'zaalis Browser',
+    message: origin ? hostOf(origin) + ' souhaite partager le contenu de votre écran.' : 'Partager votre écran',
+    detail: 'Choisissez ce que vous voulez partager :',
+    buttons: [...choices.map(c => c.label), 'Annuler'],
+    cancelId: choices.length, defaultId: 0, noLink: false,
+    checkboxLabel: withAudio ? 'Partager aussi l\'audio' : undefined,
+    checkboxChecked: withAudio,
+  });
+  const c = choices[r.response];
+  if (!c) return null;
+  const audio = withAudio && r.checkboxChecked;
+  if (c.frame) {
+    if (c.frame.isDestroyed && c.frame.isDestroyed()) return null;
+    return audio ? { video: c.frame, audio: c.frame } : { video: c.frame };
+  }
+  return audio ? { video: c.video, audio: 'loopback' } : { video: c.video };
+}
+
+// ----- Sélecteurs d'appareils (Bluetooth, HID, USB, série, clés FIDO) -------
+// Comme Chrome, le site ne voit un appareil que si l'utilisateur le choisit.
+// Electron choisirait sinon automatiquement le premier appareil Bluetooth.
+async function chooseFromList(message, items) {
+  if (!mainWin) return null;
+  if (!items.length) {
+    dialog.showMessageBox(mainWin, {
+      type: 'info', title: 'zaalis Browser', message,
+      detail: 'Aucun appareil compatible n\'a été trouvé.', buttons: ['OK'],
+    }).catch(() => {});
+    return null;
+  }
+  const shown = items.slice(0, 12);
+  try {
+    const r = await dialog.showMessageBox(mainWin, {
+      type: 'none', title: 'zaalis Browser', message,
+      buttons: [...shown.map(i => i.label), 'Annuler'],
+      cancelId: shown.length, defaultId: 0, noLink: false,
+    });
+    return shown[r.response] ? shown[r.response].id : null;
+  } catch { return null; }
+}
+
+function frameHost(frame) {
+  try { return frame && frame.url ? hostOf(frame.url) : 'Ce site'; } catch { return 'Ce site'; }
+}
+
+function attachDeviceChoosers(ses) {
+  ses.on('select-hid-device', (event, details, callback) => {
+    event.preventDefault();
+    const items = (details.deviceList || []).map(d => ({ id: d.deviceId, label: d.name || ('Appareil HID ' + d.vendorId + ':' + d.productId) }));
+    chooseFromList(frameHost(details.frame) + ' souhaite se connecter à un appareil HID', items)
+      .then(id => { try { id ? callback(id) : callback(); } catch {} });
+  });
+  ses.on('select-usb-device', (event, details, callback) => {
+    event.preventDefault();
+    const items = (details.deviceList || []).map(d => ({ id: d.deviceId, label: d.productName || d.manufacturerName || ('Appareil USB ' + d.vendorId + ':' + d.productId) }));
+    chooseFromList(frameHost(details.frame) + ' souhaite se connecter à un appareil USB', items)
+      .then(id => { try { id ? callback(id) : callback(); } catch {} });
+  });
+  ses.on('select-serial-port', (event, portList, wc, callback) => {
+    event.preventDefault();
+    const items = (portList || []).map(p => ({ id: p.portId, label: p.displayName ? p.displayName + ' (' + p.portName + ')' : p.portName }));
+    const host = wc && !wc.isDestroyed() ? hostOf(wc.getURL()) : 'Ce site';
+    chooseFromList(host + ' souhaite se connecter à un port série', items)
+      .then(id => { try { callback(id || ''); } catch {} });
+  });
+  ses.on('select-webauthn-account', (event, details, callback) => {
+    event.preventDefault();
+    const items = (details.accounts || []).map(a => ({ id: a.credentialId, label: a.displayName || a.userName || a.name || 'Compte' }));
+    chooseFromList('Choisissez un compte pour ' + (details.relyingPartyId || 'ce site'), items)
+      .then(id => { try { id ? callback(id) : callback(); } catch {} });
+  });
+}
+
+// Bluetooth : la liste des appareils arrive au fil de la découverte. On la
+// laisse se remplir quelques secondes puis on demande à l'utilisateur.
+function attachBluetoothChooser(wc) {
+  let pendingCallback = null, latest = [], timer = null;
+  wc.on('select-bluetooth-device', (event, devices, callback) => {
+    event.preventDefault();
+    latest = devices || [];
+    if (pendingCallback) return;
+    pendingCallback = callback;
+    timer = setTimeout(() => {
+      const cb = pendingCallback;
+      pendingCallback = null; timer = null;
+      if (wc.isDestroyed()) return;
+      const items = latest.map(d => ({ id: d.deviceId, label: d.deviceName || ('Appareil ' + d.deviceId) }));
+      chooseFromList(hostOf(wc.getURL()) + ' souhaite s\'associer à un appareil Bluetooth', items)
+        .then(id => { try { cb(id || ''); } catch {} });
+    }, 3500);
+  });
+  wc.once('destroyed', () => { if (timer) clearTimeout(timer); });
 }
 
 // ----- Informations du site / cookies (popup de la barre d'adresse) --------
@@ -1531,7 +2147,10 @@ function siteInfoForActiveTab() {
   const permissions = Object.entries(tab.incognito ? {} : sitePermissions)
     .filter(([key]) => key.startsWith(prefix))
     .map(([key, value]) => ({ permission: key.slice(prefix.length), value }))
-    .filter(x => x.value === 'allow' || x.value === 'deny');
+    .filter(x => (x.value === 'allow' || x.value === 'deny') &&
+                 !x.permission.startsWith('fileSystem:') && x.permission !== 'popups')
+    .map(x => ({ ...x, label: permissionDisplayName(x.permission) }));
+  const popupsAllowed = permissionContext(partition).decision(origin, 'popups') === 'allow';
 
   return wc.session.cookies.get({ url: pageUrl }).then(cookies => ({
     available: true,
@@ -1545,13 +2164,17 @@ function siteInfoForActiveTab() {
       session: !!c.session, sameSite: String(c.sameSite || 'unspecified'),
     })),
     permissions,
+    popupsAllowed,
   })).catch(() => ({ available: true, origin, host: parsed.hostname,
-    secure: parsed.protocol === 'https:', incognito: !!tab.incognito, cookies: [], permissions }));
+    secure: parsed.protocol === 'https:', incognito: !!tab.incognito, cookies: [], permissions, popupsAllowed }));
 }
 
 function sendSiteInfo(sender) {
   if (!sender || sender.isDestroyed()) return;
-  siteInfoForActiveTab().then(info => {
+  siteInfoForActiveTab().then(async info => {
+    // Certificat et niveau de sécurité (src/features/certificates.js).
+    const certm = featureModules.certificates;
+    if (certm && info && info.available) { try { info.security = await certm.siteSecurity(activeTab()); } catch {} }
     try { sender.send('zaalis:message', { type: 'siteInfo', info }); } catch {}
   });
 }
@@ -1573,6 +2196,18 @@ function clearActiveSiteData(sender) {
   });
 }
 
+// Pop-ups et redirections pour le site actif (popup « informations du site »).
+function setActiveSitePopups(allow, sender) {
+  const tab = activeTab();
+  const wc = tab && tab.view && tab.view.webContents;
+  const origin = wc ? originOf(wc.getURL()) : '';
+  if (!origin || origin === 'null' || !/^https?:/.test(origin)) return;
+  permissionContext(tab.incognito ? INCOGNITO_PARTITION : browserPartition())
+    .record(origin, 'popups', allow, true);
+  try { sender.send('zaalis:message', { type: 'toast', text: allow ? 'Pop-ups autorisées sur ce site.' : 'Pop-ups bloquées sur ce site.' }); } catch {}
+  sendSiteInfo(sender);
+}
+
 function resetActiveSitePermissions(sender) {
   const tab = activeTab();
   const wc = tab && tab.view && tab.view.webContents;
@@ -1584,6 +2219,7 @@ function resetActiveSitePermissions(sender) {
     for (const key of Object.keys(sitePermissions)) if (key.startsWith(prefix)) delete sitePermissions[key];
     saveSitePermissions();
   }
+  permissionContext(tab.incognito ? INCOGNITO_PARTITION : browserPartition()).forgetOnce(origin);
   try { sender.send('zaalis:message', { type: 'toast', text: 'Autorisations de ce site réinitialisées.' }); } catch {}
   sendSiteInfo(sender);
 }
@@ -1597,6 +2233,9 @@ const SAFE_BROWSING_BLOCKLIST = [
 ];
 function safeBrowsingVerdict(u) {
   if (!settings.safeBrowsing) return null;
+  // Listes publiques mises à jour + heuristiques : src/features/safebrowsing.js.
+  const sbm = featureModules.safebrowsing;
+  if (sbm && typeof sbm.verdict === 'function') { const v = sbm.verdict(u); return v ? v.reason : null; }
   let host = '';
   try { host = new URL(u).hostname.toLowerCase(); } catch { return null; }
   if (!host) return null;
@@ -1608,6 +2247,15 @@ function safeBrowsingVerdict(u) {
     return 'L\'adresse de ce site utilise des caractères trompeurs (risque d\'hameçonnage).';
   }
   return null;
+}
+
+// Affiche l'avertissement Safe Browsing (interstitiel interne du module, sinon
+// la page de secours ci-dessous).
+function showSafeBrowsingWarning(wc, u, reason) {
+  const sbm = featureModules.safebrowsing;
+  if (sbm && sbm.showInterstitial && sbm.showInterstitial(wc, u)) return;
+  const html = safeBrowsingInterstitial(u, reason);
+  try { wc.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64')); } catch {}
 }
 
 // Interstitiel Safe Browsing : page d'avertissement avec « Retour » / « Continuer ».
@@ -1679,7 +2327,11 @@ function showDownload(id) {
 
 function openDownload(id) {
   const d = downloadById(id);
-  if (d && d.state === 'completed' && d.path && fs.existsSync(d.path)) shell.openPath(d.path);
+  if (!(d && d.state === 'completed' && d.path && fs.existsSync(d.path))) return;
+  // Fichier venant d'un site signalé : confirmation avant ouverture.
+  const sbm = featureModules.safebrowsing;
+  if (sbm && sbm.confirmOpenDownload && !sbm.confirmOpenDownload(d)) return;
+  shell.openPath(d.path);
 }
 
 function removeDownload(id) {
@@ -1717,36 +2369,113 @@ function reloadFresh(wc) {
   try { wc.reloadIgnoringCache(); } catch {}
 }
 
+// Bloqueur de pop-ups façon Chrome : une page ne peut ouvrir une fenêtre ou un
+// onglet qu'en réponse à une action de l'utilisateur (clic, touche, toucher)
+// datant de moins de 5 s. Les sites autorisés dans « informations du site »
+// (autorisation « popups ») et les clics sur des liens restent libres.
+const POPUP_GESTURE_MS = 5000;
+const GESTURE_INPUTS = new Set(['mouseDown', 'mouseUp', 'rawKeyDown', 'keyDown', 'char',
+  'touchStart', 'touchEnd', 'gestureTap', 'gestureTapDown']);
+
+function popupAllowed(tab, details) {
+  // Ctrl+clic / clic molette : toujours une action explicite sur un lien.
+  if (details.disposition === 'background-tab') return true;
+  const recentGesture = Date.now() - (tab.lastGestureAt || 0) < POPUP_GESTURE_MS;
+  const origin = originOf(tab.view.webContents.getURL());
+  const ctx = permissionContext(tab.incognito ? INCOGNITO_PARTITION : browserPartition());
+  const siteChoice = origin ? ctx.decision(origin, 'popups') : '';
+  if (siteChoice === 'allow') return true;
+  if (siteChoice === 'deny' || !recentGesture) return false;
+  // Réglage « Bloquer les pop-ups » : seules les fenêtres scriptées dimensionnées
+  // (window.open avec des options) sont refusées, les liens target=_blank passent.
+  if (settings.blockPopups && details.disposition === 'new-window') return false;
+  return true;
+}
+
+function notifyPopupBlocked(tab) {
+  const now = Date.now();
+  if (now - (tab.lastPopupToastAt || 0) < 4000) return;
+  tab.lastPopupToastAt = now;
+  if (chromeView && activeTab() === tab) {
+    chromeView.webContents.send('zaalis:message', {
+      type: 'toast', text: 'Pop-up bloquée sur ' + hostOf(tab.view.webContents.getURL()),
+    });
+  }
+}
+
+// Position d'insertion d'un onglet ouvert depuis un autre : juste à droite de
+// son ouvreur (après ses autres « enfants »), comme Chrome.
+function insertIndexFor(openerId) {
+  const oi = tabs.findIndex(t => t.id === openerId);
+  if (oi < 0) return tabs.length;
+  let i = oi + 1;
+  while (i < tabs.length && tabs[i].openerId === openerId) i++;
+  // Les onglets épinglés restent groupés en tête de la barre.
+  const firstUnpinned = tabs.findIndex(t => !t.pinned);
+  return Math.max(i, firstUnpinned < 0 ? tabs.length : firstUnpinned);
+}
+
+function consoleLevel(level) {
+  if (typeof level === 'string') return ({ debug: 'log', verbose: 'log', info: 'info', warning: 'warn', error: 'error' })[level] || 'log';
+  return ['log', 'info', 'warn', 'error'][level] || 'log';
+}
+
+// opts : { incognito, openerId, webContents (pop-up créée par la page, à
+// adopter telle quelle), loadOptions (referrer / données POST d'un lien) }.
 function createTab(rawUrl, activate, opts) {
   opts = opts || {};
   const incognito = !!opts.incognito;
   const preload = path.join(__dirname, 'preload-content.js');
   const partition = incognito ? INCOGNITO_PARTITION : browserPartition();
   setupSession(partition);   // protocole zaalis:// + téléchargements + permissions
-  const view = new WebContentsView({
-    webPreferences: {
-      preload,
-      partition,
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webviewTag: false,
-      spellcheck: true,
-      // Les WebContentsView invisibles sont sinon mis en veille : les apps
-      // Google et les tableaux de bord ne recoivent plus leurs mises a jour
-      // temps reel tant que l'onglet est cache.
-      backgroundThrottling: false,
-    },
-  });
+  const view = opts.webContents
+    // Pop-up ouverte par window.open : on adopte le WebContents créé par
+    // Chromium pour conserver window.opener (connexion Google/Apple/PayPal,
+    // paiements 3-D Secure…). Il hérite des préférences de l'onglet ouvreur.
+    ? new WebContentsView({ webContents: opts.webContents })
+    : new WebContentsView({
+        webPreferences: {
+          preload,
+          partition,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          webviewTag: false,
+          spellcheck: true,
+          // Le preload (scripts de contenu : mots de passe, remplissage…)
+          // s'exécute aussi dans les iframes. Il reste isolé et sans Node.
+          nodeIntegrationInSubFrames: true,
+          // Les WebContentsView invisibles sont sinon mis en veille : les apps
+          // Google et les tableaux de bord ne recoivent plus leurs mises a jour
+          // temps reel tant que l'onglet est cache.
+          backgroundThrottling: false,
+        },
+      });
   view.setBackgroundColor('#00000000');
 
   const tab = {
     id: nextId++, view, loading: false, consoleBuf: [], pinned: false, incognito,
     loadedOnce: false, lastBackgroundAt: 0, lastFreshReloadAt: 0,
+    openerId: opts.openerId || 0, lastGestureAt: 0, closing: false,
   };
-  tabs.push(tab);
+  if (opts.openerId) {
+    const activeId = activeTab() ? activeTab().id : -1;
+    tabs.splice(insertIndexFor(opts.openerId), 0, tab);
+    active = tabs.findIndex(t => t.id === activeId);            // garde l'onglet actif
+    makeSplitAdjacent();                                         // la paire reste collée
+  } else {
+    tabs.push(tab);
+  }
 
   const wc = view.webContents;
+
+  // WebRTC : seule l'adresse publique de l'interface par défaut est exposée
+  // aux sites, jamais les adresses privées du réseau local.
+  try { wc.setWebRTCIPHandlingPolicy('default_public_interface_only'); } catch {}
+
+  // Outils de développement fermés (bouton, raccourci, fermeture de la fenêtre
+  // séparée) : on retire la zone ancrée et la page reprend toute la place.
+  wc.on('devtools-closed', () => { if (tab.dev) { disposeDevTools(tab); layoutAll(); } });
 
   // Capture des messages console de la page (tampon circulaire) pour que
   // l'assistant IA puisse les inspecter, comme l'extension Claude dans Chrome.
@@ -1757,7 +2486,7 @@ function createTab(rawUrl, activate, opts) {
       const message = event.message ?? legacyMessage;
       const line = event.lineNumber ?? legacyLine;
       const sourceId = event.sourceId ?? legacySourceId;
-      const lv = ['log', 'info', 'warn', 'error'][level] || 'log';
+      const lv = consoleLevel(level);
       const src = sourceId ? String(sourceId).split('/').pop() : '';
       tab.consoleBuf.push({
         level: lv,
@@ -1769,29 +2498,80 @@ function createTab(rawUrl, activate, opts) {
     } catch {}
   });
 
-  // Popups -> nouvel onglet
-  wc.setWindowOpenHandler(({ url }) => {
-    if (settings.blockPopups) return { action: 'deny' };
-    const target = allowedPageUrl(url, false);
-    if (target) createTab(target, true);
-    return { action: 'deny' };
+  // Dernière action de l'utilisateur dans la page (pour le bloqueur de pop-ups).
+  // before-mouse-event / before-input-event couvrent aussi les iframes d'autres
+  // sites (bouton « Se connecter avec Google », PayPal, lecteurs intégrés) ;
+  // input-event ajoute le toucher sur le document principal.
+  const noteGesture = (_e, input) => { if (input && GESTURE_INPUTS.has(input.type)) tab.lastGestureAt = Date.now(); };
+  wc.on('before-mouse-event', noteGesture);
+  wc.on('before-input-event', noteGesture);
+  wc.on('input-event', noteGesture);
+
+  // Pop-ups et liens target=_blank -> nouvel onglet, en conservant le lien
+  // avec la page d'origine (window.opener), indispensable aux connexions
+  // « Se connecter avec Google », aux paiements et aux lecteurs intégrés.
+  wc.setWindowOpenHandler((details) => {
+    const url = String(details.url || '');
+    if (isExternalAppUrl(url)) {
+      openExternalFromPage(wc, partition, url);
+      return { action: 'deny' };
+    }
+    const popupUrlOk = url === '' || url === 'about:blank' || /^(https?|blob):/i.test(url);
+    if (!popupUrlOk) return { action: 'deny' };
+    if (!popupAllowed(tab, details)) { notifyPopupBlocked(tab); return { action: 'deny' }; }
+    const foreground = details.disposition !== 'background-tab';
+    return {
+      action: 'allow',
+      outlivesOpener: true,
+      createWindow: (options) => {
+        if (options && options.webContents) {
+          return createTab('', foreground, { incognito, openerId: tab.id, webContents: options.webContents }).view.webContents;
+        }
+        // Lien rel=noopener : Chromium ne crée pas la page, on la charge nous-mêmes.
+        const loadOptions = {};
+        if (details.referrer && details.referrer.url) loadOptions.httpReferrer = details.referrer;
+        if (details.postBody && details.postBody.data) {
+          loadOptions.postData = details.postBody.data;
+          if (details.postBody.contentType) loadOptions.extraHeaders = 'Content-Type: ' + details.postBody.contentType;
+        }
+        return createTab(url, foreground, { incognito, openerId: tab.id, loadOptions }).view.webContents;
+      },
+    };
   });
+
+  attachBluetoothChooser(wc);
 
   wc.on('did-start-loading', () => { tab.loading = true;  pushState(); });
   wc.on('did-stop-loading',  () => { tab.loading = false; tab.loadedOnce = true; pushState(); });
+  wc.on('did-finish-load',   () => { tab.loadedAt = Date.now(); });
   wc.on('page-title-updated',   () => pushState());
-  wc.on('did-navigate',         (_e, u) => { tab.consoleBuf = []; pushHistory(u, wc.getTitle()); pushState(); scheduleSaveOpenTabs(); });
+  wc.on('did-navigate',         (_e, u) => {
+    tab.consoleBuf = [];
+    pushHistory(u, wc.getTitle()); pushState(); scheduleSaveOpenTabs();
+    if (findBarOpen && findTabId === tab.id && findView) {
+      findNeedsNewSession = true;
+      findView.webContents.send('zaalis:message', { type: 'findResult', active: 0, total: 0 });
+    }
+  });
   wc.on('did-navigate-in-page', () => { pushState(); scheduleSaveOpenTabs(); });
 
   // Garde de navigation (liens/JS de la page) : Safe Browsing + mise à niveau HTTPS.
   wc.on('will-navigate', (event, targetUrl) => {
+    // mailto:, tel:, zoommtg:… : confiés à l'application du système après
+    // confirmation, au lieu d'être ignorés silencieusement.
+    if (isExternalAppUrl(targetUrl)) {
+      event.preventDefault();
+      openExternalFromPage(wc, partition, targetUrl);
+      return;
+    }
+    // blob: = fichier généré par la page elle-même (PDF, facture, export…).
+    if (/^blob:/i.test(targetUrl)) return;
     const target = allowedPageUrl(targetUrl, isInternal(wc.getURL()));
     if (!target) { event.preventDefault(); return; }
     const verdict = safeBrowsingVerdict(targetUrl);
     if (verdict) {
       event.preventDefault();
-      const html = safeBrowsingInterstitial(targetUrl, verdict);
-      wc.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64'));
+      showSafeBrowsingWarning(wc, targetUrl, verdict);
       return;
     }
     const up = httpsUpgrade(targetUrl);
@@ -1813,44 +2593,68 @@ function createTab(rawUrl, activate, opts) {
         return;
       }
     } catch {}
+    // Erreur de certificat (-200…-299) : « Votre connexion n'est pas privée ».
+    const certm = featureModules.certificates;
+    if (code <= -200 && code >= -299 && certm && certm.handleCertFailure(tab, wc, failedUrl, code, desc)) return;
     const html = errorPageHtml(failedUrl, code, desc);
     wc.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64'), {
       baseURLForDataURL: failedUrl,
     });
   });
 
+  // Onglet planté (mémoire saturée, plantage du moteur) : page « Oups » avec
+  // un bouton pour recharger, comme l'onglet triste de Chrome.
+  wc.on('render-process-gone', (_e, details) => {
+    if (!details || details.reason === 'clean-exit' || wc.isDestroyed()) return;
+    if (htmlFullscreenTabId === tab.id) { htmlFullscreenTabId = null; layoutAll(); }
+    const lastUrl = wc.getURL();
+    const reason = details.reason === 'oom' ? 'La mémoire disponible était insuffisante pour afficher cette page.'
+                 : 'Un problème est survenu lors de l\'affichage de cette page.';
+    const html = errorPageHtml(lastUrl, 0, '', ['RESULT_CODE_' + String(details.reason || 'crashed').toUpperCase().replace(/-/g, '_'),
+      'Oups, la page a planté', reason + ' Cliquez sur « Réessayer » pour la recharger.']);
+    setTimeout(() => {
+      if (wc.isDestroyed()) return;
+      try { wc.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64'),
+        isWebPageUrl(lastUrl) ? { baseURLForDataURL: lastUrl } : undefined); } catch {}
+    }, 0);
+  });
+
+  // Plein écran HTML5 (bouton plein écran de YouTube, Prime Video, Netflix…).
+  wc.on('enter-html-full-screen', () => {
+    htmlFullscreenTabId = tab.id;
+    if (activeTab() !== tab) selectTab(tab.id);
+    if (findBarOpen) closeFindBar();
+    layoutAll();
+  });
+  wc.on('leave-html-full-screen', () => {
+    if (htmlFullscreenTabId === tab.id) htmlFullscreenTabId = null;
+    layoutAll();
+    pushState();
+  });
+
+  // Ctrl + molette : zoom, comme Chrome.
+  wc.on('zoom-changed', (_e, direction) => {
+    setZoomPct((settings.zoomPct || 100) + (direction === 'in' ? 10 : -10));
+  });
+
+  // Résultats de la recherche dans la page (Ctrl+F).
+  wc.on('found-in-page', (_e, result) => {
+    if (findView && activeTab() === tab && result) {
+      findView.webContents.send('zaalis:message', {
+        type: 'findResult', active: result.activeMatchOrdinal || 0, total: result.matches || 0,
+      });
+    }
+  });
+
+  // Une page peut se fermer elle-même (window.close() d'une pop-up de connexion).
+  wc.once('destroyed', () => {
+    disposeDevTools(tab);
+    if (!tab.closing && tabs.includes(tab)) removeTabEntry(tab);
+  });
+
   wc.on('context-menu', (event, params) => {
     if (!settings.contextMenus) { event.preventDefault(); return; }
-    const items = [];
-    // IA : résumé/chat sur la page courante via zaalis labs ide.
-    items.push({ label: 'Demander à l\'IA — résumé de la page', click: () => askAiAboutPage() });
-    if (!isInternal(wc.getURL())) {
-      items.push({ label: 'Traduire la page en français', click: () => translatePage('français') });
-    }
-    items.push({ type: 'separator' });
-    if (params.linkURL) {
-      items.push({ label: 'Ouvrir dans un nouvel onglet', click: () => createTab(params.linkURL, true) });
-      items.push({ label: 'Copier l\'adresse du lien',    click: () => require('electron').clipboard.writeText(params.linkURL) });
-      items.push({ type: 'separator' });
-    }
-    if (params.selectionText) {
-      items.push({ label: 'Copier', role: 'copy' });
-      items.push({ type: 'separator' });
-    }
-    items.push({ label: 'Reculer',   enabled: wc.navigationHistory.canGoBack(),    click: () => wc.navigationHistory.goBack() });
-    items.push({ label: 'Avancer',   enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() });
-    items.push({ label: 'Actualiser', click: () => reloadFresh(wc) });
-    items.push({ type: 'separator' });
-    items.push({ label: tab.pinned ? 'Détacher l\'onglet' : 'Épingler l\'onglet', click: () => togglePinTab(tab.id) });
-    items.push({ label: 'Installer comme application…', click: () => installAsApp(tab.id) });
-    if (settings.devTools) {
-      items.push({ type: 'separator' });
-      items.push({ label: 'Inspecter l\'élément', click: () => wc.inspectElement(params.x, params.y) });
-      items.push({ label: wc.isDevToolsOpened() ? 'Fermer les outils de développement' : 'Outils de développement',
-                  accelerator: 'Alt+Cmd+I',
-                  click: () => { wc.isDevToolsOpened() ? wc.closeDevTools() : wc.openDevTools({ mode: 'detach' }); } });
-    }
-    Menu.buildFromTemplate(items).popup();
+    showPageContextMenu(tab, params);
   });
 
   // Injecte le thème avant chaque navigation (comme AddScriptToExecuteOnDocumentCreated).
@@ -1873,14 +2677,204 @@ function createTab(rawUrl, activate, opts) {
 
   // Insertion sous chromeView / panel dans le z-order (les added-last sont au-dessus).
   // On remonte chromeView et panelView après.
-  if (chromeView) { mainWin.contentView.addChildView(chromeView); }
-  if (panelView && panelOpen) { mainWin.contentView.addChildView(panelView); }
-  if (aiPanelView && aiPanelOpen) { mainWin.contentView.addChildView(aiPanelView); }
+  raiseOverlays();
 
-  guardedLoad(wc, rawUrl && rawUrl.length ? resolveQuery(rawUrl) : HOME_URL);
+  if (!opts.webContents) {
+    // blob: = document généré par la page ouvreuse (PDF, facture…).
+    if (opts.loadOptions && /^blob:/i.test(rawUrl)) wc.loadURL(rawUrl, opts.loadOptions).catch(() => {});
+    else if (opts.loadOptions) guardedLoad(wc, rawUrl, opts.loadOptions);
+    else guardedLoad(wc, rawUrl && rawUrl.length ? resolveQuery(rawUrl) : HOME_URL);
+  }
 
+  runFeatureHooks('tabCreated', tab, wc, partition, opts);
   if (activate) selectTab(tab.id);
   else { layoutAll(); pushState(); scheduleSaveOpenTabs(); }
+  if (activate && opts.focusOmnibox) {
+    focusOmnibox();
+    // La page d'accueil se charge après : on garde la barre du haut active
+    // tant que l'utilisateur n'a pas cliqué dans la page.
+    wc.once('did-finish-load', () => { if (activeTab() === tab && !tab.lastGestureAt) focusOmnibox(); });
+  }
+  return tab;
+}
+
+// ----- Menu contextuel des pages (équivalent de celui de Chrome) -----------
+const ACCEL = process.platform === 'darwin'
+  ? { back: 'Cmd+[', fwd: 'Cmd+]', reload: 'Cmd+R', save: 'Cmd+S', print: 'Cmd+P', source: 'Alt+Cmd+U', inspect: 'Alt+Cmd+I', undo: 'Cmd+Z', redo: 'Shift+Cmd+Z', cut: 'Cmd+X', copy: 'Cmd+C', paste: 'Cmd+V', pastePlain: 'Shift+Alt+Cmd+V', all: 'Cmd+A' }
+  : { back: 'Alt+Left', fwd: 'Alt+Right', reload: 'Ctrl+R', save: 'Ctrl+S', print: 'Ctrl+P', source: 'Ctrl+U', inspect: 'Ctrl+Shift+I', undo: 'Ctrl+Z', redo: 'Ctrl+Y', cut: 'Ctrl+X', copy: 'Ctrl+C', paste: 'Ctrl+V', pastePlain: 'Ctrl+Shift+V', all: 'Ctrl+A' };
+
+const SEARCH_ENGINE_NAMES = { google: 'Google', bing: 'Bing', duckduckgo: 'DuckDuckGo', brave: 'Brave Search' };
+
+// Enregistre une ressource (lien, image, vidéo) en demandant l'emplacement.
+function saveResourceAs(wc, url) {
+  if (!url || wc.isDestroyed()) return;
+  saveAsRequests.add(url);
+  try { wc.downloadURL(url); } catch { saveAsRequests.delete(url); }
+}
+
+// Enregistrer la page sous… (Ctrl+S) : page web complète, comme Chrome.
+async function savePageAs(wc) {
+  if (!wc || wc.isDestroyed() || !mainWin) return;
+  const u = wc.getURL();
+  if (!isWebPageUrl(u)) return;
+  const base = safeDownloadName((wc.getTitle() || hostOf(u) || 'page').slice(0, 120));
+  let r;
+  try {
+    r = await dialog.showSaveDialog(mainWin, {
+      title: 'Enregistrer sous',
+      defaultPath: path.join(app.getPath('downloads'), base + '.html'),
+      filters: [
+        { name: 'Page Web, complète', extensions: ['html', 'htm'] },
+        { name: 'Page Web, HTML uniquement', extensions: ['html', 'htm'] },
+        { name: 'Archive Web (MHTML)', extensions: ['mhtml'] },
+      ],
+    });
+  } catch { return; }
+  if (!r || r.canceled || !r.filePath) return;
+  const type = /\.mhtml$/i.test(r.filePath) ? 'MHTML' : 'HTMLComplete';
+  wc.savePage(r.filePath, type).catch(() => {
+    dialog.showMessageBox(mainWin, { type: 'error', title: 'zaalis Browser', message: 'Impossible d\'enregistrer cette page.', buttons: ['OK'] }).catch(() => {});
+  });
+}
+
+function printPage(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  try { wc.print({}, () => {}); } catch {}
+}
+
+function openViewSource(u, openerTab) {
+  if (!isWebPageUrl(u)) return;
+  const t = createTab('', true, { incognito: !!(openerTab && openerTab.incognito), openerId: openerTab ? openerTab.id : 0 });
+  try { t.view.webContents.loadURL('view-source:' + u); } catch {}
+}
+
+// Exécute un script sur l'élément média situé sous le clic (boucle, PiP…).
+function mediaAt(wc, params, body) {
+  const z = wc.getZoomFactor() || 1;
+  const x = Math.round(params.x / z), y = Math.round(params.y / z);
+  const code = `(() => { const el = document.elementFromPoint(${x}, ${y});
+    const m = el && (el.closest('video, audio') || (el.querySelector && el.querySelector('video, audio')));
+    if (!m) return false; ${body}; return true; })()`;
+  return wc.executeJavaScript(code, true).catch(() => false);
+}
+
+function showPageContextMenu(tab, params) {
+  const wc = tab.view.webContents;
+  const pageUrl = wc.getURL();
+  const internal = isInternal(pageUrl);
+  const items = [];
+  const sep = () => { if (items.length && items[items.length - 1].type !== 'separator') items.push({ type: 'separator' }); };
+  const flags = params.editFlags || {};
+  const mf = params.mediaFlags || {};
+
+  // Correcteur orthographique : suggestions en tête, comme Chrome.
+  if (params.isEditable && params.misspelledWord) {
+    const sugg = (params.dictionarySuggestions || []).slice(0, 5);
+    if (sugg.length) sugg.forEach(s => items.push({ label: s, click: () => wc.replaceMisspelling(s) }));
+    else items.push({ label: 'Aucune suggestion', enabled: false });
+    items.push({ label: 'Ajouter au dictionnaire', click: () => { try { wc.session.addWordToSpellCheckerDictionary(params.misspelledWord); } catch {} } });
+    sep();
+  }
+
+  if (params.linkURL) {
+    const linkIsWeb = isWebPageUrl(params.linkURL);
+    items.push({ label: 'Ouvrir le lien dans un nouvel onglet', enabled: linkIsWeb,
+      click: () => createTab(params.linkURL, false, { incognito: tab.incognito, openerId: tab.id }) });
+    items.push({ label: 'Ouvrir le lien dans un onglet de navigation privée', enabled: linkIsWeb,
+      click: () => createTab(params.linkURL, true, { incognito: true }) });
+    sep();
+    items.push({ label: 'Enregistrer le lien sous…', enabled: linkIsWeb, click: () => saveResourceAs(wc, params.linkURL) });
+    items.push({ label: 'Copier l\'adresse du lien', click: () => clipboard.writeText(params.linkURL) });
+    if (params.linkText && !params.srcURL) items.push({ label: 'Copier le texte du lien', click: () => clipboard.writeText(params.linkText) });
+    sep();
+  }
+
+  if (params.mediaType === 'image' && params.srcURL) {
+    items.push({ label: 'Ouvrir l\'image dans un nouvel onglet', enabled: /^(https?|data|blob):/i.test(params.srcURL) && !/^data:/i.test(params.srcURL),
+      click: () => createTab(params.srcURL, false, { incognito: tab.incognito, openerId: tab.id }) });
+    items.push({ label: 'Enregistrer l\'image sous…', click: () => saveResourceAs(wc, params.srcURL) });
+    items.push({ label: 'Copier l\'image', click: () => wc.copyImageAt(params.x, params.y) });
+    items.push({ label: 'Copier l\'adresse de l\'image', click: () => clipboard.writeText(params.srcURL) });
+    sep();
+  } else if ((params.mediaType === 'video' || params.mediaType === 'audio') && !mf.inError) {
+    const isVideo = params.mediaType === 'video';
+    items.push({ label: mf.isPaused ? 'Lecture' : 'Pause', click: () => mediaAt(wc, params, 'm.paused ? m.play() : m.pause()') });
+    items.push({ label: mf.isMuted ? 'Réactiver le son' : 'Couper le son', enabled: mf.hasAudio !== false, click: () => mediaAt(wc, params, 'm.muted = !m.muted') });
+    if (mf.canLoop !== false) items.push({ label: 'Boucle', type: 'checkbox', checked: !!mf.isLooping, click: () => mediaAt(wc, params, 'm.loop = !m.loop') });
+    if (mf.canToggleControls) items.push({ label: 'Afficher les commandes', type: 'checkbox', checked: !!mf.isControlsVisible, click: () => mediaAt(wc, params, 'm.controls = !m.controls') });
+    if (isVideo && mf.canShowPictureInPicture) {
+      items.push({ label: 'Picture-in-picture', type: 'checkbox', checked: !!mf.isShowingPictureInPicture,
+        click: () => mediaAt(wc, params, 'document.pictureInPictureElement === m ? document.exitPictureInPicture() : m.requestPictureInPicture()') });
+    }
+    sep();
+    const saveable = params.srcURL && /^https?:/i.test(params.srcURL);
+    if (saveable) {
+      items.push({ label: isVideo ? 'Ouvrir la vidéo dans un nouvel onglet' : 'Ouvrir l\'audio dans un nouvel onglet',
+        click: () => createTab(params.srcURL, false, { incognito: tab.incognito, openerId: tab.id }) });
+      if (mf.canSave !== false) items.push({ label: isVideo ? 'Enregistrer la vidéo sous…' : 'Enregistrer l\'audio sous…', click: () => saveResourceAs(wc, params.srcURL) });
+      items.push({ label: isVideo ? 'Copier l\'adresse de la vidéo' : 'Copier l\'adresse de l\'audio', click: () => clipboard.writeText(params.srcURL) });
+      sep();
+    }
+  }
+
+  if (params.isEditable) {
+    items.push({ label: 'Annuler', accelerator: ACCEL.undo, registerAccelerator: false, enabled: !!flags.canUndo, click: () => wc.undo() });
+    items.push({ label: 'Rétablir', accelerator: ACCEL.redo, registerAccelerator: false, enabled: !!flags.canRedo, click: () => wc.redo() });
+    sep();
+    items.push({ label: 'Couper', accelerator: ACCEL.cut, registerAccelerator: false, enabled: !!flags.canCut, click: () => wc.cut() });
+    items.push({ label: 'Copier', accelerator: ACCEL.copy, registerAccelerator: false, enabled: !!flags.canCopy, click: () => wc.copy() });
+    items.push({ label: 'Coller', accelerator: ACCEL.paste, registerAccelerator: false, enabled: !!flags.canPaste, click: () => wc.paste() });
+    items.push({ label: 'Coller en tant que texte brut', accelerator: ACCEL.pastePlain, registerAccelerator: false, enabled: !!flags.canPaste, click: () => wc.pasteAndMatchStyle() });
+    items.push({ label: 'Tout sélectionner', accelerator: ACCEL.all, registerAccelerator: false, enabled: flags.canSelectAll !== false, click: () => wc.selectAll() });
+    sep();
+  } else if (params.selectionText && params.selectionText.trim()) {
+    const sel = params.selectionText.trim().replace(/\s+/g, ' ');
+    const short = sel.length > 32 ? sel.slice(0, 30) + '…' : sel;
+    items.push({ label: 'Copier', accelerator: ACCEL.copy, registerAccelerator: false, click: () => wc.copy() });
+    items.push({ label: 'Rechercher « ' + short + ' » sur ' + (SEARCH_ENGINE_NAMES[settings.searchEngine] || 'Google'),
+      click: () => createTab(sel.slice(0, 500), true, { incognito: tab.incognito, openerId: tab.id }) });
+    if (/^\S+\.[a-z]{2,}(\/\S*)?$/i.test(sel) || /^https?:\/\//i.test(sel)) {
+      items.push({ label: 'Accéder à ' + short, click: () => createTab(sel, true, { incognito: tab.incognito, openerId: tab.id }) });
+    }
+    sep();
+  }
+
+  const onPageArea = !params.linkURL && !params.isEditable && !(params.selectionText && params.selectionText.trim()) &&
+                     (params.mediaType === 'none' || !params.mediaType);
+  if (onPageArea) {
+    items.push({ label: 'Retour', accelerator: ACCEL.back, registerAccelerator: false, enabled: wc.navigationHistory.canGoBack(), click: () => wc.navigationHistory.goBack() });
+    items.push({ label: 'Avancer', accelerator: ACCEL.fwd, registerAccelerator: false, enabled: wc.navigationHistory.canGoForward(), click: () => wc.navigationHistory.goForward() });
+    items.push({ label: 'Actualiser', accelerator: ACCEL.reload, registerAccelerator: false, click: () => reloadFresh(wc) });
+    sep();
+    if (!internal) {
+      items.push({ label: 'Enregistrer sous…', accelerator: ACCEL.save, registerAccelerator: false, click: () => savePageAs(wc) });
+      items.push({ label: 'Imprimer…', accelerator: ACCEL.print, registerAccelerator: false, click: () => printPage(wc) });
+      items.push({ label: 'Traduire la page en français', click: () => translatePage('français') });
+      sep();
+    }
+  }
+
+  // Entrées des modules de fonctionnalités (lecture, QR, Cast…).
+  const nBefore = items.length;
+  runFeatureHooks('contextMenu', items, { tab, wc, params, internal, pageUrl, onPageArea });
+  if (items.length > nBefore) sep();
+
+  // IA : résumé/chat sur la page courante via zaalis labs ide.
+  items.push({ label: 'Demander à l\'IA — résumé de la page', click: () => askAiAboutPage() });
+  if (onPageArea) {
+    items.push({ label: tab.pinned ? 'Détacher l\'onglet' : 'Épingler l\'onglet', click: () => togglePinTab(tab.id) });
+    if (!internal) items.push({ label: 'Installer comme application…', click: () => installAsApp(tab.id) });
+  }
+
+  if (settings.devTools) {
+    sep();
+    if (onPageArea && !internal) items.push({ label: 'Afficher le code source de la page', accelerator: ACCEL.source, registerAccelerator: false, click: () => openViewSource(pageUrl, tab) });
+    items.push({ label: 'Inspecter', accelerator: ACCEL.inspect, registerAccelerator: false, click: () => openDevToolsFor(tab, { x: params.x, y: params.y }) });
+  }
+  // Modules (ex. extensions : chrome.contextMenus) : (items, tab, params, sep).
+  runFeatureHooks('contextMenu', items, tab, params, sep);
+  while (items.length && items[items.length - 1].type === 'separator') items.pop();
+  Menu.buildFromTemplate(items).popup({ window: mainWin || undefined });
 }
 
 // ----- Vue fractionnee (2 onglets max, comme Chrome) -------------------------
@@ -1955,7 +2949,10 @@ function showTabMenu(id) {
   }
   items.push({ type: 'separator' });
   items.push({ label: t.pinned ? 'Détacher l\'onglet' : 'Épingler l\'onglet', click: () => togglePinTab(id) });
-  items.push({ label: 'Nouvel onglet', click: () => createTab('', true) });
+  // Groupes d'onglets (src/features/tabgroups.js).
+  try { if (featureModules.tabgroups) items.push(...featureModules.tabgroups.tabMenuItems(t)); } catch {}
+  items.push({ type: 'separator' });
+  items.push({ label: 'Nouvel onglet', click: () => openNewTab() });
   items.push({ label: 'Nouvel onglet privé', click: () => openIncognitoTab() });
   items.push({ label: 'Actualiser',    click: () => reloadFresh(t.view.webContents) });
   if (!isInternal(t.view.webContents.getURL())) {
@@ -1969,10 +2966,12 @@ function showTabMenu(id) {
 function selectTab(id) {
   const idx = tabs.findIndex(t => t.id === id);
   if (idx < 0) return;
+  if (findBarOpen && findTabId !== id) closeFindBar();   // comme Chrome : la barre suit l'onglet
   const now = Date.now();
   const previous = activeTab();
   if (previous && previous.id !== id) previous.lastBackgroundAt = now;
   active = idx;
+  runFeatureHooks('tabActivated', tabs[idx], previous);
   layoutAll();
   const t = tabs[idx];
   try { t.view.webContents.focus(); } catch {}
@@ -1980,7 +2979,9 @@ function selectTab(id) {
   // Ne recharge jamais une page interne, un chargement en cours, ni un onglet
   // qui vient juste d'etre affiche. On evite ainsi les boucles et les pertes
   // de saisie, tout en revalidant les sites publies pendant l'absence.
-  if (t.loadedOnce && !t.loading && isWebPageUrl(t.view.webContents.getURL()) &&
+  const wcSel = t.view.webContents;
+  if (t.loadedOnce && !t.loading && isLocalDevUrl(wcSel.getURL()) &&
+      !wcSel.isCurrentlyAudible() && (t.lastGestureAt || 0) <= (t.lastFreshReloadAt || t.loadedAt || 0) &&
       asleepFor >= STALE_TAB_REFRESH_MS && now - t.lastFreshReloadAt >= STALE_TAB_REFRESH_MS) {
     t.lastFreshReloadAt = now;
     reloadFresh(t.view.webContents);
@@ -1990,25 +2991,41 @@ function selectTab(id) {
 }
 
 function closeTab(id) {
-  const idx = tabs.findIndex(t => t.id === id);
-  if (idx < 0) return;
-  if (splitPair && splitPair.includes(id)) splitPair = null;  // dissout la vue fractionnee
-  const t = tabs[idx];
-  // Mémorise l'URL pour la réouverture (⌘⇧T), sauf pages internes / privées.
+  const t = tabs.find(x => x.id === id);
+  if (!t) return;
+  t.closing = true;
+  // Mémorise l'URL pour la réouverture (Ctrl+Maj+T), sauf pages internes / privées.
   try {
-    const u = t.view.webContents.getURL();
+    const u = t.discarded ? t.discarded.url : t.view.webContents.getURL();
     if (u && !t.incognito && !isInternal(u)) { closedTabs.push(u); if (closedTabs.length > 25) closedTabs.shift(); }
   } catch {}
-  try { mainWin.contentView.removeChildView(t.view); } catch {}
+  removeTabEntry(t);
   try { t.view.webContents.close(); } catch {}
+}
+
+// Retire un onglet de la barre (fermeture par l'utilisateur ou par la page).
+function removeTabEntry(t) {
+  const idx = tabs.indexOf(t);
+  if (idx < 0) return;
+  const wasActive = idx === active;
+  if (splitPair && splitPair.includes(t.id)) splitPair = null;  // dissout la vue fractionnee
+  if (htmlFullscreenTabId === t.id) htmlFullscreenTabId = null;
+  disposeDevTools(t);
+  runFeatureHooks('tabClosed', t);
+  try { mainWin.contentView.removeChildView(t.view); } catch {}
   tabs.splice(idx, 1);
   if (tabs.length === 0) {
     active = -1;
-    createTab('', true);
+    if (mainWin) createTab('', true);
     return;
   }
+  // Comme Chrome : fermer un onglet ouvert depuis un autre ramène à l'ouvreur
+  // (retour à la page d'origine après une pop-up de connexion, par exemple).
+  const opener = wasActive && t.openerId ? tabs.findIndex(x => x.id === t.openerId) : -1;
+  if (opener >= 0) { active = opener; selectTab(tabs[opener].id); return; }
   if (active >= tabs.length) active = tabs.length - 1;
   else if (idx < active) active--;
+  if (wasActive && tabs[active]) { selectTab(tabs[active].id); return; }
   layoutAll();
   pushState();
   scheduleSaveOpenTabs();
@@ -2026,22 +3043,24 @@ function reorderTabs(csv) {
   active = tabs.findIndex(t => t.id === currentActiveId);
   sortPinned();           // les onglets épinglés restent en tête de la barre
   makeSplitAdjacent();    // la paire fractionnee reste toujours collee
+  runFeatureHooks('tabsReordered');
   layoutAll();
   pushState();
   scheduleSaveOpenTabs();
 }
 
 // Chargement filtré par Safe Browsing (barre d'adresse + ouverture d'onglet).
-function guardedLoad(wc, u) {
+function guardedLoad(wc, u, loadOptions) {
   const target = allowedPageUrl(u, true);
   if (!target) return false;
   const verdict = safeBrowsingVerdict(target);
   if (verdict) {
-    const html = safeBrowsingInterstitial(target, verdict);
-    try { wc.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64')); } catch {}
+    showSafeBrowsingWarning(wc, target, verdict);
     return true;
   }
-  try { wc.loadURL(target); return true; } catch { return false; }
+  // loadURL rejette sa promesse sur un téléchargement ou une navigation
+  // annulée : sans .catch, Node journaliserait une erreur non gérée.
+  try { wc.loadURL(target, loadOptions).catch(() => {}); return true; } catch { return false; }
 }
 
 function navigateActive(u) {
@@ -2070,6 +3089,7 @@ function togglePinTab(id) {
   // Un onglet épinglé quitte toute vue fractionnée.
   if (t.pinned && splitPair && splitPair.includes(id)) splitPair = null;
   sortPinned();
+  runFeatureHooks('tabsReordered');   // un onglet épinglé quitte son groupe
   layoutAll();
   pushState();
   scheduleSaveOpenTabs();
@@ -2077,7 +3097,11 @@ function togglePinTab(id) {
 
 // Onglet de navigation privée : session éphémère, rien n'est écrit sur disque.
 // Ouvre une page d'accueil privée dédiée (pas la page d'accueil classique).
-function openIncognitoTab() { createTab('zaalis://home/incognito.html', true, { incognito: true }); }
+function openIncognitoTab() { createTab('zaalis://home/incognito.html', true, { incognito: true, focusOmnibox: true }); }
+
+// Nouvel onglet ouvert par l'utilisateur (Ctrl+T, bouton +, menus) : comme
+// Chrome, la barre d'adresse du haut est sélectionnée pour taper aussitôt.
+function openNewTab() { return createTab('', true, { focusOmnibox: true }); }
 
 // Pile des onglets récemment fermés (URLs) pour ⌘⇧T, comme Chrome.
 let closedTabs = [];
@@ -2133,6 +3157,7 @@ function installAsApp(id) {
 function rebuildTabsForProfile() {
   if (!mainWin) return;
   for (const t of tabs) {
+    disposeDevTools(t);
     try { mainWin.contentView.removeChildView(t.view); } catch {}
     try { t.view.webContents.close(); } catch {}
   }
@@ -2141,6 +3166,7 @@ function rebuildTabsForProfile() {
   if (saved && saved.urls.length) {
     saved.urls.forEach((u, i) => createTab(u, i === 0));
     if (tabs[saved.active]) selectTab(tabs[saved.active].id);
+    runFeatureHooks('sessionRestored', saved);
   } else {
     createTab('', true);
   }
@@ -2200,10 +3226,19 @@ function setTheme(t) {
   pushAiPanelState();
 }
 
+function titleBarOverlayColors() {
+  return settings.theme === 'dark'
+    ? { color: '#202124', symbolColor: '#e8eaed', height: 38 }
+    : { color: '#e9eaed', symbolColor: '#3c4043', height: 38 };
+}
+
 function applyChromeTheme() {
   const bg = settings.theme === 'dark' ? '#202124' : '#e9eaed';
   if (mainWin) mainWin.setBackgroundColor(bg);
+  // Boutons Réduire / Agrandir / Fermer de Windows : suivent le thème choisi.
+  if (mainWin && process.platform !== 'darwin') { try { mainWin.setTitleBarOverlay(titleBarOverlayColors()); } catch {} }
   for (const t of tabs) { try { t.view.setBackgroundColor(bg); } catch {} }
+  if (findView && findBarOpen) sendFindOpen();
 }
 
 function setSearchEngine(e) {
@@ -2333,6 +3368,94 @@ function closePanel() {
   pushState();
 }
 
+// ----- Rechercher dans la page (Ctrl+F) --------------------------------------
+// Petite vue dédiée, suspendue sous la barre d'outils en haut à droite de la
+// page, comme la barre de recherche de Chrome.
+const FIND_URL = 'zaalis://home/find.html';
+const FIND_WIDTH = 400, FIND_HEIGHT = 64;
+let findView = null;
+let findBarOpen = false;
+let findText = '';
+let findTabId = null;
+
+function ensureFindView() {
+  if (findView) return;
+  findView = new WebContentsView({
+    webPreferences: {
+      preload: path.join(__dirname, 'preload-chrome.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  findView.setBackgroundColor('#00000000');
+  findView.setVisible(false);
+  lockInternalView(findView.webContents, FIND_URL);
+  findView.webContents.loadURL(FIND_URL);
+}
+
+function layoutFindBar(bodyTop, bodyWidth) {
+  if (!findView) return;
+  if (!findBarOpen || fullscreenTab()) { findView.setVisible(false); return; }
+  findView.setBounds({
+    x: Math.max(0, bodyWidth - FIND_WIDTH - 8), y: Math.max(0, bodyTop - 2),
+    width: Math.min(FIND_WIDTH, bodyWidth), height: FIND_HEIGHT,
+  });
+  findView.setVisible(true);
+}
+
+function sendFindOpen() {
+  if (!findView) return;
+  try { findView.webContents.send('zaalis:message', { type: 'findOpen', theme: settings.theme, text: findText }); } catch {}
+}
+
+function openFindBar() {
+  const t = activeTab();
+  if (!t || !mainWin || fullscreenTab()) return;
+  ensureFindView();
+  if (findTabId !== null && findTabId !== t.id) stopFind();
+  findBarOpen = true;
+  findTabId = t.id;
+  mainWin.contentView.addChildView(findView);   // au-dessus des onglets
+  layoutAll();
+  findView.webContents.focus();
+  sendFindOpen();
+  if (findText) runFind(findText, true, true);
+}
+
+function stopFind() {
+  const t = tabs.find(x => x.id === findTabId);
+  if (t && !t.view.webContents.isDestroyed()) { try { t.view.webContents.stopFindInPage('keepSelection'); } catch {} }
+}
+
+function closeFindBar() {
+  if (!findBarOpen) return;
+  stopFind();
+  findBarOpen = false;
+  findTabId = null;
+  if (findView) findView.setVisible(false);
+  const t = activeTab();
+  if (t) { try { t.view.webContents.focus(); } catch {} }
+}
+
+function runFind(text, forward, newSession) {
+  const t = activeTab();
+  if (!t) return;
+  findTabId = t.id;
+  const wc = t.view.webContents;
+  if (!text) {
+    try { wc.stopFindInPage('clearSelection'); } catch {}
+    return;
+  }
+  try { wc.findInPage(text, { forward: forward !== false, findNext: !!newSession }); } catch {}
+}
+
+let findNeedsNewSession = false;
+function findAgain(forward) {
+  if (!findBarOpen) { openFindBar(); return; }
+  if (findText) { runFind(findText, forward, findNeedsNewSession); findNeedsNewSession = false; }
+}
+
 // Courbe conservee pour l'animation native du panneau de chat IA.
 // ----- Panneau chat IA (zaalis labs ide) -------------------------------------
 // Panneau lateral droit independant du panneau parametres : chat complet avec
@@ -2354,7 +3477,7 @@ function aiChatsFile() { return path.join(dataFolder, 'aichats.json'); }
 
 function loadAiChats() {
   try {
-    const d = JSON.parse(fs.readFileSync(aiChatsFile(), 'utf8'));
+    const d = JSON.parse(sealRead(aiChatsFile()));
     aiChats = Array.isArray(d) ? d.filter(c => c && c.id && Array.isArray(c.messages)) : [];
   } catch { aiChats = []; }
 }
@@ -2363,7 +3486,7 @@ function saveAiChats() {
   try {
     // Garde les 80 conversations les plus recentes.
     if (aiChats.length > 80) aiChats = aiChats.slice(-80);
-    fs.writeFileSync(aiChatsFile(), JSON.stringify(aiChats), 'utf8');
+    sealWrite(aiChatsFile(), JSON.stringify(aiChats));
   } catch {}
 }
 
@@ -2517,715 +3640,36 @@ function toggleAiPanel() { aiPanelOpen ? closeAiPanel() : openAiPanel(); }
 
 // Envoi d'un message dans la conversation courante (creee au besoin).
 // ----- Agent IA outillé (comme l'extension Claude dans Chrome) ---------------
-// Le backend IDE ne renvoie que du texte : on donne à l'assistant la capacité
-// d'INSPECTER et d'AGIR sur la page active via une boucle d'outils par protocole
-// texte. Le modèle demande un outil (bloc json), le navigateur l'exécute sur la
-// WebContents active, renvoie le résultat, et la boucle continue jusqu'à la
-// réponse finale.
-
-// Boucle d'agent bornée par les TOKENS, comme l'extension Claude dans Chrome :
-// pas de plafond d'étapes arbitraire. Chaque étape = une action (lire, cliquer,
-// remplir UN champ). On continue tant que le contexte ré-injecté reste sous le
-// budget de tokens ; deux garde-fous n'existent que pour empêcher une boucle
-// réellement infinie (jamais atteints en usage normal). L'autorisation d'agir
-// n'est demandée qu'une fois par session.
-const AGENT_HARD_CAP = 300;          // garde-fou anti-boucle infinie
-const AGENT_TOKEN_BUDGET = 200000;   // limite réelle : tokens de contexte estimés (marge sûre pour tout modèle cloud)
-// Estimation grossière ~4 caractères / token de tout ce qui est ré-injecté.
-function agentTokenEstimate(sysPrompt, hist, next) {
-  let chars = String(sysPrompt || '').length + String(next || '').length;
-  for (const m of hist) chars += String((m && m.content) || '').length;
-  return Math.ceil(chars / 4);
-}
-const TOOL_RESULT_MAX = 6000;   // taille max d'un résultat réinjecté au modèle
-const A11Y_TREE_MAX = 5200;     // budget texte de l'arbre d'accessibilité
-
-const AGENT_SYSTEM =
-  'Tu es l\'assistant IA du navigateur zaalis (propulsé par zaalis labs ide). ' +
-  'Tu peux INSPECTER et AGIR sur la page web actuellement ouverte dans l\'onglet actif, ' +
-  'exactement comme l\'extension Claude dans Chrome : lire la structure de la page, la console, ' +
-  'le réseau, exécuter du JavaScript, cliquer, remplir des champs et naviguer. ' +
-  'L\'utilisateur te voit agir : un curseur animé montre chaque clic et chaque saisie.\n\n' +
-  'Pour utiliser un outil, réponds UNIQUEMENT avec un bloc de code, sans aucun autre texte :\n' +
-  '```zaalis-tool\n{"tool":"NOM","args":{ ... }}\n```\n' +
-  'Exemples exacts : `{"tool":"fill","args":{"ref":"ref_12","value":"Texte"}}` et ' +
-  '`{"tool":"execute_js","args":{"code":"return document.title"}}`. ' +
-  'Ne lance jamais fill sans `ref` ou `selector` ni execute_js sans `code`.\n\n' +
-  'Outils disponibles :\n' +
-  '- read_page {"selector"?:"CSS"} : arbre d\'accessibilité de la page (ou d\'un élément) — ' +
-  'chaque élément interactif porte une référence [ref_N] à réutiliser dans click/fill.\n' +
-  '- read_console {} : lit les messages récents de la console (log/info/warn/error).\n' +
-  '- read_network {} : liste les requêtes réseau récentes (nom, type, durée, taille).\n' +
-  '- execute_js {"code":"..."} : exécute du JavaScript dans la page et renvoie le résultat ' +
-  '(utilise `return`). C\'est l\'outil universel : lire le DOM, extraire des données, calculer, mesurer.\n' +
-  '- click {"ref":"ref_N"} ou {"selector":"CSS"} ou {"text":"libellé"} : vrai clic souris natif.\n' +
-  '- fill {"ref":"ref_N" ou "selector":"CSS", "value":"...", "enter"?:true} : clique le champ puis ' +
-  'tape la valeur (frappe native, remplace le contenu) ; "enter":true valide avec la touche Entrée.\n' +
-  '- navigate {"url":"..."} ou {"action":"back|forward|reload"} : navigue.\n\n' +
-  'Règles :\n' +
-  '1. Dès que tu as besoin d\'une donnée réelle de la page, appelle l\'outil — n\'invente jamais.\n' +
-  '2. Avant click ou fill, appelle read_page pour connaître les refs actuels ; préfère toujours "ref" ' +
-  '(les refs restent valides tant que la page ne change pas).\n' +
-  '3. Un seul outil par message. Après avoir reçu le résultat, enchaîne ou conclus.\n' +
-  '4. Quand tu as la réponse finale pour l\'utilisateur, réponds en français, clair et concis, ' +
-  'SANS bloc zaalis-tool.';
-
-// Détecte une demande d'outil dans la réponse du modèle. Accepte un bloc balisé
-// ```zaalis-tool / ```json ou, à défaut, le premier objet JSON contenant "tool".
-function parseToolCall(text) {
-  const s = String(text || '');
-  let candidate = null;
-  let m = s.match(/```(?:zaalis-tool|json|tool)?\s*([\s\S]*?)```/i);
-  if (m) candidate = m[1];
-  if (!candidate) {
-    const b = s.match(/\{[\s\S]*?"tool"[\s\S]*?\}/);
-    if (b) candidate = b[0];
-  }
-  if (!candidate) return null;
-  try {
-    const o = JSON.parse(candidate.trim());
-    if (o && typeof o.tool === 'string') {
-      // Les fournisseurs ne suivent pas tous la même convention : certains
-      // placent les paramètres dans `args`, d'autres les mettent directement
-      // à la racine. L'ancien parseur jetait ces paramètres racine, transformant
-      // par exemple un fill valide en `fill {}` puis déclenchait l'anti-boucle.
-      const rootArgs = Object.fromEntries(Object.entries(o).filter(([k]) => k !== 'tool' && k !== 'args'));
-      const nestedArgs = o.args && typeof o.args === 'object' && !Array.isArray(o.args) ? o.args : {};
-      return { tool: o.tool, args: { ...rootArgs, ...nestedArgs } };
-    }
-  } catch {}
-  return null;
-}
-
-function toolLabel(call) {
-  const a = call.args || {};
-  switch (call.tool) {
-    case 'read_page':    return a.selector ? ('Lecture de « ' + a.selector + ' »') : 'Lecture de la page';
-    case 'read_console': return 'Lecture de la console';
-    case 'read_network': return 'Analyse du réseau';
-    case 'execute_js':   return 'Exécution de JavaScript';
-    case 'click':        return 'Clic — ' + (a.text || a.ref || a.selector || '');
-    case 'fill':         return 'Saisie dans ' + (a.ref || a.selector || 'un champ');
-    case 'navigate':     return 'Navigation — ' + (a.url || a.action || '');
-    default:             return 'Outil ' + call.tool;
-  }
-}
-
-function clampResult(s) {
-  s = String(s == null ? '' : s);
-  return s.length > TOOL_RESULT_MAX ? s.slice(0, TOOL_RESULT_MAX) + '\n…(tronqué)' : s;
-}
-
-function waitLoad(wc, ms) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = () => { if (done) return; done = true; clearTimeout(timer); wc.removeListener('did-stop-loading', finish); resolve(); };
-    const timer = setTimeout(finish, ms || 4000);
-    wc.once('did-stop-loading', finish);
-  });
-}
-
-const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ----- Vision & action « comme l'extension Claude dans Chrome » --------------
-// Tout le code injecté par l'agent tourne dans un MONDE ISOLÉ (même DOM que la
-// page, contexte JavaScript séparé) : la page ne peut ni voir ni altérer nos
-// références d'éléments ou notre curseur — mêmes garanties que les content
-// scripts d'extension Chrome. Seul execute_js reste dans le monde de la page.
-const AGENT_WORLD_ID = 1013;
-let aiControlTab = null;
-
-function agentExec(wc, code) {
-  return wc.executeJavaScriptInIsolatedWorld(AGENT_WORLD_ID, [{ code }], true);
-}
-
-// Halo de contrôle : injecté dans l'onglet piloté, jamais dans le panneau IA.
-// Reproduit littéralement le halo de la recherche IA (même dégradé, même flou
-// 14px, même opacité, même animation) — un rectangle plein flouté dont seul le
-// pourtour reste visible via le masque, si bien que la fenêtre est cernée du
-// même bandeau lumineux épais que la barre de recherche.
-function setAiControlBorder(t, active) {
-  const target = active ? t : aiControlTab;
-  aiControlTab = active && t ? t : null;
-  if (!target || !target.view || target.view.webContents.isDestroyed()) return Promise.resolve();
-
-  const enabled = !!active;
-  const code = `(() => {
-    const borderId = 'zaalis-agent-control-border';
-    const styleId = 'zaalis-agent-control-border-style';
-    const current = document.getElementById(borderId);
-    if (!${enabled}) {
-      if (current) current.remove();
-      const style = document.getElementById(styleId);
-      if (style) style.remove();
-      if (window.__zCur) {
-        try { window.__zCur.root.remove(); } catch {}
-        try { delete window.__zCur; } catch {}
-      }
-      return;
-    }
-    if (!document.getElementById(styleId)) {
-      const style = document.createElement('style');
-      style.id = styleId;
-      style.textContent = '@keyframes zaalis-agent-border-flow { from { background-position:0% 50%; } to { background-position:200% 50%; } }';
-      (document.head || document.documentElement).appendChild(style);
-    }
-    if (current) return;
-    const border = document.createElement('div');
-    border.id = borderId;
-    border.setAttribute('aria-hidden', 'true');
-    // Le masque doit être *fondu* (dégradé alpha), pas à bord franc : un masque
-    // dur est appliqué après le filtre et redécouperait des bords nets, ce qui
-    // « durcit » le halo. Ici chaque bord s'estompe vers l'intérieur, puis le
-    // blur(14px) diffuse le tout — même brume exacte que la barre de recherche.
-    const feather = 'linear-gradient(to right,transparent,#000 10px,transparent 40px),linear-gradient(to left,transparent,#000 10px,transparent 40px),linear-gradient(to bottom,transparent,#000 10px,transparent 40px),linear-gradient(to top,transparent,#000 10px,transparent 40px)';
-    border.style.cssText = [
-      'position:fixed', 'inset:-3px', 'z-index:2147483647', 'pointer-events:none',
-      'opacity:.8', 'filter:blur(14px)',
-      'background:linear-gradient(90deg,rgba(0,120,255,.85),rgba(0,212,255,.85),rgba(120,90,255,.85),rgba(0,212,255,.85),rgba(0,120,255,.85))',
-      'background-size:200% 100%', 'animation:zaalis-agent-border-flow 7s linear infinite',
-      '-webkit-mask:' + feather, 'mask:' + feather
-    ].join(';');
-    (document.body || document.documentElement).appendChild(border);
-  })()`;
-  return agentExec(target.view.webContents, code).catch(() => {});
-}
-
-// Arbre d'accessibilité de la page (rôles + libellés + refs), comme le
-// read_page de l'extension Claude. Les refs [ref_N] sont stables pour la durée
-// de vie du document (WeakMap élément→ref, Map ref→élément dans le monde isolé).
-function a11ySnapshotJs(selector) {
-  return `(() => {
-  const sel = ${JSON.stringify(String(selector || ''))};
-  let root = document.body;
-  if (sel) { try { root = document.querySelector(sel); } catch { return { error: 'sélecteur invalide : ' + sel }; } }
-  if (!root) return { error: sel ? ('sélecteur introuvable : ' + sel) : 'page sans <body>' };
-  if (!window.__zRefs) window.__zRefs = { n: 0, byRef: new Map(), byEl: new WeakMap() };
-  const R = window.__zRefs;
-  const refFor = (el) => { let r = R.byEl.get(el); if (!r) { r = 'ref_' + (++R.n); R.byEl.set(el, r); R.byRef.set(r, el); } return r; };
-  const clean = (s) => String(s == null ? '' : s).replace(/\\s+/g, ' ').trim();
-  const visible = (el) => {
-    const s = getComputedStyle(el);
-    if (s.display === 'none' || s.visibility === 'hidden') return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 1 && r.height > 1;
-  };
-  const ARIA = new Set(['link','checkbox','radio','tab','menuitem','combobox','switch','slider','searchbox','textbox','option','menuitemcheckbox','menuitemradio','spinbutton']);
-  const roleOf = (el) => {
-    const t = el.tagName, ar = (el.getAttribute('role') || '').toLowerCase();
-    if (t === 'A') return el.hasAttribute('href') ? 'link' : (ar === 'button' ? 'button' : null);
-    if (t === 'BUTTON' || t === 'SUMMARY' || ar === 'button') return 'button';
-    if (t === 'SELECT') return 'select';
-    if (t === 'TEXTAREA') return 'textbox';
-    if (t === 'INPUT') {
-      const ty = (el.getAttribute('type') || 'text').toLowerCase();
-      if (ty === 'hidden') return null;
-      if (ty === 'button' || ty === 'submit' || ty === 'reset' || ty === 'image') return 'button';
-      if (ty === 'checkbox') return 'checkbox';
-      if (ty === 'radio') return 'radio';
-      if (ty === 'range') return 'slider';
-      return 'textbox';
-    }
-    if (ARIA.has(ar)) return ar;
-    if (el.isContentEditable && (!el.parentElement || !el.parentElement.isContentEditable)) return 'textbox';
-    if (el.hasAttribute('onclick')) return 'button';
-    const ti = el.getAttribute('tabindex');
-    if (ti != null && +ti >= 0 && t !== 'BODY') return 'button';
-    return null;
-  };
-  const labelOf = (el) => {
-    let s = el.getAttribute('aria-label') || '';
-    if (!s) {
-      const lb = el.getAttribute('aria-labelledby');
-      if (lb) s = lb.split(/\\s+/).map((id) => { const n = document.getElementById(id); return n ? n.textContent : ''; }).join(' ');
-    }
-    if (!s && el.id) { try { const l = document.querySelector('label[for="' + CSS.escape(el.id) + '"]'); if (l) s = l.innerText; } catch {} }
-    // placeholder AVANT value : la valeur courante est affichée à part
-    // (valeur: "…"), le libellé doit rester stable quand l'utilisateur tape.
-    if (!s) s = el.innerText || el.placeholder || el.title || el.value || el.getAttribute('alt') || el.getAttribute('name') || '';
-    return clean(s).slice(0, 80);
-  };
-  const MAX = ${A11Y_TREE_MAX};
-  const lines = [];
-  let used = 0, cut = false;
-  const push = (depth, s) => {
-    if (used >= MAX) { cut = true; return; }
-    const line = '  '.repeat(Math.min(depth, 5)) + s;
-    if (line === lines[lines.length - 1]) return;
-    lines.push(line); used += line.length + 1;
-  };
-  const SKIP = new Set(['SCRIPT','STYLE','NOSCRIPT','TEMPLATE','SVG','CANVAS','VIDEO','AUDIO','IFRAME','OBJECT','EMBED','SLOT']);
-  const STRUCT = new Set(['MAIN','NAV','HEADER','FOOTER','ASIDE','FORM','SECTION','ARTICLE','UL','OL','TABLE','DIALOG','FIELDSET']);
-  const DEEP = 'a,button,input,select,textarea,summary,img,h1,h2,h3,h4,h5,h6,[role],[onclick],[tabindex],[contenteditable]';
-  const walk = (node, depth) => {
-    for (let c = node.firstChild; c && !cut; c = c.nextSibling) {
-      if (c.nodeType === 3) { const tx = clean(c.nodeValue); if (tx.length > 1) push(depth, 'text "' + tx.slice(0, 160) + '"'); continue; }
-      if (c.nodeType !== 1 || SKIP.has(c.tagName)) continue;
-      if (!visible(c)) continue;
-      const role = roleOf(c);
-      if (role) {
-        let s = role + ' "' + labelOf(c) + '" [' + refFor(c) + ']';
-        if (role === 'textbox' || role === 'searchbox' || role === 'combobox' || role === 'spinbutton') {
-          const v = clean('value' in c ? c.value : c.innerText); if (v) s += ' (valeur: "' + v.slice(0, 40) + '")';
-        } else if (role === 'checkbox' || role === 'radio' || role === 'switch') {
-          s += (c.checked || c.getAttribute('aria-checked') === 'true') ? ' (coché)' : ' (non coché)';
-        } else if (role === 'select') {
-          const o = c.selectedOptions && c.selectedOptions[0]; if (o) s += ' (choix: "' + clean(o.label || o.value).slice(0, 40) + '")';
-        }
-        push(depth, s);
-        continue;
-      }
-      const t = c.tagName;
-      if (t === 'H1' || t === 'H2' || t === 'H3' || t === 'H4' || t === 'H5' || t === 'H6') {
-        const h = clean(c.innerText); if (h) push(depth, t.toLowerCase() + ' "' + h.slice(0, 120) + '"'); continue;
-      }
-      if (t === 'IMG') { const a = clean(c.getAttribute('alt')); if (a) push(depth, 'image "' + a.slice(0, 80) + '"'); continue; }
-      if (!c.querySelector(DEEP)) { const tx = clean(c.innerText); if (tx.length > 1) push(depth, 'text "' + tx.slice(0, 200) + '"'); continue; }
-      walk(c, STRUCT.has(t) ? depth + 1 : depth);
-    }
-  };
-  walk(root, 0);
-  return { title: document.title || '', url: location.href, tree: lines.join('\\n'), cut };
-})()`;
-}
-
-// Résout la cible d'un click/fill (ref > selector > texte), la fait défiler au
-// centre et renvoie ses coordonnées viewport (px CSS) + son rectangle pour le
-// halo. L'élément résolu est mémorisé dans le monde isolé (window.__zTarget)
-// pour que les étapes suivantes (sélection, vérification) visent le même nœud.
-function resolveTargetJs(args) {
-  return `(() => {
-  const ref = ${JSON.stringify(String(args.ref || ''))};
-  const sel = ${JSON.stringify(String(args.selector || ''))};
-  const txt = ${JSON.stringify(String(args.text || '').toLowerCase())};
-  let el = null;
-  if (ref) {
-    const R = window.__zRefs;
-    el = R ? (R.byRef.get(ref) || null) : null;
-    if (!el) return { error: 'référence inconnue : ' + ref + ' — appelle read_page pour obtenir les refs actuels' };
-    if (!el.isConnected) return { error: ref + ' a disparu de la page — appelle read_page pour des refs à jour' };
-  }
-  if (!el && sel) { try { el = document.querySelector(sel); } catch { return { error: 'sélecteur invalide : ' + sel }; } }
-  if (!el && txt) {
-    el = [...document.querySelectorAll('a,button,[role=button],[role=link],input[type=submit],input[type=button],[onclick],summary,[tabindex]')]
-      .find((n) => ((n.innerText || n.value || n.getAttribute('aria-label') || '').trim().toLowerCase()).includes(txt));
-  }
-  if (!el) return { error: 'élément introuvable' };
-  try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch { try { el.scrollIntoView(); } catch {} }
-  const r = el.getBoundingClientRect();
-  if (!r.width && !r.height) return { error: 'élément invisible (taille nulle)' };
-  window.__zTarget = el;
-  const x = Math.min(Math.max(r.left + r.width / 2, 1), innerWidth - 2);
-  const y = Math.min(Math.max(r.top + r.height / 2, 1), innerHeight - 2);
-  const label = String(el.innerText || el.value || el.getAttribute('aria-label') || el.placeholder || el.tagName || '').replace(/\\s+/g, ' ').trim().slice(0, 80);
-  return { x, y, rect: { l: r.left, t: r.top, w: r.width, h: r.height }, label };
-})()`;
-}
-
-// Curseur agent visible : pointeur SVG au dégradé zaalis + pastille d'action +
-// halo sur la cible + onde au clic. Construit sans innerHTML (compatible
-// Trusted Types) et stylé via CSSOM (compatible CSP strictes). pointer-events:
-// none partout : l'overlay ne peut jamais intercepter le vrai clic.
-const AGENT_OVERLAY_JS = `(() => {
-  if (window.__zCur && window.__zCur.root.isConnected) return;
-  const NS = 'http://www.w3.org/2000/svg';
-  const root = document.createElement('div');
-  root.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
-  const hl = document.createElement('div');
-  hl.style.cssText = 'position:absolute;left:0;top:0;border:2px solid #4898ff;border-radius:10px;box-shadow:0 0 0 4px rgba(72,152,255,.28),0 0 18px rgba(0,255,255,.35);opacity:0;transition:opacity .25s;';
-  const cur = document.createElement('div');
-  cur.style.cssText = 'position:absolute;left:0;top:0;opacity:0;transform:translate(-60px,-60px);transition:transform .5s cubic-bezier(.3,.75,.3,1),opacity .25s;will-change:transform;filter:drop-shadow(0 2px 6px rgba(0,0,0,.45));';
-  const svg = document.createElementNS(NS, 'svg');
-  svg.setAttribute('width', '26'); svg.setAttribute('height', '26'); svg.setAttribute('viewBox', '0 0 24 24');
-  const defs = document.createElementNS(NS, 'defs');
-  const grad = document.createElementNS(NS, 'linearGradient');
-  grad.setAttribute('id', 'zaalis-cursor-grad');
-  grad.setAttribute('x1', '0'); grad.setAttribute('y1', '0'); grad.setAttribute('x2', '1'); grad.setAttribute('y2', '1');
-  const s1 = document.createElementNS(NS, 'stop'); s1.setAttribute('offset', '0'); s1.setAttribute('stop-color', '#4898ff');
-  const s2 = document.createElementNS(NS, 'stop'); s2.setAttribute('offset', '1'); s2.setAttribute('stop-color', '#00ffff');
-  grad.appendChild(s1); grad.appendChild(s2); defs.appendChild(grad); svg.appendChild(defs);
-  const p = document.createElementNS(NS, 'path');
-  p.setAttribute('d', 'M5.5 2.2 L5.5 18.6 L9.6 14.9 L12.1 20.9 L14.9 19.7 L12.4 13.8 L18 13.2 Z');
-  p.setAttribute('fill', 'url(#zaalis-cursor-grad)');
-  p.setAttribute('stroke', '#fff'); p.setAttribute('stroke-width', '1.3'); p.setAttribute('stroke-linejoin', 'round');
-  svg.appendChild(p);
-  const chip = document.createElement('div');
-  chip.style.cssText = 'position:absolute;left:20px;top:24px;background:linear-gradient(90deg,#4898ff,#00d4ff);color:#fff;font:600 11px/1 -apple-system,BlinkMacSystemFont,sans-serif;padding:5px 10px;border-radius:999px;white-space:nowrap;box-shadow:0 3px 10px rgba(0,0,0,.3);';
-  cur.appendChild(svg); cur.appendChild(chip);
-  root.appendChild(hl); root.appendChild(cur);
-  document.documentElement.appendChild(root);
-  let lastX = Math.max(28, Math.round(innerWidth * .12));
-  let lastY = Math.max(28, Math.round(innerHeight * .18));
-  window.__zCur = {
-    root, cur,
-    hold(label) {
-      if (!root.isConnected) document.documentElement.appendChild(root);
-      chip.textContent = label || 'IA active';
-      chip.style.display = '';
-      cur.style.opacity = '1';
-      cur.style.transform = 'translate(' + lastX + 'px,' + lastY + 'px)';
-      hl.style.opacity = '0';
-    },
-    act(x, y, label, rect) {
-      if (!root.isConnected) document.documentElement.appendChild(root);
-      lastX = Math.round(x); lastY = Math.round(y);
-      chip.textContent = label || '';
-      chip.style.display = label ? '' : 'none';
-      cur.style.opacity = '1';
-      cur.style.transform = 'translate(' + lastX + 'px,' + lastY + 'px)';
-      if (rect) {
-        hl.style.left = (rect.l - 4) + 'px'; hl.style.top = (rect.t - 4) + 'px';
-        hl.style.width = (rect.w + 8) + 'px'; hl.style.height = (rect.h + 8) + 'px';
-        hl.style.opacity = '1';
-      } else hl.style.opacity = '0';
-    },
-    pulse(x, y) {
-      const c = document.createElement('div');
-      c.style.cssText = 'position:absolute;width:14px;height:14px;border-radius:50%;border:2.5px solid #00e0ff;box-shadow:0 0 12px rgba(0,224,255,.8);opacity:.95;transform:translate(-50%,-50%) scale(.4);transition:transform .45s ease-out,opacity .45s ease-out;left:' + Math.round(x) + 'px;top:' + Math.round(y) + 'px;';
-      root.appendChild(c);
-      requestAnimationFrame(() => { c.style.transform = 'translate(-50%,-50%) scale(2.6)'; c.style.opacity = '0'; });
-      setTimeout(() => { try { c.remove(); } catch {} }, 600);
-    },
-  };
-})()`;
-
-// Pendant une étape sans cible (lecture, réseau, réflexion…), le curseur reste
-// visible exactement là où l'étape précédente l'a laissé. La prochaine action
-// réutilise la transition de transform et glisse naturellement vers sa cible.
-async function agentHoldCursor(wc, label) {
-  try {
-    await agentExec(wc, AGENT_OVERLAY_JS + ';window.__zCur.hold(' +
-      JSON.stringify(String(label || 'IA active')) + ');');
-  } catch {}
-}
-
-// Anime le curseur jusqu'à la cible (halo inclus) et attend la fin du trajet,
-// puis émet l'onde de clic si demandé. Ne bloque jamais l'outil en cas d'échec
-// d'affichage (page exotique) : l'action reste prioritaire sur le visuel.
-async function agentShowAction(wc, pt, label, withPulse) {
-  try {
-    await agentExec(wc, AGENT_OVERLAY_JS + ';window.__zCur.act(' + Math.round(pt.x) + ',' + Math.round(pt.y) + ',' +
-      JSON.stringify(String(label || '')) + ',' + JSON.stringify(pt.rect || null) + ');');
-    await sleepMs(560);
-    if (withPulse) await agentExec(wc, 'window.__zCur && window.__zCur.pulse(' + Math.round(pt.x) + ',' + Math.round(pt.y) + ');');
-  } catch {}
-}
-
-// Vrai clic souris : sendInputEvent injecte des événements natifs (move, down,
-// up) dans la WebContents — indiscernables d'un clic humain (hover, focus,
-// :active se déclenchent). Coordonnées CSS → DIP via le facteur de zoom.
-async function nativeClick(wc, xCss, yCss) {
-  let z = 1;
-  try { z = wc.getZoomFactor() || 1; } catch {}
-  const x = Math.round(xCss * z), y = Math.round(yCss * z);
-  wc.sendInputEvent({ type: 'mouseMove', x, y });
-  await sleepMs(40);
-  wc.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
-  await sleepMs(55);
-  wc.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-}
-
-// Frappe native d'une touche (ex. 'Return' pour valider un formulaire).
-function nativeKeyTap(wc, keyCode) {
-  wc.sendInputEvent({ type: 'keyDown', keyCode });
-  wc.sendInputEvent({ type: 'char', keyCode });
-  wc.sendInputEvent({ type: 'keyUp', keyCode });
-}
-
-// Sélectionne le contenu du champ ciblé pour que l'insertion native le remplace.
-const FOCUS_SELECT_JS = `(() => {
-  const el = window.__zTarget;
-  if (!el || !el.isConnected) return { error: 'cible perdue' };
-  try { el.focus({ preventScroll: true }); } catch {}
-  try {
-    if (typeof el.select === 'function' && 'value' in el) el.select();
-    else if (el.isContentEditable) {
-      const r = document.createRange(); r.selectNodeContents(el);
-      const s = getSelection(); s.removeAllRanges(); s.addRange(r);
-    }
-  } catch {}
-  return { ok: true };
-})()`;
-
-const READ_VALUE_JS = `(() => {
-  const el = window.__zTarget;
-  if (!el) return null;
-  return 'value' in el ? String(el.value) : String(el.innerText || '');
-})()`;
-
-// Repli si la frappe native a été neutralisée (champ non focusable, framework
-// atypique) : affectation via le setter natif du prototype (compatible React).
-function legacyFillJs(value) {
-  return `(() => {
-  const el = window.__zTarget;
-  if (!el || !el.isConnected) return { error: 'cible perdue' };
-  const v = ${JSON.stringify(String(value))};
-  try {
-    if ('value' in el) {
-      const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value');
-      if (d && d.set) d.set.call(el, v); else el.value = v;
-    } else el.textContent = v;
-    el.dispatchEvent(new Event('input', { bubbles: true }));
-  } catch (e) { return { error: String(e && e.message || e) }; }
-  return { ok: true };
-})()`;
-}
-
-const DISPATCH_CHANGE_JS = `(() => {
-  const el = window.__zTarget;
-  if (el && el.isConnected) { try { el.dispatchEvent(new Event('change', { bubbles: true })); } catch {} }
-  return true;
-})()`;
-
-// Exécute un outil sur l'onglet actif et renvoie un résultat texte pour le modèle.
-async function runAgentTool(t, tool, args) {
-  if (!t) return 'Aucune page web active.';
-  const wc = t.view.webContents;
-  args = args || {};
-  const J = (v) => JSON.stringify(v);
-
-  switch (tool) {
-    case 'read_page': {
-      const r = await agentExec(wc, a11ySnapshotJs(args.selector));
-      if (!r) return 'Page illisible pour le moment.';
-      if (r.error) return r.error;
-      return 'Titre : ' + r.title + '\nURL : ' + r.url + '\n\n' + (r.tree || '(page vide)') +
-             (r.cut ? '\n…(arbre tronqué — précise "selector" pour zoomer sur une zone)' : '');
-    }
-    case 'read_console': {
-      const buf = t.consoleBuf || [];
-      if (!buf.length) return 'Console vide (aucun message capturé depuis le chargement de la page).';
-      return buf.slice(-60).map(e => '[' + e.level + '] ' + e.message + (e.source ? ' (' + e.source + ':' + e.line + ')' : '')).join('\n');
-    }
-    case 'read_network': {
-      const list = await wc.executeJavaScript(
-        '(()=>{try{const nav=performance.getEntriesByType("navigation")[0];' +
-        'const res=performance.getEntriesByType("resource").slice(-50).map(e=>({name:e.name,type:e.initiatorType,ms:Math.round(e.duration),size:e.transferSize||0}));' +
-        'return{page:nav?{url:location.href,loadMs:Math.round(nav.duration)}:{url:location.href},resources:res};}catch(e){return{error:String(e&&e.message||e)};}})()', true);
-      return clampResult(J(list));
-    }
-    case 'execute_js': {
-      const code = String(args.code || '');
-      if (!code.trim()) return 'Erreur : aucun code fourni.';
-      const wrapped =
-        '(async()=>{try{const __r=await (async()=>{' + code + '\n})();' +
-        'return JSON.stringify(__r===undefined?"(ok, sans valeur de retour)":__r);}' +
-        'catch(e){return JSON.stringify({__error:String(e&&e.message||e)});}})()';
-      const raw = await wc.executeJavaScript(wrapped, true);
-      return clampResult(raw);
-    }
-    case 'click': {
-      if (!args.ref && !args.selector && !args.text) return 'Erreur : préciser "ref", "selector" ou "text".';
-      const pt = await agentExec(wc, resolveTargetJs(args));
-      if (!pt || pt.error) return J({ error: (pt && pt.error) || 'élément introuvable' });
-      // On montre le geste (curseur + halo), puis on clique pour de vrai.
-      await agentShowAction(wc, pt, 'Clic' + (pt.label ? ' — ' + pt.label.slice(0, 40) : ''), true);
-      const before = wc.getURL();
-      await nativeClick(wc, pt.x, pt.y);
-      await sleepMs(450);
-      const out = { ok: true, cliqué: pt.label || '(élément)' };
-      if (wc.getURL() !== before) { await waitLoad(wc, 4000); out.navigation = wc.getURL(); }
-      return J(out);
-    }
-    case 'fill': {
-      if (!args.ref && !args.selector) return 'Erreur : "ref" ou "selector" requis.';
-      const pt = await agentExec(wc, resolveTargetJs({ ref: args.ref, selector: args.selector }));
-      if (!pt || pt.error) return J({ error: (pt && pt.error) || 'champ introuvable' });
-      const value = String(args.value == null ? '' : args.value);
-      await agentShowAction(wc, pt, 'Saisie — ' + (pt.label || 'champ').slice(0, 40), true);
-      wc.focus();
-      await nativeClick(wc, pt.x, pt.y);   // focus par vrai clic (handlers focus/click natifs)
-      await sleepMs(140);
-      await agentExec(wc, FOCUS_SELECT_JS);          // sélectionne l'existant…
-      try { await wc.insertText(value); } catch {}   // …remplacé par une frappe native
-      await sleepMs(90);
-      // Vérifie la valeur obtenue ; au besoin repli sur l'affectation directe.
-      let final = await agentExec(wc, READ_VALUE_JS);
-      if (final !== value) {
-        await agentExec(wc, legacyFillJs(value));
-        final = await agentExec(wc, READ_VALUE_JS);
-      }
-      await agentExec(wc, DISPATCH_CHANGE_JS);
-      if (args.enter) { await sleepMs(80); nativeKeyTap(wc, 'Return'); await sleepMs(400); await waitLoad(wc, 4000); }
-      // Rend le clavier au panneau IA pour ne pas voler la saisie de l'utilisateur.
-      if (aiPanelOpen && aiPanelView) { try { aiPanelView.webContents.focus(); } catch {} }
-      return J({ ok: true, champ: pt.label || args.selector || args.ref || '',
-                 valeur: String(final == null ? '' : final).slice(0, 120), entrée: !!args.enter });
-    }
-    case 'navigate': {
-      if (args.action === 'back')    { if (wc.navigationHistory.canGoBack())    wc.navigationHistory.goBack();    else return 'Impossible de reculer.'; }
-      else if (args.action === 'forward') { if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); else return 'Impossible d\'avancer.'; }
-      else if (args.action === 'reload')  { wc.reload(); }
-      else if (args.url) {
-        let u = String(args.url).trim();
-        if (!/^[a-z]+:\/\//i.test(u)) u = 'https://' + u;
-        u = allowedPageUrl(u, false);
-        if (!u) return 'Navigation refusée : seuls les liens http et https sont autorisés.';
-        try { await wc.loadURL(u); } catch (e) { return 'Échec de navigation : ' + (e && e.message || e); }
-      } else return 'Erreur : préciser "url" ou "action".';
-      await waitLoad(wc, 5000);
-      if (aiControlTab === t) await setAiControlBorder(t, true);
-      return 'Page chargée : ' + wc.getURL();
-    }
-    default:
-      return 'Outil inconnu : ' + tool;
-  }
-}
-
-// Contexte rapide de la page active, injecté dans le prompt système à chaque tour.
-async function quickPageContext(t) {
-  if (!t) return '';
-  try {
-    const info = await t.view.webContents.executeJavaScript(
-      '({title:document.title||"",url:location.href,text:(document.body&&document.body.innerText||"").replace(/\\s+/g," ").trim().slice(0,2500)})', true);
-    return 'Titre : ' + (info.title || '(sans titre)') + '\nURL : ' + info.url +
-           '\nAperçu du contenu :\n' + (info.text || '(vide)');
-  } catch { return ''; }
-}
-
-function ideErrorReply(e) {
-  const m = String(e && e.message || '');
-  if (m.startsWith('no-key:')) return '⚠️ ' + m.slice(7) + '\nAjoute ta clé API dans zaalis labs ide (Paramètres → Clés API).';
-  if (m === 'no-secret') return '⚠️ zaalis labs ide n\'a jamais été lancé sur ce Mac. Lance-le une première fois pour activer l\'IA.';
-  if (m === 'timeout')   return '⚠️ Le modèle met trop de temps à répondre. Réessaie.';
-  if (/too many|429|rate.?limit/i.test(m)) return '⚠️ Le fournisseur IA limite le débit (trop de requêtes rapprochées). Patiente quelques secondes puis réessaie.';
-  return '⚠️ Impossible de joindre zaalis labs ide. Vérifie qu\'il est bien lancé, puis réessaie.';
-}
-
-async function aiChatSend(text, pageContext) {
-  text = String(text || '').replace(/\x1f/g, ' ').trim();
-  if (!text || aiChatBusy) return;
-  let chat = aiChatById(aiCurrentChatId);
-  if (!chat) chat = newAiChat(text.slice(0, 44));
-  if (chat.messages.length === 0 && chat.title === 'Nouvelle conversation') chat.title = text.slice(0, 44);
-
-  // Historique conversationnel (on écarte les étapes d'outils, non pertinentes
-  // pour le modèle d'un tour à l'autre et parfois refusées par le serveur).
-  const history = chat.messages
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({ role: m.role, content: m.content }));
-  chat.messages.push({ role: 'user', content: text });
-  chat.updatedAt = new Date().toISOString();
-  saveAiChats();
-  aiChatBusy = true;
-  pushAiChatMessages();
-  pushAiChatList();
-
-  const t = activeTab();
-  let liveCtx = pageContext;
-  if (!liveCtx && t) liveCtx = await quickPageContext(t);
-  const sysPrompt = AGENT_SYSTEM + (liveCtx
-    ? '\n\n--- Page actuellement ouverte ---\n' + liveCtx
-    : '\n\n(Aucune page web active pour le moment.)');
-
-  const loopHistory = history.slice();
-  let nextMessage = text;
-  let finalReply = null;
-  let agentMutationApproved = false;
-
-  let repeatKey = '', repeatCount = 0;
-  for (let step = 0; step < AGENT_HARD_CAP; step++) {
-    // Limite réelle = tokens : on s'arrête proprement avant de saturer le
-    // contexte du modèle, plutôt que d'attendre une erreur d'API.
-    if (agentTokenEstimate(sysPrompt, loopHistory, nextMessage) > AGENT_TOKEN_BUDGET) {
-      finalReply = 'J\'ai atteint la limite de contexte (tokens) du modèle après avoir traité une grande partie de la tâche. Relance-moi pour poursuivre.';
-      break;
-    }
-    // Un échec ponctuel (rate-limit du fournisseur, réseau) ne doit pas casser
-    // toute la session d'agent : jusqu'à 3 tentatives avec pause adaptée
-    // (les 429 « Too Many Requests » exigent de laisser la fenêtre se rouvrir).
-    let out = null, lastErr = null;
-    for (let attempt = 0; attempt < 3 && !out; attempt++) {
-      try {
-        out = await ideChat({ message: nextMessage, history: loopHistory, systemPrompt: sysPrompt, timeoutMs: 90000 });
-      } catch (e) {
-        lastErr = e;
-        const m = String(e && e.message || '');
-        if (m.startsWith('no-key:') || m === 'no-secret') break;
-        if (attempt < 2) await sleepMs(/too many|429|rate.?limit/i.test(m) ? 12000 : 2500);
-      }
-    }
-    if (!out) { finalReply = ideErrorReply(lastErr); break; }
-
-    const resp = out.response;
-    const call = t ? parseToolCall(resp) : null;
-    if (!call) { finalReply = resp; break; }
-
-    // Garde-fou anti-boucle : la même action répétée à l'identique plusieurs
-    // fois d'affilée = blocage (le remplissage légitime vise des champs
-    // différents, donc des args différents).
-    const repeatK = call.tool + '|' + JSON.stringify(call.args || {});
-    if (repeatK === repeatKey) {
-      if (++repeatCount >= 4) { finalReply = 'Je répète la même action sans progresser, je m\'arrête pour éviter une boucle. Peux-tu préciser la demande ?'; break; }
-    } else { repeatKey = repeatK; repeatCount = 0; }
-
-    // Le modèle demande un outil : on l'exécute et on réinjecte le résultat.
-    loopHistory.push({ role: 'user', content: nextMessage });
-    loopHistory.push({ role: 'assistant', content: resp });
-
-    const label = toolLabel(call);
-    await setAiControlBorder(t, true);
-    await agentHoldCursor(t.view.webContents, label);
-    aiPanelSend({ type: 'aiChatStep', label });
-    let result;
-    const mutating = ['execute_js', 'click', 'fill', 'navigate'].includes(call.tool);
-    if (mutating && !agentMutationApproved) {
-      const choice = await dialog.showMessageBox(mainWin, {
-        type: 'question',
-        buttons: ['Annuler', 'Autoriser cette action'],
-        defaultId: 0, cancelId: 0,
-        message: 'L’assistant IA souhaite agir sur la page',
-        detail: label + '\n\nLa page peut contenir des instructions trompeuses. Autorisez seulement si cette action correspond bien à votre demande.',
-      });
-      agentMutationApproved = choice.response === 1;
-      if (!agentMutationApproved) result = 'Action refusée par l’utilisateur.';
-    }
-    try { if (result == null) result = await runAgentTool(t, call.tool, call.args); }
-    catch (e) { result = 'Erreur outil : ' + (e && e.message || e); }
-
-    chat.messages.push({ role: 'tool', tool: call.tool, label, content: clampResult(result).slice(0, 800) });
-    chat.updatedAt = new Date().toISOString();
-    saveAiChats();
-    // Mise à jour INCRÉMENTALE (pas de re-render complet) : le panneau ajoute
-    // la ligne au lot et fait glisser le compteur, sans reconstruire le chat.
-    aiPanelSend({ type: 'aiChatAction', label });
-
-    nextMessage = '[RÉSULTAT DE L\'OUTIL ' + call.tool + ']\n' + clampResult(result);
-  }
-
-  if (finalReply == null) finalReply = 'Je me suis arrêté après plusieurs étapes d\'analyse sans conclure. Peux-tu préciser ta demande ?';
-  await setAiControlBorder(null, false);
-  chat.messages.push({ role: 'assistant', content: finalReply });
-  chat.updatedAt = new Date().toISOString();
-  aiChatBusy = false;
-  saveAiChats();
-  pushAiChatMessages();
-  pushAiChatList();
-}
-
-// « Demander a l'IA » : extrait le texte de la page active, ouvre le panneau
-// et lance un resume dans une nouvelle conversation.
-async function askAiAboutPage() {
-  const t = activeTab();
-  if (!t) return;
-  openAiPanel();
-  if (aiChatBusy) return;   // une reponse est deja en cours : on montre juste le panneau
-  let info = null;
-  try {
-    info = await t.view.webContents.executeJavaScript(`({
-      title: document.title || '',
-      url: location.href,
-      text: (document.body && document.body.innerText || '').replace(/\\s+/g, ' ').slice(0, 8000),
-    })`, true);
-  } catch {}
-  const title = (info && info.title) || t.view.webContents.getTitle() || 'cette page';
-  const url = (info && info.url) || t.view.webContents.getURL() || '';
-  newAiChat(('Résumé — ' + title).slice(0, 60));
-  pushAiChatList();
-  pushAiChatMessages();
-  const ctx = 'Titre : ' + title + '\nURL : ' + url + '\n\nContenu :\n' + ((info && info.text) || '(contenu inaccessible)');
-  aiChatSend('Fais un résumé clair et structuré de cette page.', ctx);
-}
+// Agent IA outillé (comme l'extension Claude dans Chrome) : outils, vision, actions natives, protocole DevTools, boucle de chat.
+// (code dans src/core/agent.js ; dépendances injectées ci-dessous)
+const AGENT = require('./src/core/agent').init({
+  get aiPanelOpen() { return aiPanelOpen; },
+  get aiPanelView() { return aiPanelView; },
+  get AGENT_SELFTEST() { return AGENT_SELFTEST; },
+  get activeTab() { return activeTab; },
+  get aiChatBusy() { return aiChatBusy; }, set aiChatBusy(v) { aiChatBusy = v; },
+  get aiChatById() { return aiChatById; },
+  get aiCurrentChatId() { return aiCurrentChatId; },
+  get aiPanelSend() { return aiPanelSend; },
+  get allowedPageUrl() { return allowedPageUrl; },
+  get chromeUserAgent() { return chromeUserAgent; },
+  get closeTab() { return closeTab; },
+  get createTab() { return createTab; },
+  get hostOf() { return hostOf; },
+  get ideChat() { return ideChat; },
+  get isInternal() { return isInternal; },
+  get mainWin() { return mainWin; },
+  get newAiChat() { return newAiChat; },
+  get openAiPanel() { return openAiPanel; },
+  get pushAiChatList() { return pushAiChatList; },
+  get pushAiChatMessages() { return pushAiChatMessages; },
+  get resolveQuery() { return resolveQuery; },
+  get saveAiChats() { return saveAiChats; },
+  get selectTab() { return selectTab; },
+  get tabs() { return tabs; },
+  get uniqueDownloadPath() { return uniqueDownloadPath; },
+});
+const { agentTokenEstimate, waitLoad, agentExec, setAiControlBorder, agentHoldCursor, agentShowAction, nativeClick, nativeKeyTap, cssToDip, nativeMouseClick, nativeKeyCombo, agentPoint, agentScreenshot, ensureDebugger, startNetworkCapture, runAgentTool, quickPageContext, ideErrorReply, aiChatSend, askAiAboutPage } = AGENT;
 
 // ----- Recherche vocale ------------------------------------------------------
 // Le navigateur conserve l'orbe et la capture vocale, mais ne déclenche plus
@@ -3308,31 +3752,12 @@ async function voiceTurn(sender, audioB64) {
 }
 
 // ----- Traduction de page (via zaalis labs ide) -----------------------------
-// Conçue sans risque : on extrait les segments de texte visibles, on les fait
-// traduire par le modèle, puis on réinjecte. Au moindre échec, la page reste
-// intacte (aucune modification n'est appliquée).
-const TRANSLATE_EXTRACT_JS = `(() => {
-  const skip = new Set(['SCRIPT','STYLE','NOSCRIPT','CODE','PRE','TEXTAREA','KBD','SAMP']);
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-    acceptNode(n){
-      const v = n.nodeValue;
-      if (!v || !v.trim() || v.trim().length < 2) return NodeFilter.FILTER_REJECT;
-      const p = n.parentElement;
-      if (!p || skip.has(p.tagName)) return NodeFilter.FILTER_REJECT;
-      if (p.closest('[contenteditable="true"]')) return NodeFilter.FILTER_REJECT;
-      const s = getComputedStyle(p);
-      if (s && (s.display === 'none' || s.visibility === 'hidden')) return NodeFilter.FILTER_REJECT;
-      return NodeFilter.FILTER_ACCEPT;
-    }
-  });
-  const nodes = []; let n;
-  while ((n = walker.nextNode())) nodes.push(n);
-  window.__zTransNodes = nodes;
-  return nodes.slice(0, 120).map((nd,i)=>({ i, t: nd.nodeValue.trim().slice(0,300) }));
-})()`;
 
 let translating = false;
 async function translatePage(targetLang) {
+  // Module de traduction (src/features/translate.js) : détection de langue,
+  // bulle, lots illimités, « Afficher l'original ».
+  if (featureModules.translate && featureModules.translate.translateActive) return featureModules.translate.translateActive(targetLang);
   const t = activeTab();
   if (!t || translating) return;
   const wc = t.view.webContents;
@@ -3373,90 +3798,10 @@ async function translatePage(targetLang) {
 
 // ----- Controle media -------------------------------------------------------
 
-const MEDIA_STATE_JS = `(() => {
-  const all = Array.from(document.querySelectorAll('video,audio'));
-  const scored = all.map(el => {
-    const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : { width: 0, height: 0 };
-    const duration = Number.isFinite(el.duration) ? Number(el.duration) : 0;
-    const score =
-      (!el.paused ? 1000 : 0) +
-      (el.currentTime > 0 ? 140 : 0) +
-      (duration > 0 ? 80 : 0) +
-      ((el.readyState || 0) * 20) +
-      Math.min(80, Math.max(0, rect.width * rect.height / 9000));
-    return { el, score };
-  }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
-  const el = scored[0] && scored[0].el;
-  if (!el) return null;
-  const md = navigator.mediaSession && navigator.mediaSession.metadata;
-  const art = md && md.artwork && md.artwork.length ? md.artwork[md.artwork.length - 1].src : '';
-  const tracks = Array.from(el.textTracks || []);
-  const host = location.hostname.replace(/^www\\./, '');
-  return {
-    type: 'mediaState',
-    available: true,
-    active: !el.paused,
-    paused: !!el.paused,
-    current: Number(el.currentTime) || 0,
-    duration: Number.isFinite(el.duration) ? (Number(el.duration) || 0) : 0,
-    title: (md && md.title) || document.title || host || 'Media',
-    artist: (md && md.artist) || '',
-    artwork: art || '',
-    host,
-    captionsOn: tracks.some(t => t.mode === 'showing')
-  };
-})()`;
-
-function mediaCommandJS(cmd) {
-  return `(async () => {
-    const pickMedia = () => Array.from(document.querySelectorAll('video,audio'))
-      .map(el => ({
-        el,
-        score: (!el.paused ? 1000 : 0) + (el.currentTime > 0 ? 120 : 0) +
-               (Number.isFinite(el.duration) && el.duration > 0 ? 80 : 0) + ((el.readyState || 0) * 20)
-      }))
-      .filter(x => x.score > 0)
-      .sort((a, b) => b.score - a.score)[0]?.el || null;
-    const clickAny = selectors => {
-      for (const s of selectors) {
-        const node = document.querySelector(s);
-        if (node) { node.click(); return true; }
-      }
-      return false;
-    };
-    const cmd = ${JSON.stringify(cmd)};
-    if (cmd === 'next') return clickAny(['.ytp-next-button', '[aria-label*="Next"]', '[aria-label*="Suivant"]', '[title*="Next"]', '[title*="Suivant"]']);
-    if (cmd === 'prev') return clickAny(['.ytp-prev-button', '[aria-label*="Previous"]', '[aria-label*="Précédent"]', '[aria-label*="Precedent"]', '[title*="Previous"]', '[title*="Précédent"]']);
-    const el = pickMedia();
-    if (!el) return false;
-    if (cmd === 'playPause') {
-      if (el.paused) { try { await el.play(); } catch (e) {} }
-      else el.pause();
-      return true;
-    }
-    if (cmd === 'seekBack') { el.currentTime = Math.max(0, (Number(el.currentTime) || 0) - 10); return true; }
-    if (cmd === 'seekForward') {
-      const dur = Number.isFinite(el.duration) ? el.duration : Infinity;
-      el.currentTime = Math.min(dur, (Number(el.currentTime) || 0) + 10);
-      return true;
-    }
-    if (cmd === 'captions') {
-      const tracks = Array.from(el.textTracks || []);
-      if (tracks.length) {
-        const on = tracks.some(t => t.mode === 'showing');
-        tracks.forEach(t => { t.mode = on ? 'disabled' : 'showing'; });
-        return true;
-      }
-      return clickAny(['.ytp-subtitles-button', '[aria-label*="captions"]', '[aria-label*="sous-titres"]', '[title*="captions"]', '[title*="sous-titres"]']);
-    }
-    if (cmd === 'captionSettings') return clickAny(['.ytp-settings-button', '[aria-label*="Settings"]', '[aria-label*="Paramètres"]']);
-    return false;
-  })()`;
-}
 
 async function getTabMediaState(tab) {
   const wc = tab && tab.view && tab.view.webContents;
-  if (!wc || wc.isDestroyed()) return null;
+  if (!wc || wc.isDestroyed() || tab.discarded) return null;   // onglet en veille : pas de page
   try {
     const st = await wc.executeJavaScript(MEDIA_STATE_JS, true);
     if (st && st.available) {
@@ -3508,6 +3853,305 @@ async function runMediaCommand(cmd, tabId) {
   setTimeout(sendMediaState, 120);
 }
 
+// ----- Modules de fonctionnalités (src/features/*) -------------------------
+// Chaque fonctionnalité (mises à jour, extensions, mots de passe…) vit dans
+// son propre fichier et reçoit ce contexte. main.js n'expose que des points
+// d'accroche : actions du bus, hooks d'onglets / de sessions, état poussé à
+// l'interface, pages internes autorisées et canal des scripts de contenu.
+const featureActions = new Map();   // action -> { fn, pages:Set<'x.html'>, views:Set<'find'|…> }
+const featureHooks = {
+  session: [], tabCreated: [], tabClosed: [], tabActivated: [], ready: [], quit: [],
+  contextMenu: [],   // fn(items, { tab, wc, params, internal, pageUrl }) : ajoute des entrées au menu de page
+  tabsReordered: [], sessionRestored: [],   // groupes d'onglets, restauration de session
+};
+// Icônes de fonctionnalités dans l'omnibox (traduire, lecture, QR…) et dans la
+// barre d'outils (Cast…). fn(tabActif) -> { title, svg, active } | null ;
+// onClick(anchor:{x,y,w,h} en coordonnées de la fenêtre, tab).
+const featureUiActions = { omni: new Map(), toolbar: new Map() };
+function featureUiList(where) {
+  const t = active >= 0 ? tabs[active] : null;
+  const out = [];
+  for (const [id, a] of featureUiActions[where]) {
+    try { const v = a.fn(t); if (v) out.push({ id, title: String(v.title || ''), svg: String(v.svg || ''), active: !!v.active }); } catch {}
+  }
+  return out;
+}
+const featureStateFns = { chrome: [], panel: [], session: [] };
+const featureTabStateFns = [];
+const featurePageHandlers = new Map();   // canal 'zaalis:page' -> fn(payload, ctx)
+const featureViews = new Map();          // webContents -> nom de vue (popups d'extension…)
+const featureModules = {};
+
+function runFeatureHooks(kind, ...args) {
+  for (const fn of featureHooks[kind] || []) {
+    try {
+      const r = fn(...args);
+      if (r && typeof r.catch === 'function') r.catch(e => console.error('[feature:' + kind + ']', e));
+    } catch (e) { console.error('[feature:' + kind + ']', e); }
+  }
+}
+function featureState(target) {
+  const out = {};
+  for (const fn of featureStateFns[target] || []) { try { Object.assign(out, fn() || {}); } catch (e) { console.error('[feature:state]', e); } }
+  if (target === 'chrome') { out.omniActions = featureUiList('omni'); out.toolbarActions = featureUiList('toolbar'); }
+  return out;
+}
+function featureTabState(t) {
+  const out = {};
+  for (const fn of featureTabStateFns) { try { Object.assign(out, fn(t) || {}); } catch {} }
+  return out;
+}
+function featureViewTrusted(sender, action) {
+  const view = featureViews.get(sender);
+  if (!view) return false;
+  const fa = featureActions.get(action);
+  return !!(fa && fa.views.has(view));
+}
+
+// Raccourcis d'adresse : zaalis://extensions, chrome://settings… -> page interne.
+const INTERNAL_ALIASES = new Map();
+// URL de schémas propres aux modules (chrome-extension://…) : ctx.allowUrl(fn).
+const featureUrlChecks = [];
+function featureUrlAllowed(u) { return featureUrlChecks.some(fn => { try { return !!fn(u); } catch { return false; } }); }
+function internalAlias(q) {
+  if (/^chrome-extension:\/\//i.test(q) && featureUrlAllowed(q)) return q;
+  const m = /^(?:zaalis|chrome|edge|about):\/{0,2}([a-z0-9-]+)\/?(.*)$/i.exec(q);
+  if (!m) return null;
+  const host = m[1].toLowerCase();
+  if (host === 'home') return null;
+  const page = INTERNAL_ALIASES.get(host);
+  return page ? 'zaalis://home/' + page + (m[2] ? (m[2].startsWith('#') || m[2].startsWith('?') ? m[2] : '#' + m[2]) : '') : null;
+}
+
+// Canal des scripts de contenu (preload-content.js) : uniquement depuis un
+// onglet connu. Chaque message porte { kind, ... } ; la réponse est renvoyée.
+function tabOfWebContents(wc) { return tabs.find(t => t.view && t.view.webContents === wc) || null; }
+ipcMain.handle('zaalis:page', async (event, payload) => {
+  if (!payload || typeof payload !== 'object' || typeof payload.kind !== 'string') return null;
+  const tab = tabOfWebContents(event.sender);
+  if (!tab) return null;
+  const fn = featurePageHandlers.get(payload.kind);
+  if (!fn) return null;
+  const frame = event.senderFrame;
+  let frameUrl = '';
+  try { frameUrl = frame ? frame.url : event.sender.getURL(); } catch {}
+  try {
+    return await fn(payload, { tab, wc: event.sender, frame, frameUrl, origin: originOf(frameUrl), isMainFrame: !frame || frame === event.sender.mainFrame });
+  } catch (e) { console.error('[feature:page]', payload.kind, e); return null; }
+});
+
+const featureCtx = {
+  electron, app, path, fs, os, crypto, SEP,
+  get mainWin() { return mainWin; },
+  get chromeView() { return chromeView; },
+  get panelView() { return panelView; },
+  get tabs() { return tabs; },
+  get splitPair() { return splitPair; },
+  // Nouvel ordre des onglets (mêmes objets) ; l'onglet actif est conservé.
+  setTabOrder(list) {
+    const id = activeTab() ? activeTab().id : -1;
+    if (list.length !== tabs.length || list.some(t => !tabs.includes(t))) return false;
+    tabs.length = 0; tabs.push(...list);
+    active = tabs.findIndex(t => t.id === id);
+    makeSplitAdjacent();
+    return true;
+  },
+  // Remplace l'objet onglet `oldTab` par `newTab` (même place, même actif).
+  replaceTab(oldTab, newTab) {
+    const wasActive = activeTab() === oldTab;
+    const ni = tabs.indexOf(newTab);
+    if (ni >= 0) tabs.splice(ni, 1);
+    const oi = tabs.indexOf(oldTab);
+    if (oi < 0) return false;
+    tabs.splice(oi, 1, newTab);
+    if (wasActive) active = oi;
+    else { const cur = active >= 0 && active < tabs.length ? tabs[active] : null; active = cur ? tabs.indexOf(cur) : active; }
+    if (splitPair) splitPair = splitPair.map(x => (x === oldTab.id ? newTab.id : x));
+    return true;
+  },
+  get dataFolder() { return dataFolder; },
+  get currentProfileId() { return currentProfileId; },
+  get bookmarks() { return bookmarks; },
+  set bookmarks(v) { bookmarks = v; },
+  get history() { return history; },
+  set history(v) { history = v; },
+  get shortcuts() { return shortcuts; },
+  set shortcuts(v) { shortcuts = v; },
+  saveShortcuts: () => { saveShortcuts(); pushShortcuts(); },
+  settings,
+  activeTab: () => activeTab(),
+  tabById: (id) => tabs.find(t => t.id === id) || null,
+  tabOfWebContents,
+  createTab: (...a) => createTab(...a),
+  closeTab: (id) => closeTab(id),
+  selectTab: (id) => selectTab(id),
+  navigateActive: (u) => navigateActive(u),
+  resolveQuery: (q) => resolveQuery(q),
+  layoutAll: () => layoutAll(),
+  pushState: () => pushState(),
+  pushPanelState: () => pushPanelState(),
+  saveSettings: () => saveSettings(),
+  saveBookmarks: () => saveBookmarks(),
+  saveHistory: () => saveHistory(),
+  scheduleSaveOpenTabs: () => scheduleSaveOpenTabs(),
+  openPanel: () => openPanel(),
+  handleAction: (a, args, event) => handleAction(a, args || [], event),
+  browserPartition: () => browserPartition(),
+  setupSession: (p) => setupSession(p),
+  readyPartitions,
+  INCOGNITO_PARTITION,
+  profileDataDir: () => profileDataDir(),
+  sealAvailable: () => sealAvailable(),
+  sealWrite: (f, t) => sealWrite(f, t),
+  sealRead: (f) => sealRead(f),
+  isInternal: (u) => isInternal(u),
+  originOf: (u) => originOf(u),
+  hostOf: (u) => hostOf(u),
+  escapeHtml: (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+  chromeUserAgent: () => chromeUserAgent(),
+  ideChat: (o) => ideChat(o),
+  get ideStatus() { return ideStatus; },
+  raiseOverlays: () => raiseOverlays(),
+  get contentTop() { return contentTop; },
+  get chromeHeight() { return chromeHeight; },
+  // Messages vers l'interface.
+  sendChrome: (msg) => { try { if (chromeView) chromeView.webContents.send('zaalis:message', msg); } catch {} },
+  sendPanel:  (msg) => { try { if (panelView) panelView.webContents.send('zaalis:message', msg); } catch {} },
+  toast: (text) => { try { if (chromeView) chromeView.webContents.send('zaalis:message', { type: 'toast', text: String(text) }); } catch {} },
+  reply: (event, msg) => { try { if (event && event.sender && !event.sender.isDestroyed()) event.sender.send('zaalis:message', msg); } catch {} },
+  // Points d'accroche.
+  // opts.pages : pages internes (onglets zaalis://home/<page>) autorisées à
+  // envoyer l'action ; opts.views : vues annexes (popups) autorisées. Le chrome,
+  // le panneau et le panneau IA sont toujours autorisés.
+  action(name, fn, opts) {
+    opts = opts || {};
+    featureActions.set(name, { fn, pages: new Set(opts.pages || []), views: new Set(opts.views || []) });
+  },
+  on(kind, fn) { if (!featureHooks[kind]) throw new Error('hook inconnu : ' + kind); featureHooks[kind].push(fn); },
+  state(target, fn) { featureStateFns[target].push(fn); },
+  tabState(fn) { featureTabStateFns.push(fn); },
+  page(kind, fn) { featurePageHandlers.set(kind, fn); },
+  alias(host, page) { INTERNAL_ALIASES.set(String(host).toLowerCase(), page); },
+  allowUrl(fn) { featureUrlChecks.push(fn); },
+  trustView(wc, name) { featureViews.set(wc, name); wc.once('destroyed', () => featureViews.delete(wc)); },
+  module: (name) => featureModules[name] || null,
+  // Icône dans l'omnibox / la barre d'outils (voir featureUiActions).
+  omniAction(id, fn, onClick) { featureUiActions.omni.set(id, { fn, onClick }); },
+  toolbarAction(id, fn, onClick) { featureUiActions.toolbar.set(id, { fn, onClick }); },
+  // RPC pour les pages internes (interface/zx.js : zx.call(nom, params)).
+  // args[0] = identifiant de requête, args[1] = paramètres JSON. La réponse
+  // { type:'rpc', id, ok, result | error } est renvoyée à l'émetteur.
+  rpc(name, fn, opts) {
+    featureCtx.action(name, async (args, event) => {
+      const id = args[0];
+      let params = {};
+      try { params = args[1] ? JSON.parse(args.slice(1).join(SEP)) : {}; } catch {}
+      try {
+        const result = await fn(params || {}, event);
+        featureCtx.reply(event, { type: 'rpc', id, ok: true, result: result === undefined ? null : result });
+      } catch (e) {
+        featureCtx.reply(event, { type: 'rpc', id, ok: false, error: String(e && e.message || e) });
+      }
+    }, opts);
+  },
+  // Ouvre (ou ré-affiche) une page interne zaalis://home/<page>.
+  openInternal(page) {
+    const file = String(page || '').replace(/[^a-z0-9._#?=&-]/gi, '');
+    if (!file) return null;
+    const target = 'zaalis://home/' + (file.includes('.html') ? file : file + '.html');
+    const base = target.split('#')[0].split('?')[0];
+    const existing = tabs.find(t => !t.incognito && (t.view.webContents.getURL() || '').split('#')[0].split('?')[0] === base);
+    if (panelOpen) closePanel();
+    if (existing) {
+      selectTab(existing.id);
+      if (existing.view.webContents.getURL() !== target) existing.view.webContents.loadURL(target).catch(() => {});
+      return existing;
+    }
+    const cur = activeTab();
+    const curUrl = cur ? cur.view.webContents.getURL() : '';
+    if (cur && !cur.incognito && (curUrl === HOME_URL || curUrl === '' || curUrl === 'zaalis://home/')) {
+      cur.view.webContents.loadURL(target).catch(() => {});
+      return cur;
+    }
+    return createTab(target, true);
+  },
+  // Petites aides de persistance JSON (chiffrées si demandé).
+  readJson(file, fallback, sealed) {
+    try {
+      if (!fs.existsSync(file)) return fallback;
+      return JSON.parse(sealed ? sealRead(file) : fs.readFileSync(file, 'utf8'));
+    } catch { return fallback; }
+  },
+  writeJson(file, data, sealed) {
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      const text = JSON.stringify(data);
+      if (sealed) sealWrite(file, text);
+      else { const tmp = file + '.tmp'; fs.writeFileSync(tmp, text, 'utf8'); fs.renameSync(tmp, file); }
+      return true;
+    } catch (e) { console.error('[feature:writeJson]', file, e.message); return false; }
+  },
+};
+
+function loadFeatures() {
+  featureCtx.action('openInternal', (args) => featureCtx.openInternal(args[0]), { pages: ['*'] });
+  // Clic sur une icône de fonctionnalité du chrome : id, x, y, w, h.
+  featureCtx.action('featureUiClick', (args) => {
+    const a = featureUiActions.omni.get(args[0]) || featureUiActions.toolbar.get(args[0]);
+    if (!a || typeof a.onClick !== 'function') return;
+    const n = (i) => Math.round(parseFloat(args[i]) || 0);
+    return a.onClick({ x: n(1), y: n(2), w: n(3), h: n(4) }, activeTab());
+  });
+  // Embedded views have no standalone updater, safeStorage, extension
+  // runtime, process metrics or browser-session request interception.
+  const embeddedModules = new Set(['tabgroups', 'crashes', 'safebrowsing', 'translate', 'reader', 'qrcode', 'cast']);
+  const modules = require('./src/features');
+  for (const [name, load] of Object.entries(modules)) {
+    if (process.env.ZAALIS_BROWSER_EMBEDDED && !embeddedModules.has(name)) continue;
+    try {
+      const mod = load();
+      featureModules[name] = (mod && typeof mod.init === 'function' ? mod.init(featureCtx) : null) || mod;
+    } catch (e) { console.error('[features] échec du module', name, e); }
+  }
+}
+
+// ----- Tests de bout en bout maison -----------------------------------------
+// ZAALIS_E2E=updater,extensions … exécute tests/e2e/<nom>.test.js dans le
+// processus principal, une fois la fenêtre prête, puis quitte (code 0 / 1).
+async function runE2E(spec) {
+  const names = spec === 'all'
+    ? fs.readdirSync(path.join(__dirname, 'tests', 'e2e')).filter(f => f.endsWith('.test.js')).map(f => f.replace(/\.test\.js$/, ''))
+    : spec.split(',').map(s => s.trim()).filter(Boolean);
+  let failed = 0, passed = 0;
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+  const t = {
+    ok(cond, msg) { if (cond) { passed++; console.log('  ✓ ' + msg); } else { failed++; console.log('  ✗ ' + msg); } },
+    eq(a, b, msg) { t.ok(JSON.stringify(a) === JSON.stringify(b), msg + (JSON.stringify(a) === JSON.stringify(b) ? '' : ` (obtenu ${JSON.stringify(a)}, attendu ${JSON.stringify(b)})`)); },
+    sleep,
+    async waitFor(fn, timeoutMs, label) {
+      const end = Date.now() + (timeoutMs || 10000);
+      while (Date.now() < end) { try { const v = await fn(); if (v) return v; } catch {} await sleep(100); }
+      throw new Error('délai dépassé : ' + (label || 'condition'));
+    },
+    async waitLoad(wc, timeoutMs) {
+      await sleep(50);
+      await t.waitFor(() => !wc.isLoading(), timeoutMs || 15000, 'chargement de ' + wc.getURL());
+    },
+    // Envoie une action au bus comme si elle venait du chrome.
+    action(name, ...args) { handleAction(name, args.map(String), chromeView ? { sender: chromeView.webContents } : null); },
+  };
+  await sleep(800);
+  for (const name of names) {
+    console.log('▶ ' + name);
+    try {
+      const fn = require(path.join(__dirname, 'tests', 'e2e', name + '.test.js'));
+      await fn(t, featureCtx, { modules: featureModules, http, net, session, WebContentsView, BrowserWindow, dialog });
+    } catch (e) { failed++; console.log('  ✗ exception : ' + (e && e.stack || e)); }
+  }
+  console.log(`\nE2E : ${passed} réussi(s), ${failed} échec(s)`);
+  app.exit(failed ? 1 : 0);
+}
+
 // ----- Bus de messages ------------------------------------------------------
 
 function handleAction(a, args, event) {
@@ -3535,7 +4179,7 @@ function handleAction(a, args, event) {
       }
       break;
     }
-    case 'newTab':         createTab('', true); break;
+    case 'newTab':         openNewTab(); break;
     case 'newIncognito':   openIncognitoTab(); break;
     case 'openInNewTab':   createTab(arg(0), true); break;
     case 'closeTab':       closeTab(parseInt(arg(0), 10)); break;
@@ -3545,7 +4189,10 @@ function handleAction(a, args, event) {
     case 'pinTab':         togglePinTab(parseInt(arg(0), 10)); break;
     case 'installApp':     installAsApp(parseInt(arg(0), 10)); break;
     case 'translatePage':  translatePage('français'); break;
-    case 'toggleDevTools': { const t = activeTab(); if (t) { const w = t.view.webContents; w.isDevToolsOpened() ? w.closeDevTools() : w.openDevTools({ mode: 'detach' }); } break; }
+    case 'toggleDevTools': toggleDevTools(false); break;
+    case 'devGripMove':    dragDevGrip(tabOfDevGrip(event && event.sender)); break;
+    case 'devGripEnd':     saveSettings(); break;
+    case 'devGripMenu':    showDevGripMenu(tabOfDevGrip(event && event.sender)); break;
     case 'splitWith':      setSplit(parseInt(arg(0), 10)); break;
     case 'unsplit':        clearSplit(); break;
     case 'navigate':       navigateActive(resolveQuery(arg(0))); break;
@@ -3670,6 +4317,14 @@ function handleAction(a, args, event) {
     case 'getHistory':     sendPanelHistory(); break;
     case 'getDownloads':   pushDownloads(); break;
     case 'cancelDownload': cancelDownload(arg(0)); break;
+    case 'resumeDownload': resumeDownload(arg(0)); break;
+    // ----- Rechercher dans la page (find.html) -----
+    case 'findReady':      if (findBarOpen) sendFindOpen(); break;
+    case 'findQuery':      findText = String(args.join(SEP)).slice(0, 500); runFind(findText, true, true); findNeedsNewSession = false; break;
+    case 'findNext':       findAgain(true); break;
+    case 'findPrev':       findAgain(false); break;
+    case 'findClose':      closeFindBar(); break;
+    case 'setSitePopups':  setActiveSitePopups(arg(0) === '1', event ? event.sender : null); break;
     case 'showDownload':   showDownload(arg(0)); break;
     case 'openDownload':   openDownload(arg(0)); break;
     case 'removeDownload': removeDownload(arg(0)); break;
@@ -3697,7 +4352,10 @@ function handleAction(a, args, event) {
     case 'setSafeSearch':       settings.safeSearch = arg(0) === '1'; saveSettings(); pushPanelState(); break;
     case 'setHttpsOnly':        settings.httpsOnly = arg(0) === '1'; saveSettings(); pushPanelState(); break;
     case 'setSafeBrowsing':     settings.safeBrowsing = arg(0) === '1'; saveSettings(); pushPanelState(); break;
-    case 'resetPermissions':    sitePermissions = {}; saveSitePermissions(); break;
+    case 'resetPermissions':
+      sitePermissions = {}; saveSitePermissions();
+      for (const ctx of permissionContexts.values()) ctx.forgetOnce('');
+      break;
     case 'setSearchEngine':     setSearchEngine(arg(0)); break;
     case 'setZoomPct':          setZoomPct(parseInt(arg(0), 10)); break;
     case 'resetSettings':       resetSettings(); break;
@@ -3714,9 +4372,16 @@ function handleAction(a, args, event) {
         if (chromeView) chromeView.webContents.send('zaalis:message', parsed);
       } catch {}
       break;
-    default:
-      // silencieux
+    default: {
+      const fa = featureActions.get(a);
+      if (fa) {
+        try {
+          const r = fa.fn(args, event);
+          if (r && typeof r.catch === 'function') r.catch(e => console.error('[feature]', a, e));
+        } catch (e) { console.error('[feature]', a, e); }
+      }
       break;
+    }
   }
 }
 
@@ -3727,6 +4392,8 @@ const HOME_ACTIONS = new Set([
   'voiceStart', 'voiceStop', 'voiceAudio',
 ]);
 const AISEARCH_ACTIONS = new Set(['runAiSearch']);
+const FIND_ACTIONS = new Set(['findReady', 'findQuery', 'findNext', 'findPrev', 'findClose']);
+const DEVGRIP_ACTIONS = new Set(['devGripMove', 'devGripEnd', 'devGripMenu']);
 
 function trustedIpcAction(event, action) {
   const sender = event && event.sender;
@@ -3735,6 +4402,9 @@ function trustedIpcAction(event, action) {
   if ((chromeView && sender === chromeView.webContents) ||
       (panelView && sender === panelView.webContents) ||
       (aiPanelView && sender === aiPanelView.webContents)) return true;
+  if (featureViewTrusted(sender, action)) return true;
+  if (findView && sender === findView.webContents) return FIND_ACTIONS.has(action);
+  if (tabOfDevGrip(sender)) return DEVGRIP_ACTIONS.has(action);
 
   const tab = tabs.find(t => t.view && sender === t.view.webContents);
   if (!tab) return false;
@@ -3744,7 +4414,8 @@ function trustedIpcAction(event, action) {
   if (!isAllowedInternalUrl(sender.getURL())) return false;
   if (page === '' || page === 'index.html') return HOME_ACTIONS.has(action);
   if (page === 'aisearch.html') return AISEARCH_ACTIONS.has(action);
-  return false;
+  const fa = featureActions.get(action);
+  return !!(fa && (fa.pages.has(page) || fa.pages.has('*')));
 }
 
 ipcMain.on('zaalis:postMessage', (event, str) => {
@@ -3872,11 +4543,7 @@ function createWindow() {
     backgroundColor: settings.theme === 'dark' ? '#202124' : '#e9eaed',
     icon,
     titleBarStyle: 'hidden',
-    titleBarOverlay: {
-      color: settings.theme === 'dark' ? '#202124' : '#e9eaed',
-      symbolColor: settings.theme === 'dark' ? '#e8eaed' : '#3c4043',
-      height: 38,
-    },
+    titleBarOverlay: titleBarOverlayColors(),
   });
 
   chromeView = new WebContentsView({
@@ -3902,6 +4569,22 @@ function createWindow() {
   chromeView.webContents.loadURL(CHROME_URL);
 
   mainWin.on('resize', layoutAll);
+  // F11 / plein écran vidéo : la barre d'onglets se masque, comme Chrome.
+  mainWin.on('enter-full-screen', () => { layoutAll(); pushState(); });
+  mainWin.on('leave-full-screen', () => {
+    // Quitter le plein écran de la fenêtre quitte aussi celui de la vidéo.
+    const t = fullscreenTab();
+    if (t) { htmlFullscreenTabId = null; try { t.view.webContents.executeJavaScript('document.fullscreenElement && document.exitFullscreen()', true).catch(() => {}); } catch {} }
+    layoutAll(); pushState();
+  });
+  // Boutons « Précédent / Suivant » de la souris et touches multimédias du clavier.
+  mainWin.on('app-command', (_e, cmd) => {
+    if (cmd === 'browser-backward') goBack();
+    else if (cmd === 'browser-forward') goForward();
+    else if (cmd === 'browser-refresh') withActiveWc(wc => reloadFresh(wc));
+    else if (cmd === 'browser-home') navigateActive(HOME_URL);
+    else if (cmd === 'browser-search') focusOmnibox();
+  });
   mainWin.on('closed', () => { mainWin = null; });
 
   mainWin.once('ready-to-show', () => mainWin.show());
@@ -3911,6 +4594,7 @@ function createWindow() {
   if (saved && saved.urls.length) {
     saved.urls.forEach((u, i) => createTab(u, i === 0));
     if (tabs[saved.active]) selectTab(tabs[saved.active].id);
+    runFeatureHooks('sessionRestored', saved);
   } else {
     createTab('', true);
   }
@@ -3921,6 +4605,9 @@ function createWindow() {
 
 app.setName('zaalis browser');
 app.setAppUserModelId('com.zaalis.browser');
+
+// UA de Google Chrome pour toutes les sessions (voir chromeUserAgent()).
+app.userAgentFallback = chromeUserAgent();
 
 // Chromium utilise déjà l'accélération matérielle par défaut ; ce réglage
 // privilégie explicitement la rasterisation GPU pour les surfaces Chromium et
@@ -3937,82 +4624,278 @@ app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
 // jamais toucher le vrai profil (et éviter le verrou single-instance de l'app
 // installée). Voir runAgentSelfTest().
 const AGENT_SELFTEST = process.env.ZAALIS_AGENT_SELFTEST || '';
+// Tests de bout en bout maison (tests/e2e/*.test.js) : profil jetable.
+const E2E = process.env.ZAALIS_E2E || '';   // toujours vide en version installée (voir plus haut)
+if (E2E) {
+  const base = process.env.ZAALIS_E2E_DIR || path.join(os.tmpdir(), 'zaalis-e2e-' + process.pid);
+  app.setPath('appData', base);
+  app.setPath('userData', path.join(base, 'zaalis browser'));
+}
 if (AGENT_SELFTEST) {
   const base = path.join(os.tmpdir(), 'zaalis-agent-selftest');
   app.setPath('appData', base);
   app.setPath('userData', path.join(base, 'zaalis browser'));
 }
 
+// Rapports de plantage locaux, jamais envoyés (src/features/crashes.js) :
+// démarré avant tout processus enfant pour qu'ils soient tous surveillés.
+try { require('./src/features/crashes').startEarly(app, electron.crashReporter); } catch (e) { console.error('[crashes]', e.message); }
+
+// Adresse web ou fichier local passé en argument (raccourci, « Ouvrir avec »,
+// navigateur par défaut via « --single-argument %1 », autre instance).
+// Les fichiers ainsi reçus sont les seuls file:// que le navigateur accepte.
+const trustedFileUrls = new Set();
+const ARGV_FILE_EXT = /\.(html?|shtml|xht|xhtml|pdf|svg|webp)$/i;
+function urlFromArgv(argv) {
+  const args = (argv || []).slice(1).map(a => String(a));
+  const si = args.indexOf('--single-argument');
+  const candidates = si >= 0 ? [args.slice(si + 1).join(' ')] : args;
+  for (const a of candidates) {
+    if (/^https?:\/\//i.test(a)) return a;
+    if (a.startsWith('-') || !(/^file:\/\//i.test(a) || ARGV_FILE_EXT.test(a))) continue;
+    try {
+      const p = /^file:/i.test(a) ? url.fileURLToPath(a) : path.resolve(a);
+      if (ARGV_FILE_EXT.test(p) && fs.existsSync(p) && fs.statSync(p).isFile()) {
+        const fileUrl = url.pathToFileURL(p).href;
+        trustedFileUrls.add(fileUrl);
+        return fileUrl;
+      }
+    } catch {}
+  }
+  return '';
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit();
   process.exit(0);
 }
-app.on('second-instance', () => {
-  if (mainWin) { mainWin.show(); mainWin.focus(); }
+app.on('second-instance', (_e, argv) => {
+  if (!mainWin) return;
+  const u = urlFromArgv(argv);
+  if (u) createTab(u, true);
+  if (mainWin.isMinimized()) mainWin.restore();
+  mainWin.show(); mainWin.focus();
 });
 
 app.on('before-quit', () => {
+  runFeatureHooks('quit');
   if (saveTabsTimer) { clearTimeout(saveTabsTimer); saveTabsTimer = null; }
   saveOpenTabsNow();
+  flushSessions();
 });
 
-app.whenReady().then(() => {
+// ----- Widevine (Prime Video, Netflix, Disney+, Canal+, Spotify…) -----------
+// Le build castlabs installe le module DRM Widevine au premier lancement puis
+// le met à jour en arrière-plan. On l'attend brièvement avant d'ouvrir les
+// onglets (instantané quand il est déjà installé) sans jamais bloquer le
+// démarrage hors connexion.
+let widevineState = components ? 'pending' : 'unavailable';
+async function waitForWidevine(timeoutMs) {
+  if (!components) return;
+  const ready = components.whenReady([components.WIDEVINE_CDM_ID])
+    .then(() => { widevineState = 'ready'; })
+    .catch((e) => { widevineState = 'error'; console.warn('[widevine] installation impossible :', e && e.message); });
+  await Promise.race([ready, new Promise(r => setTimeout(r, timeoutMs))]);
+  if (widevineState === 'pending') console.warn('[widevine] module toujours en cours d\'installation, démarrage sans attendre');
+}
+
+// ----- Authentification HTTP (Basic/Digest, proxy) --------------------------
+// Electron annule ces demandes par défaut : routeurs, intranets ou serveurs
+// de test devenaient inaccessibles. Boîte « Connexion » comme dans Chrome.
+const pendingAuth = new Map();
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[<>&"']/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function askHttpCredentials(authInfo, requestUrl) {
+  const key = (authInfo.isProxy ? 'proxy|' : '') + authInfo.host + ':' + authInfo.port + '|' + (authInfo.realm || '');
+  if (pendingAuth.has(key)) return pendingAuth.get(key);
+  const p = new Promise((resolve) => {
+    if (!mainWin) { resolve(null); return; }
+    const dark = settings.theme === 'dark';
+    const insecure = /^http:/i.test(requestUrl || '') && !authInfo.isProxy;
+    const who = authInfo.isProxy ? 'Le proxy ' + authInfo.host + ':' + authInfo.port : (hostOf(requestUrl) || authInfo.host);
+    const html = `<!doctype html><html lang="fr"><head><meta charset="utf-8"><title>Connexion</title><style>
+      :root{color-scheme:${dark ? 'dark' : 'light'}}
+      body{margin:0;padding:22px 24px;font-family:"Segoe UI",Arial,sans-serif;font-size:13.5px;
+        background:${dark ? '#292a2d' : '#ffffff'};color:${dark ? '#e8eaed' : '#202124'}}
+      h1{font-size:17px;font-weight:600;margin:0 0 6px}
+      p{margin:0 0 14px;color:${dark ? '#9aa0a6' : '#5f6368'};line-height:1.45;word-break:break-word}
+      p.warn{color:${dark ? '#f28b82' : '#d93025'}}
+      label{display:block;font-size:12px;margin:10px 0 4px;color:${dark ? '#9aa0a6' : '#5f6368'}}
+      input{width:100%;box-sizing:border-box;height:34px;padding:0 10px;border-radius:8px;font:inherit;outline:none;
+        border:1px solid ${dark ? '#5f6368' : '#dadce0'};background:${dark ? '#202124' : '#fff'};color:inherit}
+      input:focus{border-color:${dark ? '#8ab4f8' : '#1a73e8'}}
+      .row{display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+      button{height:34px;padding:0 18px;border-radius:17px;font:inherit;font-weight:600;cursor:pointer;
+        border:1px solid ${dark ? '#5f6368' : '#dadce0'};background:transparent;color:${dark ? '#8ab4f8' : '#1a73e8'}}
+      button.primary{background:${dark ? '#8ab4f8' : '#1a73e8'};border-color:transparent;color:${dark ? '#202124' : '#fff'}}
+    </style></head><body><form id="f">
+      <h1>Connexion</h1>
+      <p>${escapeHtml(who)} exige un nom d'utilisateur et un mot de passe.${authInfo.realm ? '<br>« ' + escapeHtml(authInfo.realm) + ' »' : ''}</p>
+      ${insecure ? '<p class="warn">Votre connexion à ce site n\'est pas privée.</p>' : ''}
+      <label for="u">Nom d'utilisateur</label><input id="u" autocomplete="username" autofocus>
+      <label for="p">Mot de passe</label><input id="p" type="password" autocomplete="current-password">
+      <div class="row"><button type="button" id="c">Annuler</button><button class="primary" type="submit">Se connecter</button></div>
+    </form><script>
+      const send = (v) => { document.title = 'zaalis-auth:' + JSON.stringify(v); };
+      document.getElementById('f').onsubmit = (e) => { e.preventDefault(); send({ u: document.getElementById('u').value, p: document.getElementById('p').value }); };
+      document.getElementById('c').onclick = () => send(null);
+      addEventListener('keydown', (e) => { if (e.key === 'Escape') send(null); });
+    <\/script></body></html>`;
+    const win = new BrowserWindow({
+      parent: mainWin, modal: true, width: 420, height: insecure ? 372 : 340,
+      resizable: false, minimizable: false, maximizable: false, fullscreenable: false,
+      show: false, title: 'Connexion', autoHideMenuBar: true,
+      backgroundColor: dark ? '#292a2d' : '#ffffff',
+      webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, javascript: true },
+    });
+    win.setMenu(null);
+    let settled = false;
+    const finish = (v) => { if (settled) return; settled = true; resolve(v); if (!win.isDestroyed()) win.destroy(); };
+    win.webContents.on('page-title-updated', (e, title) => {
+      if (!String(title).startsWith('zaalis-auth:')) return;
+      e.preventDefault();
+      let v = null;
+      try { v = JSON.parse(title.slice('zaalis-auth:'.length)); } catch {}
+      finish(v && typeof v.u === 'string' ? { username: v.u, password: String(v.p || '') } : null);
+    });
+    win.webContents.on('will-navigate', (e) => e.preventDefault());
+    win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    win.on('closed', () => finish(null));
+    win.once('ready-to-show', () => win.show());
+    win.loadURL('data:text/html;charset=utf-8;base64,' + Buffer.from(html, 'utf8').toString('base64'));
+  });
+  pendingAuth.set(key, p);
+  p.finally(() => pendingAuth.delete(key));
+  return p;
+}
+
+app.on('login', (event, _wc, details, authInfo, callback) => {
+  event.preventDefault();
+  askHttpCredentials(authInfo || {}, (details && details.url) || '').then((creds) => {
+    try { creds ? callback(creds.username, creds.password) : callback(); } catch {}
+  });
+});
+
+// ----- Raccourcis clavier (identiques à Chrome sur chaque plateforme) -------
+const IS_MAC = process.platform === 'darwin';
+function withActiveWc(fn) {
+  const t = activeTab();
+  if (t && !t.view.webContents.isDestroyed()) fn(t.view.webContents, t);
+}
+function goBack()    { withActiveWc(wc => { if (wc.navigationHistory.canGoBack()) wc.navigationHistory.goBack(); }); }
+function goForward() { withActiveWc(wc => { if (wc.navigationHistory.canGoForward()) wc.navigationHistory.goForward(); }); }
+function toggleDevTools(openConsole) {
+  if (!settings.devTools) return;
+  withActiveWc((_wc, tab) => {
+    if (devToolsShown(tab) && !openConsole) closeDevToolsFor(tab);
+    else openDevToolsFor(tab);
+  });
+}
+function focusOmnibox() { if (chromeView) { chromeView.webContents.focus(); chromeView.webContents.send('zaalis:message', { type: 'focusOmni' }); } }
+
+// Entrée de menu invisible : seul son raccourci compte (alias Windows de Chrome).
+const hidden = (accelerator, click) => ({ label: accelerator, accelerator, visible: false, acceleratorWorksWhenHidden: true, click });
+
+function buildAppMenu() {
+  const template = [
+    ...(IS_MAC ? [{ role: 'appMenu' }] : []),
+    { label: 'Fichier', submenu: [
+      { label: 'Nouvel onglet',               accelerator: 'CmdOrCtrl+T',       click: () => openNewTab() },
+      { label: 'Nouvel onglet privé',         accelerator: 'CmdOrCtrl+Shift+N', click: () => openIncognitoTab() },
+      { label: 'Rouvrir l\'onglet fermé',     accelerator: 'CmdOrCtrl+Shift+T', click: () => reopenClosedTab() },
+      { type: 'separator' },
+      { label: 'Enregistrer la page sous…',   accelerator: 'CmdOrCtrl+S',       click: () => withActiveWc(wc => savePageAs(wc)) },
+      { label: 'Imprimer…',                   accelerator: 'CmdOrCtrl+P',       click: () => withActiveWc(wc => printPage(wc)) },
+      { type: 'separator' },
+      { label: 'Fermer l\'onglet',            accelerator: 'CmdOrCtrl+W',       click: () => { const t = activeTab(); if (t) closeTab(t.id); } },
+      ...(IS_MAC ? [] : [hidden('Ctrl+F4', () => { const t = activeTab(); if (t) closeTab(t.id); })]),
+      { label: 'Quitter', role: 'quit', ...(IS_MAC ? { accelerator: 'Cmd+Q' } : {}) },
+    ]},
+    { label: 'Édition', submenu: [
+      { role: 'undo', label: 'Annuler' }, { role: 'redo', label: 'Rétablir' }, { type: 'separator' },
+      { role: 'cut', label: 'Couper' }, { role: 'copy', label: 'Copier' }, { role: 'paste', label: 'Coller' },
+      { role: 'pasteAndMatchStyle', label: 'Coller en tant que texte brut' },
+      { role: 'selectAll', label: 'Tout sélectionner' },
+      { type: 'separator' },
+      { label: 'Rechercher…',                 accelerator: 'CmdOrCtrl+F',       click: () => openFindBar() },
+      { label: 'Rechercher le suivant',       accelerator: IS_MAC ? 'Cmd+G' : 'F3',             click: () => findAgain(true) },
+      { label: 'Rechercher le précédent',     accelerator: IS_MAC ? 'Cmd+Shift+G' : 'Shift+F3', click: () => findAgain(false) },
+      ...(IS_MAC ? [] : [hidden('Ctrl+G', () => findAgain(true)), hidden('Ctrl+Shift+G', () => findAgain(false))]),
+    ]},
+    { label: 'Onglets', submenu: [
+      { label: 'Onglet suivant',              accelerator: 'Ctrl+Tab',          click: () => cycleTab(1) },
+      { label: 'Onglet précédent',            accelerator: 'Ctrl+Shift+Tab',    click: () => cycleTab(-1) },
+      hidden(IS_MAC ? 'Cmd+Alt+Right' : 'Ctrl+PageDown', () => cycleTab(1)),
+      hidden(IS_MAC ? 'Cmd+Alt+Left'  : 'Ctrl+PageUp',   () => cycleTab(-1)),
+      { label: 'Aller à l\'onglet', submenu: [1,2,3,4,5,6,7,8].map(n => (
+          { label: 'Onglet ' + n, accelerator: 'CmdOrCtrl+' + n, click: () => gotoTab(n) }
+        )).concat([{ label: 'Dernier onglet', accelerator: 'CmdOrCtrl+9', click: () => gotoTab(9) }]) },
+      { label: 'Rechercher un onglet',        accelerator: 'CmdOrCtrl+Shift+A', click: () => { if (chromeView) chromeView.webContents.send('zaalis:message', { type: 'openTabSearch' }); } },
+      { type: 'separator' },
+      { label: 'Gestionnaire de tâches',      accelerator: IS_MAC ? 'Cmd+Alt+Escape' : 'Shift+Escape', click: () => { const m = featureModules.taskmanager; if (m) m.open(); } },
+    ]},
+    { label: 'Navigation', submenu: [
+      { label: 'Reculer',                     accelerator: IS_MAC ? 'Cmd+[' : 'Alt+Left',   click: goBack },
+      { label: 'Avancer',                     accelerator: IS_MAC ? 'Cmd+]' : 'Alt+Right',  click: goForward },
+      ...(IS_MAC ? [hidden('Cmd+Left', goBack), hidden('Cmd+Right', goForward)] : []),
+      { label: 'Actualiser',                  accelerator: 'CmdOrCtrl+R',       click: () => withActiveWc(wc => reloadFresh(wc)) },
+      { label: 'Actualiser sans le cache',    accelerator: 'CmdOrCtrl+Shift+R', click: () => withActiveWc(wc => reloadFresh(wc)) },
+      ...(IS_MAC ? [] : [
+        hidden('F5', () => withActiveWc(wc => reloadFresh(wc))),
+        hidden('Ctrl+F5', () => withActiveWc(wc => reloadFresh(wc))),
+        hidden('Shift+F5', () => withActiveWc(wc => reloadFresh(wc))),
+      ]),
+      { label: 'Accueil',                     accelerator: IS_MAC ? 'Cmd+Shift+H' : 'Alt+Home', click: () => navigateActive(HOME_URL) },
+      ...(IS_MAC ? [] : [hidden('Ctrl+Shift+H', () => navigateActive(HOME_URL))]),
+      { label: 'Barre d\'adresse',            accelerator: 'CmdOrCtrl+L',       click: focusOmnibox },
+      ...(IS_MAC ? [] : [hidden('Alt+D', focusOmnibox), hidden('F6', focusOmnibox), hidden('Ctrl+E', focusOmnibox), hidden('Ctrl+K', focusOmnibox)]),
+      { type: 'separator' },
+      { label: 'Ajouter aux favoris',         accelerator: 'CmdOrCtrl+D',       click: () => toggleBookmark() },
+      { label: 'Afficher la barre de favoris', accelerator: 'CmdOrCtrl+Shift+B', click: () => { settings.showBookmarks = !settings.showBookmarks; saveSettings(); pushState(); pushPanelState(); } },
+      { label: 'Historique',                  accelerator: IS_MAC ? 'Cmd+Y' : 'Ctrl+H',         click: () => openHistoryPanel() },
+      { label: 'Téléchargements',             accelerator: IS_MAC ? 'Cmd+Shift+J' : 'Ctrl+J',   click: () => { openPanel(); showPanelDownloads(); } },
+      { type: 'separator' },
+      { label: 'Afficher le code source',     accelerator: IS_MAC ? 'Alt+Cmd+U' : 'Ctrl+U',     click: () => withActiveWc((wc, t) => openViewSource(wc.getURL(), t)) },
+      { label: 'Outils de développement',     accelerator: IS_MAC ? 'Alt+Cmd+I' : 'Ctrl+Shift+I', click: () => toggleDevTools(false) },
+      ...(IS_MAC ? [] : [hidden('F12', () => toggleDevTools(false)), hidden('Ctrl+Shift+J', () => toggleDevTools(true))]),
+    ]},
+    { label: 'Affichage', submenu: [
+      { label: 'Zoom avant',    accelerator: 'CmdOrCtrl+Plus',  click: () => setZoomPct((settings.zoomPct || 100) + 10) },
+      hidden('CmdOrCtrl+=', () => setZoomPct((settings.zoomPct || 100) + 10)),
+      hidden('CmdOrCtrl+numadd', () => setZoomPct((settings.zoomPct || 100) + 10)),
+      { label: 'Zoom arrière',  accelerator: 'CmdOrCtrl+-',     click: () => setZoomPct((settings.zoomPct || 100) - 10) },
+      hidden('CmdOrCtrl+numsub', () => setZoomPct((settings.zoomPct || 100) - 10)),
+      { label: 'Taille réelle', accelerator: 'CmdOrCtrl+0',     click: () => setZoomPct(100) },
+      hidden('CmdOrCtrl+num0', () => setZoomPct(100)),
+      { type: 'separator' },
+      { label: 'Plein écran', accelerator: IS_MAC ? 'Ctrl+Cmd+F' : 'F11',
+        click: () => { if (mainWin) mainWin.setFullScreen(!mainWin.isFullScreen()); } },
+    ]},
+    ...(IS_MAC ? [{ role: 'windowMenu' }] : []),
+  ];
+  return Menu.buildFromTemplate(template);
+}
+
+app.whenReady().then(async () => {
   ensureDataFolder();
+  configureSecureDns();
   loadSettings();
   loadProfiles();
   loadSitePermissions();
   loadProfileData();   // favoris/raccourcis/historique/lanceur du profil courant
   loadAiChats();
   startIdeStatusWatcher();
+  loadFeatures();
   registerProtocol();  // enregistre aussi téléchargements + permissions (invité)
+  await waitForWidevine(4000);
+  Menu.setApplicationMenu(buildAppMenu());
   createWindow();
   startApi();
-  // Menu macOS minimal (rôles standard) + raccourcis.
-  const template = [
-    { role: 'appMenu' },
-    { role: 'fileMenu' },
-    { label: 'Édition', submenu: [
-      { role: 'undo' }, { role: 'redo' }, { type: 'separator' },
-      { role: 'cut'  }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' },
-    ]},
-    { label: 'Onglets', submenu: [
-      { label: 'Nouvel onglet',            accelerator: 'CmdOrCtrl+T',       click: () => createTab('', true) },
-      { label: 'Nouvel onglet privé',      accelerator: 'CmdOrCtrl+Shift+N', click: () => openIncognitoTab() },
-      { label: 'Rouvrir l\'onglet fermé',  accelerator: 'CmdOrCtrl+Shift+T', click: () => reopenClosedTab() },
-      { label: 'Fermer l\'onglet',         accelerator: 'CmdOrCtrl+W',       click: () => { const t = activeTab(); if (t) closeTab(t.id); } },
-      { type: 'separator' },
-      { label: 'Onglet suivant',           accelerator: 'Ctrl+Tab',          click: () => cycleTab(1) },
-      { label: 'Onglet précédent',         accelerator: 'Ctrl+Shift+Tab',    click: () => cycleTab(-1) },
-      { label: 'Aller à l\'onglet', submenu: [1,2,3,4,5,6,7,8].map(n => (
-          { label: 'Onglet ' + n, accelerator: 'CmdOrCtrl+' + n, click: () => gotoTab(n) }
-        )).concat([{ label: 'Dernier onglet', accelerator: 'CmdOrCtrl+9', click: () => gotoTab(9) }]) },
-      { label: 'Rechercher un onglet',     accelerator: 'CmdOrCtrl+Shift+A', click: () => { if (chromeView) chromeView.webContents.send('zaalis:message', { type: 'openTabSearch' }); } },
-    ]},
-    { label: 'Navigation', submenu: [
-      { label: 'Reculer',                  accelerator: 'CmdOrCtrl+Left',    click: () => { const t = activeTab(); if (t && t.view.webContents.navigationHistory.canGoBack())    t.view.webContents.navigationHistory.goBack(); } },
-      { label: 'Avancer',                  accelerator: 'CmdOrCtrl+Right',   click: () => { const t = activeTab(); if (t && t.view.webContents.navigationHistory.canGoForward()) t.view.webContents.navigationHistory.goForward(); } },
-      { label: 'Actualiser',               accelerator: 'CmdOrCtrl+R',       click: () => { const t = activeTab(); if (t) reloadFresh(t.view.webContents); } },
-      { label: 'Actualiser sans le cache', accelerator: 'CmdOrCtrl+Shift+R', click: () => { const t = activeTab(); if (t) reloadFresh(t.view.webContents); } },
-      { label: 'Accueil',                  accelerator: 'CmdOrCtrl+Shift+H', click: () => navigateActive(HOME_URL) },
-      { label: 'Focus barre d\'adresse',   accelerator: 'CmdOrCtrl+L',       click: () => { if (chromeView) chromeView.webContents.send('zaalis:message', { type: 'focusOmni' }); } },
-      { type: 'separator' },
-      { label: 'Ajouter aux favoris',      accelerator: 'CmdOrCtrl+D',       click: () => toggleBookmark() },
-      { label: 'Historique',               accelerator: 'CmdOrCtrl+Y',       click: () => openHistoryPanel() },
-      { label: 'Téléchargements',          accelerator: 'CmdOrCtrl+Shift+J', click: () => { openPanel(); showPanelDownloads(); } },
-      { type: 'separator' },
-      { label: 'Outils de développement',  accelerator: 'Ctrl+Shift+I',      click: () => { const t = activeTab(); if (t) { const w = t.view.webContents; w.isDevToolsOpened() ? w.closeDevTools() : w.openDevTools({ mode: 'detach' }); } } },
-    ]},
-    { label: 'Affichage', submenu: [
-      { label: 'Zoom avant',    accelerator: 'CmdOrCtrl+Plus',  click: () => setZoomPct((settings.zoomPct || 100) + 10) },
-      { label: 'Zoom avant',    accelerator: 'CmdOrCtrl+=',     acceleratorWorksWhenHidden: true, visible: false, click: () => setZoomPct((settings.zoomPct || 100) + 10) },
-      { label: 'Zoom arrière',  accelerator: 'CmdOrCtrl+-',     click: () => setZoomPct((settings.zoomPct || 100) - 10) },
-      { label: 'Taille réelle', accelerator: 'CmdOrCtrl+0',     click: () => setZoomPct(100) },
-      { type: 'separator' },
-      { role: 'togglefullscreen', label: 'Plein écran' },
-    ]},
-    { role: 'windowMenu' },
-  ];
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+  const argvUrl = urlFromArgv(process.argv);
+  if (argvUrl) createTab(argvUrl, true);
+  runFeatureHooks('ready');
+  if (E2E) runE2E(E2E);
 
   if (AGENT_SELFTEST) {
     runAgentSelfTest(AGENT_SELFTEST).catch((e) => {
@@ -4027,133 +4910,63 @@ app.whenReady().then(() => {
 //                                 page locale, imprime un rapport puis quitte.
 // ZAALIS_AGENT_SELFTEST=mistral : idem + boucle agent complète via zaalis labs
 //                                 ide (provider Mistral) sur la même page.
-async function runAgentSelfTest(mode) {
-  const results = [];
-  const check = (name, pass, extra) => {
-    results.push({ name, pass: !!pass });
-    console.log('  ' + (pass ? 'PASS' : 'FAIL') + '  ' + name +
-                (!pass && extra ? '  — ' + String(extra).replace(/\n/g, ' ').slice(0, 200) : ''));
-  };
-  setTimeout(() => { console.log('[selftest] délai global dépassé'); app.exit(1); }, 240000);
-
-  const TEST_PAGE = 'data:text/html;charset=utf-8,' + encodeURIComponent(
-    '<!doctype html><html><head><title>Page de test agent</title></head><body>' +
-    '<h1>Test agent zaalis</h1><p>Paragraphe de démonstration.</p>' +
-    '<button id="btn" onclick="window.__n=(window.__n||0)+1;document.getElementById(\'out\').textContent=\'cliqué:\'+window.__n;console.log(\'bouton cliqué\')">Ajouter au panier</button>' +
-    '<div id="out">jamais</div>' +
-    '<form onsubmit="event.preventDefault();document.getElementById(\'res\').textContent=\'soumis:\'+document.getElementById(\'q\').value">' +
-    '<input id="q" placeholder="Rechercher" value="ancien texte"><div id="res">rien</div></form>' +
-    '<a href="#bas">Mon compte</a>' +
-    '</body></html>');
-
-  console.log('=== Self-test agent zaalis (' + mode + ') ===');
-  const wrappedCall = parseToolCall('```zaalis-tool\n{"tool":"fill","args":{"ref":"ref_12","value":"test"}}\n```');
-  const flatCall = parseToolCall('```json\n{"tool":"fill","ref":"ref_12","value":"test"}\n```');
-  check('parseur : arguments enveloppés conservés', wrappedCall && wrappedCall.args.ref === 'ref_12' && wrappedCall.args.value === 'test');
-  check('parseur : arguments racine conservés', flatCall && flatCall.args.ref === 'ref_12' && flatCall.args.value === 'test');
-  check('recherche vocale : messages IPC autorisés', ['voiceStart', 'voiceStop', 'voiceAudio'].every(a => HOME_ACTIONS.has(a)));
-  createTab('', true);
-  const t = activeTab();
-  const wc = t.view.webContents;
-  await waitLoad(wc, 8000);
-  await wc.loadURL(TEST_PAGE);
-  await waitLoad(wc, 8000);
-  await sleepMs(400);
-
-  // 1) read_page : arbre d'accessibilité avec refs
-  const tree = await runAgentTool(t, 'read_page', {});
-  check('read_page : bouton avec ref', /button "Ajouter au panier" \[ref_\d+\]/.test(tree), tree);
-  check('read_page : champ texte avec valeur', /textbox "Rechercher" \[ref_\d+\] \(valeur: "ancien texte"\)/.test(tree), tree);
-  check('read_page : titre h1', tree.includes('h1 "Test agent zaalis"'), tree);
-  check('read_page : lien avec ref', /link "Mon compte" \[ref_\d+\]/.test(tree), tree);
-
-  const btnRef   = (tree.match(/button "Ajouter au panier" \[(ref_\d+)\]/) || [])[1];
-  const inputRef = (tree.match(/textbox "Rechercher" \[(ref_\d+)\]/) || [])[1];
-
-  // 2) click par ref → vrai clic natif, le handler de la page doit tourner
-  const c1 = await runAgentTool(t, 'click', { ref: btnRef });
-  await sleepMs(150);
-  let out = await wc.executeJavaScript('document.getElementById("out").textContent', true);
-  check('click par ref : handler déclenché', out === 'cliqué:1', c1 + ' / out=' + out);
-
-  // 3) click par texte (repli sans ref)
-  await runAgentTool(t, 'click', { text: 'ajouter au panier' });
-  await sleepMs(150);
-  out = await wc.executeJavaScript('document.getElementById("out").textContent', true);
-  check('click par texte', out === 'cliqué:2', 'out=' + out);
-
-  // 4) curseur agent présent dans la page (overlay monde isolé)
-  const cursor = await agentExec(wc, '!!(window.__zCur && window.__zCur.root.isConnected)');
-  check('curseur agent visible (overlay)', cursor === true);
-  await agentHoldCursor(wc, 'Analyse en cours');
-  const heldAt = await agentExec(wc, '({opacity:window.__zCur.cur.style.opacity,transform:window.__zCur.cur.style.transform})');
-  await sleepMs(2800);
-  const stillHeld = await agentExec(wc, 'window.__zCur.cur.style.opacity');
-  check('curseur maintenu entre deux outils', heldAt.opacity === '1' && stillHeld === '1');
-
-  // 5) fill + enter : REMPLACE l'ancienne valeur puis soumet le formulaire
-  const f1 = await runAgentTool(t, 'fill', { ref: inputRef, value: 'zaalis test', enter: true });
-  const movedToField = await agentExec(wc, 'window.__zCur.cur.style.transform');
-  check('curseur glissé vers le champ', movedToField !== heldAt.transform, movedToField);
-  const val = await wc.executeJavaScript('document.getElementById("q").value', true);
-  const res = await wc.executeJavaScript('document.getElementById("res").textContent', true);
-  check('fill : valeur remplacée (pas concaténée)', val === 'zaalis test', f1 + ' / value=' + val);
-  check('fill + enter : formulaire soumis', res === 'soumis:zaalis test', 'res=' + res);
-
-  // 6) console de la page capturée
-  const logs = await runAgentTool(t, 'read_console', {});
-  check('read_console : log du clic', String(logs).includes('bouton cliqué'), logs);
-
-  // 7) rechargement → les refs de l'ancien document doivent être refusés proprement
-  wc.reload();
-  await waitLoad(wc, 8000);
-  await sleepMs(300);
-  const stale = await runAgentTool(t, 'click', { ref: btnRef });
-  check('refs invalidés après rechargement', String(stale).includes('référence inconnue'), stale);
-
-  // 8) The settings panel uses one fixed native layout; only its CSS layer
-  // moves. This avoids text repaint jitter on Windows and keeps the rounded
-  // left edge stable throughout the transition.
-  ensurePanelView();
-  const boundsBeforePanel = panelBoundsUpdates;
-  openPanel();
-  await sleepMs(PANEL_ANIM_MS + 160);
-  const panelVisual = await panelView.webContents.executeJavaScript(`({
-    open: document.body.classList.contains('panel-visible'),
-    transform: getComputedStyle(document.body).transform,
-    radius: parseFloat(getComputedStyle(document.body).borderTopLeftRadius) || 0
-  })`, true);
-  check('settings panel: opening completed', panelVisual.open && panelVisual.transform === 'matrix(1, 0, 0, 1, 0, 0)', JSON.stringify(panelVisual));
-  check('settings panel: rounded left corners', panelVisual.radius === 10, JSON.stringify(panelVisual));
-  closePanel();
-  await sleepMs(PANEL_ANIM_MS + 100);
-  check('settings panel: closing completed', panelViewVisible === false);
-  check('settings panel: no frame-by-frame native movement', panelBoundsUpdates - boundsBeforePanel <= 1, String(panelBoundsUpdates - boundsBeforePanel));
-
-  if (mode === 'mistral') {
-    settings.aiProvider = 'mistral';
-    settings.aiSubmodel = 'mistral-large-latest';
-    console.log('--- Boucle agent complète (mistral / ' + settings.aiSubmodel + ') ---');
-    await wc.loadURL(TEST_PAGE);
-    await waitLoad(wc, 8000);
-    await sleepMs(300);
-    newAiChat('selftest');
-    await aiChatSend('Clique sur le bouton « Ajouter au panier » puis dis-moi le contenu exact de l\'élément #out.');
-    const chat = aiChatById(aiCurrentChatId);
-    const msgs = chat ? chat.messages : [];
-    const toolSteps = msgs.filter((m) => m.role === 'tool').map((m) => m.label);
-    const reply = String((msgs[msgs.length - 1] || {}).content || '');
-    console.log('  étapes outils : ' + (toolSteps.join(' | ') || '(aucune)'));
-    console.log('  réponse finale : ' + reply.replace(/\n/g, ' ').slice(0, 300));
-    const outNow = await wc.executeJavaScript('document.getElementById("out").textContent', true);
-    check('mistral : le bouton a réellement été cliqué', /^cliqué:[1-9]/.test(outNow), 'out=' + outNow);
-    check('mistral : réponse finale propre (sans bloc outil)', reply.length > 0 && !reply.includes('zaalis-tool'), reply);
-  }
-
-  const fails = results.filter((r) => !r.pass).length;
-  console.log('=== ' + (results.length - fails) + '/' + results.length + ' OK ===');
-  app.exit(fails ? 1 : 0);
-}
+// Self-test de l'agent IA (développement : npm run selftest).
+// (code dans src/core/agent-selftest.js ; dépendances injectées ci-dessous)
+const SELFTEST = require('./src/core/agent-selftest').init({
+  get components() { return components; },
+  get AGENT() { return AGENT; },
+  get AUTO_GRANTED_PERMISSIONS() { return AUTO_GRANTED_PERMISSIONS; },
+  get BLOCKED_EXTERNAL_SCHEMES() { return BLOCKED_EXTERNAL_SCHEMES; },
+  get DEVTOOLS_GRIP() { return DEVTOOLS_GRIP; },
+  get HOME_ACTIONS() { return HOME_ACTIONS; },
+  get HOME_URL() { return HOME_URL; },
+  get PANEL_ANIM_MS() { return PANEL_ANIM_MS; },
+  get activeTab() { return activeTab; },
+  get aiChatById() { return aiChatById; },
+  get aiCurrentChatId() { return aiCurrentChatId; },
+  get aiProvidersSnapshot() { return aiProvidersSnapshot; },
+  get buildAppMenu() { return buildAppMenu; },
+  get chromeView() { return chromeView; },
+  get closeDevToolsFor() { return closeDevToolsFor; },
+  get closeFindBar() { return closeFindBar; },
+  get closePanel() { return closePanel; },
+  get closeTab() { return closeTab; },
+  get contentTop() { return contentTop; },
+  get createTab() { return createTab; },
+  get devToolsLayout() { return devToolsLayout; },
+  get downloads() { return downloads; },
+  get ensurePanelView() { return ensurePanelView; },
+  get errorPageHtml() { return errorPageHtml; },
+  get findBarOpen() { return findBarOpen; },
+  get findText() { return findText; }, set findText(v) { findText = v; },
+  get findView() { return findView; },
+  get htmlFullscreenTabId() { return htmlFullscreenTabId; },
+  get isExternalAppUrl() { return isExternalAppUrl; },
+  get layoutAll() { return layoutAll; },
+  get mainWin() { return mainWin; },
+  get newAiChat() { return newAiChat; },
+  get openDevToolsFor() { return openDevToolsFor; },
+  get openFindBar() { return openFindBar; },
+  get openNewTab() { return openNewTab; },
+  get openPanel() { return openPanel; },
+  get panelBoundsUpdates() { return panelBoundsUpdates; },
+  get panelView() { return panelView; },
+  get panelViewVisible() { return panelViewVisible; },
+  get permissionContext() { return permissionContext; },
+  get popupAllowed() { return popupAllowed; },
+  get reservedDownloadPaths() { return reservedDownloadPaths; },
+  get runFind() { return runFind; },
+  get safeDownloadName() { return safeDownloadName; },
+  get sealAvailable() { return sealAvailable; },
+  get sealRead() { return sealRead; },
+  get sealWrite() { return sealWrite; },
+  get selectTab() { return selectTab; },
+  get settings() { return settings; },
+  get uniqueDownloadPath() { return uniqueDownloadPath; },
+  get urlScheme() { return urlScheme; },
+  get validAiChoice() { return validAiChoice; },
+});
+const { runAgentSelfTest } = SELFTEST;
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

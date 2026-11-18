@@ -1,0 +1,23 @@
+// Explicit lazy imports keep each module discoverable by pkg.
+module.exports = {
+  updater: () => require('./updater'),
+  tabgroups: () => require('./tabgroups'),
+  memorysaver: () => require('./memorysaver'),
+  taskmanager: () => require('./taskmanager'),
+  crashes: () => require('./crashes'),
+  passwords: () => require('./passwords'),
+  autofill: () => require('./autofill'),
+  importer: () => require('./importer'),
+  webrequest: () => require('./webrequest'),
+  safebrowsing: () => require('./safebrowsing'),
+  certificates: () => require('./certificates'),
+  clienthints: () => require('./clienthints'),
+  defaultbrowser: () => require('./defaultbrowser'),
+  extensions: () => require('./extensions'),
+  translate: () => require('./translate'),
+  spellcheck: () => require('./spellcheck'),
+  reader: () => require('./reader'),
+  qrcode: () => require('./qrcode'),
+  cast: () => require('./cast'),
+  sync: () => require('./sync'),
+};

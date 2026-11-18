@@ -14,6 +14,7 @@
 
 const fs = require('fs');
 const net = require('net');
+const os = require('os');
 const path = require('path');
 const Module = require('module');
 const { EventEmitter } = require('events');
@@ -163,8 +164,12 @@ class BrowserHost extends EventEmitter {
     try {
       fs.mkdirSync(this.dataDir, { recursive: true });
       if (fs.existsSync(path.join(this.dataDir, 'settings.txt'))) return;
-      const legacy = path.join(process.env.APPDATA || '', 'zaalis browser');
-      if (!process.env.APPDATA || !fs.existsSync(path.join(legacy, 'settings.txt'))) return;
+      const appData = process.platform === 'darwin'
+        ? path.join(os.homedir(), 'Library', 'Application Support')
+        : process.platform === 'win32' ? process.env.APPDATA : process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+      if (!appData) return;
+      const legacy = path.join(appData, 'zaalis browser');
+      if (!fs.existsSync(path.join(legacy, 'settings.txt'))) return;
       for (const file of DATA_FILES) {
         const from = path.join(legacy, file);
         if (fs.existsSync(from)) fs.copyFileSync(from, path.join(this.dataDir, file));

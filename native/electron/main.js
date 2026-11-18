@@ -403,6 +403,13 @@ function createWindow(port) {
 
   browserBridge.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return;
+    const key = input.key.toLowerCase();
+    const command = input.shift ? ({p:'palette',e:'mode'})[key] : ({',':'settings',n:'new-chat',o:'open-folder',b:'sidebar',w:'close-tab'})[key];
+    if (command) { event.preventDefault(); mainWindow.webContents.executeJavaScript('window.ZaalisCommands?.run(' + JSON.stringify(command) + ')').catch(() => {}); }
+  });
+
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

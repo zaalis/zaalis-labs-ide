@@ -9,10 +9,10 @@
 
     const NS = 'http://www.w3.org/2000/svg';
     const VARIANTS = ['trace', 'bricks', 'slices', 'cube'];
-    const DEFAULT_VARIANT = 'trace';
+    const DEFAULT_VARIANT = 'off';
     const STORAGE_KEY = 'zaalis.splash';
     const MAX_WAIT_MS = 4000;
-    const LEAVE_MS = 340;
+    const LEAVE_MS = 200;
 
     // The zaalis "Z", traced from image/logo-zaalis.ico on a 100-unit grid:
     // the top bar with its long diagonal, and the inner diagonal with the

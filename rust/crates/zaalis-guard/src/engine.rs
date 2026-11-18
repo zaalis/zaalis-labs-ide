@@ -14,6 +14,13 @@ use zaalis_core::{
     PermissionSet,
 };
 
+/// Written into the target of a VM or laboratory request that asks for a
+/// connected machine. The guard keys its confirmation on it.
+pub const VM_NETWORK_MARK: &str = "réseau Internet + réseau local";
+/// Written into the target of a VM request that opens a session on a server
+/// the user registered over SSH.
+pub const VM_REMOTE_MARK: &str = "hôte SSH distant";
+
 /// What a tool is about to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRequest {
@@ -30,6 +37,10 @@ pub struct AccessRequest {
     /// how paths are resolved.
     #[serde(default)]
     pub sensitive: bool,
+    /// The caller proved, from structured fields, that this sandbox reaches
+    /// another network. The French marks in `target` stay as a second signal.
+    #[serde(default)]
+    pub networked: bool,
 }
 
 impl AccessRequest {
@@ -40,6 +51,7 @@ impl AccessRequest {
             kind,
             target: None,
             sensitive: false,
+            networked: false,
         }
     }
 
@@ -50,6 +62,11 @@ impl AccessRequest {
 
     pub fn sensitive(mut self, sensitive: bool) -> Self {
         self.sensitive = sensitive;
+        self
+    }
+
+    pub fn networked(mut self, networked: bool) -> Self {
+        self.networked = networked;
         self
     }
 
@@ -366,6 +383,19 @@ impl Guard {
                 reason: DecisionReason::PolicyAllow,
             };
         }
+        // A remembered yes must not reopen a credential file. An explicit
+        // allow rule, checked just above, is still the user's written policy.
+        if request.sensitive
+            && matches!(
+                request.kind,
+                AccessKind::Read | AccessKind::Write | AccessKind::Edit | AccessKind::Delete
+            )
+        {
+            return Decision::Ask {
+                reason: DecisionReason::ModeAsk,
+                summary: format!("accès à un fichier sensible : {target}"),
+            };
+        }
         if matching_rule(&self.persisted, request.kind, target).is_some() {
             return Decision::Allow {
                 reason: DecisionReason::PersistedGrant,
@@ -374,6 +404,28 @@ impl Guard {
         if self.session_grants.contains(&session_key) {
             return Decision::Allow {
                 reason: DecisionReason::SessionGrant,
+            };
+        }
+
+        // 4a. A VM or laboratory run with network access reaches the Internet,
+        //     the local network and services listening on the host's loopback
+        //     (QEMU user networking maps 10.0.2.2 to it). The sandbox capability
+        //     covers isolated machines only, so this always asks, whatever the
+        //     mode, unless the user saved an explicit allowance above.
+        let reaches_network = request.networked
+            || target.contains(VM_NETWORK_MARK)
+            || target.contains(VM_REMOTE_MARK);
+        if request.kind == AccessKind::Sandbox
+            && ["vm", "laboratory"].contains(&request.tool.as_str())
+            && reaches_network
+        {
+            return Decision::Ask {
+                reason: DecisionReason::ModeAsk,
+                summary: if target.contains(VM_REMOTE_MARK) {
+                    format!("{target} : l'agent pourra lancer des commandes sur ce serveur")
+                } else {
+                    format!("{target} : la machine pourra joindre Internet et le réseau local")
+                },
             };
         }
 
@@ -435,6 +487,25 @@ impl Guard {
             };
         }
 
+        // MCP tools can write, send or delete. An empty server allow-list is
+        // marked sensitive above, so it asks in every mode. A tool the user
+        // named still asks in the confirming modes.
+        if request.kind == AccessKind::Mcp {
+            return match permissions.mode {
+                PermissionMode::ReadOnly | PermissionMode::Plan | PermissionMode::Supervised => {
+                    Decision::Ask {
+                        reason: DecisionReason::ModeAsk,
+                        summary: format!("appel MCP : {target}"),
+                    }
+                }
+                PermissionMode::Semi | PermissionMode::Auto | PermissionMode::Bypass => {
+                    Decision::Allow {
+                        reason: DecisionReason::ModeAuto,
+                    }
+                }
+            };
+        }
+
         // 6b. Reads, searches and bookkeeping never need approval.
         if !request.kind.is_mutating() {
             return Decision::Allow {
@@ -485,10 +556,16 @@ impl Guard {
                 }
             }
             PermissionMode::Semi => {
-                if request.kind == AccessKind::Execute {
+                if request.kind == AccessKind::Execute
+                    || (request.kind == AccessKind::Computer && computer_changes_the_desktop(target))
+                {
                     Decision::Ask {
                         reason: DecisionReason::ModeAsk,
-                        summary: format!("exécuter : {target}"),
+                        summary: if request.kind == AccessKind::Computer {
+                            format!("piloter le PC : {target}")
+                        } else {
+                            format!("exécuter : {target}")
+                        },
                     }
                 } else {
                     Decision::Allow {
@@ -601,6 +678,13 @@ fn pattern_matches(pattern: &str, target: &str) -> bool {
     compile(pattern).is_some_and(|matcher| matcher.is_match(target))
 }
 
+fn computer_changes_the_desktop(target: &str) -> bool {
+    matches!(
+        target,
+        "move" | "click" | "double_click" | "drag" | "scroll" | "type" | "key" | "activate_app"
+    )
+}
+
 fn compile(pattern: &str) -> Option<GlobMatcher> {
     // `literal_separator` is what makes `src/*.js` mean "in src" rather than
     // "anywhere under src". Without it a rule scoped to one directory silently
@@ -624,6 +708,14 @@ mod tests {
         assert!(guard.evaluate(&vm, &permissions, 0).is_allow());
         let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox).with_target("run");
         assert!(guard.evaluate(&lab, &permissions, 0).is_allow());
+        for mode in [PermissionMode::Supervised, PermissionMode::Auto, PermissionMode::Bypass] {
+            let connected = AccessRequest::new(agent(), "vm", AccessKind::Sandbox)
+                .with_target(format!("VM : create · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&connected, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }), "{mode} must ask for a connected VM");
+            let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox)
+                .with_target(format!("VM : run · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&lab, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }));
+        }
         let apply = AccessRequest::new(agent(), "laboratory", AccessKind::Edit).with_target("apply").sensitive(true);
         assert!(matches!(guard.evaluate(&apply, &permissions, 0).decision, Decision::Ask { .. }));
         let host = AccessRequest::new(agent(), "run", AccessKind::Execute).with_target("npm test");
@@ -692,6 +784,50 @@ mod tests {
             let git = AccessRequest::new(agent(), "git_diff", AccessKind::Read).with_target("git diff");
             assert!(matches!(guard.evaluate(&git, &permissions, 0).decision, Decision::Deny { .. }));
         }
+    }
+
+    #[test]
+    fn a_connected_machine_asks_from_the_structured_flag_alone() {
+        let access = AccessRequest::new(agent(), "vm", AccessKind::Sandbox)
+            .with_target("VM : exec")
+            .networked(true);
+        assert!(evaluate(PermissionMode::Bypass, &access).needs_prompt());
+    }
+
+    #[test]
+    fn semi_asks_before_a_click_and_not_before_a_look() {
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "click")).needs_prompt());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "observe")).is_allow());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Computer, "type").sensitive(true)).needs_prompt());
+    }
+
+    #[test]
+    fn read_only_asks_before_a_listed_mcp_call() {
+        let evaluation = evaluate(PermissionMode::ReadOnly, &request(AccessKind::Mcp, "blender:scene"));
+        assert!(evaluation.needs_prompt());
+    }
+
+    #[test]
+    fn an_unlisted_mcp_tool_asks_even_in_bypass() {
+        let evaluation = evaluate(
+            PermissionMode::Bypass,
+            &request(AccessKind::Mcp, "blender:code").sensitive(true),
+        );
+        assert!(evaluation.needs_prompt());
+    }
+
+    #[test]
+    fn a_session_grant_does_not_reopen_a_credential_file() {
+        let mut guard = Guard::new();
+        let access = request(AccessKind::Read, ".env").sensitive(true);
+        guard.record_answer(&access, true, GrantScope::Session);
+        assert!(guard.evaluate(&access, &PermissionSet::new(PermissionMode::Auto), 0).needs_prompt());
+    }
+
+    #[test]
+    fn python_cannot_hide_an_intrusion_tool() {
+        let evaluation = evaluate(PermissionMode::Bypass, &request(AccessKind::Execute, "python sqlmap.py --version"));
+        assert!(evaluation.needs_prompt());
     }
 
     #[test]

@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+<title>Code QR</title>
+<link rel="stylesheet" href="zx.css">
+<link rel="stylesheet" href="bubble.css">
+<style>
+  .qr-box { width: 220px; height: 220px; margin: 4px auto 10px; border-radius: 8px; overflow: hidden; background: #fff; display: flex; align-items: center; justify-content: center; }
+  .qr-box img { width: 100%; height: 100%; image-rendering: pixelated; }
+  textarea { width: 100%; height: 54px; resize: none; padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--card); color: var(--text); font: 12.5px "Segoe UI", sans-serif; outline: 0; }
+  textarea:focus { border-color: var(--accent); }
+</style>
+<script src="bubble.js"></script>
+</head>
+<body>
+<div class="bubble">
+  <div class="b-head">
+    <div class="t">Scanner le code QR</div>
+    <button class="zx-icon-btn" id="close" title="Fermer"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="b-body">
+    <div class="qr-box" id="box"></div>
+    <textarea id="text" spellcheck="false" aria-label="Texte du code QR"></textarea>
+    <div class="b-status" id="status"></div>
+  </div>
+  <div class="b-foot">
+    <button class="zx-btn" id="copy">Copier le lien</button>
+    <button class="zx-btn primary" id="save">Télécharger</button>
+  </div>
+</div>
+<script src="zx.js"></script>
+<script src="qr-bubble.js"></script>
+</body>
+</html>

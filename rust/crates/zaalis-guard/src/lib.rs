@@ -22,7 +22,7 @@ pub mod powershell;
 pub mod reviewer;
 
 pub use command::{analyse, CommandAnalysis, Finding, Segment, KNOWN_SAFE_BINARIES};
-pub use engine::{AccessRequest, AuditEntry, Evaluation, GrantKey, Guard};
+pub use engine::{AccessRequest, AuditEntry, Evaluation, GrantKey, Guard, VM_NETWORK_MARK, VM_REMOTE_MARK};
 pub use powershell::Obfuscation;
 pub use reviewer::{may_delegate, AlwaysAsk, ReviewRequest, ReviewVerdict, Reviewer};
 

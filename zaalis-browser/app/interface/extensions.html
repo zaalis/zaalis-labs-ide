@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Extensions</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  .dev { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; white-space:nowrap; }
+  .devbar { display:none; gap:8px; flex-wrap:wrap; padding:12px 24px; border-bottom:1px solid var(--border); background:var(--bg); }
+  body.devmode .devbar { display:flex; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(380px, 1fr)); gap:14px; }
+  .ext { background:var(--card); border-radius:10px; box-shadow:var(--shadow); display:flex; flex-direction:column; min-height:170px; }
+  .ext .top { display:flex; gap:14px; padding:18px 18px 10px; flex:1; }
+  .ext .top img, .ext .top .ph { width:48px; height:48px; flex:none; object-fit:contain; border-radius:8px; }
+  .ext .top .ph { background:var(--accent-soft); color:var(--accent); font:600 22px/48px "Segoe UI",sans-serif; text-align:center; }
+  .ext .nm { font-size:15px; font-weight:500; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .ext .vs { color:var(--muted); font-size:12.5px; font-weight:400; }
+  .ext .ds { color:var(--muted); font-size:13px; margin-top:6px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  .ext .id { color:var(--muted); font-size:12px; margin-top:6px; display:none; }
+  body.devmode .ext .id { display:block; }
+  .ext .warn { color:var(--danger); font-size:12.5px; margin-top:6px; }
+  .ext .bot { display:flex; align-items:center; gap:6px; padding:10px 14px 12px 18px; border-top:1px solid var(--border); }
+  .ext .bot .grow { flex:1; }
+  .ext.off .top { opacity:.6; }
+  .detail { display:none; }
+  body.show-detail .detail { display:block; }
+  body.show-detail .listview { display:none; }
+  .detail .hero { display:flex; align-items:center; gap:16px; padding:20px; }
+  .detail .hero img, .detail .hero .ph { width:56px; height:56px; object-fit:contain; }
+  .detail ul { margin:6px 0 0; padding-left:20px; }
+  .detail li { margin:3px 0; }
+  .back { display:inline-flex; align-items:center; gap:6px; cursor:pointer; color:var(--accent); margin-bottom:12px; }
+  .storebox { display:flex; align-items:center; gap:16px; padding:18px; }
+  .storebox .grow { flex:1; }
+</style>
+</head>
+<body>
+  <div class="zx-top">
+    <h1><svg class="i" viewBox="0 0 24 24"><path d="M10 4a2 2 0 0 1 4 0v2h4v4h-2a2 2 0 0 0 0 4h2v4h-4v-2a2 2 0 0 0-4 0v2H6v-4H4a2 2 0 0 1 0-4h2V6h4z"/></svg>Extensions</h1>
+    <div class="search"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="q" placeholder="Rechercher dans les extensions"></div>
+    <div class="dev">Mode développeur <div class="zx-switch" id="devmode"></div></div>
+  </div>
+  <div class="devbar">
+    <button class="zx-btn" id="load-unpacked">Charger l'extension non empaquetée</button>
+    <button class="zx-btn" id="install-crx">Installer un fichier .crx</button>
+    <button class="zx-btn" id="update-now">Mettre à jour</button>
+  </div>
+  <div class="zx-main" style="max-width:1100px">
+    <div class="listview">
+      <div class="zx-card storebox">
+        <svg class="i" viewBox="0 0 24 24" style="width:28px;height:28px;color:var(--accent)"><path d="M4 8h16l-1 12H5z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/></svg>
+        <div class="grow"><div class="t" style="font-weight:500">Chrome Web Store</div>
+          <div class="zx-muted" style="font-size:13px">Ouvrez une fiche d'extension et cliquez sur « Ajouter à zaalis » : l'extension est vérifiée (signature du paquet) puis installée après confirmation de ses autorisations.</div></div>
+        <button class="zx-btn primary" id="open-store">Ouvrir le Web Store</button>
+      </div>
+      <div class="zx-section-title" id="count">Toutes les extensions</div>
+      <div class="grid" id="grid"></div>
+      <div class="zx-card zx-empty" id="empty" style="display:none">Aucune extension installée.</div>
+    </div>
+    <div class="detail" id="detail"></div>
+  </div>
+
+<script src="zx.js"></script>
+<script>
+  let data = { extensions: [], devMode: false };
+  const SOURCE = { store: 'Chrome Web Store', crx: 'Fichier .crx', unpacked: 'Extension non empaquetée' };
+
+  function iconHtml(e, cls) {
+    return e.icon ? '<img src="' + zx.esc(e.icon) + '" alt="">' : '<div class="ph">' + zx.esc((e.name || '?').charAt(0).toUpperCase()) + '</div>';
+  }
+  function reasonText(e) {
+    if (e.pending) return 'Désactivée : la version ' + e.pending.version + ' demande de nouvelles autorisations. Activez-la pour les accepter.';
+    if (e.disabledReason === 'missing') return 'Dossier introuvable : l\'extension a été déplacée ou supprimée.';
+    if (e.error) return 'Erreur de chargement : ' + e.error;
+    return '';
+  }
+  function render() {
+    document.body.classList.toggle('devmode', !!data.devMode);
+    zx.$('devmode').classList.toggle('on', !!data.devMode);
+    const q = zx.$('q').value.trim().toLowerCase();
+    const list = data.extensions.filter(e => !q || (e.name + ' ' + e.description + ' ' + e.id).toLowerCase().includes(q));
+    zx.$('count').textContent = data.extensions.length ? 'Toutes les extensions (' + data.extensions.length + ')' : 'Toutes les extensions';
+    zx.$('empty').style.display = list.length ? 'none' : '';
+    zx.$('empty').textContent = data.extensions.length ? 'Aucune extension ne correspond à la recherche.' : 'Aucune extension installée.';
+    zx.$('grid').innerHTML = list.map(e => {
+      const r = reasonText(e);
+      return '<div class="ext' + (e.enabled ? '' : ' off') + '" data-id="' + e.id + '">' +
+        '<div class="top">' + iconHtml(e) + '<div style="min-width:0;flex:1">' +
+          '<div class="nm">' + zx.esc(e.name) + ' <span class="vs">' + zx.esc(e.version) + '</span>' + (e.source === 'unpacked' ? '<span class="zx-badge warn">non empaquetée</span>' : '') + '</div>' +
+          '<div class="ds">' + zx.esc(e.description || '') + '</div>' +
+          '<div class="id zx-mono">ID : ' + zx.esc(e.id) + '</div>' +
+          (r ? '<div class="warn">' + zx.esc(r) + '</div>' : '') +
+        '</div></div>' +
+        '<div class="bot">' +
+          '<button class="zx-btn" data-act="details">Détails</button>' +
+          '<button class="zx-btn" data-act="remove">Supprimer</button>' +
+          (e.source === 'unpacked' && e.enabled ? '<button class="zx-icon-btn" data-act="reload" title="Recharger"><svg class="i" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg></button>' : '') +
+          '<div class="grow"></div>' +
+          '<div class="zx-switch' + (e.enabled ? ' on' : '') + '" data-act="toggle" title="' + (e.enabled ? 'Désactiver' : 'Activer') + '"></div>' +
+        '</div></div>';
+    }).join('');
+  }
+  async function refresh() {
+    try { data = await zx.call('extList'); } catch (e) { zx.toast(e.message); }
+    render();
+    const id = location.hash.slice(1);
+    if (/^[a-p]{32}$/.test(id)) showDetail(id); else document.body.classList.remove('show-detail');
+  }
+  async function act(id, what) {
+    const e = data.extensions.find(x => x.id === id);
+    try {
+      if (what === 'toggle') await zx.call('extSetEnabled', { id, enabled: !e.enabled });
+      else if (what === 'remove') {
+        if (!(await zx.confirm('Supprimer « ' + e.name + ' » ?', 'L\'extension et ses données seront supprimées de zaalis Browser.', { ok: 'Supprimer', danger: true }))) return;
+        await zx.call('extRemove', { id });
+        if (location.hash) history.replaceState(null, '', location.pathname);
+        zx.toast('Extension supprimée');
+      }
+      else if (what === 'reload') { await zx.call('extReload', { id }); zx.toast('Extension rechargée'); }
+      else if (what === 'details') { location.hash = id; return; }
+      else if (what === 'pin') await zx.call('extPin', { id, pinned: !e.pinned });
+      else if (what === 'options') await zx.call('extOpenOptions', { id });
+      else if (what === 'folder') await zx.call('extShowFolder', { id });
+      else if (what === 'store') await zx.call('extOpenUrl', { url: 'https://chromewebstore.google.com/detail/' + id });
+      else if (what === 'homepage') await zx.call('extOpenUrl', { url: e.homepage });
+    } catch (err) { zx.toast(err.message); }
+    refresh();
+  }
+  async function showDetail(id) {
+    let e;
+    try { e = await zx.call('extDetails', { id }); } catch (err) { zx.toast(err.message); history.replaceState(null, '', location.pathname); return; }
+    document.body.classList.add('show-detail');
+    const perms = (e.warnings.length ? e.warnings : ['Aucune autorisation particulière']).map(w => '<li>' + zx.esc(w) + '</li>').join('');
+    const hosts = e.hosts.length ? '<ul>' + e.hosts.map(h => '<li class="zx-mono">' + zx.esc(h) + '</li>').join('') + '</ul>' : '<div class="zx-muted">Aucun</div>';
+    const row = (t, s) => '<div class="zx-row"><div class="grow"><div class="t">' + t + '</div><div class="s" style="white-space:normal">' + s + '</div></div></div>';
+    zx.$('detail').innerHTML =
+      '<div class="back" id="back"><svg class="i" viewBox="0 0 24 24"><path d="M15 18l-6-6 6-6"/></svg>Toutes les extensions</div>' +
+      '<div class="zx-card"><div class="hero">' + iconHtml(e) + '<div style="flex:1"><div style="font-size:18px">' + zx.esc(e.name) + '</div><div class="zx-muted">' + zx.esc(e.description) + '</div></div>' +
+        '<div class="zx-switch' + (e.enabled ? ' on' : '') + '" data-act="toggle"></div></div>' +
+        (reasonText(e) ? '<div class="zx-row"><div class="grow warn" style="color:var(--danger)">' + zx.esc(reasonText(e)) + '</div></div>' : '') +
+        row('Version', zx.esc(e.version) + ' (Manifest V' + e.manifestVersion + ')') +
+        row('Taille', zx.fmtBytes(e.size || 0)) +
+        row('Source', zx.esc(SOURCE[e.source] || e.source)) +
+        (data.devMode ? row('ID', '<span class="zx-mono">' + zx.esc(e.id) + '</span>') : '') +
+        (e.source === 'unpacked' || data.devMode ? row('Emplacement', '<span class="zx-mono">' + zx.esc(e.path) + '</span>') : '') +
+        row('Autorisations', '<ul>' + perms + '</ul>') +
+        row('Accès aux sites', hosts) +
+        (e.permissions.length ? row('API utilisées', zx.esc(e.permissions.join(', '))) : '') +
+        (e.hasAction ? '<div class="zx-row"><div class="grow"><div class="t">Épingler à la barre d\'outils</div></div><div class="zx-switch' + (e.pinned ? ' on' : '') + '" data-act="pin"></div></div>' : '') +
+        (e.optionsUrl && e.enabled ? '<div class="zx-row click" data-act="options"><div class="grow"><div class="t">Options de l\'extension</div></div><div>›</div></div>' : '') +
+        (e.source === 'store' ? '<div class="zx-row click" data-act="store"><div class="grow"><div class="t">Voir dans le Chrome Web Store</div></div><div>›</div></div>' : '') +
+        (e.homepage ? '<div class="zx-row click" data-act="homepage"><div class="grow"><div class="t">Site Web de l\'extension</div></div><div>›</div></div>' : '') +
+        (data.devMode ? '<div class="zx-row click" data-act="folder"><div class="grow"><div class="t">Ouvrir le dossier de l\'extension</div></div><div>›</div></div>' : '') +
+        '<div class="zx-row click" data-act="remove"><div class="grow"><div class="t" style="color:var(--danger)">Supprimer l\'extension</div></div><div>›</div></div>' +
+      '</div>';
+    zx.$('detail').dataset.id = id;
+    zx.$('back').onclick = () => { history.replaceState(null, '', location.pathname); document.body.classList.remove('show-detail'); };
+  }
+
+  document.addEventListener('click', (ev) => {
+    const el = ev.target.closest('[data-act]');
+    if (!el) return;
+    const card = el.closest('[data-id]');
+    const id = card ? card.dataset.id : zx.$('detail').dataset.id;
+    if (id) act(id, el.dataset.act);
+  });
+  zx.$('q').addEventListener('input', render);
+  zx.$('devmode').onclick = async () => { await zx.call('extSetDevMode', { on: !data.devMode }); refresh(); };
+  zx.$('open-store').onclick = () => zx.call('extOpenUrl', { url: 'https://chromewebstore.google.com/category/extensions' });
+  zx.$('load-unpacked').onclick = () => zx.call('extLoadUnpacked').then(r => { if (r) zx.toast('« ' + r.name + ' » chargée'); refresh(); }).catch(e => zx.toast(e.message));
+  zx.$('install-crx').onclick = () => zx.call('extInstallCrxFile').then(r => { if (r) zx.toast('« ' + r.name + ' » installée'); refresh(); }).catch(e => zx.toast(e.message));
+  zx.$('update-now').onclick = async () => {
+    zx.toast('Recherche de mises à jour…');
+    try {
+      const r = await zx.call('extCheckUpdates');
+      zx.toast(r.updated.length ? r.updated.length + ' extension(s) mise(s) à jour' : (r.errors.length ? 'Erreur : ' + r.errors[0] : 'Les extensions sont à jour'));
+    } catch (e) { zx.toast(e.message); }
+    refresh();
+  };
+  window.addEventListener('hashchange', refresh);
+  zx.on('extensions-changed', refresh);
+  refresh();
+</script>
+</body>
+</html>

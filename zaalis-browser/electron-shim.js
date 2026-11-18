@@ -65,6 +65,7 @@ function createElectron(host, hooks = {}) {
   // ----- Sessions -----------------------------------------------------------
   class Cookies {
     constructor(session) { this.session = session; }
+    flushStore() { return Promise.resolve(); }
     get(filter) {
       const view = this.session.anyView();
       if (!view) return Promise.resolve([]);
@@ -81,7 +82,25 @@ function createElectron(host, hooks = {}) {
       this.permissionRequestHandler = null;
       this.permissionCheckHandler = null;
       this.protocol = { handle: (scheme, handler) => protocolHandlers.set(scheme, handler) };
+      const ignore = () => {};
+      this.webRequest = {
+        onBeforeRequest: ignore, onBeforeSendHeaders: ignore, onHeadersReceived: ignore,
+        onCompleted: ignore, onErrorOccurred: ignore, onSendHeaders: ignore, onResponseStarted: ignore, onBeforeRedirect: ignore,
+      };
+      this.serviceWorkers = new EventEmitter();
+      this.serviceWorkers.getWorkerFromVersionID = () => null;
+      this.serviceWorkers.startWorkerForScope = () => Promise.reject(new Error('service workers indisponibles dans le navigateur intégré'));
+      this.availableSpellCheckerLanguages = [];
     }
+    setUserAgent() {}
+    setDisplayMediaRequestHandler(handler) { this.displayMediaRequestHandler = handler; }
+    setCertificateVerifyProc(handler) { this.certificateVerifyProc = handler; }
+    registerPreloadScript() {}
+    setSpellCheckerEnabled() {}
+    setSpellCheckerLanguages() {}
+    flushStorageData() {}
+    downloadURL() {}
+    addWordToSpellCheckerDictionary() {}
     anyView() {
       for (const view of views.values()) {
         if (!view.webContents.isDestroyed() && view.session === this) return view;
@@ -168,6 +187,8 @@ function createElectron(host, hooks = {}) {
     }
     stop() { host.send('stop', { view: this.id }); }
     focus() { host.send('focus', { view: this.id }); }
+    findInPage(text, options = {}) { host.send('findInPage', { view: this.id, text: String(text), forward: options.forward !== false, findNext: !!options.findNext }); }
+    stopFindInPage(action) { host.send('stopFindInPage', { view: this.id, action }); }
     close() {
       if (this.destroyed) return;
       this.destroyed = true;
@@ -401,6 +422,12 @@ function createElectron(host, hooks = {}) {
 
   // ----- ipcMain, app, dialogs ----------------------------------------------------
   const ipcMain = new EventEmitter();
+  const ipcHandlers = new Map();
+  // Electron invoke channels. The embedded browser registers them at load;
+  // the WebView2 shell still speaks postMessage, so handle only has to exist
+  // and keep the listener until something on this side calls it.
+  ipcMain.handle = (channel, listener) => { ipcHandlers.set(String(channel), listener); };
+  ipcMain.removeHandler = (channel) => { ipcHandlers.delete(String(channel)); };
 
   let resolveReady;
   const readyPromise = new Promise((resolve) => { resolveReady = resolve; });
@@ -409,6 +436,9 @@ function createElectron(host, hooks = {}) {
   Object.assign(app, {
     whenReady: () => readyPromise,
     isReady: () => !!app.ready,
+    isPackaged: false,
+    getVersion: () => '1.0.16',
+    configureHostResolver() {},
     setName() {}, setAppUserModelId() {}, setPath() {},
     commandLine: { appendSwitch() {} },
     requestSingleInstanceLock: () => true,
@@ -444,6 +474,11 @@ function createElectron(host, hooks = {}) {
         filters: (opts.filters || []).map((filter) => ({ name: String(filter.name), extensions: (filter.extensions || []).map(String) })),
       }).then((result) => (result && result.path ? { canceled: false, filePaths: [result.path] } : { canceled: true, filePaths: [] })));
     },
+    showSaveDialog(_window, options) {
+      const opts = options || _window || {};
+      return host.command('saveFile', { title: String(opts.title || ''), defaultPath: String(opts.defaultPath || ''), filters: opts.filters || [] })
+        .then(result => ({ canceled: !result?.path, filePath: result?.path }));
+    },
   };
 
   function nativeImageFromDataUrl(dataUrl) {
@@ -470,6 +505,7 @@ function createElectron(host, hooks = {}) {
 
   // Electron's net.request, over Node's fetch (same machine, same user).
   const net = {
+    fetch: (url, options) => fetch(url, options),
     request(options) {
       const opts = typeof options === 'string' ? { url: options } : (options || {});
       const request = new EventEmitter();
@@ -625,6 +661,7 @@ function createElectron(host, hooks = {}) {
         if (!message.newDocument) emitSafe(wc, 'did-navigate-in-page', {}, wc.url, true);
         return;
       case 'domReady': emitSafe(wc, 'dom-ready'); return;
+      case 'foundInPage': emitSafe(wc, 'found-in-page', {}, message.result); return;
       case 'completed': {
         if (message.url) wc.url = String(message.url);
         // A page served with an HTTP error status (404, 429…) is still a page:
@@ -633,7 +670,7 @@ function createElectron(host, hooks = {}) {
           emitSafe(wc, 'did-finish-load');
           wc.settleLoads(null);
         } else {
-          const code = WEB_ERROR_CODES[message.status] !== undefined ? WEB_ERROR_CODES[message.status] : -2;
+          const code = Number.isInteger(message.code) ? message.code : (WEB_ERROR_CODES[message.status] ?? -2);
           emitSafe(wc, 'did-fail-load', {}, code, WEB_ERROR_NAMES[String(code)] || 'ERR_FAILED', String(message.url || wc.url), true);
           const error = new Error(WEB_ERROR_NAMES[String(code)] || 'ERR_FAILED');
           error.code = code;

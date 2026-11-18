@@ -143,6 +143,23 @@
   .tab.split-l::after { right: 0; border-top-right-radius: 0; border-bottom-right-radius: 0; }
   .tab.split-r::after { left: 0; border-top-left-radius: 0; border-bottom-left-radius: 0; }
   .tab .title { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Groupes d'onglets : pastille + liseré de couleur, onglets masqués si réduit. */
+  .tab.gc-hidden { display: none; }
+  .tab.grouped::before { content: ""; position: absolute; left: 6px; right: 6px; bottom: 0; height: 2px; border-radius: 2px; background: var(--gcolor); }
+  .tg-chip { flex: none; display: flex; align-items: center; gap: 5px; height: 22px; max-width: 160px; margin: 0 2px 6px; padding: 0 9px;
+    border-radius: 7px; background: var(--gcolor); color: #fff; font: 600 12px "Segoe UI", sans-serif; cursor: default; user-select: none; }
+  body.dark .tg-chip { color: #202124; }
+  .tg-chip span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tg-chip.untitled { width: 14px; height: 14px; padding: 0; margin-bottom: 10px; border-radius: 50%; gap: 0; }
+  .tg-chip.untitled.collapsed { width: auto; height: 22px; padding: 0 8px; margin-bottom: 6px; border-radius: 7px; }
+  .tg-chip .tg-count { font-weight: 500; opacity: .85; }
+  .tg-chip:hover { filter: brightness(1.08); }
+  .tg-chip .tg-edit { width: 130px; height: 18px; border: 0; outline: 0; border-radius: 4px; padding: 0 5px; font: 500 12px "Segoe UI", sans-serif; color: #202124; background: #fff; }
+  .tg-chip:has(.tg-edit) { width: auto; height: 22px; padding: 0 3px; border-radius: 7px; margin-bottom: 6px; }
+  .ts-group { display: inline-block; margin-left: 8px; padding: 0 6px; border-radius: 6px; font-size: 11px; font-weight: 600; color: #fff; background: var(--gcolor); vertical-align: 1px; }
+  /* Onglet en veille (économiseur de mémoire) : estompé, comme Chrome. */
+  .tab.discarded .title, .tab.discarded .tab-fav { opacity: .55; }
+  .tab.discarded .tab-fav { filter: grayscale(.6); }
   .tab-fav {
     width: 16px; height: 16px; border-radius: 4px; flex: none;
     position: relative; overflow: hidden;
@@ -225,6 +242,14 @@
     user-select: text; -webkit-user-select: text;
   }
   .address input::placeholder { color: var(--muted); }
+  /* Icônes des modules (traduire, lecture, QR, Cast…) : state.omniActions / toolbarActions. */
+  .feature-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+  .feature-actions:empty { display: none; }
+  .feature-actions .fa { width: 28px; height: 28px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: var(--muted); cursor: default; }
+  .toolbar-actions .fa { width: 34px; height: 34px; }
+  .feature-actions .fa:hover { background: var(--surface-h); color: var(--text); }
+  .feature-actions .fa.on { color: var(--accent); }
+  .feature-actions .fa svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   .star { color: var(--muted); }
   .star.on { color: #f5b400; }
   .star.on svg { fill: #f5b400; stroke: #f5b400; }
@@ -469,6 +494,12 @@
     color: var(--muted); cursor: default;
   }
   .site-info-trigger.show { display: flex; }
+  /* État de sécurité (src/features/certificates.js) : « Non sécurisé » façon Chrome. */
+  .site-info-trigger .sec-label { display: none; margin-left: 5px; font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+  .site-info-trigger.sec-warn { width: auto; padding: 0 9px 0 7px; border-radius: 14px; color: var(--danger); }
+  .site-info-trigger.sec-warn .sec-label { display: inline; }
+  .site-info-trigger.sec-mild { color: var(--muted); }
+  .sip-cert { margin: 0 4px 8px; padding: 8px 10px; border-radius: 10px; background: var(--surface-h); font: 11.5px/1.5 Consolas, "Cascadia Mono", monospace; white-space: pre-wrap; word-break: break-all; color: var(--text); max-height: 260px; overflow: auto; }
   .site-info-trigger:hover, .site-info-trigger.on { background: var(--surface-h); color: var(--text); }
   .site-info-trigger svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
   .site-info-pop {
@@ -503,6 +534,9 @@
   .sip-cookie-list { max-height: 190px; overflow: auto; margin: 0 2px 8px; border: 1px solid var(--border); border-radius: 11px; }
   .sip-cookie { padding: 8px 10px; border-bottom: 1px solid var(--border); }
   .sip-cookie:last-child { border-bottom: 0; }
+  .sip-toggle { cursor: pointer; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .sip-toggle:hover { background: var(--surface-h); }
+  .sip-cookie.sip-toggle .m { margin-top: 0; color: var(--accent); }
   .sip-cookie .n { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sip-cookie .m { margin-top: 2px; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .sip-empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 22px 10px; }
@@ -641,6 +675,13 @@
   /* ---------- Telechargements ---------- */
   /* Le bouton n'existe qu'a partir du premier telechargement de la session,
      et prend la place de l'etoile favoris de Chrome (a droite de la barre). */
+  /* Mise à jour prête : pilule « Mettre à jour » à côté des paramètres, comme Chrome. */
+  .update-pill { display:none; align-items:center; gap:6px; height:28px; padding:0 12px; margin:0 2px; border-radius:14px;
+    background:#e6f4ea; color:#137333; font:600 12.5px "Segoe UI",sans-serif; cursor:pointer; white-space:nowrap; flex:none; }
+  .update-pill:hover { filter:brightness(.96); }
+  .update-pill svg { width:15px; height:15px; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; stroke-linejoin:round; }
+  body.dark .update-pill { background:#1e3a2a; color:#81c995; }
+  body.update-ready .update-pill { display:flex; }
   .dl-btn { display: none; position: relative; }
   body.has-downloads .dl-btn { display: flex; }
   .dl-btn.active { background: var(--surface-h); }
@@ -876,7 +917,10 @@
         <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
       </div>
       <input id="omni" type="text" autocomplete="off" placeholder="Rechercher sur Google ou saisir une URL">
+      <div class="pw-key" id="pw-key"></div>
+      <div class="feature-actions omni-actions" id="omni-actions"></div>
     </div>
+    <div class="feature-actions toolbar-actions" id="toolbar-actions"></div>
 
     <div class="iconbtn star" id="star" title="Ajouter aux favoris"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></div>
     <div class="iconbtn dl-btn" id="downloads" title="Telechargements">
@@ -885,6 +929,7 @@
     </div>
     <div class="iconbtn" id="aichat" title="Chat IA — zaalis labs ide"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/><path d="M12 8.2l.9 2.4 2.4.9-2.4.9-.9 2.4-.9-2.4-2.4-.9 2.4-.9z"/></svg></div>
     <div class="iconbtn" id="media" title="Controle media"><svg viewBox="0 0 24 24"><path d="M4 5h10"/><path d="M4 12h7"/><path d="M4 19h4"/><circle cx="17" cy="17" r="3"/><path d="M17 14V4l4 1"/></svg></div>
+    <div class="update-pill" id="update-pill" title="Relancer pour installer la mise à jour"><svg viewBox="0 0 24 24"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>Mettre à jour</div>
     <div class="iconbtn" id="settings" title="Parametres"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></div>
   </div>
 
@@ -929,12 +974,19 @@
 
   <div class="omni-suggest" id="omni-suggest"></div>
   <div class="site-info-pop" id="site-info-pop"></div>
+  <div class="pw-pop" id="pw-pop"></div>
   <div class="toast" id="toast"></div>
 
 <script>
   const wv = window.zaalisBridge;
   const SEP = "\x1f";
   function post(...parts){ if (wv) wv.postMessage(parts.join(SEP)); }
+  // Libellés propres à la plateforme (Explorateur et Ctrl sous Windows).
+  const IS_MAC = /Mac/i.test(navigator.platform || "");
+  const REVEAL_LABEL = IS_MAC ? "Afficher dans le Finder" : "Afficher dans le dossier";
+  if (!IS_MAC) document.addEventListener("DOMContentLoaded", () => {
+    const nt = document.getElementById("newtab"); if (nt) nt.title = "Nouvel onglet (Ctrl+T)";
+  });
 
   const $ = id => document.getElementById(id);
   const tabsEl = $("tabs"), omni = $("omni"), addr = $("address");
@@ -1013,15 +1065,45 @@
       const permissions = Array.isArray(info.permissions) ? info.permissions : [];
       let html = sipHeader("Paramètres du site", true);
       html += '<div class="sip-note">Autorisations accordées ou bloquées pour <b>' + escHtml(host) + '</b>.</div>';
-      html += permissions.length ? '<div class="sip-cookie-list">' + permissions.map(p => '<div class="sip-cookie"><div class="n">' + escHtml(p.permission) + '</div><div class="m">' + (p.value === 'allow' ? 'Autorisé' : 'Bloqué') + '</div></div>').join("") + '</div>' : '<div class="sip-empty">Aucune autorisation spécifique pour ce site.</div>';
+      html += permissions.length ? '<div class="sip-cookie-list">' + permissions.map(p => '<div class="sip-cookie"><div class="n">' + escHtml(p.label || p.permission) + '</div><div class="m">' + (p.value === 'allow' ? 'Autorisé' : 'Bloqué') + '</div></div>').join("") + '</div>' : '<div class="sip-empty">Aucune autorisation spécifique pour ce site.</div>';
+      // Pop-ups : bloquées sans action de l'utilisateur, comme dans Chrome.
+      html += '<div class="sip-cookie-list"><div class="sip-cookie sip-toggle" id="sip-popups" title="Cliquer pour changer"><div class="n">Pop-ups et redirections</div><div class="m">' + (info.popupsAllowed ? 'Autorisées' : 'Bloquées sans clic') + '</div></div></div>';
       html += '<button class="sip-danger" id="sip-reset-perms">Réinitialiser les autorisations</button>';
       pop.innerHTML = html; wireSiteInfoHeader();
       $("sip-reset-perms").onclick = () => post("resetSitePermissions");
+      $("sip-popups").onclick = () => post("setSitePopups", info.popupsAllowed ? "0" : "1");
+    } else if (siteInfoView === "cert") {
+      // Visionneuse de certificat (src/features/certificates.js).
+      const sec = info.security || {}, c = sec.cert;
+      const fmtD = (t) => { try { return new Date(t).toLocaleString("fr-FR", { dateStyle: "medium", timeStyle: "short" }); } catch { return ""; } };
+      let html = sipHeader("Certificat", true);
+      if (c) {
+        const block = (x, title) => title + "\nDélivré à : " + (x.subject || "?") + (x.subjectOrg ? " (" + x.subjectOrg + ")" : "") +
+          "\nDélivré par : " + (x.issuer || "?") + (x.issuerOrg ? " (" + x.issuerOrg + ")" : "") +
+          "\nValide du " + fmtD(x.validFrom) + "\n       au " + fmtD(x.validTo) +
+          "\nSHA-256 : " + (x.sha256 || "?") + (x.serial ? "\nN° de série : " + x.serial : "");
+        let txt = block(c, "Certificat du site") + (c.altNames && c.altNames.length ? "\nNoms : " + c.altNames.slice(0, 12).join(", ") : "");
+        (c.chain || []).forEach((x, i) => { txt += "\n\n" + block(x, i === (c.chain.length - 1) ? "Autorité racine" : "Autorité intermédiaire"); });
+        html += '<div class="sip-note">' + escHtml(sec.verification || "") + '</div><div class="sip-cert">' + escHtml(txt) + '</div>';
+      } else {
+        html += '<div class="sip-empty">Certificat indisponible pour ce site.</div>';
+      }
+      pop.innerHTML = html; wireSiteInfoHeader();
     } else {
       const cookieCount = Array.isArray(info.cookies) ? info.cookies.length : 0;
-      const secure = info.available ? !!info.secure : /^https:\/\//i.test(state.active.url || "");
+      const sec = info.security || {};
+      const secure = sec.level ? (sec.level === "secure" || sec.level === "local") : (info.available ? !!info.secure : /^https:\/\//i.test(state.active.url || ""));
+      const SEC_TEXT = {
+        insecure: ['La connexion n’est pas sécurisée', 'Évitez de saisir des informations sensibles (mots de passe, cartes bancaires) : elles pourraient être volées.'],
+        exception: ['Votre connexion à ce site n’est pas sécurisée', 'Vous avez choisi d’ignorer une erreur de certificat (' + (sec.exception ? sec.exception.error : '') + ').'],
+        mixed: ['La connexion n’est pas totalement sécurisée', 'Ce site contient des éléments non sécurisés (contenu mixte).'],
+        dangerous: ['Site dangereux', 'Ce site figure sur une liste de sites malveillants ou d’hameçonnage.'],
+        local: ['Site local', 'Ce site est hébergé sur votre ordinateur.'],
+      };
+      const st = SEC_TEXT[sec.level] || (secure ? ['La connexion est sécurisée', 'Les données sont chiffrées pendant leur transfert.'] : SEC_TEXT.insecure);
       let html = sipHeader(host || "Informations sur le site", false);
-      html += '<div class="sip-status' + (secure ? '' : ' warn') + '">' + (secure ? SIP_LOCK : SIP_WARN) + '<div><div class="t">' + (secure ? 'La connexion est sécurisée' : 'La connexion n’est pas sécurisée') + '</div><div class="s">' + (secure ? 'Les données sont chiffrées pendant leur transfert.' : 'Évitez de saisir des informations sensibles.') + '</div></div></div>';
+      html += '<div class="sip-status' + (secure ? '' : ' warn') + '">' + (secure ? SIP_LOCK : SIP_WARN) + '<div><div class="t">' + escHtml(st[0]) + '</div><div class="s">' + escHtml(st[1]) + '</div></div></div>';
+      if (sec.cert) html += sipRow(SIP_LOCK, sec.level === "exception" ? 'Le certificat n’est pas valide' : 'Le certificat est valide', 'Délivré par ' + (sec.cert.issuerOrg || sec.cert.issuer || '?'), 'sip-cert');
       html += sipRow(SIP_COOKIE, 'Cookies et données des sites', cookieCount ? cookieCount + ' cookie' + (cookieCount > 1 ? 's' : '') : 'Aucun cookie', 'sip-cookies');
       html += '<div class="sip-divider"></div>';
       html += sipRow(SIP_GEAR, 'Paramètres des sites', 'Autorisations et accès du site', 'sip-settings');
@@ -1029,6 +1111,7 @@
       pop.innerHTML = html; wireSiteInfoHeader();
       $("sip-cookies").onclick = () => { siteInfoView = "cookies"; renderSiteInfo(); reportHeight(); };
       $("sip-settings").onclick = () => { siteInfoView = "settings"; renderSiteInfo(); reportHeight(); };
+      if ($("sip-cert")) $("sip-cert").onclick = () => { siteInfoView = "cert"; renderSiteInfo(); reportHeight(); };
     }
   }
 
@@ -1072,6 +1155,27 @@
     ));
   }
 
+  // Icônes fournies par les modules (src/features) : le SVG vient de main.js
+  // (contenu de confiance) ; le clic renvoie l'id et la position de l'icône.
+  function renderFeatureActions(boxId, list){
+    const box = $(boxId); if (!box) return;
+    list = Array.isArray(list) ? list : [];
+    const sig = JSON.stringify(list);
+    if (box.dataset.sig === sig) return;
+    box.dataset.sig = sig; box.innerHTML = "";
+    list.forEach(a => {
+      const el = document.createElement("div");
+      el.className = "fa" + (a.active ? " on" : ""); el.title = a.title || ""; el.dataset.id = a.id;
+      el.innerHTML = a.svg || "";
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const r = el.getBoundingClientRect();
+        post("featureUiClick", a.id, r.left, r.top, r.width, r.height);
+      });
+      box.appendChild(el);
+    });
+  }
+
   function render(){
     document.body.classList.toggle("dark", state.theme === "dark");
     document.body.classList.toggle("incognito", !!state.incognito);
@@ -1081,6 +1185,19 @@
     if (!homeContext) closeHomeContext();
     const webSite = /^https?:\/\//i.test(state.active.url || "");
     $("site-info-trigger").classList.toggle("show", webSite);
+    {
+      // « Non sécurisé » / « Dangereux » à gauche de l'adresse, comme Chrome.
+      const trig = $("site-info-trigger");
+      const actTab = (state.tabs || []).find(t => t.active) || {};
+      const lvl = webSite ? (actTab.security || "") : "";
+      const warnText = { insecure: "Non sécurisé", exception: "Non sécurisé", dangerous: "Dangereux" }[lvl] || "";
+      let lbl = trig.querySelector(".sec-label");
+      if (!lbl) { lbl = document.createElement("span"); lbl.className = "sec-label"; trig.appendChild(lbl); }
+      lbl.textContent = warnText;
+      trig.classList.toggle("sec-warn", !!warnText);
+      trig.classList.toggle("sec-mild", lvl === "mixed");
+      trig.title = warnText ? warnText + " — informations sur le site" : "Informations sur le site";
+    }
     if (!webSite && siteInfoOpen) closeSiteInfo();
     if (siteInfoOpen) { positionSiteInfo(); renderSiteInfo(); }
     updatePlaceholder();
@@ -1088,12 +1205,20 @@
     // Onglets
     const plusBefore = plusLeft();
     tabsEl.innerHTML = "";
+    const tgMap = tabGroupMap();
+    let prevGroup = "";
     state.tabs.forEach(t => {
+      // Groupes d'onglets : pastille avant le premier membre, liseré coloré.
+      const tg = t.group ? tgMap[t.group] : null;
+      if (tg && t.group !== prevGroup) tabsEl.appendChild(tabGroupChip(tg));
+      prevGroup = tg ? t.group : "";
       const el = document.createElement("div");
       const inSplit = Array.isArray(state.split) && state.split.indexOf(t.id) !== -1;
       const splitSide = inSplit ? (state.split[0] === t.id ? " split-l" : " split-r") : "";
       el.className = "tab" + (t.active ? " active" : "") + (inSplit ? " split" + splitSide : "")
-        + (t.pinned ? " pinned" : "") + (t.incognito ? " incognito" : "");
+        + (t.pinned ? " pinned" : "") + (t.incognito ? " incognito" : "")
+        + (tg ? " grouped" : "") + (tg && tg.collapsed ? " gc-hidden" : "") + (t.discarded ? " discarded" : "");
+      if (tg) el.style.setProperty("--gcolor", tabGroupColor(tg));
       el.dataset.id = t.id;
       el.addEventListener("contextmenu", (e) => {
         e.preventDefault(); e.stopPropagation();
@@ -1114,6 +1239,8 @@
       });
       el.appendChild(faviconNode("tab-fav", t.url));
       el.title = t.title && t.title.trim() ? t.title : (t.incognito ? "Onglet privé" : "Nouvel onglet");
+      if (t.discarded) el.title += "\nOnglet en veille" + (t.freedMB ? " — Mémoire libérée : " + t.freedMB + " Mo" : "");
+      if (tg) el.title += "\nGroupe : " + (tg.title || "sans nom");
       const title = document.createElement("div");
       title.className = "title";
       title.textContent = t.title && t.title.trim() ? t.title : (t.incognito ? "Onglet privé" : "Nouvel onglet");
@@ -1158,6 +1285,9 @@
     // Meme bleu que la recherche IA quand le panneau correspondant est ouvert.
     $("aichat").classList.toggle("ai-on", !!state.aiPanelOpen && !aiOff);
     $("settings").classList.toggle("ai-on", !!state.panelOpen);
+    document.body.classList.toggle("update-ready", !!(state.update && state.update.status === "ready"));
+    renderFeatureActions("omni-actions", state.omniActions);
+    renderFeatureActions("toolbar-actions", state.toolbarActions);
 
     // Favoris : le bouton dossier reste seul sur la barre, le detail vit dans
     // la mini-fenetre scrollable pour garder une largeur Chrome-like stable.
@@ -1401,6 +1531,7 @@
     return b;
   }
 
+  const ICON_RESUME = '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>';
   const ICON_FOLDER = '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
   const ICON_OPEN   = '<svg viewBox="0 0 24 24"><path d="M14 4h6v6"/><path d="M20 4l-8 8"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>';
 
@@ -1428,8 +1559,9 @@
       row.appendChild(meta);
 
       const done = d.state === "completed";
-      // La "loupe" facon Finder : revele le fichier dans le gestionnaire.
-      row.appendChild(dlAction("Afficher dans le Finder", ICON_FOLDER, done, () => post("showDownload", d.id)));
+      // Révèle le fichier dans le gestionnaire de fichiers (Explorateur / Finder).
+      if (d.state === "interrupted") row.appendChild(dlAction("Reprendre le téléchargement", ICON_RESUME, true, () => post("resumeDownload", d.id)));
+      row.appendChild(dlAction(REVEAL_LABEL, ICON_FOLDER, done, () => post("showDownload", d.id)));
       row.appendChild(dlAction("Ouvrir le fichier",       ICON_OPEN,   done, () => post("openDownload", d.id)));
       if (done) row.ondblclick = () => post("openDownload", d.id);
       list.appendChild(row);
@@ -1874,7 +2006,54 @@
   const GAP = 4;
   const EASE = "transform .18s cubic-bezier(.2,.7,.3,1)";
   let drag = null;
-  const tabEls = () => [...tabsEl.querySelectorAll(".tab")];
+  // Onglets visibles (ceux d'un groupe réduit sont masqués et ne bougent pas).
+  const tabEls = () => [...tabsEl.querySelectorAll(".tab:not(.gc-hidden)")];
+
+  // ----- Groupes d'onglets -------------------------------------------------
+  function tabGroupMap(){
+    const m = {};
+    (state.tabGroups || []).forEach(g => { m[g.id] = g; });
+    return m;
+  }
+  function tabGroupColor(g){ return document.body.classList.contains("dark") ? g.dark : g.light; }
+  let tgEditing = "";
+  function tabGroupChip(g){
+    const chip = document.createElement("div");
+    chip.className = "tg-chip" + (g.collapsed ? " collapsed" : "") + (g.title ? "" : " untitled");
+    chip.dataset.group = g.id;
+    chip.style.setProperty("--gcolor", tabGroupColor(g));
+    chip.title = (g.title || "Groupe sans nom") + " — " + g.count + " onglet" + (g.count > 1 ? "s" : "") +
+      (g.collapsed ? " (cliquer pour développer)" : " (cliquer pour réduire)");
+    if (tgEditing === g.id) {
+      const inp = document.createElement("input");
+      inp.className = "tg-edit"; inp.value = g.title || ""; inp.placeholder = "Nommer ce groupe";
+      inp.maxLength = 60;
+      const done = (commit) => {
+        if (tgEditing !== g.id) return;
+        tgEditing = "";
+        if (commit) post("tabGroupSet", g.id, JSON.stringify({ title: inp.value }));
+        else render();
+      };
+      inp.addEventListener("keydown", (e) => { e.stopPropagation(); if (e.key === "Enter") done(true); if (e.key === "Escape") done(false); });
+      inp.addEventListener("blur", () => done(true));
+      inp.addEventListener("pointerdown", (e) => e.stopPropagation());
+      chip.appendChild(inp);
+      setTimeout(() => { inp.focus(); inp.select(); }, 0);
+    } else {
+      const label = document.createElement("span");
+      label.textContent = g.title || "";
+      chip.appendChild(label);
+      if (g.collapsed && g.count) {
+        const n = document.createElement("span");
+        n.className = "tg-count"; n.textContent = String(g.count);
+        chip.appendChild(n);
+      }
+    }
+    chip.addEventListener("click", (e) => { if (tgEditing === g.id) return; e.stopPropagation(); post("tabGroupToggle", g.id); });
+    chip.addEventListener("dblclick", (e) => { e.stopPropagation(); tgEditing = g.id; render(); });
+    chip.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); cancelTabDrag(); post("tabGroupMenu", g.id); });
+    return chip;
+  }
 
   // Annule proprement un drag en cours (menu contextuel, perte de focus…) :
   // retire les ecouteurs et remet tous les onglets a leur place.
@@ -1950,9 +2129,14 @@
     d.el.style.transition = EASE;
     d.el.style.transform = "translateX(" + offset + "px)";
 
-    const ids = tabEls().map(t => t.dataset.id);
-    const [moved] = ids.splice(d.index, 1);
-    ids.splice(d.target, 0, moved);
+    const visible = tabEls().map(t => t.dataset.id);
+    const [moved] = visible.splice(d.index, 1);
+    visible.splice(d.target, 0, moved);
+    // Les onglets masqués (groupe réduit) gardent leur place : seules les
+    // positions des onglets visibles sont réattribuées.
+    const shown = new Set(visible);
+    let vi = 0;
+    const ids = (state.tabs || []).map(t => String(t.id)).map(id => shown.has(id) ? visible[vi++] : id);
     setTimeout(() => post("reorderTabs", ids.join(",")), 175);
   }
 
@@ -1965,6 +2149,7 @@
     else if (d.type === "suggest") onSuggest(d);
     else if (d.type === "focusOmni") { omni.focus(); omni.select(); }
     else if (d.type === "openTabSearch") openTabSearch();
+    else if (d.type === "tabGroupEdit") { tgEditing = d.id; if (!drag) render(); }
     else if (d.type === "toast") showToast(d.text);
     else if (d.type === "downloads") { downloads = Array.isArray(d.items) ? d.items : []; renderDownloads(); }
     else if (d.type === "mediaState") {
@@ -2014,6 +2199,14 @@
       tt.textContent = t.title && t.title.trim() ? t.title : (t.incognito ? "Onglet privé" : "Nouvel onglet");
       const uu = document.createElement("div"); uu.className = "u";
       uu.textContent = isInternal(t.url) ? "Page zaalis" : (t.url || "");
+      const tsg = t.group ? tabGroupMap()[t.group] : null;
+      if (tsg) {
+        const gb = document.createElement("span");
+        gb.className = "ts-group"; gb.textContent = tsg.title || "Groupe";
+        gb.style.setProperty("--gcolor", tabGroupColor(tsg));
+        tt.appendChild(gb);
+      }
+      if (t.discarded) uu.textContent += " · en veille";
       m.appendChild(tt); m.appendChild(uu); row.appendChild(m);
       row.onclick = () => { post("selectTab", t.id); closeTabSearch(); };
       list.appendChild(row);
@@ -2050,6 +2243,7 @@
   $("star").onclick = ()=> post("bookmarkToggle");
   $("media").onclick = ()=> setMediaOpen(!mediaOpen);
   $("settings").onclick = ()=> post("togglePanel");
+  $("update-pill").onclick = ()=> post("openInternal", "about");
   function aiUnavailableFlash(btn) {
     // Flash rouge doux + ouvre le panneau reglages sur l'etat de connexion.
     btn.animate([{transform:'translateX(0)'},{transform:'translateX(-3px)'},{transform:'translateX(3px)'},{transform:'translateX(0)'}], {duration:220});
@@ -2168,6 +2362,8 @@
     else if (profileOpen) pops.push($("profile-pop"));
     else if (typeof launcherOpen !== "undefined" && launcherOpen) pops.push($("launcher-pop"));
     if (siteInfoOpen) pops.push($("site-info-pop"));
+    if (window.pwPopOpen) pops.push($("pw-pop"));
+    if (window.extPopOpen && $("ext-pop")) pops.push($("ext-pop"));
     if (typeof suggestOpen !== "undefined" && suggestOpen && $("omni-suggest").children.length) pops.push($("omni-suggest"));
     if (pops.length) {
       let L = Infinity, T = Infinity, R = -Infinity, B = -Infinity;
@@ -2188,5 +2384,7 @@
   reportHeight();
   window.addEventListener("resize", () => { if (suggestOpen) positionSuggest(); if (siteInfoOpen) positionSiteInfo(); reportHeight(); });
 </script>
+<script src="pw-bubble.js"></script>
+<script src="ext-bar.js"></script>
 </body>
 </html>

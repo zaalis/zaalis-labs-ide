@@ -18,6 +18,8 @@ const { registerSecret } = require('../agent/secrets-mask');
 const modelCatalog = require('../accounts/model-catalog');
 const compatProviders = require('../accounts/compat-providers');
 const chatgptSubscription = require('../accounts/chatgpt-subscription');
+const { beginSignIn } = require('../accounts/chatgpt-sign-in');
+const { SkillsStore } = require('../agent/skills-store');
 const accountSubscriptions = require('../accounts/account-subscriptions');
 const workspaceContext = require('../agent/workspace-context');
 const platformRuntime = require('../runtime/platform-runtime');
@@ -78,6 +80,7 @@ chatgptSubscription.setVersion(APP_VERSION);
 // (storing it next to the exe meant losing accounts/chats on every update).
 function resolveDataDir() { return platformRuntime.dataDir(APP_DIR, !!process.pkg); }
 const DATA_DIR = resolveDataDir();
+const skillsStore = new SkillsStore(DATA_DIR);
 const { VmManager } = require('../laboratory/vm-manager');
 const vmManager = new VmManager({ appDir: APP_DIR, dataDir: DATA_DIR });
 const { Laboratory } = require('../laboratory/laboratory');
@@ -690,7 +693,7 @@ app.post('/api/internal/rust-workspace', async (req, res) => {
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte workspace invalide.' });
   try {
-    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService });
+    const serviceResult = await workspaceServiceAction(context, req.body, { memory: generalMemory, conversations: conversationStore, tasks: taskService, skills: skillsStore });
     if (serviceResult) return res.json(serviceResult);
     if (req.body.action === 'github') return res.json(await githubIntegration.action(context.user.id, context.root, req.body.input || {}));
     if (req.body.action === 'create_artifact') {
@@ -725,7 +728,7 @@ app.post('/api/internal/rust-vm', async (req, res) => {
   const entry = [...workspaceTokens.values()].find(item => safeEqual(raw, item.token));
   const context = entry?.agents.get(String(req.body?.agent_id || ''));
   if (!context) return res.status(401).json({ error: 'Contexte VM invalide.' });
-  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.projectRoot)); }
+  try { res.json(await vmManager.action(context.user.id, req.body || {}, terminalManager, context.run?.projectRoot || context.projectRoot)); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 
@@ -773,16 +776,26 @@ app.post('/api/internal/rust-browser', async (req, res) => {
 // ChatGPT subscription as one more OpenAI-compatible endpoint. The core sends
 // chat-completions with a per-launch key; the OAuth tokens never leave this
 // process and are renewed here.
-app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
+const cyberObservations = new Map();
+app.post(['/api/internal/chatgpt/v1/chat/completions', '/api/internal/openai/v1/chat/completions'], async (req, res) => {
   const refuse = (status, message) => res.status(status).json({ error: { message } });
   const user = chatgptProxyUser(req);
   if (!user) return refuse(401, 'Jeton ChatGPT interne invalide.');
   const controller = new AbortController();
   res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  const observation = { requested: user.cyberProgram || 'standard', applied: null, model: String(req.body?.model || ''), status: 'starting', at: new Date().toISOString() };
+  cyberObservations.set(user.id, observation);
   try {
-    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id });
-    const upstream = await withChatgptToken(user.id, (token) =>
-      chatgptSubscription.openResponseStream(token, request, { signal: controller.signal }));
+    const apiKey = req.path.includes('/internal/openai/');
+    const publicApi = apiKey || chatgptSession(user)?.transport === 'public';
+    const cyber = user.cyberProgram || 'standard';
+    const request = chatgptSubscription.toResponsesRequest(req.body, { cacheScope: user.id, publicApi, subscription: !apiKey, cyber });
+    const options = { signal: controller.signal, publicApi };
+    const key = apiKey ? userApiKeys(user).openai : '';
+    if (apiKey && !key) throw Object.assign(Error('Clé API OpenAI absente.'), { status: 401 });
+    const upstream = apiKey ? await chatgptSubscription.openResponseStream(key, request, options)
+      : await withChatgptToken(user.id, token => chatgptSubscription.openResponseStream(token, request, options));
+    observation.status = 'streaming';
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -790,14 +803,22 @@ app.post('/api/internal/chatgpt/v1/chat/completions', async (req, res) => {
     const reader = chatgptSubscription.createSseReader();
     const translator = chatgptSubscription.createChunkTranslator(request.model);
     const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
-    for await (const chunk of upstream.body) {
-      for (const event of reader.push(chunk)) write(translator.push(event));
-    }
-    for (const event of reader.finish()) write(translator.push(event));
+    const consume = events => {
+      for (const event of events) {
+        if (event.response?.access_programs?.cyber) observation.applied = event.response.access_programs.cyber;
+        if (event.type === 'response.completed') observation.status = 'completed';
+        if (['response.failed', 'error', 'response.incomplete'].includes(event.type)) observation.status = 'failed';
+        write(translator.push(event));
+      }
+    };
+    for await (const chunk of upstream.body) consume(reader.push(chunk));
+    consume(reader.finish());
     write(translator.finish());
+    if (observation.status === 'streaming') observation.status = 'interrupted';
     res.write('data: [DONE]\n\n');
     return res.end();
   } catch (error) {
+    observation.status = controller.signal.aborted ? 'interrupted' : 'failed';
     if (controller.signal.aborted) return res.end();
     const message = error.message || String(error);
     if (!res.headersSent) return refuse(error.status || 502, message);
@@ -817,13 +838,17 @@ app.post('/api/internal/subscription/:provider/v1/chat/completions', async (req,
   try {
     const upstream = await withAccountToken(user.id, kind, (token) =>
       accountSubscriptions.openStream(kind, token, req.body, { signal: controller.signal }));
+    if (kind === 'xai') {
+      const limits = accountSubscriptions.xaiRateLimits(upstream.headers);
+      if (limits) rememberXaiRateLimits(user.id, limits);
+    }
     res.status(200);
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     if (typeof res.flushHeaders === 'function') res.flushHeaders();
     const reader = accountSubscriptions.createSseReader();
     const translator = kind === 'xai'
-      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''))
+      ? accountSubscriptions.createChunkTranslator(String(req.body?.model || ''), { aliases: upstream.zaalisToolAliases })
       : accountSubscriptions.miniMaxTranslator(String(req.body?.model || ''));
     const write = (payloads) => { for (const payload of payloads) res.write(`data: ${JSON.stringify(payload)}\n\n`); };
     for await (const chunk of upstream.body) for (const event of reader.push(chunk)) write(translator.push(event));
@@ -987,6 +1012,8 @@ app.post('/api/profile', (req, res) => {
 
 // Shared local runtime settings used by both the desktop IDE and the CLI.
 // This intentionally covers hardware/local-model settings, not UI state.
+require('../services/project-clone').mountProjectClone(app);
+
 app.get('/api/config', (req, res) => {
   res.json({
     configured: !!(req.user && req.user.sharedConfig),
@@ -1067,7 +1094,7 @@ app.get('/api/vm', async (req, res) => {
   catch (error) { res.status(500).json({ error: error.message }); }
 });
 app.post('/api/vm/action', async (req, res) => {
-  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, req.body?.action === 'import_project' ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
+  try { res.json(await vmManager.action(req.user.id, req.body || {}, terminalManager, ['import_project', 'create', 'reset'].includes(req.body?.action) && req.body?.root ? workspaceContext.agentRoot({ root: req.body.root }, req.user) : null)); }
   catch (error) { res.status(400).json({ error: error.message }); }
 });
 app.post('/api/vm/activate-sandbox', async (req, res) => {
@@ -1076,6 +1103,12 @@ app.post('/api/vm/activate-sandbox', async (req, res) => {
 app.post('/api/vm/activate-linux', async (req,res) => {
   try { res.json(await vmManager.activate('linux')); } catch(error){res.status(400).json({error:error.message});}
 });
+// SSH hosts are registered and verified by the user only; the agent can list
+// and pick them, never add one.
+app.get('/api/vm/ssh-hosts', (req, res) => { try { res.json({ hosts: vmManager.sshHosts.list(req.user.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/vm/ssh-hosts', (req, res) => { try { res.status(201).json({ host: vmManager.sshHosts.add(req.user.id, req.body || {}) }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.delete('/api/vm/ssh-hosts/:id', (req, res) => { try { vmManager.sshHosts.remove(req.user.id, req.params.id); res.json({ success: true }); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.post('/api/vm/ssh-hosts/:id/verify', async (req, res) => { try { res.json({ host: await vmManager.sshHosts.verify(req.user.id, req.params.id) }); } catch (e) { res.status(400).json({ error: e.message }); } });
 app.post('/api/vm/:id/terminal', async (req, res) => {
   try { res.json(await vmManager.terminal(vmManager.get(req.params.id, req.user.id), terminalManager)); }
   catch (error) { res.status(400).json({ error: error.message }); }
@@ -1220,10 +1253,16 @@ function compatStatus(user) {
 // Every configured endpoint goes to the daemon at once, so switching provider
 // does not restart it. The keys travel as separate environment variables.
 function compatEndpointsFor(user) {
-  return compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+  const endpoints = compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
     // The daemon reaches the subscription through the loopback adapter above.
     ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/${entry.oauth === 'chatgpt' ? 'chatgpt' : `subscription/${entry.id}`}/v1`, key: chatgptProxyKey(user.id) }
     : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
+  if (userApiKeys(user).openai) endpoints.push({ id: 'openai-responses', base_url: `http://127.0.0.1:${PORT}/api/internal/openai/v1`, key: chatgptProxyKey(user.id) });
+  return endpoints;
+}
+function providerBinding(provider, model) {
+  if (provider === 'codex' && /^(gpt-(?:5|6|daybreak)|o[134])/.test(String(model || ''))) return { provider: 'compat', model: `openai-responses::${model}` };
+  return compatProviders.binding(provider, model);
 }
 
 // ---------------------------------------------------------------------------
@@ -1236,6 +1275,7 @@ function chatgptSession(user) {
     if (!session || !session.accessToken) return null;
     registerSecret('jeton ChatGPT', session.accessToken);
     registerSecret('jeton de renouvellement ChatGPT', session.refreshToken);
+    if (session.idToken) registerSecret('identité ChatGPT', session.idToken);
     return session;
   } catch { return null; }
 }
@@ -1251,7 +1291,7 @@ function storeChatgptSession(userId, session) {
 function chatgptStatus(user) {
   const session = chatgptSession(user);
   return session
-    ? { connected: true, email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
+    ? { connected: true, transport: session.transport || 'legacy', email: session.email || '', plan: session.plan || '', connectedAt: session.connectedAt || '' }
     : { connected: false };
 }
 
@@ -1318,6 +1358,63 @@ function chatgptProxyUser(req) {
 
 app.get('/api/chatgpt/status', (req, res) => res.json(chatgptStatus(req.user)));
 
+const browserSignIns = new Map();
+app.post('/api/chatgpt/sign-in', async (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Connexion réservée au desktop.' });
+  try {
+    browserSignIns.get(req.user.id)?.cancel();
+    const hostFile = path.join(DATA_DIR, 'chatgpt-host-id');
+    try { fs.writeFileSync(hostFile, `urn:uuid:${crypto.randomUUID()}`, { mode: 0o600, flag: 'wx' }); } catch (e) { if (e.code !== 'EEXIST') throw e; }
+    const flow = await beginSignIn({ hostId: fs.readFileSync(hostFile, 'utf8').trim(), previous: chatgptSession(req.user), onSession: session => storeChatgptSession(req.user.id, session) });
+    const flowId = crypto.randomBytes(18).toString('base64url');
+    browserSignIns.set(req.user.id, { ...flow, flowId });
+    res.json({ flowId, verificationUrl: flow.verificationUrl, interval: flow.interval, expiresAt: flow.expiresAt });
+  } catch (e) { res.status(e.status || 502).json({ error: e.message }); }
+});
+app.post('/api/chatgpt/sign-in/status', (req, res) => {
+  const flow = browserSignIns.get(req.user.id);
+  if (!flow || flow.flowId !== req.body?.flowId) return res.json({ status: 'expired' });
+  const result = flow.poll();
+  const user = loadUsers().find(u => u.id === req.user.id);
+  res.json({ ...result, ...(result.status === 'connected' ? { account: chatgptStatus(user), providers: compatStatus(user) } : {}) });
+});
+app.delete('/api/chatgpt/sign-in', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  browserSignIns.get(req.user.id)?.cancel(); browserSignIns.delete(req.user.id); res.json({ success: true });
+});
+
+app.get('/api/openai/access', (req, res) => res.json({ program: req.user.cyberProgram || 'standard', lastRequest: cyberObservations.get(req.user.id) || null }));
+app.put('/api/openai/access', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  if (!['standard', 'daybreak_blue'].includes(req.body?.program)) return res.status(400).json({ error: 'Programme invalide.' });
+  const users = loadUsers(), user = users.find(u => u.id === req.user.id);
+  user.cyberProgram = req.body.program; saveUsers(users); cyberObservations.delete(user.id);
+  res.json({ program: user.cyberProgram });
+});
+
+app.get('/api/skills-settings', (req, res) => { try { res.json(skillsStore.settings(req.user.id)); } catch (e) { res.status(400).json({ error: e.message }); } });
+app.put('/api/skills-settings', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { res.json(skillsStore.settings(req.user.id, req.body || {})); } catch (e) { res.status(400).json({ error: e.message }); }
+});
+app.delete('/api/skills/:name', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { skillsStore.remove(req.user.id, req.params.name); res.json({ success: true }); } catch (e) { res.status(e.status || 400).json({ error: e.message }); }
+});
+
+function skillProject(req) { return req.query.root ? workspaceContext.agentRoot({ root: String(req.query.root) }, req.user) : undefined; }
+app.get('/api/skills', (req, res) => {
+  try { res.json(skillsStore.list(req.user.id, skillProject(req))); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.post('/api/skills', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Import réservé au desktop.' });
+  try { res.status(201).json(skillsStore.import(req.user.id, req.body?.instructions)); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+app.put('/api/skills/:name', (req, res) => {
+  if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
+  try { skillsStore.toggle(req.user.id, req.params.name, req.body?.enabled, skillProject(req)); res.json({ success: true }); } catch (e) { res.status(e.status || 500).json({ error: e.message }); }
+});
+
 // Sign-in with a code typed on auth.openai.com. The device id stays here; the
 // interface only ever holds the code to show and an opaque flow id.
 const chatgptFlows = new Map();
@@ -1365,6 +1462,7 @@ app.post('/api/chatgpt/device-poll', async (req, res) => {
 app.delete('/api/chatgpt/session', (req, res) => {
   if (req.isMobile || req.isBrowser || req.isTunnel) return res.status(403).json({ error: 'Action réservée au desktop.' });
   try {
+    browserSignIns.get(req.user.id)?.cancel(); browserSignIns.delete(req.user.id);
     for (const [id, entry] of chatgptFlows) if (entry.userId === req.user.id) chatgptFlows.delete(id);
     const user = storeChatgptSession(req.user.id, null);
     res.json({ account: chatgptStatus(user), providers: compatStatus(user) });
@@ -1437,6 +1535,42 @@ function accountStatus(user, provider) {
 }
 const accountFlows = new Map();
 function accountKind(id) { return id === 'xai-sub' ? 'xai' : id === 'minimax-sub' ? 'minimax' : null; }
+// Usage limits for the composer's usage card, for the provider actually
+// selected (?provider=). Three subscriptions report something:
+// - ChatGPT: the plan's quota windows (`kind: 'plan'`); its public-API
+//   transport is refused by that endpoint and so answers unavailable.
+// - MiniMax: the plan's 5-hour and weekly windows (`kind: 'plan'`).
+// - Grok / xAI: rate limits read from the last response's headers
+//   (`kind: 'rate'`) — xAI does not expose the plan's quota.
+// Kept on disk so the last measure survives a restart of the IDE.
+const XAI_LIMITS_FILE = path.join(DATA_DIR, 'xai-rate-limits.json');
+const xaiRateLimitCache = new Map((() => {
+  try { return Object.entries(JSON.parse(fs.readFileSync(XAI_LIMITS_FILE, 'utf8')) || {}); } catch { return []; }
+})());
+function rememberXaiRateLimits(userId, limits) {
+  xaiRateLimitCache.set(userId, { ...limits, at: Date.now() });
+  try { fs.writeFileSync(XAI_LIMITS_FILE, JSON.stringify(Object.fromEntries(xaiRateLimitCache))); } catch {}
+}
+app.get('/api/plan-limits', async (req, res) => {
+  const provider = String(req.query.provider || '');
+  try {
+    if (provider === 'compat:chatgpt') {
+      if (!chatgptSession(req.user)) return res.json({ available: false });
+      const limits = await withChatgptToken(req.user.id, token => chatgptSubscription.fetchUsageLimits(token));
+      return res.json(limits ? { available: true, kind: 'plan', ...limits } : { available: false });
+    }
+    if (provider === 'compat:minimax-sub') {
+      if (!accountSession(req.user, 'minimax')) return res.json({ available: false });
+      const limits = await withAccountToken(req.user.id, 'minimax', token => accountSubscriptions.fetchMiniMaxLimits(token));
+      return res.json(limits ? { available: true, kind: 'plan', ...limits } : { available: false });
+    }
+    if (provider === 'compat:xai-sub') {
+      const limits = xaiRateLimitCache.get(req.user.id);
+      return res.json(limits ? { available: true, kind: 'rate', windows: limits.windows, measuredAt: limits.at } : { available: false, pending: true });
+    }
+    return res.json({ available: false });
+  } catch { return res.json({ available: false }); }
+});
 app.get('/api/subscriptions/:provider/status', (req, res) => {
   const kind = accountKind(req.params.provider);
   if (!kind) return res.status(404).json({ error: 'Abonnement inconnu.' });
@@ -1549,7 +1683,7 @@ app.get('/api/compat/models', async (req, res) => {
     try {
       if (provider.oauth === 'minimax') return res.json({ models: provider.models, live: false });
       const live = provider.oauth === 'chatgpt'
-        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token))
+        ? await withChatgptToken(req.user.id, (token) => chatgptSubscription.listModels(token, { publicApi: session.transport === 'public' }))
         : await withAccountToken(req.user.id, 'xai', async (token) => {
           const answer = await fetch(`${accountSubscriptions.XAI_API}/models`, {
             headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(8000),
@@ -1708,8 +1842,8 @@ app.get('/api/blender/status', async (req, res) => {
 });
 app.post('/api/blender/install', async (req, res) => {
   try {
-    // Installing changes Blender's own settings (it turns on "Allow Online
-    // Access"): it only happens on an explicit yes from the settings window.
+    // Installing writes Blender's preferences and generates its local token:
+    // it only happens on an explicit yes from the settings window.
     if (!req.body || req.body.consent !== true) return res.status(400).json({ error: 'Consentement requis.', code: 'consent-required' });
     const status = await blender.install();
     setBlenderConnected(req.user.id, true);
@@ -3601,9 +3735,30 @@ async function rustAgentHttp(req, res, next) {
     if(policy.moa.enabled&&!body.team&&!body.assistantAnalysis){body.model=policy.moa.aggregator.provider;body.submodel=policy.moa.aggregator.model;body.reasoningLevel=policy.moa.aggregator.reasoning;}
     const model = String(body.model || '');
     const message = String(body.message || '');
+    const skillCommand = /^\/(revers|skill)(?:\s+([\s\S]*))?$/.exec(message.trim());
+    if (skillCommand) {
+      const words = (skillCommand[2] || '').trim();
+      const name = skillCommand[1] === 'skill' ? words.split(/\s+/)[0] : skillCommand[1];
+      const skill = skillsStore.get(req.user.id, root, name);
+      if (skill.instructions.length > 160000) throw Object.assign(Error('Cette skill est trop longue pour une invocation explicite (160 000 caractères maximum).'), { status: 400 });
+      body.systemPrompt = [body.systemPrompt, `SKILL EXPLICITEMENT DEMANDÉE : ${skill.name}\n${skill.instructions}`].filter(Boolean).join('\n\n');
+      body.sessionId = undefined;
+      if (name === 'revers' && !/(?:^|\s)--dynamic(?:\s|$)/.test(words)) body.permissionMode = 'read-only';
+    }
     if ((!model && !Array.isArray(body.team)) || !message.trim()) {
       if (wantsStream) { openStream(400); res.write(JSON.stringify({ type: 'error', error: 'model/team and message are required' }) + '\n'); return res.end(); }
       return res.status(400).json({ error: 'model/team and message are required' });
+    }
+    // An image model has no agent loop: answer with the picture directly.
+    if (!Array.isArray(body.team) && isGrokImageRequest(model, body.submodel)) {
+      const result = { response: await generateGrokImage(req.user, { ...body, message }) };
+      if (wantsStream) { emit({ type: 'done', result }); return res.end(); }
+      return res.json(result);
+    }
+    // Say which key is missing instead of the core's bare "provider X non configuré".
+    const builtIn = !Array.isArray(body.team) && modelCatalog.PROVIDERS.find(entry => entry.id === model);
+    if (builtIn && builtIn.keyName && !userApiKeys(req.user)[builtIn.keyName]) {
+      throw Object.assign(new Error(`${builtIn.label} (${builtIn.vendor}) n’a pas de clé API configurée. Ajoutez-la dans Paramètres › Clés API, ou choisissez un autre fournisseur.`), { status: 400 });
     }
     if (body.computerControl === true) {
       if (req.isMobile) return res.status(403).json({ error: 'Action indisponible en mode mobile.' });
@@ -3630,11 +3785,11 @@ async function rustAgentHttp(req, res, next) {
       ...(githubReadOnly ? { permissions: { ...agent.permissions, mode: 'read-only' } } : {}),
       model: {
         ...agent.model,
-        ...(compatProviders.binding(agent.model?.provider, agent.model?.model) || {}),
+        ...(providerBinding(agent.model?.provider, agent.model?.model) || {}),
         capabilities: bindingCapabilities(await capabilitiesForUser(req.user, agent.model?.provider, agent.model?.model)),
       },
     }))) : null;
-    const lead = compatProviders.binding(model, body.submodel) || { provider: model, model: body.submodel };
+    const lead = providerBinding(model, body.submodel) || { provider: model, model: body.submodel };
     const assistantContext = { userId: req.user.id, root, model, submodel: body.submodel,
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       conversationId: body.conversationId, localBase: `http://127.0.0.1:${PORT}`, computerToken,
@@ -3645,6 +3800,10 @@ async function rustAgentHttp(req, res, next) {
       conversationStore.beginTurn(req.user.id, conversation.id, kind, body, recordedTurn.turnId);
     }
     const remembered = generalMemory.recall(req.user.id, root, message);
+    // Every finished turn closes with a short report the user can scan.
+    const finalReport = body.language === 'en'
+      ? 'FINAL REPORT (mandatory): always end your final answer with a short section titled "**Mini report**": 2 to 5 bullets saying what you did (files created or changed, commands run, results, checks performed) and what is left or not verified. When you only answered a question without acting, one line is enough. Never invent an action you did not take.'
+      : 'RAPPORT FINAL (obligatoire) : termine toujours ta réponse finale par une courte section intitulée « **Mini rapport** » : 2 à 5 puces qui disent ce que tu as fait (fichiers créés ou modifiés, commandes lancées, résultats, vérifications) et ce qui reste à faire ou n’a pas été vérifié. Si tu as seulement répondu à une question sans agir, une ligne suffit. N’invente jamais une action que tu n’as pas faite.';
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -3654,7 +3813,8 @@ async function rustAgentHttp(req, res, next) {
       budget: body.assistantTaskId ? assistant.service.agentSettings.budget(req.user.id,true) : assistant.service.agentSettings.budget(req.user.id),
       modelCapabilities: modelFacts && bindingCapabilities(modelFacts),
       message: [remembered, assistant.service.memory.recall(assistantContext)].filter(Boolean).join("\n\n") + "\nDEMANDE ACTUELLE :\n" + message,
-      systemPrompt: [body.systemPrompt, "OUTILS : tool_search retrouve le catalogue complet ; tool_describe donne le schéma, tool_call exécute avec les permissions de ce tour. Les connexions externes peuvent être absentes : rapporte leur état réel.", `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`].filter(Boolean).join('\n\n'),
+      systemPrompt: [body.systemPrompt, "OUTILS : tool_search retrouve le catalogue complet ; tool_describe donne le schéma, tool_call exécute avec les permissions de ce tour. Les connexions externes peuvent être absentes : rapporte leur état réel.", `ÉTAT DE L'IDE : dossier des outils = ${root}. ${workspaceRun?.projectRoot ? 'Projet actif = ' + workspaceRun.projectRoot : 'Aucun projet sélectionné. Ce dossier est un espace de chat sans projet, pas le dossier d’installation de Zaalis.'} ${workspaceRun ? 'Utilise workspace list pour connaître les projets récents et le terminal avant de conclure qu’un projet est introuvable. Pour ouvrir un projet dans l’IDE et le terminal, utilise workspace open.' : ''}`,
+        workspaceRun ? 'MÉMOIRE ET SKILLS AUTOMATIQUES : quand l’utilisateur exprime une préférence durable ou une convention, ou que tu établis un fait stable utile plus tard (commande de build, piège, configuration), enregistre-le sans demander avec workspace memory save (titre court, tags), après une recherche memory search pour éviter les doublons ; jamais de secret ni de donnée personnelle sensible. Après une tâche réussie de plusieurs étapes que l’utilisateur pourrait redemander, propose une procédure réutilisable avec workspace skills propose (name, description, instructions : étapes vérifiées, pièges, vérifications) ; consulte skills list pour ne pas créer de doublon.' : '', finalReport].filter(Boolean).join('\n\n'),
       permissionMode: githubReadOnly ? 'read-only' : body.permissionMode || 'supervised',
       language: body.language || 'fr',
       reasoningLevel: body.reasoningLevel,
@@ -3697,6 +3857,9 @@ async function rustAgentHttp(req, res, next) {
       recordedTurn.finished = true;
     }
     if (workspaceRun?.selected) { result.workspaceSelection = workspaceRun.selected; emit({ type: 'workspace_selected', ...workspaceRun.selected }); }
+    if (workspaceRun && !skillCommand) {
+      try { const drafted = skillsStore.draftFromTurn(req.user.id, message, result); if (drafted) { result.skillDraft = drafted; emit({ type: 'skill_drafted', skill: drafted }); } } catch {}
+    }
     if (wantsStream) {
       emit({ type: 'done', result });
       return res.end();
@@ -3726,13 +3889,68 @@ async function rustAgentHttp(req, res, next) {
 app.post('/api/agent-chat', rustAgentHttp);
 app.post('/api/rust-agent-team', rustAgentHttp);
 
+// xAI image models (grok-imagine-image, grok-imagine-image-2.0, grok-2-image…)
+// only exist on /images/generations: the chat endpoints reject them outright.
+function isGrokImageRequest(model, submodel) {
+  const provider = String(model || '');
+  if (provider !== 'grok' && provider !== 'compat:xai-sub') return false;
+  return /grok-imagine-image|grok-[\w.]*-image(?:$|[-.])/i.test(String(submodel || ''));
+}
+
+async function generateGrokImage(user, body) {
+  // The composer appends chat-only hints (/fast, /deep) that mean nothing to an image model.
+  const prompt = String(body.message || '').replace(/\n+\[STYLE\][^\n]*/g, '').trim();
+  const payload = JSON.stringify({ prompt, model: String(body.submodel), n: 1, response_format: 'b64_json' });
+  const call = async (url, headers) => {
+    const answer = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: payload, signal: AbortSignal.timeout(180000) });
+    const raw = await answer.text().catch(() => '');
+    if (!answer.ok) throw Object.assign(new Error(accountSubscriptions.xaiDetail(raw) || `xAI : HTTP ${answer.status}`), { status: answer.status });
+    try { return JSON.parse(raw); } catch { throw Object.assign(new Error('Réponse image xAI invalide.'), { status: 502 }); }
+  };
+  let data;
+  if (body.model === 'grok') {
+    const key = userApiKeys(user).grok;
+    if (!key) throw Object.assign(new Error('[Grok] Aucune clé API xAI configurée (Paramètres › Clés API).'), { status: 400 });
+    data = await call(`${accountSubscriptions.XAI_API}/images/generations`, { Authorization: `Bearer ${key}` });
+  } else {
+    data = await withAccountToken(user.id, 'xai', async (token) => {
+      try {
+        return await call(`${accountSubscriptions.XAI_API}/images/generations`, { Authorization: `Bearer ${token}` });
+      } catch (error) {
+        // Some subscription tokens are only honoured by the CLI proxy.
+        if (![400, 401, 403, 404].includes(error.status)) throw error;
+        try {
+          return await call(`${accountSubscriptions.XAI_PROXY}/images/generations`, {
+            Authorization: `Bearer ${token}`, 'X-XAI-Token-Auth': 'xai-grok-cli', 'x-grok-model-override': String(body.submodel),
+          });
+        } catch (proxyError) {
+          if (proxyError.status === 401) throw proxyError;
+          throw error;
+        }
+      }
+    });
+  }
+  const item = data && Array.isArray(data.data) ? data.data[0] : null;
+  let b64 = item && item.b64_json;
+  let mime = 'image/png';
+  if (!b64 && item && item.url) {
+    const image = await fetch(item.url, { signal: AbortSignal.timeout(60000) });
+    if (!image.ok) throw Object.assign(new Error(`Téléchargement de l'image impossible (HTTP ${image.status}).`), { status: 502 });
+    mime = (image.headers.get('content-type') || mime).split(';')[0];
+    b64 = Buffer.from(await image.arrayBuffer()).toString('base64');
+  }
+  if (!b64) throw Object.assign(new Error("Aucune image n'a été générée par l'API xAI."), { status: 502 });
+  if (/^\/9j\//.test(b64)) mime = 'image/jpeg';
+  const title = prompt.replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
+  return `![${title}](data:${mime};base64,${b64})`;
+}
+
 // POST /api/chat  { model, submodel, message, systemPrompt, config, reasoningLevel, images }
 // images: [{ mime, data(base64) }]  — sent to vision-capable models only.
 async function rustChatHttp(req, res, next) {
   const status = rustAgentBridge.status();
   const body = req.body || {};
-  const grokImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
-  if (grokImage) return next();
+  if (isGrokImageRequest(body.model, body.submodel)) return next();
   if (!status.enabled) return res.status(503).json({ error: 'Core Rust desactive.' });
   if (!status.available) {
     return res.status(503).json({ error: 'Binaire zaalis-agentd introuvable.' });
@@ -3744,7 +3962,7 @@ async function rustChatHttp(req, res, next) {
       await ensureEngine(body.submodel, body.config && body.config.ggufVariant, { ctx: body.config && body.config.ggufCtx, gpuLayers: body.config && body.config.ggufGpuLayers });
     }
     const modelFacts = await capabilitiesForUser(req.user, body.model, body.submodel);
-    const target = compatProviders.binding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
+    const target = providerBinding(body.model, body.submodel) || { provider: String(body.model), model: body.submodel };
     const result = await rustAgentBridge.run({
       userId: req.user.id,
       keys: userApiKeys(req.user),
@@ -3793,22 +4011,11 @@ app.post('/api/chat', rustChatHttp);
 // xAI's image endpoint has no agent/tool loop to migrate.
 app.post('/api/chat', async (req, res) => {
   const body = req.body || {};
-  const isImage = body.model === 'grok' && ['grok-imagine-image-quality', 'grok-imagine-image'].includes(body.submodel);
-  if (!isImage) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
+  if (!isGrokImageRequest(body.model, body.submodel)) return res.status(400).json({ error: `Unknown model: ${body.model || ''}` });
   try {
-    const key = userApiKeys(req.user).grok || (body.config && body.config.keys && body.config.keys.grok);
-    if (!key) return res.json({ response: '[Grok] Aucune cle API configuree.' });
-    const data = await fetchJSON('https://api.x.ai/v1/images/generations', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({ prompt: String(body.message || ''), model: body.submodel, n: 1, response_format: 'b64_json' }),
-    });
-    const b64 = data.data && data.data[0] && data.data[0].b64_json;
-    if (!b64) return res.json({ response: "Erreur: Aucune image n'a ete generee par l'API." });
-    const title = String(body.message || '').replace(/[\[\]()\r\n]+/g, ' ').trim().slice(0, 120);
-    return res.json({ response: `![${title}](data:image/png;base64,${b64})` });
+    return res.json({ response: await generateGrokImage(req.user, body) });
   } catch (error) {
-    return res.status(500).json({ error: error.message || String(error) });
+    return res.json({ error: error.message || String(error) });
   }
 });
 
@@ -4130,7 +4337,13 @@ let cfProc = null;        // cloudflared child process
 let cfUrl = null;         // https://xxx.trycloudflare.com (null when down)
 let cfStartedAt = 0;
 let cfStarting = null;    // in-flight start promise (dedupe concurrent starts)
-let mobileEpoch = 1;      // bump to invalidate every outstanding mobile token
+// The epoch survives restarts: a phone revoked by "stop" stays revoked, and a
+// paired phone keeps its session when the IDE restarts.
+const MOBILE_EPOCH_FILE = path.join(DATA_DIR, 'mobile-epoch');
+let mobileEpoch = (() => { try { const n = parseInt(fs.readFileSync(MOBILE_EPOCH_FILE, 'utf8'), 10); return Number.isSafeInteger(n) && n > 0 ? n : 1; } catch { return 1; } })();
+function bumpMobileEpoch() { mobileEpoch++; try { fs.writeFileSync(MOBILE_EPOCH_FILE, String(mobileEpoch)); } catch {} }
+let tunnelWanted = false;   // true between a user "start" and "stop"
+let tunnelRestartTimer = null, tunnelRestarts = 0;
 let tunnelProxy = null;
 let tunnelProxyPort = 0;
 
@@ -4218,7 +4431,9 @@ function ensureTunnelProxy() {
 }
 
 function stopTunnel() {
-  mobileEpoch++;                       // every paired phone is now logged out
+  tunnelWanted = false;
+  if (tunnelRestartTimer) { clearTimeout(tunnelRestartTimer); tunnelRestartTimer = null; }
+  bumpMobileEpoch();                   // every paired phone is now logged out
   if (cfProc) { try { cfProc.kill(); } catch {} }
   if (tunnelProxy) { try { tunnelProxy.close(); } catch {} }
   tunnelProxy = null; tunnelProxyPort = 0;
@@ -4245,7 +4460,15 @@ function startTunnel() {
     proc.on('error', (e) => { if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(e); } });
     proc.on('exit', () => {
       if (!settled) { settled = true; cfStarting = null; cfProc = null; reject(new Error('cloudflared exited')); }
-      else { cfUrl = null; cfProc = null; } // tunnel died after being up
+      else {
+        // Tunnel died after being up: restart it while the user still wants it.
+        // Paired phones keep their token; only the public address can change.
+        cfUrl = null; cfProc = null; cfStarting = null;
+        if (tunnelWanted && !tunnelRestartTimer) {
+          const delay = Math.min(30000, 1000 * 2 ** Math.min(tunnelRestarts++, 5));
+          tunnelRestartTimer = setTimeout(() => { tunnelRestartTimer = null; startTunnel().then(() => { tunnelRestarts = 0; }, () => {}); }, delay);
+        }
+      }
     });
     setTimeout(() => {
       if (!settled) { settled = true; try { proc.kill(); } catch {} cfStarting = null; cfProc = null; reject(new Error('Tunnel timeout (30s)')); }
@@ -4259,6 +4482,7 @@ app.post('/api/remote/start', async (req, res) => {
   if (req.isMobile) return res.status(403).json({ error: 'Indisponible en mode mobile.' });
   if (!QRCode) return res.status(500).json({ error: 'Module QR indisponible (npm install qrcode).' });
   try {
+    tunnelWanted = true;
     const url = await startTunnel();
     const token = makeMobileToken(req.user.id);
     const pairUrl = `${url}/m?t=${encodeURIComponent(token)}`;

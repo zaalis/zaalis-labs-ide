@@ -9,6 +9,12 @@ const XAI_CLIENT_ID = 'b1a00492-073a-47ea-816f-4c329264a828';
 const MINIMAX_CLIENT_ID = '78257093-7e40-4613-99e0-527b14b39113';
 const XAI_AUTH = 'https://auth.x.ai';
 const XAI_API = 'https://api.x.ai/v1';
+// SuperGrok / Grok CLI OAuth tokens are not API keys. Inference goes through
+// the CLI chat proxy; api.x.ai rejects that bearer with HTTP 400.
+const XAI_PROXY = 'https://cli-chat-proxy.grok.com/v1';
+const XAI_CLI_VERSION = process.env.ZAALIS_GROK_CLI_VERSION || '1.0.46';
+const XAI_EFFORTS = new Set(['low', 'medium', 'high', 'xhigh']);
+const XAI_RESERVED_TOOLS = new Set(['tool_search', 'web_search']);
 const MINIMAX_AUTH = 'https://api.minimax.io';
 const MINIMAX_API = 'https://api.minimax.io/anthropic/v1';
 const XAI_SCOPE = 'openid profile email offline_access grok-cli:access api:access';
@@ -226,26 +232,161 @@ function miniMaxTranslator(model) {
     finish() { return complete ? [] : [{ error: { message: 'Flux MiniMax interrompu.' } }]; },
   };
 }
+function xaiDetail(raw) {
+  let json = null;
+  try { json = JSON.parse(raw); } catch {}
+  if (!json || typeof json !== 'object') {
+    return raw && raw.length < 300 && !/^\s*</.test(raw) ? raw.trim() : '';
+  }
+  const error = json.error;
+  if (typeof error === 'string' && error.trim()) return error.trim();
+  if (error && typeof error === 'object') {
+    const message = error.message || error.detail;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return typeof json.message === 'string' ? json.message.trim() : '';
+}
+
+// The CLI proxy rejects OpenAI-only fields and a few function names it owns.
+function shapeXaiRequest(chat) {
+  const request = toResponsesRequest(chat);
+  const aliases = {};
+  const taken = new Set((request.tools || []).map((tool) => tool.name));
+  const wireName = (name) => {
+    if (!XAI_RESERVED_TOOLS.has(name)) return name;
+    let wire = `zaalis_${name}`;
+    let suffix = 2;
+    while (taken.has(wire) && aliases[wire] !== name) wire = `zaalis_${name}_${suffix++}`;
+    taken.add(wire);
+    aliases[wire] = name;
+    return wire;
+  };
+  if (Array.isArray(request.tools)) {
+    request.tools = request.tools.map((tool) => {
+      const next = {
+        type: 'function',
+        name: wireName(String(tool.name || '')),
+        description: String(tool.description || ''),
+        parameters: tool.parameters && typeof tool.parameters === 'object' ? tool.parameters : { type: 'object', properties: {} },
+      };
+      return next;
+    });
+  }
+  for (const item of request.input || []) {
+    if (item && item.type === 'function_call' && item.name) item.name = wireName(String(item.name));
+  }
+  let effort = String(request.reasoning && request.reasoning.effort || '').toLowerCase();
+  if (effort === 'max') effort = 'xhigh';
+  if (!XAI_EFFORTS.has(effort)) effort = 'high';
+  // grok-build, Composer, the grok-3 / bare grok-4 families and every
+  // "non-reasoning" variant 400 on effort.
+  const rejectsEffort = /(?:^|\/)grok-(?:build|composer|code|3(?:$|[-.])|4(?:$|-(?!\d)))|non-reasoning/i.test(request.model);
+  request.reasoning = rejectsEffort ? { summary: 'concise' } : { effort, summary: 'concise' };
+  request.include = ['reasoning.encrypted_content'];
+  request.store = false;
+  request.stream = true;
+  return { request, aliases };
+}
+
+function xaiHeaders(accessToken, request) {
+  const session = String(request.prompt_cache_key || '');
+  return {
+    Authorization: `Bearer ${accessToken}`,
+    'Content-Type': 'application/json',
+    Accept: 'text/event-stream',
+    'X-XAI-Token-Auth': 'xai-grok-cli',
+    'x-grok-client-version': XAI_CLI_VERSION,
+    'x-grok-client-identifier': 'grok-shell',
+    'x-grok-model-override': request.model,
+    ...(session ? { 'x-grok-conv-id': session, 'x-grok-session-id': session } : {}),
+    'User-Agent': `xai-grok-workspace/${XAI_CLI_VERSION}`,
+  };
+}
+
 async function openStream(provider, accessToken, body, { fetchImpl = fetch, signal } = {}) {
   const minimax = provider === 'minimax';
-  const endpoint = minimax ? `${MINIMAX_API}/messages` : `${XAI_API}/responses`;
-  const request = minimax ? miniMaxRequest(body) : toResponsesRequest(body);
-  const response = await fetchImpl(endpoint, {
+  const shaped = minimax ? null : shapeXaiRequest(body);
+  const endpoint = minimax ? `${MINIMAX_API}/messages` : `${XAI_PROXY}/responses`;
+  const request = minimax ? miniMaxRequest(body) : shaped.request;
+  const send = () => fetchImpl(endpoint, {
     method: 'POST', signal, headers: minimax
       ? { Authorization: `Bearer ${accessToken}`, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json', Accept: 'text/event-stream' }
-      : { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+      : xaiHeaders(accessToken, request),
     body: JSON.stringify(request),
   });
+  let response = await send();
+  let raw = null;
+  // A model xAI ships later may reject effort without matching the list above:
+  // retry once without it instead of failing the turn.
+  if (!response.ok && !minimax && response.status === 400 && request.reasoning && request.reasoning.effort) {
+    raw = await response.text().catch(() => '');
+    if (/reasoning_?effort/i.test(raw)) {
+      request.reasoning = { summary: 'concise' };
+      response = await send();
+      raw = null;
+    }
+  }
   if (!response.ok) {
-    const raw = await response.text().catch(() => '');
-    let detail = '';
-    try { const json = JSON.parse(raw); detail = json.error?.message || json.message || ''; } catch {}
+    if (raw === null) raw = await response.text().catch(() => '');
+    let detail = xaiDetail(raw);
     if (response.status === 403 && !minimax) detail = 'Ce compte xAI n’a pas accès à l’inférence OAuth pour son forfait (HTTP 403).';
+    if (response.status === 426 && !minimax) detail = detail || 'Le proxy Grok refuse cette version de client. Mettez à jour ZAALIS_GROK_CLI_VERSION.';
     throw fail(response.status, detail || `${minimax ? 'MiniMax' : 'xAI'} : HTTP ${response.status}`,
       { relogin: response.status === 401 });
   }
+  if (shaped) response.zaalisToolAliases = shaped.aliases;
   return response;
 }
 
-module.exports = { start, poll, needsRefresh, refresh, miniMaxRequest, miniMaxTranslator, openStream,
-  createSseReader, createChunkTranslator, XAI_API, MINIMAX_API };
+// MiniMax Token/Coding Plan quota: a rolling interval (5 h) and a weekly window,
+// reported as a remaining percentage for the text models ("general").
+async function fetchMiniMaxLimits(accessToken, { fetchImpl = fetch } = {}) {
+  const response = await fetchImpl(`${MINIMAX_AUTH}/v1/api/openplatform/coding_plan/remains`, {
+    headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' }, signal: AbortSignal.timeout(8000),
+  });
+  if (response.status === 401) throw fail(401, 'Session MiniMax refusée.');
+  if (!response.ok) return null;
+  let data = null;
+  try { data = await response.json(); } catch { return null; }
+  if (!data || (data.base_resp && data.base_resp.status_code !== 0)) return null;
+  const entries = Array.isArray(data.model_remains) ? data.model_remains : [];
+  const text = entries.find((entry) => entry && entry.model_name === 'general') || entries[0];
+  if (!text) return null;
+  const window = (remaining, start, end) => {
+    const left = Number(remaining);
+    if (!Number.isFinite(left)) return null;
+    const span = Number(end) - Number(start);
+    return {
+      usedPercent: Math.max(0, Math.min(100, Math.round(100 - left))),
+      windowMinutes: Number.isFinite(span) && span > 0 ? Math.round(span / 60000) : null,
+      resetsAt: Number(end) > 0 ? Number(end) : null,
+    };
+  };
+  const windows = [
+    window(text.current_interval_remaining_percent, text.start_time, text.end_time),
+    window(text.current_weekly_remaining_percent, text.weekly_start_time, text.weekly_end_time),
+  ].filter(Boolean);
+  return windows.length ? { plan: null, windows } : null;
+}
+
+// xAI reports rate limits (not the plan's quota) on every response:
+// x-ratelimit-{limit,remaining}-{requests,tokens}. Null when absent.
+function xaiRateLimits(headers) {
+  const read = (name) => {
+    const value = headers && typeof headers.get === 'function' ? headers.get(name) : null;
+    const number = value === null || value === '' ? NaN : Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const windows = [];
+  for (const [kind, label] of [['requests', 'Requêtes'], ['tokens', 'Tokens']]) {
+    const limit = read(`x-ratelimit-limit-${kind}`);
+    const remaining = read(`x-ratelimit-remaining-${kind}`);
+    if (!limit || limit <= 0 || remaining === null) continue;
+    const used = Math.max(0, limit - remaining);
+    windows.push({ kind, label, limit, remaining, usedPercent: Math.max(0, Math.min(100, Math.round(used / limit * 100))) });
+  }
+  return windows.length ? { windows } : null;
+}
+
+module.exports = { start, poll, needsRefresh, refresh, miniMaxRequest, miniMaxTranslator, openStream, xaiRateLimits, fetchMiniMaxLimits,
+  shapeXaiRequest, xaiDetail, createSseReader, createChunkTranslator, XAI_API, XAI_PROXY, MINIMAX_API };

@@ -180,6 +180,11 @@
         <div class="main"><div class="label">Controle</div><div class="hint">Onglets et session</div></div>
         <div class="chev">&rsaquo;</div>
       </div>
+      <div class="menu-row" data-open="performance">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 18a8 8 0 1 1 16 0"/><path d="M12 18l4-6"/></svg></div>
+        <div class="main"><div class="label">Performances</div><div class="hint" id="perf-menu-hint">Économiseur de mémoire</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
       <div class="menu-row" data-open="voice">
         <div class="icon"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></svg></div>
         <div class="main"><div class="label">Recherche vocale</div><div class="hint" id="voice-menu-hint">Rechercher sur le Web avec la voix</div></div>
@@ -201,6 +206,56 @@
       <div class="menu-row" id="open-downloads">
         <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg></div>
         <div class="main"><div class="label">Telechargements recents</div><div class="hint" id="dl-counts"></div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+    </div>
+
+    <div class="group" id="tools-group">
+      <div class="group-title">Outils</div>
+      <!-- Pages internes (zaalis://home/<page>.html) : une ligne par outil. -->
+      <div class="menu-row" data-internal="extensions">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M10 4a2 2 0 0 1 4 0v2h4v4h-2a2 2 0 0 0 0 4h2v4h-4v-2a2 2 0 0 0-4 0v2H6v-4H4a2 2 0 0 1 0-4h2V6h4z"/></svg></div>
+        <div class="main"><div class="label">Extensions</div><div class="hint">Chrome Web Store, gérer, épingler</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="passwords">
+        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M17 6l3 3M14 9l2 2"/></svg></div>
+        <div class="main"><div class="label">Mots de passe et remplissage</div><div class="hint">Mots de passe, adresses</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="import">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M5 21h14"/></svg></div>
+        <div class="main"><div class="label">Importer depuis Chrome ou Edge</div><div class="hint">Favoris, historique, mots de passe</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="security">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <div class="main"><div class="label">Sécurité</div><div class="hint">Sites dangereux, certificats, navigateur par défaut</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" id="open-taskmanager">
+        <div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M6 15l3-4 3 3 3-5 3 4"/></svg></div>
+        <div class="main"><div class="label">Gestionnaire de tâches</div><div class="hint">Mémoire et processeur par onglet (Maj+Échap)</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="crashes">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4"/><path d="M12 17v.5"/></svg></div>
+        <div class="main"><div class="label">Plantages</div><div class="hint">Rapports locaux, jamais envoyés</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="sync">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2"/><path d="M3 12A9 9 0 0 1 18.5 5.8"/><path d="M18 2v4h-4"/><path d="M6 22v-4h4"/></svg></div>
+        <div class="main"><div class="label">Synchronisation</div><div class="hint">Favoris, mots de passe, onglets entre appareils</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="languages">
+        <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 5h9"/><path d="M8.5 3v2"/><path d="M11 5c-.8 3.6-3 6.4-6 8"/><path d="M6.5 8.5c1 1.8 2.6 3.2 4.5 4"/><path d="M12.5 21l4-10 4 10"/><path d="M14 17.5h5"/></svg></div>
+        <div class="main"><div class="label">Langues</div><div class="hint">Traduction et correcteur orthographique</div></div>
+        <div class="chev">&rsaquo;</div>
+      </div>
+      <div class="menu-row" data-internal="about">
+        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.5"/></svg></div>
+        <div class="main"><div class="label">À propos de zaalis Browser</div><div class="hint" id="update-hint">Version et mises à jour</div></div>
         <div class="chev">&rsaquo;</div>
       </div>
     </div>
@@ -284,7 +339,7 @@
 
   <!-- ----- Modele IA : choix du fournisseur ----- -->
   <div class="body screen" id="screen-aimodels" style="display:none">
-    <div class="group" id="ai-provider-list"></div>
+    <div id="ai-provider-list"></div>
   </div>
 
   <!-- ----- Modele IA : choix du sous-modele ----- -->
@@ -326,6 +381,30 @@
     </div>
   </div>
 
+  <!-- ----- Performances : économiseur de mémoire ----- -->
+  <div class="body screen" id="screen-performance" style="display:none">
+    <div class="group">
+      <div class="menu-row" id="mem-saver-row">
+        <div class="icon"><svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v4M15 2v4M9 18v4M15 18v4M2 9h4M2 15h4M18 9h4M18 15h4"/></svg></div>
+        <div class="main"><div class="label">Économiseur de mémoire</div><div class="hint">Met en veille les onglets inactifs pour libérer de la mémoire</div></div>
+        <div class="switch" id="mem-saver"></div>
+      </div>
+      <div class="menu-row static" id="mem-delay-row">
+        <div class="icon"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+        <div class="main"><div class="label">Inactifs depuis</div><div class="hint" id="mem-stats"></div></div>
+        <select id="mem-delay"></select>
+      </div>
+    </div>
+    <div class="group">
+      <div class="group-title">Toujours garder ces sites actifs</div>
+      <div class="menu-row static">
+        <input id="mem-site" type="text" placeholder="exemple.com" style="flex:1;min-width:0;height:30px;border:1px solid var(--border);border-radius:999px;padding:0 12px;background:var(--bg);color:var(--text);outline:none;font:inherit;font-size:13px">
+        <button class="pill" id="mem-site-add" title="Ajouter" style="font-size:18px">+</button>
+      </div>
+      <div id="mem-sites"></div>
+    </div>
+  </div>
+
   <!-- ----- Controle ----- -->
   <div class="body screen" id="screen-control" style="display:none">
     <div class="group">
@@ -356,7 +435,7 @@
   </div>
 
   <div class="body screen" id="screen-voiceproviders" style="display:none">
-    <div class="group" id="voice-provider-list"></div>
+    <div id="voice-provider-list"></div>
   </div>
 
   <div class="body screen" id="screen-voicesub" style="display:none">
@@ -414,24 +493,34 @@
   const wv = window.zaalisBridge;
   const SEP = "\x1f";
   const post = (...p) => { if (wv) wv.postMessage(p.join(SEP)); };
+  const IS_MAC = /Mac/i.test(navigator.platform || "");
+  if (!IS_MAC) document.querySelectorAll(".hint").forEach(h => { h.textContent = h.textContent.replace("⌘⇧N", "Ctrl+Maj+N"); });
   const $ = id => document.getElementById(id);
   let state = { zoomPct:100 };
   let panelVisibilityFrame = 0;
 
+  let panelVisibilityTimer = 0;
   function setPanelVisibility(open) {
     if (panelVisibilityFrame) cancelAnimationFrame(panelVisibilityFrame);
+    clearTimeout(panelVisibilityTimer);
     if (!open) {
       document.body.classList.remove("panel-visible");
       panelVisibilityFrame = 0;
       return;
     }
     document.body.classList.remove("panel-visible");
+    const show = () => {
+      if (panelVisibilityFrame) cancelAnimationFrame(panelVisibilityFrame);
+      clearTimeout(panelVisibilityTimer);
+      panelVisibilityFrame = 0;
+      document.body.classList.add("panel-visible");
+    };
     panelVisibilityFrame = requestAnimationFrame(() => {
-      panelVisibilityFrame = requestAnimationFrame(() => {
-        document.body.classList.add("panel-visible");
-        panelVisibilityFrame = 0;
-      });
+      panelVisibilityFrame = requestAnimationFrame(show);
     });
+    // Fenêtre couverte ou réduite : Chromium suspend requestAnimationFrame.
+    // Le panneau doit quand même être ouvert quand elle redevient visible.
+    panelVisibilityTimer = setTimeout(show, 150);
   }
 
   const SCREENS = ["menu","appearance","search","privacy","control","voice","devmode","history","downloads","aimodels","aisub","voiceproviders","voicesub"];
@@ -443,6 +532,8 @@
   const PARENT = { appearance:"menu", search:"menu", privacy:"menu", control:"menu", devmode:"menu",
                    history:"menu", downloads:"menu", aimodels:"search", aisub:"aimodels",
                    voice:"menu", voiceproviders:"voice", voicesub:"voiceproviders" };
+  // Écran « Performances » (économiseur de mémoire, src/features/memorysaver.js).
+  SCREENS.push("performance"); TITLES.performance = "Performances"; PARENT.performance = "menu";
   let currentScreen = "menu";
   let pendingProvider = null;   // provider en cours de selection dans aisub
   let pendingVoiceProvider = null;
@@ -534,7 +625,10 @@
           true, "danger-btn", () => post("cancelDownload", d.id)));
       } else {
         const done = d.state === "completed";
-        el.appendChild(dlBtn("Afficher dans le Finder",
+        if (d.state === "interrupted") {
+          el.appendChild(dlBtn("Reprendre le telechargement", '<svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/></svg>', true, "", () => post("resumeDownload", d.id)));
+        }
+        el.appendChild(dlBtn(IS_MAC ? "Afficher dans le Finder" : "Afficher dans le dossier",
           '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>',
           done, "", () => post("showDownload", d.id)));
         el.appendChild(dlBtn("Retirer de la liste",
@@ -611,7 +705,7 @@
     },
     unreachable: {
       hint: "zaalis labs ide n'est pas lancé.",
-      msg:  "⚠️ Impossible de joindre zaalis labs ide sur ce Mac. Lancez l'application, puis réessayez."
+      msg:  "⚠️ Impossible de joindre zaalis labs ide sur cet ordinateur. Lancez l'application, puis réessayez."
     },
     offline: {
       hint: "Mode local sécurisé actif.",
@@ -640,24 +734,67 @@
   // ----- Modele IA : fournisseur -> sous-modele (comme dans zaalis labs ide) -
   function modelLabel(id) { return (state.aiModelLabels || {})[id] || id; }
 
-  function renderProviders() {
-    const box = $("ai-provider-list"); box.innerHTML = "";
+  const PROVIDER_ICONS = {
+    subscription: '<svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>',
+    api: '<svg viewBox="0 0 24 24"><path d="M12 2l2.2 6L20 10l-5.8 2L12 18l-2.2-6L4 10l5.8-2z"/></svg>',
+    compat: '<svg viewBox="0 0 24 24"><path d="M4 12h16"/><path d="M12 4a12 12 0 0 1 0 16"/><path d="M12 4a12 12 0 0 0 0 16"/><circle cx="12" cy="12" r="8"/></svg>',
+    local: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg>',
+  };
+  const GROUP_ORDER = ["subscription", "api", "compat", "local"];
+  let compatExpanded = false;
+
+  // Liste des fournisseurs rangée par sections : abonnements, API officielles,
+  // passerelles compatibles OpenAI (repliées tant qu'aucune n'est choisie),
+  // puis modèles locaux (Ollama, GGUF). Partagée par l'IA et le mode vocal.
+  function renderProviderGroups(boxId, selectedKey, selectedSub, onPick) {
+    const box = $(boxId); box.innerHTML = "";
     const provs = state.aiProviders || {};
+    const titles = state.aiProviderGroups || {};
+    const byGroup = {};
     Object.keys(provs).forEach(key => {
-      const p = provs[key];
-      const row = document.createElement("div"); row.className = "menu-row";
-      const sel = key === state.aiProvider;
-      row.innerHTML =
-        '<div class="icon"><svg viewBox="0 0 24 24"><path d="M12 2l2.2 6L20 10l-5.8 2L12 18l-2.2-6L4 10l5.8-2z"/></svg></div>' +
-        '<div class="main"><div class="label"></div><div class="hint"></div></div>' +
-        '<div class="chev">' + (sel ? "&#10003;&nbsp;" : "") + '&rsaquo;</div>';
-      row.querySelector(".label").textContent = p.label;
-      row.querySelector(".hint").textContent = sel
-        ? modelLabel(state.aiSubmodel)
-        : (p.submodels.length + " modeles");
-      row.onclick = () => { pendingProvider = key; showScreen("aisub"); };
-      box.appendChild(row);
+      const g = provs[key].group || "api";
+      (byGroup[g] = byGroup[g] || []).push(key);
     });
+    const order = GROUP_ORDER.concat(Object.keys(byGroup).filter(g => !GROUP_ORDER.includes(g)));
+    order.forEach(g => {
+      const keys = byGroup[g];
+      if (!keys || !keys.length) return;
+      const group = document.createElement("div"); group.className = "group";
+      const title = document.createElement("div"); title.className = "group-title";
+      title.textContent = titles[g] || g;
+      group.appendChild(title);
+      const collapsed = g === "compat" && !compatExpanded && !keys.includes(selectedKey);
+      (collapsed ? [] : keys).forEach(key => {
+        const p = provs[key];
+        const row = document.createElement("div"); row.className = "menu-row";
+        const sel = key === selectedKey;
+        row.innerHTML =
+          '<div class="icon">' + (PROVIDER_ICONS[g] || PROVIDER_ICONS.api) + '</div>' +
+          '<div class="main"><div class="label"></div><div class="hint"></div></div>' +
+          '<div class="chev">' + (sel ? "&#10003;&nbsp;" : "") + '&rsaquo;</div>';
+        row.querySelector(".label").textContent = p.label;
+        const count = p.submodels.length;
+        row.querySelector(".hint").textContent = sel ? modelLabel(selectedSub)
+          : (p.hint || (count ? count + " modele" + (count > 1 ? "s" : "") : "Aucun modele installe"));
+        row.onclick = () => onPick(key);
+        group.appendChild(row);
+      });
+      if (g === "compat") {
+        const more = document.createElement("div"); more.className = "menu-row";
+        more.innerHTML = '<div class="icon">' + PROVIDER_ICONS.compat + '</div><div class="main"><div class="label"></div>' +
+          '<div class="hint">DeepSeek, Qwen, GLM, MiniMax, NVIDIA… (clé dans zaalis labs ide)</div></div>' +
+          '<div class="chev">' + (collapsed ? "&#9662;" : "&#9652;") + '</div>';
+        more.querySelector(".label").textContent = collapsed ? ("Afficher les " + keys.length + " passerelles") : "Masquer les passerelles";
+        more.onclick = () => { compatExpanded = collapsed; renderProviderGroups(boxId, selectedKey, selectedSub, onPick); };
+        if (collapsed || !keys.includes(selectedKey)) group.appendChild(more);
+      }
+      box.appendChild(group);
+    });
+  }
+
+  function renderProviders() {
+    renderProviderGroups("ai-provider-list", state.aiProvider, state.aiSubmodel,
+      key => { pendingProvider = key; showScreen("aisub"); });
   }
 
   function renderSubmodels() {
@@ -665,6 +802,11 @@
     const prov = (state.aiProviders || {})[pendingProvider];
     if (!prov) { showScreen("aimodels"); return; }
     $("title").textContent = prov.label;
+    if (!prov.submodels.length) {
+      const e = document.createElement("div"); e.className = "empty";
+      e.textContent = "Aucun modele disponible. Installez-en un depuis zaalis labs ide.";
+      box.appendChild(e);
+    }
     prov.submodels.forEach(id => {
       const row = document.createElement("div"); row.className = "menu-row";
       const sel = pendingProvider === state.aiProvider && id === state.aiSubmodel;
@@ -683,21 +825,8 @@
   }
 
   function renderVoiceProviders() {
-    const box = $("voice-provider-list"); box.innerHTML = "";
-    const provs = state.aiProviders || {};
-    Object.keys(provs).forEach(key => {
-      const p = provs[key];
-      const row = document.createElement("div"); row.className = "menu-row";
-      const sel = key === state.voiceProvider;
-      row.innerHTML =
-        '<div class="icon"><svg viewBox="0 0 24 24"><path d="M12 2l2.2 6L20 10l-5.8 2L12 18l-2.2-6L4 10l5.8-2z"/></svg></div>' +
-        '<div class="main"><div class="label"></div><div class="hint"></div></div>' +
-        '<div class="chev">' + (sel ? "&#10003;&nbsp;" : "") + '&rsaquo;</div>';
-      row.querySelector(".label").textContent = p.label;
-      row.querySelector(".hint").textContent = sel ? modelLabel(state.voiceSubmodel) : (p.submodels.length + " modeles");
-      row.onclick = () => { pendingVoiceProvider = key; showScreen("voicesub"); };
-      box.appendChild(row);
-    });
+    renderProviderGroups("voice-provider-list", state.voiceProvider, state.voiceSubmodel,
+      key => { pendingVoiceProvider = key; showScreen("voicesub"); });
   }
 
   function renderVoiceSubmodels() {
@@ -727,6 +856,14 @@
   function renderState(d) {
     state = d || state;
     document.body.classList.toggle("dark", state.theme === "dark");
+    for (const row of document.querySelectorAll('[data-internal="extensions"], [data-internal="passwords"], [data-internal="import"], [data-internal="sync"], [data-internal="languages"], [data-internal="about"], #open-taskmanager')) {
+      row.style.display = state.embedded ? 'none' : '';
+    }
+    const performance = document.getElementById('perf-menu-hint');
+    if (performance) performance.closest('.menu-row').style.display = state.embedded ? 'none' : '';
+    const up = state.update || {};
+    const uh = document.getElementById("update-hint");
+    if (uh) uh.textContent = up.status === "ready" ? "Mise à jour " + up.latest + " prête : relancer" : "Version " + (up.current || "") + " · mises à jour";
     renderAccount();
     setSwitch("theme-sw", state.theme === "dark");
     setSwitch("offline", state.offline);
@@ -741,6 +878,7 @@
     setSwitch("status-bar", state.statusBar);
     setSwitch("zoom-controls", state.zoomControls);
     setSwitch("restore-tabs", state.restoreTabs);
+    renderMemorySaver();
     setSwitch("ai-overview", state.aiOverview);
     $("search-engine").value = state.searchEngine || "google";
     const prov = (state.aiProviders || {})[state.aiProvider];
@@ -802,6 +940,46 @@
   wireSwitch("zoom-controls-row", "zoom-controls", "setZoomControls");
   wireSwitch("restore-tabs-row", "restore-tabs", "setRestoreTabs");
 
+  // ----- Performances : économiseur de mémoire -----
+  function renderMemorySaver() {
+    const ms = state.memorySaver;
+    if (!ms) return;
+    setSwitch("mem-saver", ms.enabled);
+    $("mem-delay-row").style.opacity = ms.enabled ? "" : ".5";
+    $("mem-delay").disabled = !ms.enabled;
+    const sel = $("mem-delay");
+    if (sel.options.length !== (ms.choices || []).length) {
+      sel.innerHTML = "";
+      (ms.choices || []).forEach(m => {
+        const o = document.createElement("option");
+        o.value = String(m); o.textContent = m < 60 ? m + " minutes" : (m / 60) + " heure" + (m > 60 ? "s" : "");
+        sel.appendChild(o);
+      });
+    }
+    sel.value = String(ms.minutes);
+    $("mem-stats").textContent = ms.sleeping
+      ? ms.sleeping + " onglet" + (ms.sleeping > 1 ? "s" : "") + " en veille" + (ms.freedMB ? " · " + ms.freedMB + " Mo libérés" : "")
+      : "Aucun onglet en veille";
+    const hint = $("perf-menu-hint");
+    if (hint) hint.textContent = "Économiseur de mémoire " + (ms.enabled ? "activé" : "désactivé");
+    const box = $("mem-sites"); box.innerHTML = "";
+    (ms.exclusions || []).forEach(site => {
+      const row = document.createElement("div"); row.className = "menu-row static";
+      const main = document.createElement("div"); main.className = "main";
+      const label = document.createElement("div"); label.className = "label"; label.textContent = site;
+      main.appendChild(label); row.appendChild(main);
+      const rm = document.createElement("button"); rm.className = "pill"; rm.title = "Retirer"; rm.textContent = "×";
+      rm.onclick = () => post("memSaverExclude", "remove", site);
+      row.appendChild(rm); box.appendChild(row);
+    });
+  }
+  $("mem-saver-row").onclick = () => post("memSaverSet", "enabled", $("mem-saver").classList.contains("on") ? "0" : "1");
+  $("mem-delay").onchange = () => post("memSaverSet", "minutes", $("mem-delay").value);
+  const addMemSite = () => { const v = $("mem-site").value.trim(); if (v) { post("memSaverExclude", "add", v); $("mem-site").value = ""; } };
+  $("mem-site-add").onclick = addMemSite;
+  $("mem-site").addEventListener("keydown", (e) => { if (e.key === "Enter") addMemSite(); });
+  $("open-taskmanager").onclick = () => { post("openTaskManager"); post("closePanel"); };
+
   if (wv) wv.addEventListener("message", e => {
     const d = e.data;
     if (!d) return;
@@ -818,6 +996,11 @@
     }
     else if (d.type === "showMenu") showScreen("menu");
     else if (d.type === "panelVisibility") setPanelVisibility(!!d.open);
+  });
+
+  // Lignes « Outils » : ouvrent la page interne correspondante dans un onglet.
+  document.querySelectorAll("[data-internal]").forEach(row => {
+    row.addEventListener("click", () => post("openInternal", row.getAttribute("data-internal")));
   });
 
   showScreen("menu");

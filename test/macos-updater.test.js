@@ -55,7 +55,7 @@ test('le runner macOS verifie, remplace, restaure et relance sans commande Windo
   assert.match(script, /open "\$DEST_APP"/);
   assert.doesNotMatch(script, /\.exe|taskkill|powershell|wscript/i);
 
-  const syntax = spawnSync('/bin/sh', ['-n'], { input: script, encoding: 'utf8' });
+  const syntax = spawnSync(process.env.ZAALIS_TEST_POSIX_SH || '/bin/sh', ['-n'], { input: script, encoding: 'utf8' });
   assert.equal(syntax.status, 0, syntax.stderr);
 });
 

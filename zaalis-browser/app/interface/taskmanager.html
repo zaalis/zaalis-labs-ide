@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gestionnaire de tâches</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  body { display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+  .zx-top { flex:none; }
+  .wrap { flex:1; overflow:auto; }
+  body.win .zx-top { height:48px; }
+  table.zx-table th { top:0; user-select:none; }
+  table.zx-table th.sortable { cursor:pointer; }
+  table.zx-table th.sortable:hover { color:var(--text); }
+  table.zx-table th .arr { font-size:10px; margin-left:4px; }
+  table.zx-table td { white-space:nowrap; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  td.task { max-width:0; width:60%; overflow:hidden; text-overflow:ellipsis; }
+  td.task .cell { display:flex; align-items:center; gap:8px; min-width:0; }
+  td.task .cell span { overflow:hidden; text-overflow:ellipsis; }
+  td.task img, td.task .dot { width:16px; height:16px; flex:none; border-radius:3px; }
+  td.task .dot { background:var(--border); }
+  tr { cursor:default; }
+  tr.sleep td { color:var(--muted); font-style:italic; }
+  .foot { flex:none; display:flex; align-items:center; gap:12px; padding:10px 18px; border-top:1px solid var(--border); background:var(--card); }
+  .foot .grow { flex:1; color:var(--muted); font-size:12.5px; }
+</style>
+</head>
+<body>
+  <div class="zx-top">
+    <h1>Gestionnaire de tâches</h1>
+    <div class="search"><svg class="i" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg><input id="q" placeholder="Rechercher une tâche"></div>
+  </div>
+  <div class="wrap">
+    <table class="zx-table" id="table">
+      <thead><tr>
+        <th class="sortable" data-k="title">Tâche</th>
+        <th class="sortable num" data-k="memoryKB">Mémoire</th>
+        <th class="sortable num" data-k="cpu">Processeur</th>
+        <th class="sortable num" data-k="pid">ID de processus</th>
+      </tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <div class="foot">
+    <div class="grow" id="summary"></div>
+    <button class="zx-btn" id="sleep" disabled>Mettre en veille</button>
+    <button class="zx-btn primary" id="kill" disabled>Arrêter le processus</button>
+  </div>
+<script src="zx.js"></script>
+<script>
+  const isWindow = /[?&]window=1/.test(location.search);
+  document.body.classList.toggle('win', isWindow);
+  let rows = [], sortKey = 'memoryKB', sortDir = -1, selected = null;
+
+  function fmtKB(kb) { return kb ? zx.fmtBytes(kb * 1024) : (kb === 0 ? '—' : ''); }
+  function favicon(u) {
+    try { const h = new URL(u); if (!/^https?:$/.test(h.protocol)) return ''; return 'https://www.google.com/s2/favicons?sz=32&domain=' + encodeURIComponent(h.hostname); } catch (e) { return ''; }
+  }
+  function key(r) { return r.pid ? 'p' + r.pid : 't' + r.tabId; }
+  function render() {
+    const q = zx.$('q').value.trim().toLowerCase();
+    const list = rows.filter(r => !q || (r.title + ' ' + r.url + ' ' + r.pid).toLowerCase().includes(q));
+    list.sort((a, b) => {
+      const x = a[sortKey], y = b[sortKey];
+      if (typeof x === 'string') return x.localeCompare(y, 'fr') * sortDir;
+      return ((x || 0) - (y || 0)) * sortDir;
+    });
+    // Le navigateur reste toujours en tête, comme dans Chrome.
+    list.sort((a, b) => (a.type === 'Browser' ? -1 : 0) - (b.type === 'Browser' ? -1 : 0));
+    const tb = zx.$('rows');
+    tb.innerHTML = list.map(r => {
+      const fav = favicon(r.url);
+      const icon = fav ? '<img src="' + zx.esc(fav) + '" alt="">' : '<span class="dot"></span>';
+      const mem = r.type === 'Discarded' ? (r.freedMB ? r.freedMB + ' Mo libérés' : 'libérée') : fmtKB(r.memoryKB);
+      return '<tr data-k="' + key(r) + '" class="' + (selected === key(r) ? 'sel' : '') + (r.type === 'Discarded' ? ' sleep' : '') + '">' +
+        '<td class="task"><div class="cell">' + icon + '<span title="' + zx.esc(r.url || r.title) + '">' + zx.esc(r.title) + '</span></div></td>' +
+        '<td class="num">' + zx.esc(mem) + '</td>' +
+        '<td class="num">' + (r.pid ? r.cpu.toFixed(1).replace('.', ',') : '—') + '</td>' +
+        '<td class="num">' + (r.pid || '—') + '</td></tr>';
+    }).join('');
+    document.querySelectorAll('th.sortable').forEach(th => {
+      const k = th.getAttribute('data-k');
+      th.innerHTML = th.textContent.replace(/[▲▼]$/, '').trim() + (k === sortKey ? '<span class="arr">' + (sortDir > 0 ? '▲' : '▼') + '</span>' : '');
+    });
+    const sel = rows.find(r => key(r) === selected);
+    zx.$('kill').disabled = !(sel && sel.killable && sel.pid);
+    zx.$('sleep').disabled = !(sel && sel.tabId && sel.type !== 'Discarded');
+    const total = rows.reduce((s, r) => s + (r.memoryKB || 0), 0);
+    const cpu = rows.reduce((s, r) => s + (r.cpu || 0), 0);
+    zx.$('summary').textContent = rows.filter(r => r.pid).length + ' processus · ' + fmtKB(total) + ' · processeur ' + cpu.toFixed(1).replace('.', ',') + ' %';
+  }
+  async function refresh() {
+    try {
+      const d = await zx.call('taskList');
+      rows = d.rows || [];
+      document.body.classList.toggle('dark', d.theme === 'dark');
+      render();
+    } catch (e) {}
+  }
+  zx.$('rows').addEventListener('click', (e) => {
+    const tr = e.target.closest('tr'); if (!tr) return;
+    selected = tr.getAttribute('data-k'); render();
+  });
+  zx.$('rows').addEventListener('dblclick', (e) => {
+    const tr = e.target.closest('tr'); if (!tr) return;
+    const r = rows.find(x => key(x) === tr.getAttribute('data-k'));
+    if (r && r.tabId) zx.post('taskFocusTab', r.tabId);
+  });
+  document.querySelectorAll('th.sortable').forEach(th => th.addEventListener('click', () => {
+    const k = th.getAttribute('data-k');
+    if (sortKey === k) sortDir = -sortDir; else { sortKey = k; sortDir = k === 'title' ? 1 : -1; }
+    render();
+  }));
+  zx.$('q').addEventListener('input', render);
+  zx.$('kill').onclick = async () => {
+    const r = rows.find(x => key(x) === selected);
+    if (!r) return;
+    try { await zx.call('taskKill', { pid: r.pid }); zx.toast('Processus arrêté.'); selected = null; refresh(); }
+    catch (e) { zx.toast(e.message); }
+  };
+  zx.$('sleep').onclick = () => {
+    const r = rows.find(x => key(x) === selected);
+    if (r && r.tabId) { zx.post('memSaverDiscard', r.tabId); setTimeout(refresh, 600); }
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Delete' && !zx.$('kill').disabled) zx.$('kill').click();
+  });
+  refresh();
+  setInterval(refresh, 1000);
+</script>
+</body>
+</html>
