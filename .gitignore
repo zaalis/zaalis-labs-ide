@@ -28,6 +28,7 @@ claude-code-main/
 
 # Logs and caches
 *.log
+__pycache__/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
