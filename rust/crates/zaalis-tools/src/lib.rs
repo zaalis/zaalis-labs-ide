@@ -238,8 +238,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sensitive_reads_ask_even_in_bypass_mode() {
-        let (_dir, runtime, context) = setup(PermissionMode::Bypass);
+    async fn sensitive_reads_ask_unless_the_user_handed_over_control() {
+        let (_dir, runtime, context) = setup(PermissionMode::Supervised);
         let dispatch = runtime
             .invoke(
                 invocation("read", json!({"path":".env"})),
@@ -252,6 +252,17 @@ mod tests {
         };
         assert_eq!(prompt.target.as_deref(), Some(".env"));
         assert!(prompt.summary.contains("sensible"));
+        // Autonomous mode: a project's .env is read without a prompt (only
+        // private keys and catastrophic actions still ask).
+        let (_dir, runtime, context) = setup(PermissionMode::Bypass);
+        let dispatch = runtime
+            .invoke(
+                invocation("read", json!({"path":".env"})),
+                context,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(!matches!(dispatch, ToolDispatch::PermissionRequired(_)), "{dispatch:?}");
     }
 
     #[tokio::test]

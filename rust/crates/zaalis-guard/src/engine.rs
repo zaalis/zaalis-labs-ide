@@ -461,7 +461,11 @@ impl Guard {
         if request.sensitive {
             return Decision::Ask {
                 reason: DecisionReason::ModeAsk,
-                summary: format!("accès à un fichier sensible : {target}"),
+                summary: if request.kind == AccessKind::Computer {
+                    describe(request)
+                } else {
+                    format!("accès à un fichier sensible : {target}")
+                },
             };
         }
 
@@ -832,10 +836,11 @@ fn is_critical_path(raw: &str) -> bool {
     }
 }
 
+/// Everything but looking: a new gesture is a change until proven otherwise.
 fn computer_changes_the_desktop(target: &str) -> bool {
-    matches!(
+    !matches!(
         target,
-        "move" | "click" | "double_click" | "drag" | "scroll" | "type" | "key" | "activate_app"
+        "observe" | "inspect" | "zoom" | "menus" | "wait" | "cursor_position"
     )
 }
 
@@ -954,7 +959,11 @@ mod tests {
     fn semi_asks_before_a_click_and_not_before_a_look() {
         assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "click")).needs_prompt());
         assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "observe")).is_allow());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "zoom")).is_allow());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "triple_click")).needs_prompt());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "batch")).needs_prompt());
         assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Computer, "type").sensitive(true)).is_allow());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Computer, "batch").sensitive(true)).is_allow());
     }
 
     #[test]

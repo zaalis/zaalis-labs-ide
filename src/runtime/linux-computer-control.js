@@ -16,8 +16,29 @@ const KEY_NAMES = new Map([
   ['win', 'Super_L'], ['windows', 'Super_L'], ['volumeup', 'XF86AudioRaiseVolume'],
   ['volumedown', 'XF86AudioLowerVolume'], ['volumemute', 'XF86AudioMute'],
   ['medianext', 'XF86AudioNext'], ['mediaprev', 'XF86AudioPrev'], ['mediastop', 'XF86AudioStop'],
-  ['mediaplaypause', 'XF86AudioPlay'],
+  ['mediaplaypause', 'XF86AudioPlay'], ['ins', 'Insert'], ['del', 'Delete'],
+  ['ctrl', 'Control_L'], ['control', 'Control_L'], ['alt', 'Alt_L'], ['shift', 'Shift_L'],
+  ['multiply', 'KP_Multiply'], ['add', 'KP_Add'], ['subtract', 'KP_Subtract'], ['decimal', 'KP_Decimal'], ['divide', 'KP_Divide'],
+  ['browserback', 'XF86Back'], ['browserforward', 'XF86Forward'], ['browserrefresh', 'XF86Reload'], ['browserhome', 'XF86HomePage'],
+  ...Array.from({ length: 10 }, (_, digit) => [`numpad${digit}`, `KP_${digit}`]),
 ]);
+const MODIFIER_NAMES = { command: 'super', cmd: 'super', control: 'ctrl', option: 'alt', opt: 'alt', meta: 'super', win: 'super', windows: 'super' };
+
+function keyName(value) {
+  const name = String(value || '').toLowerCase();
+  return KEY_NAMES.get(name) || (/^f(?:[1-9]|1[0-9]|2[0-4])$/.test(name) ? name.toUpperCase() : (name.length === 1 ? name : ''));
+}
+
+// Whether a key press puts text into the focused field: a character without
+// Ctrl/Alt/Super, or a paste.
+function keyWrites(action) {
+  const key = String(action.key || '').toLowerCase();
+  const mods = (action.modifiers || []).map((m) => MODIFIER_NAMES[m] || m);
+  const chord = mods.some((m) => ['ctrl', 'alt', 'super'].includes(m));
+  return (key.length === 1 && !chord) || (key === 'v' && mods.includes('ctrl')) || (['insert', 'ins'].includes(key) && mods.includes('shift'));
+}
+
+function buttonNumber(button) { return button === 'right' ? '3' : button === 'middle' ? '2' : '1'; }
 
 function run(file, args = [], options = {}) {
   return new Promise((resolve, reject) => {
@@ -372,6 +393,20 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
     if (process.platform !== 'linux') return { ok: false, error: 'unsupported-platform' };
     if (action && action.action === 'overlay_start') return startOverlay();
     if (action && action.action === 'overlay_stop') { stopOverlay(); return { ok: true }; }
+    if (action && action.action === 'batch') {
+      // Same contract as the Windows bridge: every step's result, stopping at
+      // the first failure.
+      const steps = [];
+      for (const step of Array.isArray(action.actions) ? action.actions : []) {
+        const outcome = step && step.action === 'wait'
+          ? await new Promise((resolve) => setTimeout(() => resolve({ ok: true }), Math.round(Math.min(10, Math.max(0.05, Number(step.seconds) || 1)) * 1000)))
+          : await linuxComputerAction(step);
+        steps.push(outcome);
+        if (!outcome || !outcome.ok) return { ok: false, steps };
+        await new Promise((resolve) => setTimeout(resolve, 60));
+      }
+      return { ok: true, steps };
+    }
     try {
       const hasInput = !!await commandPath(['xdotool']);
       const hasCapture = !!await commandPath(['import', 'gnome-screenshot']);
@@ -381,14 +416,38 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         const hasDesktop = !!(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
         return { ok: hasDesktop && hasInput && hasCapture && hasAtSpi, accessibility: hasDesktop && hasInput && hasAtSpi, screenRecording: hasDesktop && hasCapture, platform: 'linux', session: process.env.XDG_SESSION_TYPE || '' };
       }
+      if (action.action === 'clipboard_read' || action.action === 'clipboard_write') {
+        const xclip = await commandPath(['xclip']);
+        const xsel = xclip ? '' : await commandPath(['xsel']);
+        if (!xclip && !xsel) throw new Error('clipboard: installe xclip ou xsel');
+        if (action.action === 'clipboard_read') {
+          const value = xclip
+            ? await run(xclip, ['-selection', 'clipboard', '-o']).catch(() => '')
+            : await run(xsel, ['--clipboard', '--output']).catch(() => '');
+          return { ok: true, text: String(value || ''), has_text: !!value };
+        }
+        // xclip stays alive to serve the selection: detach it.
+        const writer = xclip ? spawn(xclip, ['-selection', 'clipboard'], { stdio: ['pipe', 'ignore', 'ignore'], detached: true })
+          : spawn(xsel, ['--clipboard', '--input'], { stdio: ['pipe', 'ignore', 'ignore'], detached: true });
+        writer.stdin.end(String(action.text));
+        writer.unref();
+        await new Promise((resolve) => setTimeout(resolve, 120));
+        return { ok: true, length: String(action.text).length };
+      }
       if (!hasInput) throw new Error('xdotool-not-installed');
-      if (['click', 'double_click', 'key', 'type'].includes(action.action)) {
+      if (action.action === 'cursor_position') {
+        const where = parseGeometry(String(await run('xdotool', ['getmouselocation', '--shell'])));
+        return { ok: true, x: where.x, y: where.y };
+      }
+      const writesKey = ['key', 'hold_key'].includes(action.action) && keyWrites(action);
+      const pointsAt = ['click', 'double_click', 'triple_click'].includes(action.action) || (action.action === 'mouse_up' && action.x != null);
+      if (pointsAt || writesKey || action.action === 'type' || (action.action === 'key' && action.guard)) {
         let ui;
         try { ui = await accessibility(400); }
         catch { return { ok: false, error: 'accessibility-unavailable' }; }
         const focused = (ui.elements || []).find(e => e.focused);
-        if (action.action === 'type' && focused?.secure) return { ok: false, error: 'password-field' };
-        const candidates = ['click', 'double_click'].includes(action.action)
+        if ((action.action === 'type' || writesKey) && focused?.secure) return { ok: false, error: 'password-field' };
+        const candidates = pointsAt
           ? (ui.elements || []).filter(e => !e.offscreen && action.x >= e.frame.x && action.y >= e.frame.y && action.x <= e.frame.x + e.frame.width && action.y <= e.frame.y + e.frame.height)
           : ['enter', 'return', 'space', ' '].includes(String(action.key || '').toLowerCase()) && focused ? [focused] : [];
         if (action.guard) {
@@ -399,12 +458,29 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
       }
       publish(action);
       if (action.action === 'move') { await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y))]); return { ok: true }; }
-      if (action.action === 'click' || action.action === 'double_click') {
-        const modifiers = (action.modifiers || []).map(m => ({ command: 'super', cmd: 'super', control: 'ctrl', option: 'alt', opt: 'alt', meta: 'super', win: 'super', windows: 'super' }[m] || m));
+      if (action.action === 'click' || action.action === 'double_click' || action.action === 'triple_click') {
+        const modifiers = (action.modifiers || []).map(m => MODIFIER_NAMES[m] || m);
+        const repeat = { click: '1', double_click: '2', triple_click: '3' }[action.action];
         try {
           for (const mod of modifiers) await run('xdotool', ['keydown', mod]);
-          await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y)), 'click', '--repeat', action.action === 'double_click' ? '2' : '1', '--delay', '80', action.button === 'right' ? '3' : action.button === 'middle' ? '2' : '1']);
+          await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y)), 'click', '--repeat', repeat, '--delay', '80', buttonNumber(action.button)]);
         } finally { for (const mod of modifiers) await run('xdotool', ['keyup', mod]).catch(() => {}); }
+        return { ok: true };
+      }
+      if (action.action === 'mouse_down' || action.action === 'mouse_up') {
+        if (action.x != null && action.y != null) await run('xdotool', ['mousemove', '--sync', String(Math.round(action.x)), String(Math.round(action.y))]);
+        await run('xdotool', [action.action === 'mouse_down' ? 'mousedown' : 'mouseup', buttonNumber(action.button)]);
+        return { ok: true };
+      }
+      if (action.action === 'hold_key') {
+        const mods = (action.modifiers || []).map((m) => MODIFIER_NAMES[m] || m);
+        const key = keyName(action.key);
+        if (!key) throw new Error(`unsupported-key:${action.key}`);
+        const held = [...mods, key];
+        try {
+          await run('xdotool', ['keydown', ...held]);
+          await new Promise((resolve) => setTimeout(resolve, Math.round(Math.min(10, Math.max(0.05, Number(action.seconds) || 1)) * 1000)));
+        } finally { await run('xdotool', ['keyup', ...held.reverse()]).catch(() => {}); }
         return { ok: true };
       }
       if (action.action === 'drag') {
@@ -438,11 +514,12 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         return { ok: true };
       }
       if (action.action === 'key') {
+        // On Linux "cmd" means the shortcut modifier, Ctrl (as on the old map).
         const mods = (action.modifiers || []).map((m) => ({ control: 'ctrl', command: 'ctrl', cmd: 'ctrl', option: 'alt', opt: 'alt', meta: 'super', win: 'super', windows: 'super' }[m] || m));
-        const name = String(action.key || '').toLowerCase();
-        const key = KEY_NAMES.get(name) || (/^f(?:[1-9]|1[0-9]|2[0-4])$/.test(name) ? name.toUpperCase() : (name.length === 1 ? name : ''));
-        if (!key) throw new Error(`unsupported-key:${name}`);
-        await run('xdotool', ['key', '--clearmodifiers', [...mods, key].join('+')]); return { ok: true };
+        const key = keyName(action.key);
+        if (!key) throw new Error(`unsupported-key:${action.key}`);
+        const repeat = Math.max(1, Math.min(30, Number(action.repeat) || 1));
+        await run('xdotool', ['key', '--clearmodifiers', '--repeat', String(repeat), [...mods, key].join('+')]); return { ok: true };
       }
       if (action.action === 'open_terminal') {
         const terminal = await commandPath(appCandidates('terminal'));

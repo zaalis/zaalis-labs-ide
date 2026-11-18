@@ -32,8 +32,6 @@ const TOOL_IMAGES_PROMPT_PREFIX: &str = "[Images renvoyées par les outils";
 /// for "before / after" or a few views, bounded so a request stays affordable.
 const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
-/// The tools a desktop-control turn keeps.
-const DESKTOP_TOOLS: [&str; 7] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call", "request_user_input"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
 const ESSENTIAL_TOOLS: [&str; 23] = [
@@ -86,20 +84,29 @@ pub(crate) fn announces_pending_action(text: &str) -> bool {
 /// The desktop-mode instructions, naming the tools the turn actually has.
 fn desktop_mode_prompt(tools: &[zaalis_tools::ToolDefinition]) -> String {
     let has = |name: &str| tools.iter().any(|tool| tool.name == name);
-    let mut prompt = String::from("\n\nMODE CONTRÔLE DU BUREAU : ");
-    if has("mcp") || has("skill") {
-        prompt.push_str("outils disponibles : computer");
-        if has("mcp") {
-            prompt.push_str(", mcp");
-        }
-        if has("skill") {
-            prompt.push_str(", skill");
-        }
-        prompt.push_str(". Quand un serveur MCP couvre l’application visée (Blender par exemple), passe par lui plutôt que par la souris : c’est plus fiable et plus rapide ; garde computer pour le reste du bureau. ");
-    } else {
-        prompt.push_str("seul l’outil computer est disponible. ");
+    let mut prompt = String::from("\n\nMODE CONTRÔLE DU BUREAU : tu pilotes le PC avec computer ET tu gardes tous tes autres outils");
+    let others: Vec<&str> = [
+        ("run", "run (commandes)"),
+        ("process", "process (tâches de fond)"),
+        ("read", "fichiers (read/write/edit)"),
+        ("browser", "browser"),
+        ("web_search", "web_search/web_fetch"),
+        ("workspace", "workspace (projet, GitHub)"),
+        ("mcp", "mcp"),
+        ("skill", "skill"),
+        ("spawn_agent", "sous-agents"),
+    ]
+    .iter()
+    .filter(|(name, _)| has(name))
+    .map(|(_, label)| *label)
+    .collect();
+    if !others.is_empty() {
+        prompt.push_str(" : ");
+        prompt.push_str(&others.join(", "));
     }
-    prompt.push_str("Regroupe les actions clavier sûres et déterministes lorsque l’état est déjà connu (par exemple ouvrir une nouvelle note puis saisir son texte), mais observe/inspecte après un changement d’écran important. Termine dès que le résultat demandé est confirmé afin d’économiser les appels au fournisseur.");
+    prompt.push_str(". Choisis le chemin le plus sûr : une commande, un fichier, une API ou un serveur MCP (Blender par exemple) bat une suite de clics ; garde computer pour ce qui n’existe qu’à l’écran. ");
+    prompt.push_str("Gestes de computer : click/double_click/triple_click (sélectionner une ligne), mouse_down/mouse_up (glisser précis, sélection longue), hold_key (maintenir une touche N secondes), cursor_position, clipboard_read/clipboard_write (coller un long texte, récupérer un texte copié), zoom (agrandir une zone pour lire un petit texte), batch (plusieurs gestes en un appel quand l’état est connu). ");
+    prompt.push_str("Après une action importante, inspect dit si l’écran a VRAIMENT changé : fie-toi à ce verdict. Termine dès que le résultat demandé est confirmé.");
     prompt
 }
 
@@ -214,19 +221,11 @@ pub(crate) async fn run_agent(
             ));
         }
 
-        let mut available_tools = session.tools.definitions();
+        // A desktop-control turn keeps the whole catalogue: a task that drives
+        // the screen often needs a command, a file, the web or GitHub along
+        // the way, and a shell or MCP call beats a dozen clicks.
+        let available_tools = session.tools.definitions();
         let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
-        if desktop_control {
-            // A desktop-control turn does not need filesystem, Git, terminal,
-            // checkpoint or web schemas. Advertising the whole IDE catalogue
-            // costs thousands of input tokens on every observe/click/type
-            // round, which is enough to exhaust entry-plan provider limits
-            // before the task can finish. The computer tool remains fully
-            // typed; only irrelevant choices are removed. MCP servers and
-            // Skills stay: an application with its own MCP server (Blender)
-            // is driven far more reliably through it than with the mouse.
-            available_tools.retain(|tool| DESKTOP_TOOLS.contains(&tool.name.as_str()));
-        }
         let mut runtime_system =
             system_prompt(&session, &node, planning, &files_changed);
         if desktop_control {
@@ -247,9 +246,12 @@ pub(crate) async fn run_agent(
         // A small window (a local model at 8K) cannot carry the whole IDE
         // catalogue and still leave room for the conversation. Keep the
         // essential tools rather than refusing the turn.
-        if input_budget < context / 4 && !desktop_control {
+        if input_budget < context / 4 {
             let before = tools.len();
-            tools.retain(|tool| ESSENTIAL_TOOLS.contains(&tool.name.as_str()));
+            tools.retain(|tool| {
+                ESSENTIAL_TOOLS.contains(&tool.name.as_str())
+                    || (desktop_control && matches!(tool.name.as_str(), "computer" | "mcp"))
+            });
             if tools.len() < before {
                 runtime_system.push_str(REDUCED_TOOLS_NOTE);
                 overhead = overhead_of(&runtime_system, &tools)?;
@@ -675,14 +677,9 @@ async fn execute_tool_raw(
         permissions: node.permissions.clone(),
         workspace: workspace_for_node(session, node)?,
     };
-    // Desktop schema reduction predates discovery and is an optimisation, not
-    // a new permission policy for direct calls. Discovery stays inside that
-    // advertised catalogue; target permissions still run in the shared guard.
-    let scoped_discovery = matches!(call.name.as_str(), "tool_search" | "tool_describe" | "tool_call")
-        && session.tools.definitions().iter().any(|tool| tool.name == "computer");
     let dispatch = session
         .tools
-        .invoke_scoped(
+        .invoke(
             ToolInvocation {
                 call_id: call_id.clone(),
                 name: call.name,
@@ -690,7 +687,6 @@ async fn execute_tool_raw(
             },
             context,
             cancel.clone(),
-            scoped_discovery.then_some(DESKTOP_TOOLS.as_slice()),
         )
         .await;
     let dispatch = match dispatch {

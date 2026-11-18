@@ -325,6 +325,16 @@ public static class ZaalisInput {
     Flush(batch);
     Press(modifiers, true);
   }
+  // Holds a key (and its modifiers) down for a while, then releases it in
+  // reverse order. vk 0 holds the modifiers alone.
+  public static void Hold(ushort[] modifiers, ushort vk, int milliseconds) {
+    Press(modifiers, false);
+    List<ZaalisInputRecord> batch = new List<ZaalisInputRecord>();
+    if (vk != 0) { batch.Add(KeyRecord(vk, 0, Extended(vk))); Flush(batch); }
+    Thread.Sleep(milliseconds);
+    if (vk != 0) { batch.Add(KeyRecord(vk, 0, Extended(vk) | 2)); Flush(batch); }
+    Press(modifiers, true);
+  }
   // Wheel notches, in the unsigned field Windows expects.
   public static void Wheel(int notches, bool horizontal) {
     mouse_event(horizontal ? 0x1000u : 0x0800u, 0, 0, unchecked((uint)(notches * 120)), UIntPtr.Zero);
@@ -375,7 +385,14 @@ try { [void][ZaalisInput]::SetProcessDpiAwareness(2) } catch { try { [void][Zaal
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
 $a = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:ZAALIS_COMPUTER_ACTION)) | ConvertFrom-Json
-function Result($obj) { [Console]::Out.Write(($obj | ConvertTo-Json -Compress -Depth 8)); exit }
+# Inside a batch, a step's result ends that step only: it is handed back to
+# the batch loop instead of ending the process.
+$script:Batching = $false
+$script:StepResult = $null
+function Result($obj) {
+  if ($script:Batching) { $script:StepResult = $obj; throw 'zaalis-step-done' }
+  [Console]::Out.Write(($obj | ConvertTo-Json -Compress -Depth 8)); exit
+}
 function ActiveTitle {
   $b = New-Object Text.StringBuilder 1024
   [void][ZaalisInput]::GetWindowText([ZaalisInput]::GetForegroundWindow(), $b, $b.Capacity)
@@ -606,6 +623,39 @@ function MouseFlags($button) {
   if ($button -eq 'middle') { return @(0x20, 0x40) }
   return @(0x02, 0x04)
 }
+# Virtual-key code of a key name or character; adds the Shift/Ctrl/Alt a
+# character needs on this layout to $mods. -1: unknown name, -2: a character
+# this keyboard layout cannot produce.
+function KeyCode($k, $mods) {
+  $named = @{ enter=0x0D; return=0x0D; tab=0x09; escape=0x1B; esc=0x1B; backspace=0x08; delete=0x2E; del=0x2E; insert=0x2D; ins=0x2D; up=0x26; down=0x28; left=0x25; right=0x27; home=0x24; end=0x23; pageup=0x21; pagedown=0x22; pgup=0x21; pgdn=0x22; space=0x20; printscreen=0x2C; prtsc=0x2C; pause=0x13; capslock=0x14; numlock=0x90; scrolllock=0x91; menu=0x5D; apps=0x5D; win=0x5B; windows=0x5B; ctrl=0x11; control=0x11; alt=0x12; shift=0x10; volumeup=0xAF; volumedown=0xAE; volumemute=0xAD; medianext=0xB0; mediaprev=0xB1; mediastop=0xB2; mediaplaypause=0xB3; browserback=0xA6; browserforward=0xA7; browserrefresh=0xA8; browserhome=0xAC; multiply=0x6A; add=0x6B; subtract=0x6D; decimal=0x6E; divide=0x6F }
+  if ($named.ContainsKey($k)) { return [int]$named[$k] }
+  if ($k -match '^f([1-9]|1[0-9]|2[0-4])$') { return 0x6F + [int]$Matches[1] }
+  if ($k -match '^numpad([0-9])$') { return 0x60 + [int]$Matches[1] }
+  if ($k.Length -eq 1) {
+    $scan = [int][ZaalisInput]::VkKeyScanW([char]$k)
+    if ($scan -eq -1) { return -2 }
+    $state = ($scan -shr 8) -band 0xFF
+    if (($state -band 1) -and -not $mods.Contains([uint16]0x10)) { $mods.Add([uint16]0x10) }
+    if (($state -band 2) -and -not $mods.Contains([uint16]0x11)) { $mods.Add([uint16]0x11) }
+    if (($state -band 4) -and -not $mods.Contains([uint16]0x12)) { $mods.Add([uint16]0x12) }
+    return ($scan -band 0xFF)
+  }
+  return -1
+}
+function FocusIsPassword {
+  $secret = [ZaalisInput]::FocusIsPasswordEdit()
+  if (-not $secret) { try { Ui; $focused = [System.Windows.Automation.AutomationElement]::FocusedElement; $secret = ($null -ne $focused -and $focused.Current.IsPassword) } catch {} }
+  return [bool]$secret
+}
+# Whether a key press would put text into the focused field: a character
+# without Ctrl/Alt/Win, or a paste (Ctrl+V, Shift+Insert).
+function KeyWrites($k, $userMods) {
+  $chord = $userMods.Contains([uint16]0x11) -or $userMods.Contains([uint16]0x12) -or $userMods.Contains([uint16]0x5B)
+  if ($k.Length -eq 1 -and -not $chord) { return $true }
+  if ($k -eq 'v' -and $userMods.Contains([uint16]0x11)) { return $true }
+  if (($k -eq 'insert' -or $k -eq 'ins') -and $userMods.Contains([uint16]0x10)) { return $true }
+  return $false
+}
 # Brings the top-level window of an application already open to the front.
 function OpenWindowFor($name) {
   $key = ($name -replace '\.exe$', '').ToLower()
@@ -659,6 +709,7 @@ function WaitForeground($previous) {
     if ($now -ne $previous -and (ActiveTitle)) { return }
   }
 }
+function Dispatch {
 if ($a.action -eq 'status' -or $a.action -eq 'request_permissions') { Result @{ok=$true; accessibility=$true; screenRecording=$true} }
 if ($a.action -eq 'overlay_start' -or $a.action -eq 'overlay_stop') { Result @{ok=$true} }
 if ($a.action -eq 'activate_app' -or $a.action -eq 'open_terminal') {
@@ -712,7 +763,7 @@ if ($a.action -eq 'move') {
   [void][ZaalisInput]::SetCursorPos([int]$a.x,[int]$a.y)
   Result @{ok=$true}
 }
-if ($a.action -eq 'click' -or $a.action -eq 'double_click') {
+if ($a.action -eq 'click' -or $a.action -eq 'double_click' -or $a.action -eq 'triple_click') {
   GuardPoint $a.x $a.y
   $flags = MouseFlags ([string]$a.button)
   $mods = (ModifierKeys $a.modifiers).ToArray()
@@ -721,6 +772,7 @@ if ($a.action -eq 'click' -or $a.action -eq 'double_click') {
   [ZaalisInput]::Press($mods, $false)
   $count = 1
   if ($a.action -eq 'double_click') { $count = 2 }
+  if ($a.action -eq 'triple_click') { $count = 3 }
   for ($i = 0; $i -lt $count; $i++) {
     if ($i -gt 0) { Start-Sleep -Milliseconds 70 }
     [ZaalisInput]::mouse_event($flags[0],0,0,0,[UIntPtr]::Zero)
@@ -754,39 +806,77 @@ if ($a.action -eq 'scroll') {
 }
 if ($a.action -eq 'type') {
   # Never type into a password field, whatever the text.
-  $secret = [ZaalisInput]::FocusIsPasswordEdit()
-  if (-not $secret) { try { Ui; $focused = [System.Windows.Automation.AutomationElement]::FocusedElement; $secret = ($null -ne $focused -and $focused.Current.IsPassword) } catch {} }
-  if ($secret) { Result @{ok=$false;error='password-field'} }
+  if (FocusIsPassword) { Result @{ok=$false;error='password-field'} }
   $typed = [ZaalisInput]::TypeText([string]$a.text)
   Result @{ok=$true;typed=$typed}
 }
-if ($a.action -eq 'key') {
+if ($a.action -eq 'key' -or $a.action -eq 'hold_key') {
   $k = ([string]$a.key).ToLower()
-  $named = @{ enter=0x0D; return=0x0D; tab=0x09; escape=0x1B; esc=0x1B; backspace=0x08; delete=0x2E; del=0x2E; insert=0x2D; up=0x26; down=0x28; left=0x25; right=0x27; home=0x24; end=0x23; pageup=0x21; pagedown=0x22; space=0x20; printscreen=0x2C; capslock=0x14; menu=0x5D; apps=0x5D; win=0x5B; windows=0x5B }
+  $userMods = ModifierKeys $a.modifiers
   $mods = ModifierKeys $a.modifiers
-  $vk = 0
-  if ($named.ContainsKey($k)) { $vk = $named[$k] }
-  elseif ($k -match '^f([1-9]|1[0-9]|2[0-4])$') { $vk = 0x6F + [int]$Matches[1] }
-  elseif ($k.Length -eq 1) {
-    $scan = [int][ZaalisInput]::VkKeyScanW([char]$k)
-    if ($scan -eq -1) {
-      # Not on this keyboard layout: the character itself is sent instead.
-      if ($mods.Count -gt 0) { Result @{ok=$false;error='unknown-key'} }
-      [void][ZaalisInput]::TypeText($k)
-      Result @{ok=$true}
-    }
-    $vk = $scan -band 0xFF
-    $state = ($scan -shr 8) -band 0xFF
-    if (($state -band 1) -and -not $mods.Contains([uint16]0x10)) { $mods.Add([uint16]0x10) }
-    if (($state -band 2) -and -not $mods.Contains([uint16]0x11)) { $mods.Add([uint16]0x11) }
-    if (($state -band 4) -and -not $mods.Contains([uint16]0x12)) { $mods.Add([uint16]0x12) }
+  $vk = KeyCode $k $mods
+  if ($vk -eq -1) { Result @{ok=$false;error=('unknown-key: ' + $k)} }
+  # Typing a character or pasting into a password field is typing a password.
+  if ((KeyWrites $k $userMods) -and (FocusIsPassword)) { Result @{ok=$false;error='password-field'} }
+  if ($vk -eq -2) {
+    # Not on this keyboard layout: the character itself is sent instead.
+    if ($mods.Count -gt 0 -or $a.action -eq 'hold_key') { Result @{ok=$false;error=('unknown-key: ' + $k)} }
+    [void][ZaalisInput]::TypeText($k)
+    Result @{ok=$true}
   }
-  else { Result @{ok=$false;error='unknown-key'} }
+  if ($a.action -eq 'hold_key') {
+    $ms = 1000
+    if ($a.seconds) { $ms = [int]([double]$a.seconds * 1000) }
+    $ms = [Math]::Max(50, [Math]::Min(10000, $ms))
+    # Holding a modifier alone: it is the key, not an extra.
+    $held = [uint16]$vk
+    if ($mods.Contains($held)) { [void]$mods.Remove($held) }
+    [ZaalisInput]::Hold($mods.ToArray(), $held, $ms)
+    Result @{ok=$true;held_ms=$ms}
+  }
   if ($vk -eq 0x0D -or $vk -eq 0x20) { GuardFocus }
   $repeat = 1
   if ($a.repeat) { $repeat = [Math]::Max(1, [Math]::Min(30, [int]$a.repeat)) }
   [ZaalisInput]::Chord($mods.ToArray(), [uint16]$vk, $repeat)
   Result @{ok=$true}
+}
+if ($a.action -eq 'mouse_down' -or $a.action -eq 'mouse_up') {
+  if ($null -ne $a.x -and $null -ne $a.y) {
+    if ($a.action -eq 'mouse_up') { GuardPoint $a.x $a.y }
+    [void][ZaalisInput]::SetCursorPos([int]$a.x,[int]$a.y)
+    Start-Sleep -Milliseconds 40
+  }
+  $flags = MouseFlags ([string]$a.button)
+  if ($a.action -eq 'mouse_down') { [ZaalisInput]::mouse_event($flags[0],0,0,0,[UIntPtr]::Zero) }
+  else { [ZaalisInput]::mouse_event($flags[1],0,0,0,[UIntPtr]::Zero) }
+  Result @{ok=$true}
+}
+if ($a.action -eq 'cursor_position') {
+  $p = [Windows.Forms.Cursor]::Position
+  Result @{ok=$true;x=$p.X;y=$p.Y}
+}
+if ($a.action -eq 'clipboard_read') {
+  # Another application may hold the clipboard open for a moment.
+  $text = $null
+  $failure = 'clipboard-busy'
+  for ($i = 0; $i -lt 6 -and $null -eq $text; $i++) {
+    try { $text = [Windows.Forms.Clipboard]::GetText() } catch { $failure = $_.Exception.Message; Start-Sleep -Milliseconds 80 }
+  }
+  if ($null -eq $text) { Result @{ok=$false;error=$failure} }
+  $hasText = [Windows.Forms.Clipboard]::ContainsText()
+  $hasImage = $false
+  $hasFiles = $false
+  try { $hasImage = [Windows.Forms.Clipboard]::ContainsImage(); $hasFiles = [Windows.Forms.Clipboard]::ContainsFileDropList() } catch {}
+  $files = @()
+  if ($hasFiles) { try { foreach ($f in [Windows.Forms.Clipboard]::GetFileDropList()) { if ($files.Count -lt 50) { $files += [string]$f } } } catch {} }
+  Result @{ok=$true;text=$text;has_text=$hasText;has_image=$hasImage;files=$files}
+}
+if ($a.action -eq 'clipboard_write') {
+  $failure = $null
+  # copy=true: the text stays on the clipboard after this process exits.
+  try { [Windows.Forms.Clipboard]::SetDataObject([string]$a.text, $true, 10, 100) } catch { $failure = $_.Exception.Message }
+  if ($failure) { Result @{ok=$false;error=('clipboard: ' + $failure)} }
+  Result @{ok=$true;length=([string]$a.text).Length}
 }
 if ($a.action -eq 'observe' -or $a.action -eq 'inspect') {
   $target = 'active_window'
@@ -838,7 +928,37 @@ if ($a.action -eq 'menus') {
   }
   Result @{ok=$true;application=(ActiveTitle);menus=$menus}
 }
-Result @{ok=$false;error='unsupported-action'}
+Result @{ok=$false;error=('unsupported-action: ' + [string]$a.action)}
+}
+# Several gestures in one process: no PowerShell start-up nor C# compilation
+# between them, so a click-type-Enter sequence runs as fast as a person would.
+if ($a.action -eq 'batch') {
+  $steps = @($a.actions)
+  $outcomes = @()
+  $okAll = $true
+  $script:Batching = $true
+  foreach ($step in $steps) {
+    $a = $step
+    $script:StepResult = $null
+    if ([string]$step.action -eq 'wait') {
+      $ms = 1000
+      if ($step.seconds) { $ms = [int]([double]$step.seconds * 1000) }
+      Start-Sleep -Milliseconds ([Math]::Max(50, [Math]::Min(10000, $ms)))
+      $script:StepResult = @{ok=$true}
+    } else {
+      try { Dispatch } catch { if ($null -eq $script:StepResult) { $script:StepResult = @{ok=$false;error=('' + $_.Exception.Message)} } }
+    }
+    $r = $script:StepResult
+    if ($null -eq $r) { $r = @{ok=$false;error='no-result'} }
+    $outcomes += $r
+    if (-not $r.ok) { $okAll = $false; break }
+    # Lets the application react before the next gesture.
+    Start-Sleep -Milliseconds 60
+  }
+  $script:Batching = $false
+  Result @{ok=$okAll;steps=$outcomes}
+}
+Dispatch
 `;
 
 let bridgeFile = null;
@@ -866,6 +986,16 @@ function bridgeScriptFile() {
   return bridgeFile;
 }
 
+// A batch or a held key legitimately takes longer than one gesture.
+function timeoutFor(action) {
+  const seconds = (step) => (step && ['wait', 'hold_key'].includes(step.action) ? Number(step.seconds) || 1 : 0);
+  if (action && action.action === 'batch' && Array.isArray(action.actions)) {
+    const total = action.actions.reduce((sum, step) => sum + seconds(step) * 1000 + 2500, 25000);
+    return Math.min(85000, total);
+  }
+  return Math.min(85000, 25000 + seconds(action) * 1000);
+}
+
 function call(action, overlayConfig) {
   if (process.platform !== 'win32') return Promise.resolve({ ok: false, error: 'unsupported-platform' });
   if (action && action.action === 'overlay_start') return Promise.resolve(startOverlay(overlayConfig || {}));
@@ -873,13 +1003,14 @@ function call(action, overlayConfig) {
   const payload = Buffer.from(JSON.stringify(action || {}), 'utf8').toString('base64');
   let file;
   try { file = bridgeScriptFile(); } catch (error) { return Promise.resolve({ ok: false, error: `windows-computer-script: ${error.message}` }); }
+  const timeout = timeoutFor(action);
   return new Promise((resolve) => {
     execFile('powershell.exe', ['-NoProfile', '-Sta', '-ExecutionPolicy', 'Bypass', '-File', file], {
       env: { ...process.env, ZAALIS_COMPUTER_ACTION: payload },
-      timeout: 25000, maxBuffer: 32 * 1024 * 1024, windowsHide: true,
+      timeout, maxBuffer: 32 * 1024 * 1024, windowsHide: true,
     }, (error, stdout, stderr) => {
       // A timeout kills PowerShell: say so, instead of the whole command line Node puts in its message.
-      if (error && error.killed) return resolve({ ok: false, error: 'timeout: the desktop did not answer within 25 s; inspect again before retrying' });
+      if (error && error.killed) return resolve({ ok: false, error: `timeout: the desktop did not answer within ${Math.round(timeout / 1000)} s; inspect again before retrying` });
       if (error) return resolve({ ok: false, error: (stderr || error.message || 'windows-computer-failed').slice(0, 1000) });
       try { resolve(JSON.parse(String(stdout || '').trim())); }
       catch { resolve({ ok: false, error: 'windows-computer-invalid-response' }); }
@@ -894,4 +1025,4 @@ function createWindowsComputerAction({ port, secret }) {
   return function windowsComputerAction(action) { return call(action, { port, secret }); };
 }
 
-module.exports = { call, createWindowsComputerAction };
+module.exports = { call, createWindowsComputerAction, timeoutFor, BRIDGE_SCRIPT };
