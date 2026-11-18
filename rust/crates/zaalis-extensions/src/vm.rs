@@ -53,7 +53,8 @@ impl Tool for VmTool {
             format!("VM : {action} · {}", zaalis_guard::VM_NETWORK_MARK)
         } else { format!("VM : {action}") };
         let kind = if ["list","status","templates","hosts"].contains(&action) { AccessKind::Read } else { AccessKind::Sandbox };
-        Ok(AccessRequest::new(context.agent_id.clone(), "vm", kind).with_target(target).sensitive(connected || remote))
+        let outside = connected || remote;
+        Ok(AccessRequest::new(context.agent_id.clone(), "vm", kind).with_target(target).sensitive(outside).networked(outside))
     }
     async fn execute(&self, mut input: Value, context: ToolContext, cancel: CancellationToken) -> Result<ToolResult> {
         input["agent_id"] = json!(context.agent_id);

@@ -41,20 +41,22 @@ class TaskService {
       try { cron.parse(task.cron); } catch (error) { throw fail(error.message); }
       if (task.intervalMinutes) throw fail('Choisissez soit une récurrence en minutes, soit une expression cron.');
     }
+    task.endsAt = task.endsAt || null;
+    if (task.endsAt && !Number.isFinite(Date.parse(task.endsAt))) throw fail('Date de fin invalide.');
+    if (task.endsAt && task.runAt && Date.parse(task.endsAt) < Date.parse(task.runAt)) throw fail('La fin est avant le début.');
     task.enabled = task.enabled !== false;
     return task;
   }
   // First run: an explicit date wins, then the cron schedule, then the interval.
   firstRun(task, now) {
-    if (!task.enabled) return null;
-    if (task.runAt) return Date.parse(task.runAt);
-    if (task.cron) return cron.next(task.cron, now);
-    return task.intervalMinutes ? now + task.intervalMinutes * 60000 : null;
+    return this.withinEnd(task, !task.enabled ? null : task.runAt ? Date.parse(task.runAt) : task.cron ? cron.next(task.cron, now) : task.intervalMinutes ? now + task.intervalMinutes * 60000 : null);
   }
   following(task, now) {
-    if (!task.enabled) return null;
-    if (task.cron) return cron.next(task.cron, now);
-    return task.intervalMinutes ? now + task.intervalMinutes * 60000 : null;
+    return this.withinEnd(task, !task.enabled ? null : task.cron ? cron.next(task.cron, now) : task.intervalMinutes ? now + task.intervalMinutes * 60000 : null);
+  }
+  withinEnd(task, next) {
+    if (next == null) return null;
+    return task.endsAt && next > Date.parse(task.endsAt) ? null : next;
   }
   create(user, input) {
     const list = this.read(user); if (list.length >= 100) throw fail('Limite de 100 tâches atteinte.');
@@ -63,14 +65,14 @@ class TaskService {
     // conversation, current execution status or approval request.
     const task = { id: crypto.randomUUID(), title: valid.title, prompt: valid.prompt, root: valid.root,
       model: valid.model || 'mistral', submodel: valid.submodel || null, permissionMode: valid.permissionMode,
-      intervalMinutes: valid.intervalMinutes, cron: valid.cron, runAt: valid.runAt, enabled: valid.enabled,
+      intervalMinutes: valid.intervalMinutes, cron: valid.cron, runAt: valid.runAt, endsAt: valid.endsAt, enabled: valid.enabled,
       nextRunAt: this.firstRun(valid, now),
       createdAt: now, updatedAt: now, status: 'idle', history: [] };
     list.push(task); this.write(user, list); return copy(task);
   }
   update(user, id, input) {
     const old = this.find(user, id);
-    const fields = Object.fromEntries(['title', 'prompt', 'root', 'model', 'submodel', 'permissionMode', 'intervalMinutes', 'cron', 'runAt', 'enabled'].filter(key => key in input).map(key => [key, input[key]]));
+    const fields = Object.fromEntries(['title', 'prompt', 'root', 'model', 'submodel', 'permissionMode', 'intervalMinutes', 'cron', 'runAt', 'endsAt', 'enabled'].filter(key => key in input).map(key => [key, input[key]]));
     if (this.active.has(`${user}:${id}`) && Object.keys(fields).some(key => !['title', 'enabled'].includes(key))) throw fail('Arrêtez la tâche avant de modifier sa configuration.', 409);
     const valid = this.validate(fields, old);
     valid.updatedAt = this.clock();

@@ -46,10 +46,50 @@
         const unit = seconds < 3600 ? 'min' : seconds < 86400 ? 'h' : english ? 'd' : 'j';
         return english ? `${amount} ${unit} ago` : `il y a ${amount} ${unit}`;
     }
-    function render(pane, agents, { el, text, stop }) {
+    function duration(ms, english) {
+        const total = Math.max(0, Math.floor(Number(ms || 0) / 1000));
+        const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+        if (h) return `${h} h ${String(m).padStart(2, '0')} min`;
+        if (m) return `${m} min ${String(s).padStart(2, '0')} s`;
+        return english ? `${s} s` : `${s} s`;
+    }
+    // Background jobs (builds, dev servers, watchers) the agent started with
+    // the `process` tool: named, timed, and stoppable from here.
+    function renderProcesses(pane, processes, { el, text, kill }) {
+        const section = el('section', 'ws-agent-group ws-process-group');
+        const running = processes.filter(item => item.running);
+        section.setAttribute('aria-label', text('Tâches en arrière-plan', 'Background tasks'));
+        section.append(el('h3', 'ws-agent-group-title', `${text('Tâches en arrière-plan', 'Background tasks')} · ${running.length}`));
+        const sorted = [...processes].sort((a, b) => (b.running - a.running) || String(b.process_id).localeCompare(String(a.process_id)));
+        for (const item of sorted.slice(0, 30)) {
+            const row = el('div', `ws-process-row ${item.running ? 'is-running' : 'is-finished'}`);
+            const dot = el('span', 'ws-process-dot'); dot.setAttribute('aria-hidden', 'true');
+            const body = el('div', 'ws-process-body');
+            const name = item.label || String(item.command || '').split(/\s+/).slice(0, 3).join(' ') || item.process_id;
+            body.append(el('strong', 'ws-process-name', name));
+            const command = el('code', 'ws-process-command', String(item.command || '')); command.title = String(item.command || '');
+            body.append(command);
+            const status = item.running
+                ? text('En cours', 'Running')
+                : (item.exit_code === 0 ? text('Terminé', 'Done') : `${text('Arrêté', 'Stopped')}${item.exit_code != null ? ` (code ${item.exit_code})` : ''}`);
+            const meta = el('span', 'ws-process-meta', `${status} · ${duration(item.duration_ms, text(false, true))}`);
+            row.append(dot, body, meta);
+            if (item.running && kill) {
+                const btn = el('button', 'ws-process-stop'); btn.type = 'button';
+                btn.title = text('Arrêter cette tâche', 'Stop this task'); btn.setAttribute('aria-label', `${btn.title} : ${name}`);
+                btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><rect x="1" y="1" width="10" height="10" rx="2" fill="currentColor"/></svg>';
+                btn.addEventListener('click', () => { btn.disabled = true; kill(item); });
+                row.append(btn);
+            }
+            section.append(row);
+        }
+        pane.append(section);
+    }
+    function render(pane, agents, { el, text, stop, processes = [], kill }) {
         const expanded = new Set([...pane.querySelectorAll('details')].filter(item => item.open).map(item => item.getAttribute('data-agent-key')));
         pane.replaceChildren();
         const grouped = groups(agents);
+        if (processes.length) renderProcesses(pane, processes, { el, text, kill });
         const labels = { pending: text('En attente', 'Queued'), queued: text('En attente', 'Queued'), running: text('En cours', 'Running'), waiting_permission: text('Autorisation requise', 'Approval required'), waiting_budget: text('Budget requis', 'Budget required'), blocked: text('En attente', 'Waiting'), done: text('Terminé', 'Done'), failed: text('Échec', 'Failed'), cancelled: text('Arrêté', 'Stopped') };
         function card(agent) {
             const item = el('details', 'ws-agent-run'), summary = el('summary');
@@ -86,5 +126,5 @@
             for (const agent of grouped.roots) section.append(card(agent)); pane.append(section);
         }
     }
-    window.ZaalisAgentActivity = { update, groups, render, terminal, age };
+    window.ZaalisAgentActivity = { update, groups, render, terminal, age, duration };
 })();

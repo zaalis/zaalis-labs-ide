@@ -17,7 +17,12 @@ use zaalis_providers::{
 };
 use zaalis_tools::{ToolContext, ToolDispatch, ToolInvocation};
 
-const MAX_RUNTIME_ROUNDS: u32 = 128;
+/// A safety net against a runaway loop, not a work limit: a real task can run
+/// for hours (hundreds of rounds), like a Codex session.
+const MAX_RUNTIME_ROUNDS: u32 = 5_000;
+/// Consecutive provider failures (cut stream, 5xx, rate limit) retried before
+/// the turn gives up. A long autonomous task must survive a network blip.
+const MAX_ROUND_RETRIES: u32 = 6;
 const COMPUTER_CAPTURE_PROMPT: &str =
     "[Capture actuelle du bureau — utilise cette image pour poursuivre le contrôle.]";
 /// Label of the vision message carrying images that tools other than the
@@ -157,6 +162,8 @@ pub(crate) async fn run_agent(
     let mut partial_reason = None;
     let mut tool_repairs = 0_u32;
     let mut action_nudged = false;
+    let mut round_retries = 0_u32;
+    let mut envelope_extended = false;
 
     if session.hook_agents.lock().await.insert(node.id.clone()) {
         execute_hooks(
@@ -203,7 +210,7 @@ pub(crate) async fn run_agent(
         if usage.rounds >= MAX_RUNTIME_ROUNDS {
             return Err(ZaalisError::new(
                 zaalis_core::ErrorCode::BudgetExceeded,
-                "limite de sécurité de 128 rounds atteinte",
+                format!("limite de sécurité de {MAX_RUNTIME_ROUNDS} rounds atteinte"),
             ));
         }
 
@@ -261,7 +268,20 @@ pub(crate) async fn run_agent(
         session.checkpoint_history(&node.id, &history).await;
         let estimated_input=(crate::context::estimate(&history)+overhead) as u64;
         let output=remaining_tokens(&node,&usage).unwrap_or(output_reserve as u32).min(output_reserve as u32);
-        let (mut reservation,allowed_output)=crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await?;
+        let (mut reservation,allowed_output)=match crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await {
+            Ok(acquired) => { envelope_extended = false; acquired }
+            // The shared token envelope is a budget like any other: ask (or,
+            // in autonomous mode, extend silently) instead of killing the task.
+            Err(error) if error.code == zaalis_core::ErrorCode::BudgetExceeded && !envelope_extended => {
+                envelope_extended = true;
+                if !request_budget(&session, &mut node, &mut usage, zaalis_core::BudgetLimit::Tokens, &cancel).await? {
+                    partial_reason = Some("budget tokens non prolongé".to_owned());
+                    break;
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // Tools travel as a text protocol rather than natively (GGUF, Ollama
         // models without tool support): the answer may need a correction.
         let fallback_protocol = !capabilities.native_tools && !tools.is_empty();
@@ -277,11 +297,17 @@ pub(crate) async fn run_agent(
         usage.rounds = usage.rounds.saturating_add(1);
         session.update_usage(&node.id, usage).await;
         let mut telemetry = crate::telemetry::ProviderCall::new(session.config.usage_store.clone(), session.config.session_id.to_string(), node.model.provider.to_string(), node.model.model.clone().unwrap_or_default());
-        let mut stream = session
-            .providers
-            .stream_turn(request, cancel.clone())
-            .await
-            .map_err(ZaalisError::from)?;
+        let mut stream = match session.providers.stream_turn(request, cancel.clone()).await {
+            Ok(stream) => stream,
+            Err(error) if error.is_retryable() && round_retries < MAX_ROUND_RETRIES => {
+                reservation.settle(None).await;
+                telemetry.complete();
+                round_retries += 1;
+                wait_before_retry(&session, &node, &error, round_retries, &cancel).await?;
+                continue;
+            }
+            Err(error) => return Err(ZaalisError::from(error)),
+        };
 
         let mut text = String::new();
         let mut preview = crate::progress::ProgressPreview::default();
@@ -292,6 +318,7 @@ pub(crate) async fn run_agent(
         let mut usage_reported = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut invalid_call: Option<String> = None;
+        let mut retry_after: Option<zaalis_providers::ProviderError> = None;
         while let Some(event) = stream.next().await {
             match event {
                 TurnEvent::TextDelta { text: delta } => {
@@ -322,6 +349,13 @@ pub(crate) async fn run_agent(
                 } => state = Some(provider_state),
                 TurnEvent::Completed { reason } => stop_reason = reason,
                 TurnEvent::Failed { error } => {
+                    // A stream cut halfway (network, 5xx, overload) is retried:
+                    // tools only run once a round completes, so replaying the
+                    // round cannot run anything twice.
+                    if error.is_retryable() && round_retries < MAX_ROUND_RETRIES && !cancel.is_cancelled() {
+                        retry_after = Some(error);
+                        break;
+                    }
                     session.events.emit(Event::ProviderError {
                         provider: node.model.provider,
                         agent_id: Some(node.id.clone()),
@@ -336,6 +370,13 @@ pub(crate) async fn run_agent(
         }
         reservation.settle(usage_reported.then_some(round_usage)).await;
         telemetry.complete();
+        if let Some(error) = retry_after {
+            close_stream_segments(&session, &mut timeline);
+            round_retries += 1;
+            wait_before_retry(&session, &node, &error, round_retries, &cancel).await?;
+            continue;
+        }
+        round_retries = 0;
         let pending_action = fallback_protocol && calls.is_empty() && !planning
             && !action_nudged && stop_reason != StopReason::MaxTokens
             && announces_pending_action(&text);
@@ -912,6 +953,29 @@ async fn request_plan(
     Ok(answer)
 }
 
+/// Tell the user a provider hiccup is being retried, then wait it out.
+async fn wait_before_retry(
+    session: &Arc<SessionInner>,
+    node: &AgentNode,
+    error: &zaalis_providers::ProviderError,
+    attempt: u32,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let backoff = 2_000_u64.saturating_mul(1_u64 << attempt.min(5));
+    let delay = error.retry_after_ms.unwrap_or(backoff).clamp(1_000, 90_000);
+    session.events.emit(Event::ProviderError {
+        provider: node.model.provider,
+        agent_id: Some(node.id.clone()),
+        code: error.code().into(),
+        message: format!("{} — nouvelle tentative {attempt}/{MAX_ROUND_RETRIES}, la tâche continue", error.message),
+        retry_in_ms: Some(delay),
+    });
+    tokio::select! {
+        () = cancel.cancelled() => Err(ZaalisError::cancelled()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(delay)) => Ok(()),
+    }
+}
+
 async fn request_budget(
     session: &Arc<SessionInner>,
     node: &mut AgentNode,
@@ -919,6 +983,18 @@ async fn request_budget(
     limit: zaalis_core::BudgetLimit,
     cancel: &CancellationToken,
 ) -> Result<bool> {
+    // Autonomous modes never pause a task for a budget: a long job (hours,
+    // like a Codex session) keeps going until it is done or stopped.
+    if matches!(node.permissions.mode, PermissionMode::Auto | PermissionMode::Bypass) {
+        match limit {
+            zaalis_core::BudgetLimit::Tokens => node.budget.max_tokens = None,
+            zaalis_core::BudgetLimit::ToolCalls => node.budget.max_tool_calls = None,
+            zaalis_core::BudgetLimit::Rounds => node.budget.max_rounds = None,
+            zaalis_core::BudgetLimit::WallTime => node.budget.max_wall_time_ms = None,
+        }
+        session.update_runtime_limits(node).await;
+        return Ok(true);
+    }
     let request_id = RequestId::new();
     let receiver = session.interactions.wait_budget(request_id.clone())?;
     session.events.emit(Event::BudgetExhausted {

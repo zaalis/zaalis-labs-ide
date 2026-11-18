@@ -53,7 +53,7 @@ impl Tool for LabTool {
         if action == "apply" { return Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", AccessKind::Edit).with_target("intégration du candidat VM").sensitive(true)); }
         let connected = action == "run" && input.get("network").and_then(Value::as_str) == Some("internet");
         let target = if connected { format!("VM : {action} · {}", zaalis_guard::VM_NETWORK_MARK) } else { format!("VM : {action}") };
-        Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", if ["list","recall","status"].contains(&action) { AccessKind::Read } else { AccessKind::Sandbox }).with_target(target).sensitive(connected))
+        Ok(AccessRequest::new(context.agent_id.clone(), "laboratory", if ["list","recall","status"].contains(&action) { AccessKind::Read } else { AccessKind::Sandbox }).with_target(target).sensitive(connected).networked(connected))
     }
     async fn execute(&self, mut input: Value, context: ToolContext, cancel: CancellationToken) -> Result<ToolResult> {
         input["agent_id"] = json!(context.agent_id);

@@ -32,6 +32,8 @@ pub const TOOLS_LIST: &str = "tools.list";
 pub const MODELS_LIST: &str = "models.list";
 pub const HEALTH: &str = "health";
 pub const USAGE_QUERY: &str = "usage.query";
+pub const PROCESS_LIST: &str = "process.list";
+pub const PROCESS_KILL: &str = "process.kill";
 
 // ── Core → client ────────────────────────────────────────────────────────
 /// Carries an [`EventFrame`]. The only notification the core emits.
@@ -59,6 +61,8 @@ pub enum ClientMethod {
     ToolsList,
     ModelsList,
     UsageQuery,
+    ProcessList,
+    ProcessKill,
     Health,
 }
 
@@ -85,6 +89,8 @@ impl ClientMethod {
             MODELS_LIST => ClientMethod::ModelsList,
             HEALTH => ClientMethod::Health,
             USAGE_QUERY => ClientMethod::UsageQuery,
+            PROCESS_LIST => ClientMethod::ProcessList,
+            PROCESS_KILL => ClientMethod::ProcessKill,
             _ => return None,
         })
     }
@@ -111,6 +117,8 @@ impl ClientMethod {
             ClientMethod::ModelsList => MODELS_LIST,
             ClientMethod::Health => HEALTH,
             ClientMethod::UsageQuery => USAGE_QUERY,
+            ClientMethod::ProcessList => PROCESS_LIST,
+            ClientMethod::ProcessKill => PROCESS_KILL,
         }
     }
 }

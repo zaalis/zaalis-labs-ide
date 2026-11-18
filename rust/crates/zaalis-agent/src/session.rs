@@ -330,6 +330,18 @@ impl AgentSession {
             .map_err(tree_error)
     }
 
+    /// Background processes (builds, servers, watchers) the agents started.
+    pub async fn background_processes(&self) -> serde_json::Value {
+        serde_json::to_value(self.inner.tools.background_processes().await)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+    }
+
+    /// Stop one background process at the user's request.
+    pub async fn kill_background_process(&self, process_id: &str) -> Result<serde_json::Value> {
+        let poll = self.inner.tools.kill_background_process(process_id).await?;
+        Ok(serde_json::to_value(poll)?)
+    }
+
     pub fn tool_definitions(&self) -> Vec<zaalis_tools::ToolDefinition> {
         self.inner.tools.definitions()
     }

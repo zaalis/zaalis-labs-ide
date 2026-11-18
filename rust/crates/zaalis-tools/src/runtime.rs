@@ -109,6 +109,8 @@ pub struct ToolRuntime {
     pending: Mutex<HashMap<RequestId, PendingCall>>,
     rule_sink: Option<Arc<dyn RuleSink>>,
     reviewer: Option<Arc<dyn zaalis_guard::Reviewer>>,
+    /// Background processes, reachable by the client to list and stop them.
+    pub(crate) exec_runtimes: Mutex<Option<Arc<crate::exec::ExecRuntimes>>>,
 }
 
 impl ToolRuntime {

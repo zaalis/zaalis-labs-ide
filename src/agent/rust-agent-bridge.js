@@ -108,6 +108,8 @@ class AgentdClient {
     if (runtimeConfig && runtimeConfig.workspaceEndpoint) env.ZAALIS_WORKSPACE_ENDPOINT = String(runtimeConfig.workspaceEndpoint);
     if (runtimeConfig && runtimeConfig.workspaceToken) env.ZAALIS_WORKSPACE_TOKEN = String(runtimeConfig.workspaceToken);
     env.ZAALIS_GITHUB_READ_ONLY = runtimeConfig?.githubReadOnly ? '1' : '0';
+    if (runtimeConfig && runtimeConfig.githubToken) env.ZAALIS_GITHUB_TOKEN = String(runtimeConfig.githubToken);
+    else delete env.ZAALIS_GITHUB_TOKEN;
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -212,6 +214,9 @@ class RustAgentBridge {
     this.executable = findAgentd(baseDir);
     this.clients = new Map();
     this.sessions = new Map();
+    // Daemon sessions outlive a turn, and so do their background processes
+    // (builds, dev servers). Remembered so the activity pane can list and stop them.
+    this.knownSessions = new Map();
     this.skillRevisions = new Map();
   }
 
@@ -369,6 +374,7 @@ class RustAgentBridge {
     let leadUsage = lead.usage || null;
     let failure = '';
     this.sessions.set(sessionId, { client, userId: options.userId });
+    this.knownSessions.set(sessionId, { client, userId: options.userId });
     let finish;
     const completed = new Promise((resolve) => { finish = resolve; });
     const off = client.onSession(sessionId, (frame) => {
@@ -458,6 +464,26 @@ class RustAgentBridge {
     if (body.kind === 'budget') return session.client.request(METHODS.BUDGET_EXTEND, { ...base, additional_tokens: body.additionalTokens, stop: !!body.stop });
     if (body.kind === 'clarification') return session.client.request(METHODS.CLARIFICATION_DECIDE, { ...base, answers: body.answers || {} });
     throw Object.assign(new Error('Decision interactive invalide.'), { status: 400 });
+  }
+
+  async processes(userId) {
+    const all = [];
+    for (const [sessionId, entry] of this.knownSessions) {
+      if (entry.userId !== userId) continue;
+      try {
+        const result = await entry.client.request('process.list', { session_id: sessionId });
+        for (const item of result.processes || []) all.push({ ...item, sessionId });
+      } catch (error) {
+        if (/introuvable|not found|fermée|closed|inconnue/i.test(String(error.message || ''))) this.knownSessions.delete(sessionId);
+      }
+    }
+    return all;
+  }
+
+  async killProcess(userId, sessionId, processId) {
+    const entry = this.knownSessions.get(String(sessionId || ''));
+    if (!entry || entry.userId !== userId) throw Object.assign(new Error('Processus introuvable.'), { status: 404 });
+    return entry.client.request('process.kill', { session_id: String(sessionId), process_id: String(processId || '') });
   }
 
   async cancel(userId, sessionId, agentId) {

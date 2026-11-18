@@ -73,9 +73,11 @@ impl Tool for ComputerTool {
             .get("action")
             .and_then(Value::as_str)
             .ok_or_else(|| ZaalisError::invalid("action computer requise"))?;
+        let typing = matches!(action, "type" | "key");
         Ok(
             AccessRequest::new(context.agent_id.clone(), "computer", AccessKind::Computer)
-                .with_target(action),
+                .with_target(action)
+                .sensitive(typing),
         )
     }
 

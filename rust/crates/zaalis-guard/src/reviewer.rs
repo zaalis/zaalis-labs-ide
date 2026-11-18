@@ -86,7 +86,9 @@ pub fn may_delegate(mode: PermissionMode, findings: &[Finding]) -> bool {
         return false;
     }
     // Anything that can never be auto-approved is not a grey zone.
-    !findings.iter().any(|finding| finding.is_hard_prohibition())
+    !findings
+        .iter()
+        .any(|finding| finding.is_hard_prohibition() || matches!(finding, Finding::OffensiveTool))
 }
 
 /// A reviewer that always escalates. The behaviour when none is configured.

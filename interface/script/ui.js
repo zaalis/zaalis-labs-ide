@@ -477,13 +477,13 @@ function initRecentProjects() {
         trashBtn.addEventListener('click', async e => {
             e.stopPropagation();
             const ok = await customConfirm(`"${folderName}"`, {
-                title: lang === 'en' ? 'Remove this project?' : 'Supprimer ce projet ?',
+                title: lang === 'en' ? 'Delete this project and its chats?' : 'Supprimer ce projet et ses conversations ?',
                 okText: lang === 'en' ? 'Delete' : 'Supprimer',
                 danger: true
             });
-            if (ok) {
-                removeRecentProject(p);
-            }
+            if (!ok) return;
+            if (typeof deleteProjectConversations === 'function' && !await deleteProjectConversations(p)) return;
+            removeRecentProject(p);
         });
 
         projectRow.appendChild(chev);
@@ -766,28 +766,10 @@ function renderNoProjectConversations(container) {
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
-        titleEl.addEventListener('click', () => {
-            if (typeof loadConversation === 'function') {
-                loadConversation(kind, conv.id);
-            }
+        row.addEventListener('click', () => {
+            if (typeof loadConversation === 'function') loadConversation(kind, conv.id);
         });
-        
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-        `;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            if (typeof deleteConversation === 'function') {
-                deleteConversation(kind, conv.id);
-            }
-        });
-        
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
         container.appendChild(row);
     });
 }
@@ -838,24 +820,10 @@ function renderSidebarConversations() {
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
-        titleEl.addEventListener('click', () => {
+        row.addEventListener('click', () => {
             if (typeof loadConversation === 'function') loadConversation(kind, conv.id);
         });
-
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-        `;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            if (typeof deleteConversation === 'function') deleteConversation(kind, conv.id);
-        });
-
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
         container.appendChild(row);
     });
 }

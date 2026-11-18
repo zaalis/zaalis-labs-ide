@@ -53,6 +53,8 @@ pub enum Finding {
     SensitiveRedirect,
     /// Reads a credential file.
     SensitiveRead,
+    /// A named intrusion tool, including when a known interpreter launches it.
+    OffensiveTool,
     /// The binary is not recognised.
     UnknownBinary,
     /// Spawns a long-lived server or watcher.
@@ -72,6 +74,7 @@ impl Finding {
             Finding::CommandSubstitution => "command_substitution",
             Finding::SensitiveRedirect => "sensitive_redirect",
             Finding::SensitiveRead => "sensitive_read",
+            Finding::OffensiveTool => "offensive_tool",
             Finding::UnknownBinary => "unknown_binary",
             Finding::LongRunning => "long_running",
         }
@@ -90,6 +93,7 @@ impl Finding {
             Finding::CommandSubstitution => "substitution de commande (contenu réel inconnu)",
             Finding::SensitiveRedirect => "écriture vers un fichier sensible",
             Finding::SensitiveRead => "lecture d'un fichier d'identifiants",
+            Finding::OffensiveTool => "outil d'intrusion : confirmation requise",
             Finding::UnknownBinary => "binaire non reconnu",
             Finding::LongRunning => "processus long (serveur ou watcher)",
         }
@@ -119,6 +123,7 @@ impl Finding {
                 | Finding::CommandSubstitution
                 | Finding::SensitiveRedirect
                 | Finding::SensitiveRead
+                | Finding::OffensiveTool
         )
     }
 }
@@ -213,6 +218,9 @@ fn analyse_at_depth(command: &str, depth: u8) -> CommandAnalysis {
     let mut nested_segments = Vec::new();
     for segment in &segments {
         classify(segment, &mut findings);
+        if mentions_intrusion_tool(segment) && !findings.contains(&Finding::OffensiveTool) {
+            findings.push(Finding::OffensiveTool);
+        }
         if depth >= 3 {
             continue;
         }
@@ -447,6 +455,25 @@ fn normalise_binary(token: &str) -> String {
         .or_else(|| without_path.strip_suffix(".ps1"))
         .unwrap_or(&without_path)
         .to_owned()
+}
+
+/// Tools the IDE can install for an authorized test. A known interpreter
+/// (`python`, `node`) must not hide them: the name is what matters.
+fn mentions_intrusion_tool(segment: &Segment) -> bool {
+    const NAMES: &[&str] = &[
+        "nmap", "sqlmap", "nuclei", "nikto", "ffuf", "gobuster", "httpx", "subfinder", "katana",
+        "dirsearch", "wafw00f", "sslyze", "testssl", "hydra", "masscan",
+    ];
+    let named = |token: &str| {
+        let base = token
+            .trim_matches(|c| c == '"' || c == '\'')
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(token);
+        let stem = base.split('.').next().unwrap_or(base).to_ascii_lowercase();
+        NAMES.contains(&stem.as_str()) || token.to_ascii_lowercase().contains("pentest-tools")
+    };
+    named(&segment.binary) || segment.arguments.iter().any(|argument| named(argument))
 }
 
 fn classify(segment: &Segment, findings: &mut Vec<Finding>) {
@@ -786,6 +813,9 @@ mod tests {
     fn an_unrecognised_binary_is_reported_rather_than_assumed_safe() {
         assert!(findings("./some-random-binary --go").contains(&Finding::UnknownBinary));
         assert!(!findings("cargo build").contains(&Finding::UnknownBinary));
+        assert!(findings("python sqlmap.py --version").contains(&Finding::OffensiveTool));
+        assert!(findings("nmap --version").contains(&Finding::OffensiveTool));
+        assert!(!findings("python -m pip --version").contains(&Finding::OffensiveTool));
     }
 
     #[test]

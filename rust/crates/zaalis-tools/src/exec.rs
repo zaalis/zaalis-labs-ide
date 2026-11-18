@@ -25,7 +25,7 @@ pub struct ExecTool {
 }
 
 #[derive(Debug)]
-struct ExecRuntimes {
+pub(crate) struct ExecRuntimes {
     entries: Mutex<HashMap<PathBuf, RuntimePair>>,
 }
 
@@ -40,6 +40,15 @@ impl ExecRuntimes {
         Ok(Self {
             entries: Mutex::new(entries),
         })
+    }
+
+    fn all(&self) -> Vec<Arc<ExecRuntime>> {
+        self.entries
+            .lock()
+            .expect("exec runtimes lock poisoned")
+            .values()
+            .map(|entry| Arc::clone(&entry.0))
+            .collect()
     }
 
     fn for_root(&self, root: &Path) -> Result<(Arc<ExecRuntime>, Arc<PtyRuntime>)> {
@@ -76,8 +85,36 @@ impl ExecTool {
     }
 }
 
+impl ToolRuntime {
+    /// Every background process the agents started, across workspaces.
+    pub async fn background_processes(&self) -> Vec<zaalis_exec::ProcessInfo> {
+        let runtimes = self.exec_runtimes.lock().expect("exec handle poisoned").clone();
+        let Some(runtimes) = runtimes else { return Vec::new() };
+        let mut all = Vec::new();
+        for runtime in runtimes.all() {
+            all.extend(runtime.list().await);
+        }
+        all.sort_by(|left, right| left.process_id.cmp(&right.process_id));
+        all
+    }
+
+    /// Stop a background process at the user's request. This is the user
+    /// acting, not the model, so the guard is not consulted.
+    pub async fn kill_background_process(&self, process_id: &str) -> Result<zaalis_exec::ProcessPoll> {
+        let runtimes = self.exec_runtimes.lock().expect("exec handle poisoned").clone();
+        let runtimes = runtimes.ok_or_else(|| ZaalisError::not_found("aucun processus"))?;
+        for runtime in runtimes.all() {
+            if runtime.list().await.iter().any(|process| process.process_id == process_id) {
+                return runtime.kill(process_id).await;
+            }
+        }
+        Err(ZaalisError::not_found(format!("processus inconnu : {process_id}")))
+    }
+}
+
 pub fn register_exec_tools(runtime: &mut ToolRuntime, exec: ExecRuntime) -> Result<()> {
     let runtimes = Arc::new(ExecRuntimes::new(exec)?);
+    *runtime.exec_runtimes.lock().expect("exec handle poisoned") = Some(Arc::clone(&runtimes));
     runtime.register(ExecTool {
         kind: ExecKind::Run,
         runtimes: Arc::clone(&runtimes),
@@ -104,7 +141,11 @@ struct RunInput {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 enum ProcessInput {
-    Start { command: String },
+    Start {
+        command: String,
+        #[serde(default)]
+        name: Option<String>,
+    },
     Poll { process_id: String },
     Write { process_id: String, input: String },
     Kill { process_id: String },
@@ -163,9 +204,9 @@ impl Tool for ExecTool {
                 ),
             ),
             ExecKind::Process => (
-                "Démarrer, interroger, alimenter ou arrêter un processus persistant.",
+                "Démarrer, interroger, alimenter ou arrêter un processus persistant (compilation longue, serveur, watcher, tests). Donne toujours un `name` court au démarrage : l'utilisateur voit la tâche dans Activité des agents et peut l'arrêter.",
                 json!({"type":"object","oneOf":[
-                    object(json!({"action":{"const":"start"},"command":{"type":"string"}}), &["action","command"]),
+                    object(json!({"action":{"const":"start"},"command":{"type":"string"},"name":{"type":"string","description":"Nom court affiché à l'utilisateur dans Activité des agents, ex. « Compilation app », « Serveur de dev », « Tests »"}}), &["action","command"]),
                     object(json!({"action":{"const":"poll"},"process_id":{"type":"string"}}), &["action","process_id"]),
                     object(json!({"action":{"const":"write"},"process_id":{"type":"string"},"input":{"type":"string"}}), &["action","process_id","input"]),
                     object(json!({"action":{"const":"kill"},"process_id":{"type":"string"}}), &["action","process_id"]),
@@ -201,7 +242,7 @@ impl Tool for ExecTool {
                 (AccessKind::Execute, args.command)
             }
             ExecKind::Process => match serde_json::from_value(input.clone())? {
-                ProcessInput::Start { command } => (AccessKind::Execute, command),
+                ProcessInput::Start { command, .. } => (AccessKind::Execute, command),
                 ProcessInput::Write { process_id, input } => {
                     validate_interactive_input(&input)?;
                     (
@@ -263,10 +304,14 @@ impl Tool for ExecTool {
                 (summary, serde_json::to_value(output)?)
             }
             ExecKind::Process => match serde_json::from_value(input)? {
-                ProcessInput::Start { command } => {
-                    let started = runtime.start(&command).await?;
+                ProcessInput::Start { command, name } => {
+                    let started = runtime.start_named(&command, name.as_deref()).await?;
                     (
-                        format!("Processus {} démarré", started.process_id),
+                        format!(
+                            "Processus {} démarré{}",
+                            started.process_id,
+                            started.label.as_deref().map(|label| format!(" ({label})")).unwrap_or_default()
+                        ),
                         serde_json::to_value(started)?,
                     )
                 }

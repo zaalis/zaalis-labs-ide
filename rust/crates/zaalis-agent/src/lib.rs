@@ -1361,14 +1361,14 @@ mod tests {
                 },
                 ToolContext {
                     agent_id: parent,
-                    permissions: PermissionSet::new(PermissionMode::Bypass),
+                    permissions: PermissionSet::new(PermissionMode::Supervised),
                     workspace: Workspace::open(&fixture.root).unwrap(),
                 },
                 CancellationToken::new(),
             )
             .await;
         let ToolDispatch::PermissionRequired(prompt) = dispatch else {
-            panic!("merge should require explicit approval: {dispatch:?}");
+            panic!("a supervised merge requires explicit approval: {dispatch:?}");
         };
         let merged = fixture
             .session

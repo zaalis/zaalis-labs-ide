@@ -94,27 +94,23 @@
     const navToolbar = el('div', 'ws-nav-toolbar');
     const navPrimary = el('div', 'ws-nav-primary');
     navPrimary.append(button(text('Nouveau chat', 'New chat'), 'plus', () => safelyNavigate(() => newConversation(activeKind())), 'ws-button ws-new-chat'));
-    const searchToggle = button(text('Rechercher des conversations', 'Search conversations'), 'search', () => {
-        searchBox.hidden = !searchBox.hidden;
-        searchToggle.setAttribute('aria-expanded', String(!searchBox.hidden));
-        if (!searchBox.hidden) searchInput.focus();
-        else { searchInput.value = ''; renderNavigation(); }
-    }, 'ws-icon-button');
-    searchToggle.setAttribute('aria-expanded', 'false');
-    navPrimary.append(searchToggle);
-    const searchBox = el('div', 'ws-nav-search'); searchBox.hidden = true;
+    const searchBox = el('div', 'ws-nav-search');
     const searchInput = el('input'); searchInput.type = 'search';
     searchInput.placeholder = text('Projets et conversations…', 'Projects and conversations…');
     searchInput.setAttribute('aria-label', text('Filtrer les projets et conversations', 'Filter projects and conversations'));
     searchInput.addEventListener('input', () => renderNavigation());
     searchInput.addEventListener('keydown', event => {
-        if (event.key === 'Escape') { event.stopPropagation(); searchToggle.click(); searchToggle.focus(); }
+        if (event.key === 'Escape' && searchInput.value) { event.stopPropagation(); searchInput.value = ''; renderNavigation(); }
     });
-    searchBox.append(searchInput, button(text('Historique complet', 'Full history'), null, () => window.ZaalisConversations?.open(searchInput.value), 'ws-nav-link'));
-    const shortcuts = el('div', 'ws-nav-shortcuts');
-    shortcuts.append(button(text('Tâches et mémoire', 'Tasks and memory'), 'tasks', () => window.ZaalisTaskCenter?.open(), 'ws-nav-link'),
-        button(text('Personnaliser', 'Customize'), 'settings', () => { byId('settings-btn').click(); setSettingsSection('appearance'); }, 'ws-nav-link'));
-    navToolbar.append(navPrimary, searchBox, shortcuts); navigation.before(navToolbar);
+    searchBox.append(searchInput);
+    navToolbar.append(navPrimary, searchBox); navigation.before(navToolbar);
+    const shortcuts = el('nav', 'ws-nav-footer');
+    shortcuts.setAttribute('aria-label', text('Raccourcis', 'Shortcuts'));
+    shortcuts.append(
+        button(text('Automatisations', 'Automations'), 'tasks', () => window.ZaalisTaskCenter?.open(), 'ws-nav-link'),
+        button(text('Personnaliser', 'Customize'), 'settings', () => { byId('settings-btn').click(); setSettingsSection('appearance'); }, 'ws-nav-link'),
+        button(text('Historique', 'History'), 'search', () => window.ZaalisConversations?.open(searchInput.value), 'ws-nav-link'));
+    navigation.after(shortcuts);
     const chatsTitle = el('span', 'ws-sidebar-title', text('Conversations', 'Conversations'));
     byId('project-btn').after(chatsTitle);
     const filesEmpty = el('div', 'ws-files-empty');
@@ -274,6 +270,7 @@
         mobileMenu.setAttribute('aria-expanded', 'false');
         updatePanels(); saveLayout();
         if (panel === 'files' && mode === 'editor') renderEditorFilesPane();
+        if (panel === 'agents') refreshProcesses();
         if (panel === 'terminal') {
             if (terminalSessionId) attachIntegratedTerminal(terminalSessionId).catch(showError);
             else openIntegratedTerminal().catch(showError);
@@ -410,18 +407,28 @@
         wrapper.classList.toggle('is-active', selected); row.classList.toggle('active', selected);
         if (selected) row.setAttribute('aria-current', 'page');
         const updated = Number(conv.updatedAt || conv.contentUpdatedAt || conv.createdAt || conv.id);
-        if (Number.isFinite(updated) && updated > 0) {
-            const days = Math.max(0, Math.floor((Date.now() - updated) / 86400000));
-            const age = el('time', 'ws-conversation-age', days < 1 ? text('auj.', 'today') : days < 30 ? `${days} ${text('j', 'd')}` : `${Math.floor(days / 30)} ${text('mois', 'mo')}`);
-            age.dateTime = new Date(updated).toISOString(); age.title = new Date(updated).toLocaleString(state.language === 'en' ? 'en-GB' : 'fr-FR');
-            wrapper.append(age);
-        }
+        if (Number.isFinite(updated) && updated > 0) row.title = new Date(updated).toLocaleString(state.language === 'en' ? 'en-GB' : 'fr-FR');
         wrapper.prepend(row); wrapper.append(createConversationMenu(kind, conv)); return wrapper;
     }
     const currentConversation = (kind = activeKind()) => (state[kind === 'agents' ? 'agentConversations' : 'conversations'] || []).find(c => c.id === state[kind === 'agents' ? 'currentAgentConvId' : 'currentConvId']);
     function createConversationMenu(kind, conv) {
         const control=button(text('Options de la conversation','Conversation options'), null,()=>window.ZaalisConversations?.menuFor(kind,conv,control),'ws-icon-button ws-conversation-options');
         control.replaceChildren(icon('more'));control.setAttribute('aria-haspopup','menu');control.setAttribute('aria-expanded','false');return control;
+    }
+    async function deleteProjectGroup(group) {
+        const count = group.items.length;
+        const ok = await customConfirm(count
+            ? text(`${count} conversation(s) seront supprimées. Les fichiers du dossier restent sur le disque.`, `${count} chat(s) will be deleted. Files in the folder stay on disk.`)
+            : text('Ce projet disparaît de la liste. Les fichiers du dossier restent sur le disque.', 'This project leaves the list. Files in the folder stay on disk.'), {
+            title: text('Supprimer ce projet ?', 'Delete this project?'),
+            okText: text('Supprimer', 'Delete'),
+            danger: true,
+        });
+        if (!ok) return;
+        try {
+            if (count && !await deleteProjectConversations(group.path)) return;
+            removeRecentProject(group.path);
+        } catch (error) { showError(error); }
     }
     function renderNavigation() {
         refreshEditorContext();
@@ -471,9 +478,9 @@
             visibleGroups++;
             if (!key) {
                 const freeHead = el('div', 'ws-nav-section-head ws-free-title');
-                freeHead.append(el('h2', 'ws-nav-section-title', text('Conversations', 'Conversations')),
+                freeHead.append(el('h2', 'ws-nav-section-title', text('Sans projet', 'No project')),
                     button(text('Nouveau chat sans projet', 'New chat without project'), 'plus', () => safelyNavigate(() => { clearProject({ preserveConversation: true }); newConversation('chat'); }), 'ws-icon-button'));
-                navigation.append(freeHead);
+                navigation.append(freeHead, el('p', 'ws-nav-note', text('Ces discussions ne sont liées à aucun dossier.', 'These chats are not attached to a folder.')));
                 for (const item of [...items].reverse()) navigation.append(conversationRow(item));
                 continue;
             }
@@ -516,6 +523,7 @@
                     { label: text('Ouvrir les fichiers', 'Open files'), run: () => safelyNavigate(async () => { if (await openProject(group.path, false, { preserveConversation: true })) setSidebarView('files'); }) },
                     { label: text('Copier le chemin', 'Copy path'), run: () => navigator.clipboard.writeText(group.path).catch(showError) },
                     { label: text('Historique et archives', 'History and archives'), run: () => window.ZaalisConversations?.open(group.path, true) },
+                    { label: text('Supprimer le projet et ses conversations', 'Delete the project and its chats'), danger: true, run: () => deleteProjectGroup(group) },
                 ]), 'ws-icon-button ws-project-options');
                 options.setAttribute('aria-haspopup', 'menu'); options.setAttribute('aria-expanded', 'false'); head.append(options);
             }
@@ -731,12 +739,40 @@
             if (path && panel === 'files' && mode === 'editor') renderEditorFilesPane(true);
         }
         if (event.type === 'artifact_created') registerArtifacts([event.artifact || event], kind);
+        if ((event.type === 'tool_done' || event.type === 'tool_started') && (event.tool === 'process' || event.tool === 'run')) refreshProcesses();
         if (!['text_delta', 'reasoning_delta'].includes(frame.type) || panel === 'agents') scheduleRefresh();
     }
+    var backgroundProcesses = [];
+    var processFetch = null;
+    async function refreshProcesses() {
+        if (processFetch) return processFetch;
+        processFetch = (async () => {
+            try {
+                const response = await fetch('/api/rust-core/processes');
+                if (!response.ok) return;
+                const data = await response.json();
+                const next = Array.isArray(data.processes) ? data.processes : [];
+                const changed = JSON.stringify(next.map(p => [p.process_id, p.running, p.exit_code])) !== JSON.stringify(backgroundProcesses.map(p => [p.process_id, p.running, p.exit_code]));
+                backgroundProcesses = next;
+                if (panel === 'agents' && (changed || next.some(p => p.running))) renderAgents();
+            } catch { /* The core may be restarting; the next poll retries. */ }
+            finally { processFetch = null; }
+        })();
+        return processFetch;
+    }
+    async function killProcess(item) {
+        try {
+            const response = await fetch('/api/rust-core/processes/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: item.sessionId, processId: item.process_id }) });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || text('Arrêt impossible', 'Could not stop'));
+        } catch (error) { showError(error); }
+        await refreshProcesses(); renderAgents();
+    }
+    setInterval(() => { if (panel === 'agents' && !document.hidden) refreshProcesses(); }, 3000);
     function renderAgents() {
         const pane = panes.agents;
         const agents = currentConversation()?.agentRuns || [];
-        window.ZaalisAgentActivity.render(pane, agents, { el, text, stop: async agent => {
+        window.ZaalisAgentActivity.render(pane, agents, { el, text, processes: backgroundProcesses, kill: killProcess, stop: async agent => {
                 try {
                     const response = await fetch('/api/rust-core/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: agent.sessionId, agentId: agent.parentId ? agent.id : undefined }) });
                     const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Annulation impossible');

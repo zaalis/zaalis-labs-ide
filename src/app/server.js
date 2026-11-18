@@ -3590,6 +3590,17 @@ app.get('/api/codestrale/models', async (req, res) => {
   }));
 });
 
+// Background processes the agents started (builds, dev servers, watchers),
+// listed in Agent activity with a stop button.
+app.get('/api/rust-core/processes', async (req, res) => {
+  try { res.json({ processes: await rustAgentBridge.processes(req.user.id) }); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+app.post('/api/rust-core/processes/kill', async (req, res) => {
+  try { res.json(await rustAgentBridge.killProcess(req.user.id, req.body?.sessionId, req.body?.processId)); }
+  catch (error) { res.status(error.status || 500).json({ error: error.message || String(error) }); }
+});
+
 app.post('/api/rust-core/decision', async (req, res) => {
   try {
     const result = await rustAgentBridge.decide(req.user.id, req.body || {});
@@ -3774,6 +3785,9 @@ async function rustAgentHttp(req, res, next) {
       mcpServers: await agentMcpServersFor(req.user),
       runtimeConfig: {
         githubReadOnly,
+        // git push / gh in the agent's shell use the connected account, like
+        // the user's own terminal — except in a project the user made read-only.
+        ...(githubReadOnly || req.isMobile || req.isTunnel ? {} : { githubToken: githubIntegration.token(req.user.id) || undefined }),
         ollamaUrl: sharedConfigForUser(req.user).ollamaUrl,
         ggufUrl: `http://127.0.0.1:${ENGINE_PORT}`,
         compatEndpoints: compatEndpointsFor(req.user),

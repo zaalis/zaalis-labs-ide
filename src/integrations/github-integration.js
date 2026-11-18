@@ -40,8 +40,28 @@ class GitHubIntegration {
       const at = Number.isFinite(reset) && reset > 0 ? new Date(reset).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '';
       throw Object.assign(Error(`Limite d’appels GitHub atteinte.${at ? ` Réessayez après ${at}.` : ' Réessayez plus tard.'}`), { status: 429 });
     }
-    if (!response.ok) throw Error(`GitHub : accès refusé ou opération impossible (HTTP ${response.status}). Vérifiez les permissions, la protection de branche et les limites API.`);
-    return response.status === 204 ? {} : response.json();
+    if (!response.ok) {
+      let detail = '';
+      try { const data = await response.json(); detail = [data.message, ...(Array.isArray(data.errors) ? data.errors.map(e => e.message || e.code || '') : [])].filter(Boolean).join(' · '); } catch {}
+      throw Object.assign(Error(`GitHub HTTP ${response.status}${detail ? ` : ${detail.slice(0, 500)}` : ''}. Vérifiez les permissions, la protection de branche et les limites API.`), { status: response.status });
+    }
+    if (response.status === 204) return {};
+    if (typeof response.text !== 'function') return response.json();
+    const text = await response.text();
+    try { return text ? JSON.parse(text) : {}; } catch { return { text: text.slice(0, 200000) }; }
+  }
+  /** The connected account's token, for `git` and `gh` in the agent's shell. */
+  token(id) {
+    try { const g = this.user(id).github; return g?.token && !g.reauth ? this.decrypt(g.token) : ''; } catch { return ''; }
+  }
+  /**
+   * Every repository the account can reach is available to the AI, like the
+   * `gh` CLI. A repository the user restricted stays restricted: "read" is
+   * read-only, "none" is blocked.
+   */
+  grantFor(id, repo) {
+    const grant = this.user(id).github?.permissions?.[String(repo || '').toLowerCase()];
+    return grant && ['none', 'read', 'write'].includes(grant.mode) ? grant : { mode: 'write', implicit: true };
   }
   status(id) { const user = this.user(id), g = user.github; return { connected: !!g?.token, reauth: !!g?.reauth, login: g?.login || '', deviceAvailable: !!(this.browserAuth?.available || user.githubClientId || this.clientId), method: user.githubClientId || this.clientId ? 'oauth' : 'github-cli', permissions: g?.permissions || {} }; }
   configure(id, clientId) {
@@ -104,6 +124,30 @@ class GitHubIntegration {
     }
     return { repositories, truncated: true };
   }
+  /**
+   * Any GitHub REST call (issues, releases, Actions, branches, repository
+   * creation…), with the account's token. Restricted repositories keep their
+   * restriction; everything else is what `gh api` would allow.
+   */
+  async api(id, input) {
+    const method = String(input.method || 'GET').toUpperCase();
+    if (!['GET', 'POST', 'PATCH', 'PUT', 'DELETE'].includes(method)) throw Error('Méthode HTTP invalide.');
+    let endpoint = String(input.endpoint || input.path || '').trim().replace(/^https:\/\/api\.github\.com/i, '');
+    if (!endpoint.startsWith('/')) endpoint = '/' + endpoint;
+    if (endpoint.length > 2000 || /\.\.|[\s\\]|^\/\//.test(endpoint)) throw Error('Endpoint GitHub invalide.');
+    const scoped = /^\/repos\/([\w.-]+)\/([\w.-]+)/i.exec(endpoint);
+    if (scoped) {
+      const grant = this.grantFor(id, `${scoped[1]}/${scoped[2]}`);
+      if (grant.mode === 'none') throw Error('Ce dépôt est bloqué pour l’IA dans Intégrations → GitHub.');
+      if (grant.mode === 'read' && method !== 'GET') throw Error('Ce dépôt est en lecture seule pour l’IA (Intégrations → GitHub).');
+    }
+    if (input.query && typeof input.query === 'object') {
+      const query = new URLSearchParams(Object.entries(input.query).map(([k, v]) => [k, String(v)])).toString();
+      if (query) endpoint += (endpoint.includes('?') ? '&' : '?') + query;
+    }
+    const body = method === 'GET' ? undefined : (input.body && typeof input.body === 'object' ? input.body : undefined);
+    return this.request(id, endpoint, method, body);
+  }
   async git(root, args, env = {}) {
     return (await run('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false', '-C', root, ...args], { windowsHide: true, timeout: 120000, maxBuffer: 8 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0', ...env } })).stdout.trim();
   }
@@ -125,7 +169,6 @@ class GitHubIntegration {
     let canonical = '';
     if (mode === 'write' && !remote.permissions?.push) throw Error('GitHub ne vous accorde pas l’écriture sur ce dépôt.');
     if (root) canonical = await this.verify(root, repo);
-    if (mode === 'write' && !canonical) throw Error('Associez et vérifiez le dossier local avant d’autoriser l’écriture.');
     this.save(id, u => { u.github.permissions ||= {}; u.github.permissions[repo] = { mode, root: canonical, id: remote.id }; });
     return this.status(id);
   }
@@ -139,15 +182,19 @@ class GitHubIntegration {
   }
   async action(id, root, input) {
     if (input.action === 'repos') {
-      const result = await this.repos(id), permissions = this.user(id).github?.permissions || {};
-      result.repositories = result.repositories.filter(r => ['read', 'write'].includes(permissions[r.name.toLowerCase()]?.mode)); return result;
+      const result = await this.repos(id);
+      result.repositories = result.repositories
+        .map(r => ({ ...r, access: this.grantFor(id, r.name).mode === 'read' || !r.canPush ? 'read' : this.grantFor(id, r.name).mode }))
+        .filter(r => r.access !== 'none');
+      return result;
     }
+    if (input.action === 'api') return this.api(id, input);
     const repo = String(input.repo || '').toLowerCase();
     if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) throw Error('Dépôt invalide.');
-    const grant = this.user(id).github?.permissions?.[repo];
-    if (!grant || !['read', 'write'].includes(grant.mode)) throw Error('Ce dépôt n’est pas autorisé dans les intégrations.');
+    const grant = this.grantFor(id, repo);
+    if (grant.mode === 'none') throw Error('Ce dépôt est bloqué pour l’IA dans Intégrations → GitHub.');
     const remote = await this.request(id, `/repos/${repo}`);
-    if (remote.id !== grant.id) throw Error('L’identité du dépôt a changé. Renouvelez son autorisation.');
+    if (!grant.implicit && grant.id && remote.id !== grant.id) throw Error('L’identité du dépôt a changé. Renouvelez son autorisation.');
     const base = `/repos/${repo}`;
     const branch = String(input.branch || remote.default_branch);
     if (!/^[\w./-]{1,200}$/.test(branch) || branch.includes('..') || branch.startsWith('-')) throw Error('Branche invalide.');
@@ -161,7 +208,7 @@ class GitHubIntegration {
     if (grant.mode !== 'write') throw Error('Lecture seule : toute écriture GitHub est refusée, y compris en mode autonome.');
     if (await this.readOnly(id, root)) throw Error('Le projet actif est en lecture seule.');
     const key = await this.verify(root, repo);
-    if (key !== grant.root) throw Error('Ce dossier n’est pas celui associé au dépôt. Aucune écriture effectuée.');
+    if (grant.root && key !== grant.root) throw Error('Ce dossier n’est pas celui associé au dépôt. Aucune écriture effectuée.');
     // Compare committed file names against the remote tree, as well as Git identity.
     const tree = await this.request(id, `${base}/git/trees/${encodeURIComponent(remote.default_branch)}?recursive=1`);
     if (tree.truncated) throw Error('Arborescence distante incomplète : vérification refusée.');

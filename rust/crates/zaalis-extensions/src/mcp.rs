@@ -182,6 +182,15 @@ impl McpRegistry {
         );
         Ok(())
     }
+    /// True only when the user named this tool in the server's allow list.
+    /// An empty list is not an allow-list: the guard then asks.
+    pub fn explicitly_listed(&self, server: &str, tool: &str) -> bool {
+        self.servers
+            .read()
+            .expect("MCP registry poisoned")
+            .get(server)
+            .is_some_and(|state| !state.config.allow.is_empty() && state.config.allows(tool))
+    }
     pub fn list(&self) -> Vec<String> {
         self.servers
             .read()
@@ -775,9 +784,11 @@ impl Tool for McpTool {
     }
     fn access(&self, input: &Value, context: &ToolContext) -> Result<AccessRequest> {
         let input: Input = serde_json::from_value(input.clone())?;
+        let listed = self.registry.explicitly_listed(&input.server, &input.tool);
         Ok(
             AccessRequest::new(context.agent_id.clone(), "mcp", AccessKind::Mcp)
-                .with_target(format!("{}:{}", input.server, input.tool)),
+                .with_target(format!("{}:{}", input.server, input.tool))
+                .sensitive(!listed),
         )
     }
     async fn execute(

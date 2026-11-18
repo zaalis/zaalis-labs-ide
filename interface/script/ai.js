@@ -2334,8 +2334,6 @@ async function applyWorkspaceSelection(selection, conv) {
     }
 }
 
-const PH_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
-
 // The AI tab currently shown (chat | agents) drives which conversations show.
 function activeKind() {
     const t = document.querySelector('.ai-tab.active');
@@ -2374,18 +2372,8 @@ function renderProjectPanelHistory(kind = activeKind()) {
         titleEl.textContent = conv.title;
         titleEl.addEventListener('click', () => loadConversation(kind, conv.id));
 
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = PH_TRASH;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            deleteConversation(kind, conv.id);
-        });
-
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
+        row.addEventListener('click', event => { if (event.target === row) loadConversation(kind, conv.id); });
         list.appendChild(row);
     });
 }
@@ -2452,6 +2440,35 @@ async function deleteConversation(kind, id) {
     }
     persistChats(kind);
     renderHistory();
+}
+
+async function deleteProjectConversations(projectPath) {
+    const lang = state.language || 'fr';
+    const folderName = String(projectPath || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    const items = ['chat', 'agents'].flatMap(kind => (typeof conversationsForProject === 'function' ? conversationsForProject(projectPath, folderName, kind) : []).map(conv => ({ kind, conv })));
+    for (const { kind, conv } of items) {
+        if (state[HIST[kind].current] === conv.id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+            toast(lang === 'en' ? 'Stop the running task before deleting this project.' : 'Arrêtez la tâche en cours avant de supprimer ce projet.');
+            return false;
+        }
+    }
+    for (const { kind, conv } of items) {
+        try {
+            const response = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}?kind=${encodeURIComponent(kind)}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+        } catch (error) { toast(error.message); return false; }
+        const cfg = HIST[kind];
+        state[cfg.store] = (state[cfg.store] || []).filter(item => item.id !== conv.id);
+        if (state[cfg.current] === conv.id) {
+            state[cfg.current] = null;
+            const box = $(cfg.container);
+            if (box) { box.innerHTML = ''; addMsg(box, 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg); }
+            if (kind === 'chat') { state.chatHistory = []; resetContextMeasure(); updateTokenMeter(); }
+        }
+        persistChats(kind);
+    }
+    renderHistory();
+    return true;
 }
 
 const newChatBtn = $('#new-chat-btn');

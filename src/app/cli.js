@@ -872,12 +872,13 @@ function applyOneHunk(content, search, replace) {
 function isDangerousCommand(cmd) {
   const c = String(cmd || '');
   return [
-    /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-rf?\b/i,
-    /\brmdir\s+\/s/i, /\bdel\s+\/[sq]/i, /remove-item\b[\s\S]*-recurse/i,
-    /\bgit\s+reset\s+--hard/i, /\bgit\s+clean\s+-[a-z]*f/i,
-    /\bgit\s+checkout\s+--\s/i, /\bgit\s+push\b[\s\S]*--force/i,
-    /\bformat\s+[a-z]:/i, /\bdiskpart\b/i, /\bnpm\s+publish\b/i, /\bshutdown\b/i,
-  ].some((re) => re.test(c));
+    // Only what would wreck the PC or shared history: autonomous mode
+    // runs everything else (rm -rf build, git reset, npm publish…).
+    /\b(?:rm|rmdir|rd|del|erase|remove-item|ri)\b[^|;&]*?\s["']?(?:\/\*?|~[\\/]?|\$home|%userprofile%|\$env:userprofile|[a-z]:[\\/]?\*?|[a-z]:[\\/](?:windows|program files)[^\s"']*|[a-z]:[\\/]users(?:[\\/][^\\/\s"']+)?(?:[\\/](?:desktop|bureau|documents|downloads|pictures|images|music|videos|onedrive))?[\\/]?|\/(?:c|d|e)\/?|\/(?:etc|usr|bin|boot|home|users)(?:\/[^\/\s]+)?\/?)["']?(?=\s|$)/i,
+    /\bformat\s+[a-z]:/i, /\bmkfs\b/i, /\bdiskpart\b/i, /\b(?:clear-disk|format-volume|initialize-disk)\b/i,
+    /\b(?:shutdown|reboot|poweroff|stop-computer|restart-computer)\b/i,
+    /\bgit\s+push\b[\s\S]*(?:--force\b|\s-f\b|--force-with-lease|\s\+\S)/i
+].some((re) => re.test(c));
 }
 
 async function confirmAction(desc, detail) {
