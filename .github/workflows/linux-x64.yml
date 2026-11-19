@@ -58,6 +58,7 @@ jobs:
         run: npm test
 
       - name: Start the packaged Electron desktop on X11
+        timeout-minutes: 3
         run: |
           if ! command -v xvfb-run >/dev/null || ! command -v xdotool >/dev/null; then
             sudo apt-get update
@@ -66,18 +67,31 @@ jobs:
           mkdir "$RUNNER_TEMP/zaalis-portable"
           tar -xzf native/installer/zaalis-linux-x64.tar.gz -C "$RUNNER_TEMP/zaalis-portable"
           export ZAALIS_PORT=31959 ZAALIS_DATA_DIR="$RUNNER_TEMP/zaalis-desktop-smoke"
-          xvfb-run -a bash -eu -o pipefail -c '
+          export XDG_CONFIG_HOME="$RUNNER_TEMP/zaalis-desktop-config"
+          timeout --kill-after=5s 85s xvfb-run -a bash -eu -o pipefail -c '
             "$RUNNER_TEMP/zaalis-portable/zaalis-ide" --disable-gpu > "$RUNNER_TEMP/zaalis-desktop.log" 2>&1 &
             pid=$!
-            trap "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true" EXIT
-            for attempt in {1..60}; do
+            stop_desktop() {
+              kill "$pid" 2>/dev/null || return 0
+              for attempt in {1..10}; do
+                kill -0 "$pid" 2>/dev/null || return 0
+                sleep 0.2
+              done
+              kill -KILL "$pid" 2>/dev/null || true
+            }
+            trap stop_desktop EXIT
+            for attempt in {1..40}; do
               kill -0 "$pid" 2>/dev/null || break
-              if curl -fsS "http://127.0.0.1:$ZAALIS_PORT/api/health" 2>/dev/null | grep -q desktop-launcher-v2 &&
-                 xdotool search --onlyvisible --name "zaalis IDE" >/dev/null 2>&1; then
+              if curl --max-time 1 -fsS "http://127.0.0.1:$ZAALIS_PORT/api/health" 2>/dev/null | grep -q desktop-launcher-v2 &&
+                 timeout 1s xdotool search --onlyvisible --name "zaalis IDE" >/dev/null 2>&1; then
+                echo "Portable Electron window is visible and its packaged server is ready."
                 exit 0
               fi
               sleep 1
             done
-            cat "$RUNNER_TEMP/zaalis-desktop.log"
+            logs="$XDG_CONFIG_HOME/zaalis/electron/logs"
+            for file in "$RUNNER_TEMP/zaalis-desktop.log" "$logs"/*.log; do
+              if [ -f "$file" ]; then tail -n 50 "$file"; fi
+            done
             exit 1
           '
