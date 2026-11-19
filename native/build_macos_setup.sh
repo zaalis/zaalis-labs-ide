@@ -26,6 +26,8 @@ with open(sys.argv[1], 'wb') as output:
         'CFBundleDisplayName': 'Installer zaalis IDE',
         'CFBundleExecutable': 'zaalis-setup',
         'CFBundlePackageType': 'APPL',
+        'CFBundleDevelopmentRegion': 'fr',
+        'CFBundleLocalizations': ['fr', 'en'],
         'CFBundleIconFile': 'AppIcon',
         'CFBundleShortVersionString': sys.argv[2],
         'CFBundleVersion': sys.argv[2],

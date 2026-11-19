@@ -308,6 +308,7 @@ function isDangerousCommand(cmd) {
 // Translations Dictionary
 const TRANSLATIONS = {
     fr: {
+        'auth-last-name': 'Nom',
         'agent-mode-label': 'Mode Agents',
         'settings-title': 'Configuration',
         'no-project': 'Aucun projet',
@@ -532,6 +533,7 @@ const TRANSLATIONS = {
         'ws-fork-disabled-none': 'Sélectionnez une conversation à consulter pour pouvoir la dériver.'
     },
     en: {
+        'auth-last-name': 'Last name',
         'agent-mode-label': 'Agent Mode',
         'settings-title': 'Settings',
         'no-project': 'No Project',
@@ -598,7 +600,7 @@ const TRANSLATIONS = {
         'api-keys-hint': 'Each cloud model requires its own API key. Ollama works without key.',
         'settings-performance-title': 'Performance',
         'settings-performance-hint': 'Choose the zaalis IDE local GGUF engine. Auto uses the best option detected on this machine.',
-        'settings-detected-label': 'Détectéd',
+        'settings-detected-label': 'Detected',
         'settings-engine-status-label': 'Engine status',
         'settings-gguf-engine-label': 'GGUF engine',
         'settings-gguf-engine-hint': 'Auto selects CUDA, Vulkan, or CPU for this machine.',
@@ -760,6 +762,7 @@ const TRANSLATIONS = {
 function updateLanguage() {
     const lang = state.language || 'fr';
     document.documentElement.lang = lang;
+    if (typeof applyControlLocale === 'function') applyControlLocale();
     if (typeof applyStaticLocale === 'function') applyStaticLocale();
     
     // Translate text elements

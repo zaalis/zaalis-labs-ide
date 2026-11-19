@@ -7,6 +7,12 @@ let bundleID = "fr.zaalis.ide"
 let accent = NSColor(srgbRed: 0.65, green: 0.61, blue: 0.85, alpha: 1)
 let muted = NSColor(srgbRed: 0.62, green: 0.62, blue: 0.68, alpha: 1)
 
+let installerUsesEnglish = Bundle.main.preferredLocalizations.first == "en"
+
+func installerText(_ french: String, _ english: String) -> String {
+    installerUsesEnglish ? english : french
+}
+
 struct InstallationError: LocalizedError {
     let message: String
     var errorDescription: String? { message }
@@ -23,7 +29,7 @@ func command(_ executable: String, _ arguments: [String]) throws {
     let data = output.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
     if process.terminationStatus != 0 {
-        throw InstallationError(message: String(data: data, encoding: .utf8) ?? "La vérification a échoué.")
+        throw InstallationError(message: String(data: data, encoding: .utf8) ?? installerText("La vérification a échoué.", "Verification failed."))
     }
 }
 
@@ -34,17 +40,17 @@ func validateApplication(_ source: URL) throws {
           let executable = info["CFBundleExecutable"] as? String,
           !executable.contains("/"),
           fm.isExecutableFile(atPath: source.appendingPathComponent("Contents/MacOS/" + executable).path) else {
-        throw InstallationError(message: "L’application zaalis IDE est absente ou endommagée. Téléchargez à nouveau l’installateur.")
+        throw InstallationError(message: installerText("L’application zaalis IDE est absente ou endommagée. Téléchargez à nouveau l’installateur.", "zaalis IDE is missing or damaged. Download the installer again."))
     }
     if let expected = Bundle.main.object(forInfoDictionaryKey: "ZaalisPayloadSeal") as? String {
         let seal = try Data(contentsOf: source.appendingPathComponent("Contents/_CodeSignature/CodeResources"))
         let actual = SHA256.hash(data: seal).map { String(format: "%02x", $0) }.joined()
-        guard actual == expected else { throw InstallationError(message: "Le paquet ne correspond pas à cet installateur.") }
+        guard actual == expected else { throw InstallationError(message: installerText("Le paquet ne correspond pas à cet installateur.", "The package does not match this installer.")) }
     }
     if let expected = Bundle.main.object(forInfoDictionaryKey: "ZaalisPayloadCode") as? String {
         let code = try Data(contentsOf: source.appendingPathComponent("Contents/MacOS/" + executable))
         guard SHA256.hash(data: code).map({ String(format: "%02x", $0) }).joined() == expected else {
-            throw InstallationError(message: "Le programme ne correspond pas à cet installateur.")
+            throw InstallationError(message: installerText("Le programme ne correspond pas à cet installateur.", "The application does not match this installer."))
         }
     }
     try command("/usr/bin/codesign", ["--verify", "--deep", "--strict", source.path])
@@ -60,7 +66,7 @@ func locatePayload(installer: URL, token: String, volumes: [URL]) throws -> URL 
             if fm.fileExists(atPath: payload.path) { return payload }
         }
     }
-    throw InstallationError(message: "Gardez l’image disque zaalis IDE ouverte pendant l’installation, puis réessayez.")
+    throw InstallationError(message: installerText("Gardez l’image disque zaalis IDE ouverte pendant l’installation, puis réessayez.", "Keep the zaalis IDE disk image mounted and try again."))
 }
 
 // Stage on the destination filesystem, verify the copy, then swap it into
@@ -75,21 +81,21 @@ func installApplication(source: URL, directory: URL, validate: (URL) throws -> V
     let backup = directory.appendingPathComponent(".zaalis-backup-\(UUID().uuidString).app")
     var backedUp = false
     defer { try? fm.removeItem(at: stage) }
-    progress("Copie de votre espace de travail…")
+    progress(installerText("Copie de votre espace de travail…", "Copying your workspace…"))
     try fm.copyItem(at: source, to: stage)
-    progress("Vérification de l’application…")
+    progress(installerText("Vérification de l’application…", "Verifying the app…"))
     try validate(stage)
     if fm.fileExists(atPath: target.path) {
         // A folder with this name is not necessarily our application.
         let info = NSDictionary(contentsOf: target.appendingPathComponent("Contents/Info.plist"))
         guard info?["CFBundleIdentifier"] as? String == bundleID else {
-            throw InstallationError(message: "Un autre élément nommé zaalis IDE existe dans ce dossier. Choisissez un autre emplacement.")
+            throw InstallationError(message: installerText("Un autre élément nommé zaalis IDE existe dans ce dossier. Choisissez un autre emplacement.", "This folder already contains another item named zaalis IDE. Choose a different location."))
         }
         try move(target, backup)
         backedUp = true
     }
     do {
-        progress("Mise en place dans Applications…")
+        progress(installerText("Mise en place dans Applications…", "Moving the app into Applications…"))
         try move(stage, target)
     } catch {
         if backedUp { try move(backup, target) }
@@ -107,16 +113,16 @@ func installTerminal(target: URL, home: URL = fm.homeDirectoryForCurrentUser) th
     let link = bin.appendingPathComponent("zaalis")
     let executable = target.appendingPathComponent("Contents/Resources/app/bundle/bin/zaalis")
     guard fm.isExecutableFile(atPath: executable.path) else {
-        throw InstallationError(message: "La commande Terminal est absente du paquet.")
+        throw InstallationError(message: installerText("La commande Terminal est absente du paquet.", "The package is missing the Terminal command."))
     }
     if (try? link.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
         let old = try fm.destinationOfSymbolicLink(atPath: link.path)
         guard old.hasSuffix("/zaalis IDE.app/Contents/Resources/app/bundle/bin/zaalis") else {
-            throw InstallationError(message: "Une autre commande zaalis existe déjà. Elle a été conservée.")
+            throw InstallationError(message: installerText("Une autre commande zaalis existe déjà. Elle a été conservée.", "An existing zaalis command was kept."))
         }
         try fm.removeItem(at: link)
     } else if fm.fileExists(atPath: link.path) {
-        throw InstallationError(message: "Une autre commande zaalis existe déjà. Elle a été conservée.")
+        throw InstallationError(message: installerText("Une autre commande zaalis existe déjà. Elle a été conservée.", "An existing zaalis command was kept."))
     }
     try fm.createSymbolicLink(at: link, withDestinationURL: executable)
     let profile = home.appendingPathComponent(".zprofile")
@@ -174,7 +180,7 @@ func selfTest() throws {
     do {
         _ = try installApplication(source: source, directory: conflict.deletingLastPathComponent(), validate: validate)
         throw InstallationError(message: "Unrelated application was replaced")
-    } catch let error as InstallationError where error.message.hasPrefix("Un autre élément") {}
+    } catch let error as InstallationError where error.message.hasPrefix(installerText("Un autre élément", "This folder already contains another item")) {}
     let cli = installed.appendingPathComponent("Contents/Resources/app/bundle/bin/zaalis")
     try fm.createDirectory(at: cli.deletingLastPathComponent(), withIntermediateDirectories: true)
     try "#!/bin/sh\n".write(to: cli, atomically: true, encoding: .utf8)
@@ -195,7 +201,7 @@ func selfTest() throws {
     do {
         try installTerminal(target: installed, home: home)
         throw InstallationError(message: "Existing command was replaced")
-    } catch let error as InstallationError where error.message.hasPrefix("Une autre commande") {}
+    } catch let error as InstallationError where error.message.hasPrefix(installerText("Une autre commande", "An existing zaalis command")) {}
     guard try String(contentsOf: link) == "another command" else { throw InstallationError(message: "Command lost") }
     let volume = root.appendingPathComponent("mounted-image")
     let payload = volume.appendingPathComponent(".payload/" + appName)
@@ -266,14 +272,14 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var terminal: NSButton!
     var launch: NSButton!
     var warnings = ""
-    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.16"
+    let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.17"
     let previewStep: Int?
 
     init(previewStep: Int? = nil) { self.previewStep = previewStep }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         window = NSWindow(contentRect: canvas.bounds, styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
-        window.title = "Installation de zaalis IDE"
+        window.title = installerText("Installation de zaalis IDE", "Installing zaalis IDE")
         window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = .black
         window.titlebarAppearsTransparent = true
@@ -281,20 +287,20 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.delegate = self
         window.center()
         add(label("●  ZAALIS  /  IDE", 14, .semibold, accent), 34, 70, 220, 30)
-        add(label("Créez. Codez.", 29, .bold, .white), 34, 238, 230, 42)
-        add(label("Allez plus loin.", 27, .semibold, muted), 34, 284, 235, 40)
-        add(label("VOTRE ESPACE\nDE TRAVAIL IA", 11, .semibold, muted), 36, 374, 225, 45)
+        add(label(installerText("Créez. Codez.", "Create. Code."), 29, .bold, .white), 34, 238, 230, 42)
+        add(label(installerText("Allez plus loin.", "Explore further."), 27, .semibold, muted), 34, 284, 235, 40)
+        add(label(installerText("VOTRE ESPACE\nDE TRAVAIL IA", "YOUR AI\nWORKSPACE"), 11, .semibold, muted), 36, 374, 225, 45)
         let rule = NSBox(frame: NSRect(x: 36, y: 352, width: 44, height: 2))
         rule.boxType = .custom; rule.fillColor = accent; rule.borderWidth = 0
         canvas.addSubview(rule)
         add(label("macOS  ·  \(version)", 11, .medium, muted), 35, 488, 220, 22)
         add(label("INSTALLATION", 10, .semibold, muted), 326, 43, 560, 20)
-        next = button("Continuer", #selector(advance), primary: true)
+        next = button(installerText("Continuer", "Continue"), #selector(advance), primary: true)
         next.frame = NSRect(x: 758, y: 558, width: 145, height: 36)
         next.keyEquivalent = "\r"
-        back = button("Retour", #selector(goBack))
+        back = button(installerText("Retour", "Back"), #selector(goBack))
         back.frame = NSRect(x: 643, y: 558, width: 103, height: 36)
-        cancel = button("Annuler", #selector(close))
+        cancel = button(installerText("Annuler", "Cancel"), #selector(close))
         cancel.frame = NSRect(x: 35, y: 558, width: 103, height: 36)
         cancel.keyEquivalent = "\u{1b}"
         [next!, back!, cancel!].forEach { canvas.addSubview($0) }
@@ -332,42 +338,42 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
         window.standardWindowButton(.closeButton)?.isEnabled = !installing
         switch step {
         case 0:
-            item(label("Bienvenue dans\nzaalis IDE", 34, .bold, .white), 0, 94)
-            item(label("Votre espace de création, de code et d’agents IA\nest prêt à prendre place sur votre Mac.", 16, .regular, muted), 118, 60)
-            item(label("Continuez pour installer l’application et ses composants\ndans votre dossier Applications.", 14, .regular, muted), 212, 60)
-            item(label("Chat & agents IA     ·     Éditeur & terminal     ·     Intégrations", 12, .medium, accent), 318, 45)
-            next.title = "Continuer"
+            item(label(installerText("Bienvenue dans\nzaalis IDE", "Welcome to\nzaalis IDE"), 34, .bold, .white), 0, 94)
+            item(label(installerText("Votre espace de création, de code et d’agents IA\nest prêt à prendre place sur votre Mac.", "Your workspace for coding and AI agents\nis ready to install on your Mac."), 16, .regular, muted), 118, 60)
+            item(label(installerText("Continuez pour installer l’application et ses composants\ndans votre dossier Applications.", "Continue to install the app and its components\nin your Applications folder."), 14, .regular, muted), 212, 60)
+            item(label(installerText("Chat & agents IA     ·     Éditeur & terminal     ·     Intégrations", "Chat & AI agents     ·     Editor & terminal     ·     Integrations"), 12, .medium, accent), 318, 45)
+            next.title = installerText("Continuer", "Continue")
         case 1:
-            item(label("Votre espace est prêt", 30, .bold, .white), 0, 50)
-            item(label("Choisissez où installer zaalis IDE sur ce Mac.", 15, .regular, muted), 62, 40)
-            item(label("EMPLACEMENT", 10, .semibold, muted), 124, 20)
+            item(label(installerText("Votre espace est prêt", "Ready to install"), 30, .bold, .white), 0, 50)
+            item(label(installerText("Choisissez où installer zaalis IDE sur ce Mac.", "Choose where to install zaalis IDE on this Mac."), 15, .regular, muted), 62, 40)
+            item(label(installerText("EMPLACEMENT", "LOCATION"), 10, .semibold, muted), 124, 20)
             destination = NSPopUpButton(frame: .zero, pullsDown: false)
-            destination.addItems(withTitles: ["Applications — tous les utilisateurs", "Applications — mon compte uniquement"])
+            destination.addItems(withTitles: [installerText("Applications — tous les utilisateurs", "Applications — all users"), installerText("Applications — mon compte uniquement", "Applications — my account only")])
             if !fm.isWritableFile(atPath: "/Applications") { destination.selectItem(at: 1) }
             item(destination, 154, 34)
-            terminal = NSButton(checkboxWithTitle: "Installer la commande zaalis pour Terminal", target: nil, action: nil)
+            terminal = NSButton(checkboxWithTitle: installerText("Installer la commande zaalis pour Terminal", "Install the zaalis command for Terminal"), target: nil, action: nil)
             terminal.font = .systemFont(ofSize: 13)
             terminal.state = .off
             item(terminal, 220, 30)
-            item(label("Vos comptes, conversations et réglages sont conservés.\nL’application pourra être ouverte depuis Applications ou Spotlight.", 13, .regular, muted), 282, 70)
-            next.title = "Installer"
+            item(label(installerText("Vos comptes, conversations et réglages sont conservés.\nL’application pourra être ouverte depuis Applications ou Spotlight.", "Setup keeps your accounts, conversations, and settings.\nOpen zaalis IDE from Applications or Spotlight."), 13, .regular, muted), 282, 70)
+            next.title = installerText("Installer", "Install")
         case 2:
-            item(label("Installation de zaalis IDE", 29, .bold, .white), 0, 55)
-            item(label("Nous mettons en place votre espace de travail.\nCela peut prendre quelques instants.", 15, .regular, muted), 78, 65)
+            item(label(installerText("Installation de zaalis IDE", "Installing zaalis IDE"), 29, .bold, .white), 0, 55)
+            item(label(installerText("Nous mettons en place votre espace de travail.\nCela peut prendre quelques instants.", "Setting up your workspace.\nThis may take a moment."), 15, .regular, muted), 78, 65)
             let bar = NSProgressIndicator(frame: .zero)
             bar.style = .bar; bar.isIndeterminate = true
             item(bar, 196, 12); bar.startAnimation(nil)
-            status = label("Vérification du paquet…", 13, .medium, accent)
+            status = label(installerText("Vérification du paquet…", "Verifying the package…"), 13, .medium, accent)
             item(status!, 234, 65)
-            next.title = "Installation…"
+            next.title = installerText("Installation…", "Installing…")
         default:
-            item(label("zaalis IDE est prêt", 32, .bold, .white), 0, 55)
-            item(label("Installation terminée.\nVotre prochain projet commence ici.", 16, .regular, muted), 85, 70)
-            launch = NSButton(checkboxWithTitle: "Lancer zaalis IDE", target: nil, action: nil)
+            item(label(installerText("zaalis IDE est prêt", "zaalis IDE is ready"), 32, .bold, .white), 0, 55)
+            item(label(installerText("Installation terminée.\nVotre prochain projet commence ici.", "Installation complete.\nYou can start your next project."), 16, .regular, muted), 85, 70)
+            launch = NSButton(checkboxWithTitle: installerText("Lancer zaalis IDE", "Launch zaalis IDE"), target: nil, action: nil)
             launch.state = .on; launch.font = .systemFont(ofSize: 14)
             item(launch, 205, 35)
-            item(label(warnings.isEmpty ? "Retrouvez l’application dans Applications ou Spotlight." : warnings, 13, .regular, muted), 275, 110)
-            next.title = "Terminer"; cancel.isHidden = true
+            item(label(warnings.isEmpty ? installerText("Retrouvez l’application dans Applications ou Spotlight.", "Open the app from Applications or Spotlight.") : warnings, 13, .regular, muted), 275, 110)
+            next.title = installerText("Terminer", "Finish"); cancel.isHidden = true
         }
     }
     @objc func advance() {
@@ -394,9 +400,9 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let running = NSWorkspace.shared.runningApplications.filter { $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL.path == target.resolvingSymlinksInPath().standardizedFileURL.path }
         if !running.isEmpty {
             let alert = NSAlert()
-            alert.messageText = "Fermer zaalis IDE pour continuer ?"
-            alert.informativeText = "Enregistrez votre travail avant de remplacer l’application."
-            alert.addButton(withTitle: "Fermer et installer"); alert.addButton(withTitle: "Retour")
+            alert.messageText = installerText("Fermer zaalis IDE pour continuer ?", "Close zaalis IDE to continue?")
+            alert.informativeText = installerText("Enregistrez votre travail avant de remplacer l’application.", "Save your work before replacing the app.")
+            alert.addButton(withTitle: installerText("Fermer et installer", "Close and install")); alert.addButton(withTitle: installerText("Retour", "Back"))
             guard alert.runModal() == .alertFirstButtonReturn else { return }
             running.forEach { _ = $0.terminate() }
         }
@@ -409,10 +415,10 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     Thread.sleep(forTimeInterval: 0.2)
                 }
                 guard running.allSatisfy({ $0.isTerminated }) else {
-                    throw InstallationError(message: "zaalis IDE est encore ouvert. Fermez-le puis réessayez.")
+                    throw InstallationError(message: installerText("zaalis IDE est encore ouvert. Fermez-le puis réessayez.", "zaalis IDE is still open. Close it and try again."))
                 }
                 guard let token = Bundle.main.object(forInfoDictionaryKey: "ZaalisVolumeToken") as? String else {
-                    throw InstallationError(message: "Cet assistant doit être lancé depuis son image disque zaalis IDE.")
+                    throw InstallationError(message: installerText("Cet assistant doit être lancé depuis son image disque zaalis IDE.", "Open the installer from the zaalis IDE disk image."))
                 }
                 let source = try locatePayload(installer: Bundle.main.bundleURL, token: token,
                     volumes: fm.mountedVolumeURLs(includingResourceValuesForKeys: nil, options: []) ?? [])
@@ -422,7 +428,7 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 var warning = ""
                 if withTerminal {
                     do { try installTerminal(target: result) }
-                    catch { warning = "L’application est installée. Terminal : \(error.localizedDescription)" }
+                    catch { warning = installerText("L’application est installée. Terminal : \(error.localizedDescription)", "The app is installed. Terminal: \(error.localizedDescription)") }
                 }
                 DispatchQueue.main.async {
                     self.installed = result; self.warnings = warning; self.installing = false; self.step = 3; self.render()
@@ -431,9 +437,9 @@ final class Installer: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 DispatchQueue.main.async {
                     self.installing = false; self.step = 1; self.render()
                     let alert = NSAlert()
-                    alert.messageText = "L’installation n’a pas pu se terminer"
-                    alert.informativeText = error.localizedDescription + "\n\nVérifiez l’espace disponible et les droits d’accès au dossier Applications."
-                    alert.addButton(withTitle: "Réessayer"); alert.runModal()
+                    alert.messageText = installerText("L’installation n’a pas pu se terminer", "Installation could not finish")
+                    alert.informativeText = error.localizedDescription + installerText("\n\nVérifiez l’espace disponible et les droits d’accès au dossier Applications.", "\n\nCheck available disk space and permissions for the Applications folder.")
+                    alert.addButton(withTitle: installerText("Réessayer", "Try again")); alert.runModal()
                 }
             }
         }

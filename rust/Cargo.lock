@@ -4110,7 +4110,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-agent"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4133,7 +4133,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-agentd"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "dunce",
@@ -4163,7 +4163,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-checkpoint"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "dunce",
  "serde",
@@ -4176,7 +4176,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-cli"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "clap",
  "rustyline",
@@ -4188,7 +4188,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-core"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -4198,7 +4198,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-exec"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "dunce",
  "portable-pty",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-extensions"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "dunce",
@@ -4237,7 +4237,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-fs"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "dunce",
  "globset",
@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-git"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "dunce",
  "serde",
@@ -4261,7 +4261,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-guard"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "base64",
@@ -4274,7 +4274,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-hardening"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "libc",
  "serde",
@@ -4283,7 +4283,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-netpolicy"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "serde",
  "tokio",
@@ -4292,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-protocol"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "serde",
  "serde_json",
@@ -4303,7 +4303,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-providers"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -4318,21 +4318,21 @@ dependencies = [
 
 [[package]]
 name = "zaalis-sandbox-helper"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "nono",
 ]
 
 [[package]]
 name = "zaalis-secrets"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "zaalis-store"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -4351,7 +4351,7 @@ dependencies = [
 
 [[package]]
 name = "zaalis-tools"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "base64",

@@ -834,14 +834,15 @@ function renderBlender(status) {
     const state = status ? status.state : '';
     const name = status && status.version ? `Blender ${status.version}` : 'Blender';
     const needsAddon = status && status.addon && !status.addon.installed;
+    const en = window.document.documentElement.lang === 'en';
     label.textContent = !status ? uiText('État de Blender indisponible')
         : state === 'missing' ? uiText('Blender n’est pas installé sur ce PC')
-        : state === 'unsupported' ? `${name} détecté — la version ${status.minVersion} ou plus récente est requise`
-        : state === 'install' ? `${name} détecté — add-on MCP à ${needsAddon ? uiText('installer') : uiText('activer')}`
+        : state === 'unsupported' ? (en ? `${name} detected. Version ${status.minVersion} or later is required.` : `${name} détecté — la version ${status.minVersion} ou plus récente est requise`)
+        : state === 'install' ? (en ? `${name} detected. ${needsAddon ? 'Install' : 'Enable'} the MCP add-on.` : `${name} détecté — add-on MCP à ${needsAddon ? 'installer' : 'activer'}`)
         : !status.connected ? `${name} ${uiText('est prêt — non activé')}`
-        : status.reachable ? `Activé — ${name} est ouvert et répond`
+        : status.reachable ? (en ? `Enabled — ${name} is running and responding` : `Activé — ${name} est ouvert et répond`)
         : blenderStarting ? uiText('Activé — Blender démarre…')
-        : status.running ? `Activé — Blender est ouvert mais son add-on ne répond pas (port ${status.port})`
+        : status.running ? (en ? `Enabled — Blender is running but the add-on is unresponsive (port ${status.port})` : `Activé — Blender est ouvert mais son add-on ne répond pas (port ${status.port})`)
         : uiText('Activé — Blender est fermé');
     const ready = state === 'ready';
     $('#blender-install').hidden = state !== 'install';
@@ -867,13 +868,14 @@ function renderBlenderInstall() {
     if (!modal || !modal.classList.contains('active')) return;
     const status = blenderStatus;
     const setCheck = (id, state, text) => { const item = $('#' + id); item.dataset.state = state; item.querySelector('.blender-check-text').textContent = text; };
+    const en = state.language === 'en';
     const found = !!(status && status.found);
     const supported = found && status.state !== 'unsupported';
     setCheck('blender-check-version', !status ? 'pending' : supported ? 'ok' : 'error',
         !status ? uiText('Recherche de Blender…')
-            : !found ? 'Blender est introuvable sur ce PC.'
-            : supported ? `Blender ${status.version} détecté (version ${status.minVersion} ou plus récente requise).`
-            : `Blender ${status.version} est trop ancien : la version ${status.minVersion} ou plus récente est requise.`);
+            : !found ? uiText('Blender est introuvable sur ce PC.')
+            : supported ? (en ? `Blender ${status.version} detected (requires ${status.minVersion} or later).` : `Blender ${status.version} détecté (version ${status.minVersion} ou plus récente requise).`)
+            : (en ? `Blender ${status.version} is too old. Version ${status.minVersion} or later is required.` : `Blender ${status.version} est trop ancien : la version ${status.minVersion} ou plus récente est requise.`));
     const closed = supported && !status.running;
     setCheck('blender-check-closed', !supported ? 'pending' : closed ? 'ok' : 'error',
         !supported || closed ? uiText('Blender est fermé.') : uiText('Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).'));
@@ -887,7 +889,7 @@ function renderBlenderInstall() {
             : `Installer le pont Blender Zaalis (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`);
     const busy = modal.dataset.busy === 'true';
     $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
-    $('#blender-install-confirm').textContent = busy ? 'Installation…' : uiText('Installer');
+    $('#blender-install-confirm').textContent = busy ? uiText('Installation…') : uiText('Installer');
     $('#blender-install-cancel').disabled = busy;
     $('#blender-consent').disabled = busy;
 }

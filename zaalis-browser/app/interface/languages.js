@@ -8,7 +8,7 @@
     no: 'Norvégien', nb: 'Norvégien', fi: 'Finnois', cs: 'Tchèque', ro: 'Roumain', hu: 'Hongrois', el: 'Grec', he: 'Hébreu', uk: 'Ukrainien',
     hi: 'Hindi', th: 'Thaï', vi: 'Vietnamien', id: 'Indonésien', ca: 'Catalan', hr: 'Croate', bg: 'Bulgare', sk: 'Slovaque', sl: 'Slovène',
     lt: 'Lituanien', lv: 'Letton', et: 'Estonien', af: 'Afrikaans', sq: 'Albanais', hy: 'Arménien', fa: 'Persan', sr: 'Serbe', ta: 'Tamoul', cy: 'Gallois', fo: 'Féroïen', sh: 'Serbo-croate', tg: 'Tadjik', tk: 'Turkmène' };
-  const label = (code) => { const [l, r] = String(code).split('-'); return (LABELS[l] || code) + (r ? ' (' + r + ')' : ''); };
+  const label = (code) => { const [l, r] = String(code).split('-'); return zx.languageName(code, (LABELS[l] || code) + (r ? ' (' + r + ')' : '')); };
 
   function chips(list, kind, nameOf) {
     if (!list.length) return '<span class="zx-muted">Aucun</span>';
@@ -27,13 +27,13 @@
   function renderSp() {
     $('spell-on').classList.toggle('on', !!sp.enabled);
     $('spell-hint').textContent = sp.platform === 'darwin'
-      ? 'macOS : le correcteur du système choisit automatiquement la langue.'
-      : 'Langues actives : ' + (sp.active.map(label).join(', ') || 'aucune');
+      ? zx.text('macOS : le correcteur du système choisit automatiquement la langue.', 'macOS chooses the spell-check language automatically.')
+      : zx.text('Langues actives : ', 'Active languages: ') + (sp.active.map(label).join(', ') || zx.text('aucune', 'none'));
     const box = $('spell-langs');
     if (sp.platform === 'darwin' || !sp.available.length) { box.innerHTML = ''; return; }
     const chosen = new Set(sp.languages.map(c => c.toLowerCase()));
     const activeSet = new Set(sp.active.map(c => c.toLowerCase()));
-    const list = sp.available.slice().sort((a, b) => label(a).localeCompare(label(b), 'fr'));
+    const list = sp.available.slice().sort((a, b) => label(a).localeCompare(label(b), document.documentElement.lang || 'fr'));
     box.innerHTML = '<div class="zx-row" style="flex-wrap:wrap;gap:6px 18px">' + list.map(c => {
       const on = activeSet.has(c.toLowerCase()) || chosen.has(c.toLowerCase());
       return '<label style="display:flex;align-items:center;gap:6px;min-width:190px"><input type="checkbox" data-lang="' + esc(c) + '"' + (on ? ' checked' : '') + '>' + esc(label(c)) + '</label>';

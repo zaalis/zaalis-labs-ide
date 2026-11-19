@@ -1,7 +1,7 @@
 // Page zaalis://sync (src/features/sync.js).
 (function () {
   'use strict';
-  const $ = zx.$, esc = zx.esc;
+  const { $, esc, text } = zx;
   let st = null, nameTimer = 0;
 
   function render(s) {
@@ -17,7 +17,7 @@
     const stt = s.status || {};
     $('st-t').textContent = stt.state === 'error' ? 'Problème de synchronisation' : 'La synchronisation est activée';
     $('st-t').style.color = stt.state === 'error' ? 'var(--danger)' : '';
-    $('st-s').textContent = stt.state === 'error' ? stt.error : (stt.lastSync ? 'Dernière synchronisation : ' + zx.fmtDate(stt.lastSync) : 'En attente…');
+    $('st-s').textContent = stt.state === 'error' ? stt.error : (stt.lastSync ? text('Dernière synchronisation : ', 'Last synced: ') + zx.fmtDate(stt.lastSync) : 'En attente…');
     $('cur-folder').textContent = s.folder;
     if (document.activeElement !== $('dev-name')) $('dev-name').value = s.deviceName;
     $('colls').innerHTML = s.collections.map(c => '<div class="zx-row"><div class="grow"><div class="t">' + esc(c.label) + '</div>' +
@@ -26,7 +26,7 @@
     const devs = s.devices || [];
     $('devices').innerHTML = devs.length ? devs.map(d => '<div class="zx-row" style="align-items:flex-start"><div class="grow">' +
       '<div class="t">' + esc(d.name) + (d.error ? ' <span class="zx-badge err">illisible</span>' : '') + '</div>' +
-      '<div class="s">' + (d.updatedAt ? 'Mis à jour ' + esc(zx.fmtDate(d.updatedAt)) : '') + (d.platform ? ' · ' + esc(d.platform) : '') + '</div>' +
+      '<div class="s">' + (d.updatedAt ? text('Mis à jour ', 'Updated ') + esc(zx.fmtDate(d.updatedAt)) : '') + (d.platform ? ' · ' + esc(d.platform) : '') + '</div>' +
       '<div class="dev-tabs">' + (d.tabs.length ? d.tabs.map(t => '<a data-url="' + esc(t.url) + '" title="' + esc(t.url) + '">' + esc(t.title || t.url) + '</a>').join('') : '<span class="zx-muted">Aucun onglet ouvert</span>') + '</div>' +
       '</div></div>').join('') : '<div class="zx-empty">Aucun autre appareil ne s\'est encore synchronisé avec ce dossier.</div>';
   }
