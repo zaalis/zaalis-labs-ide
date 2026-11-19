@@ -270,6 +270,7 @@
         mobileMenu.setAttribute('aria-expanded', 'false');
         updatePanels(); saveLayout();
         if (panel === 'files' && mode === 'editor') renderEditorFilesPane();
+        if (panel === 'agents') refreshProcesses();
         if (panel === 'terminal') {
             if (terminalSessionId) attachIntegratedTerminal(terminalSessionId).catch(showError);
             else openIntegratedTerminal().catch(showError);
@@ -738,12 +739,40 @@
             if (path && panel === 'files' && mode === 'editor') renderEditorFilesPane(true);
         }
         if (event.type === 'artifact_created') registerArtifacts([event.artifact || event], kind);
+        if ((event.type === 'tool_done' || event.type === 'tool_started') && (event.tool === 'process' || event.tool === 'run')) refreshProcesses();
         if (!['text_delta', 'reasoning_delta'].includes(frame.type) || panel === 'agents') scheduleRefresh();
     }
+    var backgroundProcesses = [];
+    var processFetch = null;
+    async function refreshProcesses() {
+        if (processFetch) return processFetch;
+        processFetch = (async () => {
+            try {
+                const response = await fetch('/api/rust-core/processes');
+                if (!response.ok) return;
+                const data = await response.json();
+                const next = Array.isArray(data.processes) ? data.processes : [];
+                const changed = JSON.stringify(next.map(p => [p.process_id, p.running, p.exit_code])) !== JSON.stringify(backgroundProcesses.map(p => [p.process_id, p.running, p.exit_code]));
+                backgroundProcesses = next;
+                if (panel === 'agents' && (changed || next.some(p => p.running))) renderAgents();
+            } catch { /* The core may be restarting; the next poll retries. */ }
+            finally { processFetch = null; }
+        })();
+        return processFetch;
+    }
+    async function killProcess(item) {
+        try {
+            const response = await fetch('/api/rust-core/processes/kill', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: item.sessionId, processId: item.process_id }) });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || text('Arrêt impossible', 'Could not stop'));
+        } catch (error) { showError(error); }
+        await refreshProcesses(); renderAgents();
+    }
+    setInterval(() => { if (panel === 'agents' && !document.hidden) refreshProcesses(); }, 3000);
     function renderAgents() {
         const pane = panes.agents;
         const agents = currentConversation()?.agentRuns || [];
-        window.ZaalisAgentActivity.render(pane, agents, { el, text, stop: async agent => {
+        window.ZaalisAgentActivity.render(pane, agents, { el, text, processes: backgroundProcesses, kill: killProcess, stop: async agent => {
                 try {
                     const response = await fetch('/api/rust-core/cancel', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: agent.sessionId, agentId: agent.parentId ? agent.id : undefined }) });
                     const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Annulation impossible');

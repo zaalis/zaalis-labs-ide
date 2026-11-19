@@ -38,6 +38,28 @@ function taskFixture(t, concurrency = 2) {
     done: (user, id) => tasks.active.get(`${user}:${id}`).done };
 }
 
+test('editing or resuming a finished one-time task does not schedule it again', async t => {
+  const f = taskFixture(t);
+  const runAt = new Date(f.now() + 60000).toISOString();
+  const task = f.create('alice', { runAt });
+  assert.equal(f.tasks.update('alice', task.id, { title: 'Renamed' }).nextRunAt, Date.parse(runAt));
+
+  f.advance(60000);
+  await f.tasks.tick();
+  const done = f.done('alice', task.id);
+  f.calls[0].resolve({ response: 'ok' });
+  await done;
+
+  assert.equal(f.tasks.update('alice', task.id, { title: 'Finished', runAt }).nextRunAt, null);
+  f.tasks.update('alice', task.id, { enabled: false });
+  assert.equal(f.tasks.update('alice', task.id, { enabled: true }).nextRunAt, null);
+  await f.tasks.tick();
+  assert.equal(f.calls.length, 1);
+
+  const later = new Date(f.now() + 60000).toISOString();
+  assert.equal(f.tasks.update('alice', task.id, { runAt: later }).nextRunAt, Date.parse(later));
+});
+
 test('conversation pins survive legacy transcript saves and remain scoped to account and kind', t => {
   const { conversations: store } = fixture(t);
   const original = store.create('alice', { kind: 'agents', title: 'Analyse' }, 'pinned-team');

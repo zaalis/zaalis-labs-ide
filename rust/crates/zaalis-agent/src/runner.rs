@@ -17,7 +17,12 @@ use zaalis_providers::{
 };
 use zaalis_tools::{ToolContext, ToolDispatch, ToolInvocation};
 
-const MAX_RUNTIME_ROUNDS: u32 = 500;
+/// A safety net against a runaway loop, not a work limit: a real task can run
+/// for hours (hundreds of rounds), like a Codex session.
+const MAX_RUNTIME_ROUNDS: u32 = 5_000;
+/// Consecutive provider failures (cut stream, 5xx, rate limit) retried before
+/// the turn gives up. A long autonomous task must survive a network blip.
+const MAX_ROUND_RETRIES: u32 = 6;
 const COMPUTER_CAPTURE_PROMPT: &str =
     "[Capture actuelle du bureau — utilise cette image pour poursuivre le contrôle.]";
 /// Label of the vision message carrying images that tools other than the
@@ -27,8 +32,6 @@ const TOOL_IMAGES_PROMPT_PREFIX: &str = "[Images renvoyées par les outils";
 /// for "before / after" or a few views, bounded so a request stays affordable.
 const MAX_IMAGES_PER_CALL: usize = 4;
 const MAX_IMAGES_PER_ROUND: usize = 8;
-/// The tools a desktop-control turn keeps.
-const DESKTOP_TOOLS: [&str; 7] = ["computer", "mcp", "skill", "tool_search", "tool_describe", "tool_call", "request_user_input"];
 /// The tools kept when the model's context window cannot hold the whole
 /// catalogue: enough to explore, edit and verify a project.
 const ESSENTIAL_TOOLS: [&str; 23] = [
@@ -81,20 +84,29 @@ pub(crate) fn announces_pending_action(text: &str) -> bool {
 /// The desktop-mode instructions, naming the tools the turn actually has.
 fn desktop_mode_prompt(tools: &[zaalis_tools::ToolDefinition]) -> String {
     let has = |name: &str| tools.iter().any(|tool| tool.name == name);
-    let mut prompt = String::from("\n\nMODE CONTRÔLE DU BUREAU : ");
-    if has("mcp") || has("skill") {
-        prompt.push_str("outils disponibles : computer");
-        if has("mcp") {
-            prompt.push_str(", mcp");
-        }
-        if has("skill") {
-            prompt.push_str(", skill");
-        }
-        prompt.push_str(". Quand un serveur MCP couvre l’application visée (Blender par exemple), passe par lui plutôt que par la souris : c’est plus fiable et plus rapide ; garde computer pour le reste du bureau. ");
-    } else {
-        prompt.push_str("seul l’outil computer est disponible. ");
+    let mut prompt = String::from("\n\nMODE CONTRÔLE DU BUREAU : tu pilotes le PC avec computer ET tu gardes tous tes autres outils");
+    let others: Vec<&str> = [
+        ("run", "run (commandes)"),
+        ("process", "process (tâches de fond)"),
+        ("read", "fichiers (read/write/edit)"),
+        ("browser", "browser"),
+        ("web_search", "web_search/web_fetch"),
+        ("workspace", "workspace (projet, GitHub)"),
+        ("mcp", "mcp"),
+        ("skill", "skill"),
+        ("spawn_agent", "sous-agents"),
+    ]
+    .iter()
+    .filter(|(name, _)| has(name))
+    .map(|(_, label)| *label)
+    .collect();
+    if !others.is_empty() {
+        prompt.push_str(" : ");
+        prompt.push_str(&others.join(", "));
     }
-    prompt.push_str("Regroupe les actions clavier sûres et déterministes lorsque l’état est déjà connu (par exemple ouvrir une nouvelle note puis saisir son texte), mais observe/inspecte après un changement d’écran important. Termine dès que le résultat demandé est confirmé afin d’économiser les appels au fournisseur.");
+    prompt.push_str(". Choisis le chemin le plus sûr : une commande, un fichier, une API ou un serveur MCP (Blender par exemple) bat une suite de clics ; garde computer pour ce qui n’existe qu’à l’écran. ");
+    prompt.push_str("Gestes de computer : click/double_click/triple_click (sélectionner une ligne), mouse_down/mouse_up (glisser précis, sélection longue), hold_key (maintenir une touche N secondes), cursor_position, clipboard_read/clipboard_write (coller un long texte, récupérer un texte copié), zoom (agrandir une zone pour lire un petit texte), batch (plusieurs gestes en un appel quand l’état est connu). ");
+    prompt.push_str("Après une action importante, inspect dit si l’écran a VRAIMENT changé : fie-toi à ce verdict. Termine dès que le résultat demandé est confirmé.");
     prompt
 }
 
@@ -159,6 +171,8 @@ pub(crate) async fn run_agent(
     let mut partial_reason = None;
     let mut tool_repairs = 0_u32;
     let mut action_nudged = false;
+    let mut round_retries = 0_u32;
+    let mut envelope_extended = false;
 
     if session.hook_agents.lock().await.insert(node.id.clone()) {
         execute_hooks(
@@ -205,23 +219,15 @@ pub(crate) async fn run_agent(
         if turn_rounds >= if node.parent_id.is_some() { 250 } else { MAX_RUNTIME_ROUNDS } {
             return Err(ZaalisError::new(
                 zaalis_core::ErrorCode::BudgetExceeded,
-                "limite maximale des tours atteinte",
+                format!("limite de sécurité de {MAX_RUNTIME_ROUNDS} rounds atteinte"),
             ));
         }
 
-        let mut available_tools = session.tools.definitions_for_model();
+        // A desktop-control turn keeps the whole catalogue: a task that drives
+        // the screen often needs a command, a file, the web or GitHub along
+        // the way, and a shell or MCP call beats a dozen clicks.
+        let available_tools = session.tools.definitions_for_model();
         let desktop_control = available_tools.iter().any(|tool| tool.name == "computer");
-        if desktop_control {
-            // A desktop-control turn does not need filesystem, Git, terminal,
-            // checkpoint or web schemas. Advertising the whole IDE catalogue
-            // costs thousands of input tokens on every observe/click/type
-            // round, which is enough to exhaust entry-plan provider limits
-            // before the task can finish. The computer tool remains fully
-            // typed; only irrelevant choices are removed. MCP servers and
-            // Skills stay: an application with its own MCP server (Blender)
-            // is driven far more reliably through it than with the mouse.
-            available_tools.retain(|tool| DESKTOP_TOOLS.contains(&tool.name.as_str()));
-        }
         let mut runtime_system =
             system_prompt(&session, &node, planning, &files_changed);
         if desktop_control {
@@ -242,9 +248,12 @@ pub(crate) async fn run_agent(
         // A small window (a local model at 8K) cannot carry the whole IDE
         // catalogue and still leave room for the conversation. Keep the
         // essential tools rather than refusing the turn.
-        if input_budget < context / 4 && !desktop_control {
+        if input_budget < context / 4 {
             let before = tools.len();
-            tools.retain(|tool| ESSENTIAL_TOOLS.contains(&tool.name.as_str()));
+            tools.retain(|tool| {
+                ESSENTIAL_TOOLS.contains(&tool.name.as_str())
+                    || (desktop_control && matches!(tool.name.as_str(), "computer" | "mcp"))
+            });
             if tools.len() < before {
                 runtime_system.push_str(REDUCED_TOOLS_NOTE);
                 overhead = overhead_of(&runtime_system, &tools)?;
@@ -263,7 +272,20 @@ pub(crate) async fn run_agent(
         session.checkpoint_history(&node.id, &history).await;
         let estimated_input=(crate::context::estimate(&history)+overhead) as u64;
         let output=remaining_tokens(&node,&usage).unwrap_or(output_reserve as u32).min(output_reserve as u32);
-        let (mut reservation,allowed_output)=crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await?;
+        let (mut reservation,allowed_output)=match crate::envelope::Reservation::acquire(Arc::clone(&session),estimated_input,output).await {
+            Ok(acquired) => { envelope_extended = false; acquired }
+            // The shared token envelope is a budget like any other: ask (or,
+            // in autonomous mode, extend silently) instead of killing the task.
+            Err(error) if error.code == zaalis_core::ErrorCode::BudgetExceeded && !envelope_extended => {
+                envelope_extended = true;
+                if !request_budget(&session, &mut node, &mut usage, zaalis_core::BudgetLimit::Tokens, &cancel).await? {
+                    partial_reason = Some("budget tokens non prolongé".to_owned());
+                    break;
+                }
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         // Tools travel as a text protocol rather than natively (GGUF, Ollama
         // models without tool support): the answer may need a correction.
         let fallback_protocol = !capabilities.native_tools && !tools.is_empty();
@@ -281,11 +303,17 @@ pub(crate) async fn run_agent(
         usage.rounds = usage.rounds.saturating_add(1);
         session.update_usage(&node.id, usage).await;
         let mut telemetry = crate::telemetry::ProviderCall::new(session.config.usage_store.clone(), session.config.session_id.to_string(), node.model.provider.to_string(), node.model.model.clone().unwrap_or_default());
-        let mut stream = session
-            .providers
-            .stream_turn(request, cancel.clone())
-            .await
-            .map_err(ZaalisError::from)?;
+        let mut stream = match session.providers.stream_turn(request, cancel.clone()).await {
+            Ok(stream) => stream,
+            Err(error) if error.is_retryable() && round_retries < MAX_ROUND_RETRIES => {
+                reservation.settle(None).await;
+                telemetry.complete();
+                round_retries += 1;
+                wait_before_retry(&session, &node, &error, round_retries, &cancel).await?;
+                continue;
+            }
+            Err(error) => return Err(ZaalisError::from(error)),
+        };
 
         let mut text = String::new();
         let mut preview = crate::progress::ProgressPreview::default();
@@ -296,6 +324,7 @@ pub(crate) async fn run_agent(
         let mut usage_reported = false;
         let mut stop_reason = StopReason::EndTurn;
         let mut invalid_call: Option<String> = None;
+        let mut retry_after: Option<zaalis_providers::ProviderError> = None;
         while let Some(event) = stream.next().await {
             match event {
                 TurnEvent::TextDelta { text: delta } => {
@@ -326,6 +355,13 @@ pub(crate) async fn run_agent(
                 } => state = Some(provider_state),
                 TurnEvent::Completed { reason } => stop_reason = reason,
                 TurnEvent::Failed { error } => {
+                    // A stream cut halfway (network, 5xx, overload) is retried:
+                    // tools only run once a round completes, so replaying the
+                    // round cannot run anything twice.
+                    if error.is_retryable() && round_retries < MAX_ROUND_RETRIES && !cancel.is_cancelled() {
+                        retry_after = Some(error);
+                        break;
+                    }
                     session.events.emit(Event::ProviderError {
                         provider: node.model.provider,
                         agent_id: Some(node.id.clone()),
@@ -340,6 +376,13 @@ pub(crate) async fn run_agent(
         }
         reservation.settle(usage_reported.then_some(round_usage)).await;
         telemetry.complete();
+        if let Some(error) = retry_after {
+            close_stream_segments(&session, &mut timeline);
+            round_retries += 1;
+            wait_before_retry(&session, &node, &error, round_retries, &cancel).await?;
+            continue;
+        }
+        round_retries = 0;
         let pending_action = fallback_protocol && calls.is_empty() && !planning
             && !action_nudged && stop_reason != StopReason::MaxTokens
             && announces_pending_action(&text);
@@ -638,14 +681,9 @@ async fn execute_tool_raw(
         permissions: node.permissions.clone(),
         workspace: workspace_for_node(session, node)?,
     };
-    // Desktop schema reduction predates discovery and is an optimisation, not
-    // a new permission policy for direct calls. Discovery stays inside that
-    // advertised catalogue; target permissions still run in the shared guard.
-    let scoped_discovery = matches!(call.name.as_str(), "tool_search" | "tool_describe" | "tool_call")
-        && session.tools.definitions().iter().any(|tool| tool.name == "computer");
     let dispatch = session
         .tools
-        .invoke_scoped(
+        .invoke(
             ToolInvocation {
                 call_id: call_id.clone(),
                 name: call.name,
@@ -653,7 +691,6 @@ async fn execute_tool_raw(
             },
             context,
             cancel.clone(),
-            scoped_discovery.then_some(DESKTOP_TOOLS.as_slice()),
         )
         .await;
     let dispatch = match dispatch {
@@ -916,6 +953,29 @@ async fn request_plan(
     Ok(answer)
 }
 
+/// Tell the user a provider hiccup is being retried, then wait it out.
+async fn wait_before_retry(
+    session: &Arc<SessionInner>,
+    node: &AgentNode,
+    error: &zaalis_providers::ProviderError,
+    attempt: u32,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let backoff = 2_000_u64.saturating_mul(1_u64 << attempt.min(5));
+    let delay = error.retry_after_ms.unwrap_or(backoff).clamp(1_000, 90_000);
+    session.events.emit(Event::ProviderError {
+        provider: node.model.provider,
+        agent_id: Some(node.id.clone()),
+        code: error.code().into(),
+        message: format!("{} — nouvelle tentative {attempt}/{MAX_ROUND_RETRIES}, la tâche continue", error.message),
+        retry_in_ms: Some(delay),
+    });
+    tokio::select! {
+        () = cancel.cancelled() => Err(ZaalisError::cancelled()),
+        () = tokio::time::sleep(std::time::Duration::from_millis(delay)) => Ok(()),
+    }
+}
+
 async fn request_budget(
     session: &Arc<SessionInner>,
     node: &mut AgentNode,
@@ -923,6 +983,18 @@ async fn request_budget(
     limit: zaalis_core::BudgetLimit,
     cancel: &CancellationToken,
 ) -> Result<bool> {
+    // Autonomous modes never pause a task for a budget: a long job (hours,
+    // like a Codex session) keeps going until it is done or stopped.
+    if matches!(node.permissions.mode, PermissionMode::Auto | PermissionMode::Bypass) {
+        match limit {
+            zaalis_core::BudgetLimit::Tokens => node.budget.max_tokens = None,
+            zaalis_core::BudgetLimit::ToolCalls => node.budget.max_tool_calls = None,
+            zaalis_core::BudgetLimit::Rounds => node.budget.max_rounds = None,
+            zaalis_core::BudgetLimit::WallTime => node.budget.max_wall_time_ms = None,
+        }
+        session.update_runtime_limits(node).await;
+        return Ok(true);
+    }
     let request_id = RequestId::new();
     let receiver = session.interactions.wait_budget(request_id.clone())?;
     session.events.emit(Event::BudgetExhausted {

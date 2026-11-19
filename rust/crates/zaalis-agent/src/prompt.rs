@@ -94,6 +94,14 @@ pub(crate) fn system_prompt(
         prompt.push_str(
             "\n\nMODE PLAN: analyse et propose un plan précis. Ne modifie rien avant approbation.",
         );
+    } else if matches!(node.permissions.mode, zaalis_core::PermissionMode::Auto | zaalis_core::PermissionMode::Bypass) {
+        // Autonomous: the user gave full control and is not watching each step.
+        prompt.push_str(
+            "\n\nMODE AUTONOME : l'utilisateur t'a donné le contrôle total. Exécute toutes les commandes et modifications nécessaires sans demander, et va jusqu'au bout de la tâche, même si elle dure des heures : n'arrête pas pour annoncer la suite ni pour demander une confirmation, enchaîne directement l'outil suivant. Ne termine qu'une fois le résultat vérifié (build, tests, lancement) ou si un vrai blocage exige une décision de l'utilisateur. Seules les actions catastrophiques (effacer un disque, le profil utilisateur, Windows, éteindre le PC, push forcé, supprimer un dépôt GitHub) demandent encore une validation.",
+        );
+    }
+    if session.tools.definitions().iter().any(|t| t.name == "process") {
+        prompt.push_str("\n\nTÂCHES LONGUES : lance une compilation longue, un serveur de dev, un watcher ou une grosse suite de tests avec process start et un `name` court et clair (« Compilation app », « Serveur de dev », « Tests e2e ») : l'utilisateur la voit dans Activité des agents et peut l'arrêter. Suis-la avec process poll.");
     }
     if let Some(extensions) = &session.config.extensions {
         prompt.push_str(&extensions.skills.prompt_catalog());

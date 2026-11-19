@@ -28,7 +28,7 @@ impl GeminiConfig {
         Self {
             base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
             api_key: api_key.into(),
-            default_model: "gemini-3.5-flash".to_owned(),
+            default_model: "gemini-4-neon".to_owned(),
             capabilities: Capabilities {
                 reasoning: true,
                 streamed_reasoning: true,

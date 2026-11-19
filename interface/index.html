@@ -6,11 +6,12 @@
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
     <link rel="stylesheet" href="base.css?v=20261015.7">
-    <link rel="stylesheet" href="app.css?v=20261015.7">
-    <link rel="stylesheet" href="workspace.css?v=20261111.2">
+    <link rel="stylesheet" href="app.css?v=20261119.3">
+    <link rel="stylesheet" href="workspace.css?v=20261118.1">
     <link rel="stylesheet" href="collaboration.css?v=20261015.7">
-    <link rel="stylesheet" href="timeline.css?v=20261015.7">
+    <link rel="stylesheet" href="timeline.css?v=20261119.1">
     <link rel="stylesheet" href="splash.css?v=20261015.7">
+    <link rel="stylesheet" href="auth.css?v=20261119.3">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -21,30 +22,49 @@
 
 <!-- ===== AUTH OVERLAY (login / register) ===== -->
 <div id="auth-overlay">
+    <canvas class="auth-backdrop" aria-hidden="true"></canvas>
     <div class="auth-card">
         <div class="auth-logo">
             <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
             <span>zaalis IDE</span>
         </div>
-        <div class="auth-error" id="auth-error"></div>
+        <div class="auth-error" id="auth-error" role="alert"></div>
+        <div class="auth-notice" id="auth-notice" role="status"></div>
 
         <!-- Login -->
-        <form id="login-form" class="auth-form" autocomplete="off">
+        <form id="login-form" class="auth-form" autocomplete="off" novalidate>
             <h2>Connexion</h2>
-            <input type="email" id="login-email" placeholder="Adresse email" autocomplete="username" required>
-            <input type="password" id="login-password" placeholder="Mot de passe" autocomplete="current-password" required>
+            <p class="auth-sub">Heureux de vous revoir.</p>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="login-email" autocomplete="username" required></label>
+            <label class="auth-field"><span>Mot de passe</span><input type="password" id="login-password" autocomplete="current-password" required></label>
+            <a href="#" class="auth-forgot" id="show-forgot">Mot de passe oublié ?</a>
             <button type="submit" class="btn btn-primary auth-submit">Se connecter</button>
             <p class="auth-switch">Pas encore de compte ? <a href="#" id="show-register">Créer un compte</a></p>
         </form>
 
         <!-- Register -->
-        <form id="register-form" class="auth-form hidden" autocomplete="off">
+        <form id="register-form" class="auth-form hidden" autocomplete="off" novalidate>
             <h2>Créer un compte</h2>
-            <input type="email" id="reg-email" placeholder="Adresse email" autocomplete="username" required>
-            <input type="password" id="reg-password" placeholder="Mot de passe (6 caractères min.)" autocomplete="new-password" required>
-            <input type="password" id="reg-password2" placeholder="Confirmer le mot de passe" autocomplete="new-password" required>
+            <p class="auth-sub">Quelques informations pour commencer.</p>
+            <div class="auth-row">
+                <label class="auth-field"><span>Prénom</span><input type="text" id="reg-firstname" autocomplete="given-name" maxlength="60" required></label>
+                <label class="auth-field"><span>Nom</span><input type="text" id="reg-lastname" autocomplete="family-name" maxlength="60" required></label>
+            </div>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="reg-email" autocomplete="username" required></label>
+            <label class="auth-field"><span>Mot de passe</span><input type="password" id="reg-password" autocomplete="new-password" required></label>
+            <label class="auth-field"><span>Confirmer le mot de passe</span><input type="password" id="reg-password2" autocomplete="new-password" required></label>
+            <p class="auth-rule">8 caractères minimum, avec au moins une lettre et un chiffre.</p>
             <button type="submit" class="btn btn-primary auth-submit">Créer le compte</button>
             <p class="auth-switch">Déjà un compte ? <a href="#" id="show-login">Se connecter</a></p>
+        </form>
+
+        <!-- Forgotten password -->
+        <form id="forgot-form" class="auth-form hidden" autocomplete="off" novalidate>
+            <h2>Mot de passe oublié</h2>
+            <p class="auth-sub">Indiquez l’adresse de votre compte : une fenêtre s’ouvrira dans votre navigateur pour choisir un nouveau mot de passe.</p>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="forgot-email" autocomplete="username" required></label>
+            <button type="submit" class="btn btn-primary auth-submit">Ouvrir la fenêtre de réinitialisation</button>
+            <p class="auth-switch"><a href="#" id="forgot-back">Retour à la connexion</a></p>
         </form>
     </div>
 </div>
@@ -837,6 +857,7 @@
                     <h3 id="account-subscriptions-title">Compatibles abonnement</h3>
                     <p class="form-hint">Connectez votre compte directement sur le site du fournisseur. L’IDE garde les jetons chiffrés sur ce PC et affiche les modèles après la connexion. L’accès dépend du forfait et des droits accordés par le fournisseur.</p>
                     <div id="account-subscriptions" class="account-subscriptions"></div>
+                    <div id="vertex-subscription" class="account-subscriptions"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="skills">
@@ -1455,19 +1476,19 @@
 
 <script src="catalog.js?v=1.0.16"></script>
 <script src="help.js?v=1.0.17"></script>
-<script src="script/state.js?v=20261027.1" defer></script>
-<script src="script/locale.js?v=20261027.1" defer></script>
-<script src="script/ui.js?v=20261115.1" defer></script>
+<script src="script/state.js?v=20261118.1" defer></script>
+<script src="script/locale.js?v=20261119.2" defer></script>
+<script src="script/ui.js?v=20261119.2" defer></script>
 <script src="script/commands.js?v=20261027.1" defer></script>
-<script src="script/timeline.js?v=20261015.7" defer></script>
+<script src="script/timeline.js?v=20261119.1" defer></script>
 <script src="script/collaboration-ui.js?v=20261015.7" defer></script>
 <script src="script/pending-queue.js?v=20261015.7" defer></script>
 <script src="script/clarification.js?v=20261015.7" defer></script>
 <script src="script/markdown-tables.js?v=20261015.7" defer></script>
-<script src="script/ai.js?v=20261115.1" defer></script>
+<script src="script/ai.js?v=20261119.2" defer></script>
 <script src="script/remote.js?v=20261015.7" defer></script>
 <script src="script/ui-foundation.js?v=20261015.7" defer></script>
-<script src="script/main.js?v=20261027.1" defer></script>
+<script src="script/main.js?v=20261119.3" defer></script>
 <script src="script/agent-catalog.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
 <link rel="stylesheet" href="vm.css?v=20261112.1">
@@ -1478,16 +1499,16 @@
 <script src="script/vm.js?v=20261113.1" defer></script>
 <link rel="stylesheet" href="correction-memory.css?v=20261015.7">
 <script src="script/correction-memory.js?v=20261015.7" defer></script>
-<script src="script/agent-activity.js?v=20261015.7" defer></script>
-<script src="script/action-menu.js?v=20261015.7" defer></script>
-<script src="script/workspace.js?v=20261115.1" defer></script>
+<script src="script/agent-activity.js?v=20261118.1" defer></script>
+<script src="script/action-menu.js?v=20261119.1" defer></script>
+<script src="script/workspace.js?v=20261118.1" defer></script>
 <script src="script/conversation-actions.js?v=20261015.7" defer></script>
 <script src="script/task-center.js?v=20261115.1" defer></script>
 <link rel="stylesheet" href="profile-integrations.css?v=20261015.7">
 <script src="script/integration-catalog.js" defer></script>
 <script src="script/integration-setup.js" defer></script>
 <script src="script/agent-settings.js" defer></script>
-<script src="script/integrations.js?v=20261015.7" defer></script>
+<script src="script/integrations.js?v=20261118.1" defer></script>
 <script src="script/messengers.js?v=20261015.7" defer></script>
 <script src="script/token-profile.js?v=20261015.7" defer></script>
 <script src="script/welcome.js?v=20261015.7" defer></script>
@@ -1495,10 +1516,11 @@
 <link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
 <link rel="stylesheet" href="model-picker.css?v=20261111.1">
 <script src="script/settings-layout.js?v=20261113.1" defer></script>
-<script src="script/settings-persistence.js?v=20261015.7" defer></script>
+<script src="script/settings-persistence.js?v=20261119.1" defer></script>
+<script src="script/auth-backdrop.js?v=20261119.2" defer></script>
 <script src="script/inline-approval.js?v=20261015.7" defer></script>
 <script src="script/command-palette.js?v=20261015.7" defer></script>
-<script src="script/model-picker.js?v=20261113.2" defer></script>
+<script src="script/model-picker.js?v=20261119.1" defer></script>
 <script src="script/project-actions.js?v=20261015.7" defer></script>
 <script src="script/shell-layout.js?v=20261015.7" defer></script>
 <script src="script/ui-accessibility.js?v=20261015.7" defer></script>

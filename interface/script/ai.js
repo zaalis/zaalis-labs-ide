@@ -34,6 +34,17 @@ async function loadPermissionPreference() {
         const response = await fetch('/api/preferences');
         if (!response.ok) return;
         const preference = await response.json();
+        // The server holds the channel (it gates beta features): the interface
+        // follows it. A beta choice made before the server knew it is sent once.
+        if (preference.updateChannel === null && state.config.updateChannel === 'beta') {
+            const synced = await fetch('/api/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updateChannel: 'beta' }) }).catch(() => null);
+            if (synced && synced.ok && typeof loadCompatProviders === 'function') loadCompatProviders();
+        } else if (['stable', 'beta'].includes(preference.updateChannel) && state.config.updateChannel !== preference.updateChannel) {
+            state.config.updateChannel = preference.updateChannel;
+            saveState();
+            const channel = document.getElementById('settings-channel-select');
+            if (channel) { channel.value = preference.updateChannel; channel._customSelectRefresh?.(); }
+        }
         if (['plan', 'supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
             setPermissionMode(preference.permissionMode, false);
         } else {
@@ -454,19 +465,84 @@ document.addEventListener('click', e => {
 // Web links inside AI/system answers open in the integrated browser (globe
 // panel), so /deep-search sources stay in the same browsing workspace. Outside
 // the native app there is no integrated browser: the link opens normally.
-document.addEventListener('click', async e => {
-    const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
-    if (!a || !a.closest('#chat-messages, #agents-log')) return;
-    const href = a.href;
-    if (!href) return;
-    e.preventDefault();
+// Errors the user sees are short and clear; the technical cause goes to the
+// IDE error journal (server-data/logs/ide-errors.log).
+const TOAST_ALERT = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+const TOAST_OK = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+function reportIdeError({ source = 'interface', code = 'ui_error', title, message, detail = '', context = null, silent = false }) {
+    if (!silent) showToast(title || uiText('Action impossible'), message, { icon: TOAST_ALERT, duration: 7000 });
+    fetch('/api/error-log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, code, message, detail: String(detail || ''), context }) }).catch(() => {});
+}
+window.ZaalisErrorLog = { report: reportIdeError };
+
+const chatLinkAt = target => {
+    const a = target && target.closest && target.closest('a[href^="http://"], a[href^="https://"]');
+    return a && a.closest('#chat-messages, #agents-log') ? a : null;
+};
+async function openInIdeBrowser(href, { external = false } = {}) {
+    let detail = '';
     try {
-        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}`);
-        if (!r.ok) throw new Error('browser-open failed');
-    } catch {
-        window.open(href, '_blank', 'noopener,noreferrer');
+        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}${external ? '&external=1' : ''}`);
+        if (r.ok) return;
+        const data = await r.json().catch(() => ({}));
+        detail = `HTTP ${r.status} ${data.error || data.message || ''}`.trim();
+        // Outside the native app there is no integrated browser: a new tab is the expected fallback.
+        if (r.status === 503 && !external) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
+    } catch (error) { detail = error && error.message || String(error); }
+    reportIdeError({ source: 'browser', code: external ? 'external_open_failed' : 'link_open_failed',
+        title: uiText('Lien non ouvert'),
+        message: external ? uiText('Le navigateur externe n’a pas pu être lancé. Copiez le lien pour l’ouvrir vous-même.')
+            : uiText('Le navigateur intégré n’a pas pu ouvrir cette page. Réessayez, ou copiez le lien avec un clic droit.'),
+        detail, context: { host: (() => { try { return new URL(href).hostname; } catch { return ''; } })() } });
+}
+function copyWithSelection(value) {
+    const area = Object.assign(document.createElement('textarea'), { value });
+    area.setAttribute('readonly', ''); area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    const previous = document.activeElement;
+    document.body.append(area); area.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } finally { area.remove(); previous?.focus?.({ preventScroll: true }); }
+    if (!ok) throw new Error('execCommand copy refused');
+}
+async function copyLink(href) {
+    try {
+        // The async API first; a shell that refuses it still allows a copy of a selection.
+        try {
+            if (!navigator.clipboard || !window.isSecureContext) throw new Error('clipboard API unavailable');
+            await navigator.clipboard.writeText(href);
+        } catch (apiError) {
+            try { copyWithSelection(href); }
+            catch (fallbackError) { throw new Error(`${apiError.message} / ${fallbackError.message}`); }
+        }
+        showToast(uiText('Lien copié'), href.length > 90 ? href.slice(0, 87) + '…' : href, { icon: TOAST_OK, duration: 2500 });
+    } catch (error) {
+        reportIdeError({ source: 'clipboard', code: 'copy_failed', title: uiText('Copie impossible'),
+            message: uiText('Le presse-papiers a refusé la copie du lien. Réessayez après avoir cliqué dans la fenêtre.'), detail: error && error.message });
     }
+}
+document.addEventListener('click', e => {
+    const a = chatLinkAt(e.target);
+    if (!a || !a.href) return;
+    e.preventDefault();
+    openInIdeBrowser(a.href);
 });
+// Right-click on a link: open it here or outside, or copy it.
+document.addEventListener('contextmenu', e => {
+    const a = chatLinkAt(e.target);
+    if (!a || !a.href || !window.ZaalisActionMenu) return;
+    e.preventDefault();
+    const href = a.href;
+    window.ZaalisActionMenu.open(a, [
+        { label: uiText('Ouvrir dans le navigateur intégré'), run: () => openInIdeBrowser(href) },
+        { label: uiText('Ouvrir dans le navigateur externe'), run: () => openInIdeBrowser(href, { external: true }) },
+        { label: uiText('Copier le lien'), run: () => copyLink(href) },
+    ], { point: { x: e.clientX, y: e.clientY } });
+});
+// A site without a favicon keeps its row aligned, without a broken image.
+document.addEventListener('error', e => {
+    if (e.target && e.target.classList && e.target.classList.contains('tl-link-favicon')) e.target.classList.add('is-missing');
+}, true);
 
 function formatAIResponse(text) {
     if (isImageGenModel()) {

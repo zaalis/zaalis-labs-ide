@@ -246,7 +246,7 @@ function renderCompatModelOptions() {
         option.value = `compat:${provider.id}`;
         option.textContent = provider.label;
         option.title = `${provider.label} — ${provider.baseUrl}`;
-        if (provider.oauth) subscriptions.insertBefore(option, subscriptions.querySelector('option[data-action="subscription"]'));
+        if (provider.oauth || provider.subscription) subscriptions.insertBefore(option, subscriptions.querySelector('option[data-action="subscription"]'));
         else group.insertBefore(option, add);
     });
     if (String(wanted || '').startsWith('compat:') && select.value !== wanted
@@ -266,9 +266,14 @@ function renderCompatKeyFields() {
     if (!target) return;
     const en = state.language === 'en';
     target.replaceChildren();
+    // Vertex AI (beta) is a subscription-type account: it has its own block in
+    // the « Compatibles abonnement » section, emptied again outside the beta channel.
+    const vertexTarget = $('#vertex-subscription');
+    if (vertexTarget) vertexTarget.replaceChildren();
     window.compatProviders.forEach(provider => {
         // Signed in with an account, not a key: it has its own block above.
         if (provider.oauth) return;
+        if (provider.vertex) { vertexTarget?.appendChild(vertexSettingsRow(provider)); return; }
         const row = document.createElement('div');
         row.className = 'form-group';
         row.dataset.compatProvider = provider.id;
@@ -325,6 +330,89 @@ function renderCompatKeyFields() {
     });
     filterCompatKeyFields();
 }
+// Vertex AI (beta channel): Google Cloud credentials instead of a key, plus
+// the project and region. The JSON is never sent back by the server.
+function vertexSettingsRow(provider) {
+    const en = state.language === 'en';
+    const info = provider.vertex || {};
+    const row = document.createElement('div');
+    // Same card as the other subscriptions (Grok, MiniMax).
+    row.className = 'chatgpt-sub account-sub-card vertex-settings';
+    row.dataset.compatProvider = provider.id;
+    row.dataset.search = `${provider.label} vertex google gemini cloud beta`.toLowerCase();
+    const head = document.createElement('div');
+    head.className = 'key-label-row';
+    const label = document.createElement('label');
+    label.htmlFor = 'compat-key-vertex';
+    label.textContent = 'Google Vertex AI';
+    const badge = document.createElement('span');
+    badge.className = 'beta-badge';
+    badge.textContent = en ? 'Beta' : 'Bêta';
+    label.appendChild(badge);
+    const status = document.createElement('span');
+    status.className = 'key-status';
+    if (provider.configured) {
+        status.classList.add('set');
+        status.textContent = (en ? 'Active · ' : 'Activé · ') + (info.resolvedProject || '');
+    } else if (provider.key.set || info.useAdc) {
+        status.textContent = en ? 'Project missing' : 'Projet manquant';
+    }
+    if (provider.key.set || info.useAdc) {
+        const clear = document.createElement('button');
+        clear.type = 'button'; clear.className = 'compat-clear';
+        clear.textContent = en ? 'Remove' : 'Retirer';
+        clear.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/compat/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keys: { vertex: null }, vertex: { project: '', location: 'global', useAdc: false } }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'vertex');
+                window.compatProviders = data.providers || [];
+                renderCompatModelOptions(); renderCompatKeyFields();
+            } catch (error) { window.ZaalisErrorLog?.report({ source: 'vertex-ai', code: 'remove_failed', title: uiText('Action impossible'), message: error.message }); }
+        });
+        status.appendChild(clear);
+    }
+    head.append(label, status);
+    const hint = document.createElement('p');
+    hint.className = 'vertex-hint';
+    hint.textContent = en
+        ? 'Billed to your Google Cloud project (not a Google AI Pro/Ultra plan). Paste a service account key (JSON) or use this PC’s gcloud credentials.'
+        : 'Facturé sur votre projet Google Cloud (pas un forfait Google AI Pro/Ultra). Collez une clé de compte de service (JSON) ou utilisez les identifiants gcloud de ce PC.';
+    const key = document.createElement('textarea');
+    key.id = 'compat-key-vertex';
+    key.className = 'vertex-key';
+    key.dataset.compatKey = 'vertex';
+    key.rows = 3; key.spellcheck = false; key.autocomplete = 'off';
+    key.placeholder = provider.key.set
+        ? (en ? `Credentials saved (${info.credentialType || 'JSON'}) — paste new ones to replace them` : `Identifiants enregistrés (${info.credentialType || 'JSON'}) — collez-en de nouveaux pour les remplacer`)
+        : '{ "type": "service_account", "project_id": "…", … }';
+    const grid = document.createElement('div');
+    grid.className = 'vertex-grid';
+    const project = Object.assign(document.createElement('input'), { type: 'text', id: 'vertex-project', spellcheck: false,
+        value: info.project || '', placeholder: info.resolvedProject || (en ? 'Project ID (read from the key if empty)' : 'ID du projet (lu dans la clé si vide)') });
+    project.setAttribute('aria-label', en ? 'Google Cloud project ID' : 'ID du projet Google Cloud');
+    const location = Object.assign(document.createElement('input'), { type: 'text', id: 'vertex-location', spellcheck: false,
+        value: info.location || 'global', placeholder: 'global' });
+    location.setAttribute('aria-label', en ? 'Region' : 'Région');
+    grid.append(project, location);
+    const adc = document.createElement('label');
+    adc.className = 'vertex-adc';
+    const adcBox = Object.assign(document.createElement('input'), { type: 'checkbox', id: 'vertex-adc', checked: !!info.useAdc, disabled: !info.adcAvailable && !info.useAdc });
+    adc.append(adcBox, document.createTextNode(info.adcAvailable
+        ? (en ? ' Use this PC’s gcloud credentials (ADC)' : ' Utiliser les identifiants gcloud de ce PC (ADC)')
+        : (en ? ' gcloud credentials not found (run “gcloud auth application-default login”)' : ' Identifiants gcloud introuvables (lancez « gcloud auth application-default login »)')));
+    row.append(head, hint, key, grid, adc);
+    // Remember the saved values to send only real changes.
+    row.dataset.saved = JSON.stringify({ project: info.project || '', location: info.location || 'global', useAdc: !!info.useAdc });
+    return row;
+}
+function vertexSettingsChange() {
+    const row = $('#vertex-subscription .vertex-settings');
+    if (!row) return null;
+    const next = { project: $('#vertex-project').value.trim(), location: $('#vertex-location').value.trim() || 'global', useAdc: $('#vertex-adc').checked };
+    return JSON.stringify(next) === row.dataset.saved ? null : next;
+}
 function filterCompatKeyFields() {
     const query = ($('#compat-filter')?.value || '').trim().toLowerCase();
     let visible = 0;
@@ -357,9 +445,10 @@ async function removeCompatProvider(provider) {
 async function saveCompatSettings() {
     const keys = {};
     const baseUrls = {};
-    $$('#compat-key-fields input[data-compat-key]').forEach(input => {
+    $$('#compat-key-fields [data-compat-key], #vertex-subscription [data-compat-key]').forEach(input => {
         if (input.value.trim()) keys[input.dataset.compatKey] = input.value.trim();
     });
+    const vertex = vertexSettingsChange();
     $$('#compat-key-fields input[data-compat-url]').forEach(input => {
         const provider = window.compatProviders.find(p => p.id === input.dataset.compatUrl);
         const value = input.value.trim();
@@ -367,10 +456,10 @@ async function saveCompatSettings() {
         // A keyless local server (LM Studio) is enabled by saving its URL.
         if (value !== current || (value && provider && !provider.configured)) baseUrls[input.dataset.compatUrl] = value || null;
     });
-    if (!Object.keys(keys).length && !Object.keys(baseUrls).length) return;
+    if (!Object.keys(keys).length && !Object.keys(baseUrls).length && !vertex) return;
     const response = await fetch('/api/compat/keys', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys, baseUrls })
+        body: JSON.stringify(vertex ? { keys, baseUrls, vertex } : { keys, baseUrls })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || 'compat');

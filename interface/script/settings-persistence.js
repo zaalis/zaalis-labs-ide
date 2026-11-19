@@ -33,6 +33,13 @@
                 const data = await response.json(); if(!response.ok) throw new Error(data.error || text('Enregistrement impossible','Unable to save'));
                 if(key==='terminalProfile') document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
             }
+            // The channel also unlocks beta features on the server (Vertex AI…).
+            if(key==='updateChannel') {
+                const response=await fetch('/api/preferences',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({updateChannel:value})});
+                const data=await response.json().catch(()=>({}));
+                if(!response.ok)throw new Error(data.error||text('Enregistrement du canal impossible','Unable to save the channel'));
+                if(Array.isArray(data.providers)){window.compatProviders=data.providers;renderCompatModelOptions();renderCompatKeyFields();window.refreshAgentCatalog?.();}
+            }
             if(key==='defaultPermissionMode') {
                 const response=await fetch('/api/preferences',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({permissionMode:value})});
                 if(!response.ok)throw new Error(text('Enregistrement du mode impossible','Unable to save permission mode'));

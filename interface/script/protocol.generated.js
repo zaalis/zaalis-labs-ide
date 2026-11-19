@@ -25,6 +25,8 @@ const METHODS = Object.freeze({
   TOOLS_LIST: 'tools.list',
   MODELS_LIST: 'models.list',
   USAGE_QUERY: 'usage.query',
+  PROCESS_LIST: 'process.list',
+  PROCESS_KILL: 'process.kill',
   HEALTH: 'health',
 });
 

@@ -76,7 +76,26 @@ class TaskService {
     if (this.active.has(`${user}:${id}`) && Object.keys(fields).some(key => !['title', 'enabled'].includes(key))) throw fail('Arrêtez la tâche avant de modifier sa configuration.', 409);
     const valid = this.validate(fields, old);
     valid.updatedAt = this.clock();
-    valid.nextRunAt = this.firstRun(valid, this.clock());
+    const runAtChanged = (valid.runAt ? Date.parse(valid.runAt) : null)
+      !== (old.runAt ? Date.parse(old.runAt) : null);
+    const recurrenceChanged = valid.cron !== (old.cron || null)
+      || valid.intervalMinutes !== (old.intervalMinutes || null);
+    const endChanged = valid.endsAt !== (old.endsAt || null);
+    if (!valid.enabled) {
+      valid.nextRunAt = null;
+    } else if (runAtChanged || recurrenceChanged || old.enabled === false || endChanged) {
+      // An unchanged first-run date has already been used once the task
+      // starts at or after that date. Resume from the recurring schedule.
+      const firstRunUsed = !runAtChanged && valid.runAt
+        && old.lastStartedAt >= Date.parse(valid.runAt);
+      if (endChanged && !runAtChanged && !recurrenceChanged && old.enabled !== false && old.nextRunAt != null) {
+        valid.nextRunAt = this.withinEnd(valid, old.nextRunAt);
+      } else {
+        valid.nextRunAt = firstRunUsed
+          ? this.following(valid, valid.updatedAt)
+          : this.firstRun(valid, valid.updatedAt);
+      }
+    }
     this.write(user, this.read(user).map(task => task.id === id ? valid : task)); return copy(valid);
   }
   mutate(user, id, change) {

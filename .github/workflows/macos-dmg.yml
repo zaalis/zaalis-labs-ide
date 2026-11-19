@@ -4,7 +4,7 @@ name: Build macOS DMGs
 #   - zaalis-macos-arm64.dmg  (Apple Silicon: M1/M2/M3...)
 #   - zaalis-macos-x64.dmg    (Intel)
 #
-# Trigger manually from the Actions tab, or automatically on a version tag (v*).
+# Trigger manually, on a push to Macos, or on a version tag (v*).
 
 on:
   workflow_dispatch:
@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-14   # Cross-builds both architectures.
+    runs-on: macos-15   # Builds both architectures on Apple Silicon.
 
     steps:
       - name: Checkout
@@ -53,6 +53,10 @@ jobs:
           export ZAALIS_TEST_CLI_EXE="$bundle/bin/zaalis"
           node test/package-smoke.js
           node --test test/cli-parity.test.js test/conversation-runtime.test.js
+          node --test test/account-reset-vertex.test.js test/agent-activity.test.js \
+            test/automation-manager.test.js test/frontend-parity.test.js \
+            test/github-integration.test.js test/macos-updater.test.js \
+            test/parity-services.test.js test/preferences.test.js test/search-links.test.js
 
       - name: Upload macOS build log
         if: always()

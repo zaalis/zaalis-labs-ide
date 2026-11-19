@@ -247,6 +247,15 @@ async function ensureComputerHelper() {
   return computerHelperBuild;
 }
 
+// A batch or a held key legitimately takes longer than one gesture.
+function helperTimeout(payload) {
+  const seconds = (step) => (step && ['wait', 'hold_key'].includes(step.action) ? Number(step.seconds) || 1 : 0);
+  if (payload && payload.action === 'batch' && Array.isArray(payload.actions)) {
+    return Math.min(85_000, payload.actions.reduce((sum, step) => sum + seconds(step) * 1000 + 2500, 20_000));
+  }
+  return Math.min(85_000, 20_000 + seconds(payload) * 1000);
+}
+
 async function runComputerHelper(payload) {
   const helperPath = await ensureComputerHelper();
   return new Promise((resolve) => {
@@ -259,7 +268,7 @@ async function runComputerHelper(payload) {
       settled = true;
       resolve(value);
     };
-    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish({ ok: false, error: 'computer-timeout' }); }, 20_000);
+    const timer = setTimeout(() => { try { child.kill('SIGTERM'); } catch {} finish({ ok: false, error: 'computer-timeout' }); }, helperTimeout(payload));
     child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8'); });
     child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8'); });
     child.once('error', (err) => { clearTimeout(timer); finish({ ok: false, error: err.message }); });
@@ -381,7 +390,9 @@ function createWindow(port) {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const url = webContents.getURL();
     const allowedOrigin = url.startsWith(baseUrl);
-    callback(allowedOrigin && (permission === 'media' || permission === 'audioCapture'));
+    // Writing to the clipboard ("Copier le lien", copy buttons) is allowed for
+    // the IDE itself; reading it stays refused.
+    callback(allowedOrigin && ['media', 'audioCapture', 'clipboard-sanitized-write'].includes(permission));
   });
 
   mainWindow = new BrowserWindow({

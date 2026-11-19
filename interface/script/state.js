@@ -28,7 +28,7 @@ const state = {
     responseStyle: 'normal', // 'normal' | 'fast' | 'deep'  (/fast, /deep)
     config: {
         aiModel: 'codex',
-        aiSubmodel: 'gpt-6-astra',
+        aiSubmodel: 'gpt-6.2-astra',
         ollamaUrl: 'http://127.0.0.1:11434',
         ollamaModel: 'qwen3:8b',
         ollamaModels: ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
@@ -74,11 +74,11 @@ let legacyApiKeysForMigration = null;
 // Sub-model options per provider — real/current API models only, NEWEST FIRST.
 // The first entry of each list is the default selection when that provider is chosen.
 const SUBMODELS = {
-    codex:  ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-daybreak-blue-latest', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
-    claude: ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
-    gemini: ['gemini-3.5-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'],
-    grok:   ['grok-4.7', 'grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-quality', 'grok-imagine-image'],
-    mistral:['mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
+    codex:  ['gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-daybreak-blue-latest', 'gpt-daybreak-red-latest', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini', 'gpt-5.4-nano', 'gpt-5.2', 'gpt-5.1', 'o3-mini', 'o1', 'gpt-4o-mini', 'gpt-3.5-turbo', 'gpt-4'],
+    claude: ['claude-fable-5-2', 'claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-fable-5', 'claude-opus-4-8', 'claude-sonnet-5', 'claude-haiku-4-5'],
+    gemini: ['gemini-4-neon', 'gemini-4-carbon', 'gemini-4-argon', 'gemini-4-hydrogen', 'gemini-3.8-flash', 'gemini-3.1-pro-preview', 'gemini-3.1-flash-lite', 'gemini-3-flash-preview'],
+    grok:   ['grok-4.7', 'grok-4.6', 'grok-4.5', 'grok-4.3', 'grok-4.20-multi-agent-0309', 'grok-4.20-0309-reasoning', 'grok-4.20-0309-non-reasoning', 'grok-build-0.1', 'grok-imagine-image-2.0', 'grok-imagine-image'],
+    mistral:['mistral-large-4', 'mistral-medium-3-5', 'mistral-small-latest', 'mistral-large-latest', 'ministral-14b-2512', 'ministral-8b-2512', 'ministral-3b-2512', 'codestral-latest'],
     kimi:   ['kimi-k3.1-pro', 'kimi-k3.1-pro-highspeed', 'kimi-k3', 'kimi-k2.7-code', 'kimi-k2.7-code-highspeed', 'kimi-k2.6'],
     local:  ['qwen3:8b', 'llama3.2', 'gemma3:4b', 'deepseek-r1:8b', 'qwen2.5-coder:7b'],
     gguf:   []   // populated from installed .gguf files via /api/gguf-models
@@ -86,19 +86,19 @@ const SUBMODELS = {
 
 // Human-friendly display names (dots, not dashes). Falls back to the raw id.
 const MODEL_LABELS = {
-    'gpt-6-astra': 'GPT-6 Astra', 'gpt-6.1-sol': 'GPT-6.1 Sol', 'gpt-6.1-terra': 'GPT-6.1 Terra', 'gpt-6-luna': 'GPT-6 Luna', 'gpt-6-sol': 'GPT-6 Sol', 'gpt-daybreak-blue-latest': 'Daybreak Blue', 'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
+    'gpt-6.2-astra': 'GPT-6.2 Astra', 'gpt-6.2-sol': 'GPT-6.2 Sol', 'gpt-6-astra': 'GPT-6 Astra', 'gpt-6.1-sol': 'GPT-6.1 Sol', 'gpt-6.1-terra': 'GPT-6.1 Terra', 'gpt-6-luna': 'GPT-6 Luna', 'gpt-6-sol': 'GPT-6 Sol', 'gpt-daybreak-blue-latest': 'Daybreak Blue', 'gpt-daybreak-red-latest': 'Daybreak Red', 'gpt-5.6-sol': 'GPT-5.6 Sol', 'gpt-5.6-terra': 'GPT-5.6 Terra', 'gpt-5.6-luna': 'GPT-5.6 Luna',
     'gpt-5.5': 'GPT-5.5', 'gpt-5.4': 'GPT-5.4', 'gpt-5.4-mini': 'GPT-5.4 mini', 'gpt-5.4-nano': 'GPT-5.4 nano',
     'gpt-5.2': 'GPT-5.2', 'gpt-5.1': 'GPT-5.1', 'o3-mini': 'o3-mini', 'o1': 'o1', 'gpt-4o-mini': 'GPT-4o mini',
     'gpt-3.5-turbo': 'GPT-3.5 Turbo', 'gpt-4': 'GPT-4',
-    'claude-fable-5-2': 'Claude Fable 5.2', 'claude-opus-5-5': 'Claude Opus 5.5', 'claude-sonnet-5-5': 'Claude Sonnet 5.5', 'claude-haiku-5-5': 'Claude Haiku 5.5', 'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5', 'claude-haiku-4-5': 'Claude Haiku 4.5',
-    'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
+    'claude-fable-5-2': 'Claude Fable 5.2', 'claude-opus-5-5': 'Claude Opus 5.5', 'claude-sonnet-5-5': 'Claude Sonnet 5.5', 'claude-haiku-5-5': 'Claude Haiku 5.5', 'claude-fable-5-1': 'Claude Fable 5.1', 'claude-opus-5': 'Claude Opus 5', 'claude-fable-5': 'Claude Fable 5', 'claude-opus-4-8': 'Claude Opus 4.8', 'claude-sonnet-5': 'Claude Sonnet 5', 'claude-haiku-4-5': 'Claude Haiku 4.5',
+    'gemini-4-neon': 'Gemini 4 Neon', 'gemini-4-carbon': 'Gemini 4 Carbon', 'gemini-4-argon': 'Gemini 4 Argon', 'gemini-4-hydrogen': 'Gemini 4 Hydrogen', 'gemini-3.8-flash': 'Gemini 3.8 Flash', 'gemini-3.5-flash': 'Gemini 3.5 Flash', 'gemini-3.1-pro-preview': 'Gemini 3.1 Pro Preview',
     'gemini-3.1-flash-lite': 'Gemini 3.1 Flash-Lite', 'gemini-3-flash-preview': 'Gemini 3 Flash Preview',
     'gemini-2.5-pro': 'Gemini 2.5 Pro', 'gemini-2.5-flash': 'Gemini 2.5 Flash', 'gemini-2.5-flash-lite': 'Gemini 2.5 Flash-Lite',
     'grok-4.7': 'Grok 4.7', 'grok-4.6': 'Grok 4.6', 'grok-4.5': 'Grok 4.5', 'grok-4.3': 'Grok 4.3', 'grok-4.20-multi-agent-0309': 'Grok 4.20 Multi-Agent',
     'grok-4.20-0309-reasoning': 'Grok 4.20 Reasoning', 'grok-4.20-0309-non-reasoning': 'Grok 4.20 Non-Reasoning',
-    'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
-    'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
-    'mistral-large-latest': 'Mistral Large 3', 'ministral-14b-2512': 'Ministral 3 14B',
+    'grok-build-0.1': 'Grok Build 0.1', 'grok-imagine-image-2.0': 'Grok Imagine Image 2.0', 'grok-imagine-image-quality': 'Grok Imagine Image Quality', 'grok-imagine-image': 'Grok Imagine Image',
+    'mistral-large-4': 'Mistral Large 4', 'mistral-medium-3-5': 'Mistral Medium 3.5', 'mistral-small-latest': 'Mistral Small 4',
+    'mistral-large-latest': 'Mistral Large (latest)', 'ministral-14b-2512': 'Ministral 3 14B',
     'ministral-8b-2512': 'Ministral 3 8B', 'ministral-3b-2512': 'Ministral 3 3B', 'codestral-latest': 'Codestral 25.08',
     'kimi-k3.1-pro': 'Kimi K3.1 Pro', 'kimi-k3.1-pro-highspeed': 'Kimi K3.1 Pro HighSpeed', 'kimi-k3': 'Kimi K3', 'kimi-k2.7-code': 'Kimi K2.7 Code',
     'kimi-k2.7-code-highspeed': 'Kimi K2.7 Code HighSpeed', 'kimi-k2.6': 'Kimi K2.6'
@@ -141,7 +141,7 @@ function modelIdentity(model, submodel, lang) {
 // Context window (tokens) per model — aligned with official developer API key limits.
 const CONTEXT_WINDOWS = {
     codex: {
-        'gpt-6-astra': 1050000, 'gpt-6.1-sol': 1050000, 'gpt-6.1-terra': 1050000, 'gpt-6-luna': 1050000, 'gpt-6-sol': 1050000, 'gpt-daybreak-blue-latest': 1050000, 'gpt-5.6-sol': 1050000,
+        'gpt-6.2-astra': 1050000, 'gpt-6.2-sol': 1050000, 'gpt-6-astra': 1050000, 'gpt-6.1-sol': 1050000, 'gpt-6.1-terra': 1050000, 'gpt-6-luna': 1050000, 'gpt-6-sol': 1050000, 'gpt-daybreak-blue-latest': 1050000, 'gpt-daybreak-red-latest': 400000, 'gpt-5.6-sol': 1050000,
         'gpt-5.6-terra': 1050000,
         'gpt-5.6-luna': 1050000,
         'gpt-5.5': 1050000,
@@ -163,6 +163,8 @@ const CONTEXT_WINDOWS = {
         'claude-opus-5-5': 1000000,
         'claude-sonnet-5-5': 1000000,
         'claude-haiku-5-5': 1000000,
+        'claude-fable-5-1': 1000000,
+        'claude-opus-5': 1000000,
         'claude-fable-5': 1000000,
         'claude-opus-4-8': 1000000,
         'claude-sonnet-5': 1000000,
@@ -170,6 +172,11 @@ const CONTEXT_WINDOWS = {
         _default: 200000
     },
     gemini: {
+        'gemini-4-neon': 1048576,
+        'gemini-4-carbon': 1048576,
+        'gemini-4-argon': 1048576,
+        'gemini-4-hydrogen': 1048576,
+        'gemini-3.8-flash': 1048576,
         'gemini-3.5-flash': 1048576,
         'gemini-3.1-pro-preview': 1048576,
         'gemini-3.1-flash-lite': 1048576,
@@ -188,11 +195,13 @@ const CONTEXT_WINDOWS = {
         'grok-4.20-0309-reasoning': 1000000,
         'grok-4.20-0309-non-reasoning': 1000000,
         'grok-build-0.1': 256000,
+        'grok-imagine-image-2.0': 1024,
         'grok-imagine-image-quality': 1024,
         'grok-imagine-image': 1024,
         _default: 1000000
     },
     mistral: {
+        'mistral-large-4': 1000000,
         'mistral-medium-3-5': 256000,
         'mistral-small-latest': 256000,
         'mistral-large-latest': 256000,
@@ -286,13 +295,12 @@ function isReadOnlyMode() {
 function isDangerousCommand(cmd) {
     const c = String(cmd || '');
     const pats = [
-        /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-rf?\b/i,        // rm -rf / rm -fr
-        /\brmdir\s+\/s/i, /\bdel\s+\/[sq]/i,            // rmdir /s , del /s|/q
-        /\bformat\s+[a-z]:/i, /\bmkfs\b/i, /\bdiskpart\b/i,
-        /remove-item\b[\s\S]*-recurse/i, /-recurse\b[\s\S]*remove-item/i,
-        /\bgit\s+reset\s+--hard/i, /\bgit\s+clean\s+-[a-z]*f/i,
-        /\bgit\s+checkout\s+--\s/i, /\bgit\s+push\b[\s\S]*--force/i,
-        /--force-with-lease/i, /\bnpm\s+publish\b/i, /\bshutdown\b/i
+        // Only what would wreck the PC or shared history: autonomous mode
+        // runs everything else (rm -rf build, git reset, npm publish…).
+        /\b(?:rm|rmdir|rd|del|erase|remove-item|ri)\b[^|;&]*?\s["']?(?:\/\*?|~[\\/]?|\$home|%userprofile%|\$env:userprofile|[a-z]:[\\/]?\*?|[a-z]:[\\/](?:windows|program files)[^\s"']*|[a-z]:[\\/]users(?:[\\/][^\\/\s"']+)?(?:[\\/](?:desktop|bureau|documents|downloads|pictures|images|music|videos|onedrive))?[\\/]?|\/(?:c|d|e)\/?|\/(?:etc|usr|bin|boot|home|users)(?:\/[^\/\s]+)?\/?)["']?(?=\s|$)/i,
+        /\bformat\s+[a-z]:/i, /\bmkfs\b/i, /\bdiskpart\b/i, /\b(?:clear-disk|format-volume|initialize-disk)\b/i,
+        /\b(?:shutdown|reboot|poweroff|stop-computer|restart-computer)\b/i,
+        /\bgit\s+push\b[\s\S]*(?:--force\b|\s-f\b|--force-with-lease|\s\+\S)/i
     ];
     return pats.some((re) => re.test(c));
 }

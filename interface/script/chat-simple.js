@@ -24,7 +24,7 @@
     // The rail keeps working while hidden; a rail the user had folded away is unfolded first.
     function openTool(control) {
         if (document.body.classList.contains('ui-tools-collapsed')) document.getElementById('workspace-tools-toggle')?.click();
-        if (control.getAttribute('aria-expanded') !== 'true') control.click();
+        control.click();
     }
 
     // ---- "Outils" menu -------------------------------------------------
@@ -33,6 +33,7 @@
     trigger.setAttribute('aria-haspopup', 'menu'); trigger.setAttribute('aria-expanded', 'false');
     const menu = node('div', 'ui-action-menu cs-tools-menu'); menu.id = 'chat-tools-menu'; menu.setAttribute('role', 'menu');
     menu.setAttribute('aria-label', text('Outils', 'Tools')); menu.popover = 'auto';
+    trigger.setAttribute('popovertarget', menu.id);
     function item(label, iconMarkup, action, current) {
         const control = node('button', 'cs-menu-item'); control.type = 'button'; control.setAttribute('role', 'menuitem');
         const glyph = node('span', 'cs-menu-icon'); glyph.setAttribute('aria-hidden', 'true'); glyph.innerHTML = iconMarkup;
@@ -60,8 +61,15 @@
         menu.style.left = Math.max(8, Math.min(innerWidth - width - 8, box.right - width)) + 'px';
         menu.style.top = box.bottom + 6 + 'px';
     }
-    trigger.addEventListener('click', () => { if (menu.matches(':popover-open')) menu.hidePopover(); else { fill(); menu.showPopover(); place(); menu.querySelector('button')?.focus(); } });
-    menu.addEventListener('toggle', event => { const open = event.newState === 'open'; trigger.setAttribute('aria-expanded', String(open)); if (!open && menu.contains(document.activeElement)) trigger.focus(); });
+    menu.addEventListener('beforetoggle', event => {
+        if (event.newState === 'open') { fill(); place(); }
+    });
+    menu.addEventListener('toggle', event => {
+        const open = event.newState === 'open';
+        trigger.setAttribute('aria-expanded', String(open));
+        if (open) menu.querySelector('button')?.focus();
+        else if (menu.contains(document.activeElement)) trigger.focus();
+    });
     menu.addEventListener('keydown', event => {
         if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
         const items = [...menu.querySelectorAll('button')], index = items.indexOf(document.activeElement);

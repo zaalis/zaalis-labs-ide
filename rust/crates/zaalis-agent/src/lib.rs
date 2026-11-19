@@ -893,18 +893,20 @@ mod tests {
         fixture.session.run_turn("Rends la scène").await.unwrap();
 
         let requests = provider.requests.lock().expect("requests");
-        // Desktop control keeps MCP servers next to the computer tool, and
-        // says so; the rest of the IDE catalogue stays out.
-        let mut offered = requests[0]
+        // Desktop control keeps the whole catalogue next to the computer
+        // tool, and says so.
+        let offered = requests[0]
             .tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        offered.sort_unstable();
-        assert_eq!(offered, ["computer", "mcp", "request_user_input", "tool_call", "tool_describe", "tool_search"]);
-        assert!(requests[0]
-            .system
-            .contains("outils disponibles : computer, mcp."));
+        let catalogue = fixture.session.inner.tools.definitions();
+        assert_eq!(offered.len(), catalogue.len(), "{offered:?}");
+        for name in ["computer", "mcp", "request_user_input", "tool_search"] {
+            assert!(offered.contains(&name), "{name} absent : {offered:?}");
+        }
+        assert!(requests[0].system.contains("MODE CONTRÔLE DU BUREAU : tu pilotes le PC avec computer ET tu gardes tous tes autres outils"));
+        assert!(requests[0].system.contains("mcp"));
         let last = requests[1].messages.last().expect("vision message");
         assert!(matches!(last, Message::User { text, images }
             if text.starts_with("[Images renvoyées par les outils") && text.contains("computer (1), mcp (1)")
@@ -1365,14 +1367,14 @@ mod tests {
                 },
                 ToolContext {
                     agent_id: parent,
-                    permissions: PermissionSet::new(PermissionMode::Bypass),
+                    permissions: PermissionSet::new(PermissionMode::Supervised),
                     workspace: Workspace::open(&fixture.root).unwrap(),
                 },
                 CancellationToken::new(),
             )
             .await;
         let ToolDispatch::PermissionRequired(prompt) = dispatch else {
-            panic!("merge should require explicit approval: {dispatch:?}");
+            panic!("a supervised merge requires explicit approval: {dispatch:?}");
         };
         let merged = fixture
             .session

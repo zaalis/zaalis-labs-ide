@@ -98,7 +98,9 @@ impl Tool for BrowserTool {
         ToolDefinition {
             name: "browser".into(),
             description: "Navigateur intégré de zaalis IDE (panneau globe), visible par l'utilisateur. \
-C'est le navigateur par défaut pour TOUTE navigation ou recherche web visible : search (recherche), open (nouvel onglet), \
+C'est le navigateur par défaut pour TOUTE navigation web : search (recherche faite en arrière-plan, sans changer l'écran ; \
+retourne les 3 pages les plus pertinentes, affichées à l'utilisateur comme liens qui s'ouvrent dans le navigateur intégré), \
+open (nouvel onglet visible), \
 navigate (onglet actif : url ou action back|forward|reload), tabs, select_tab/close_tab (id), page_text (texte de la page), \
 read_page (arbre d'accessibilité avec refs [ref_N]), screenshot (image de la partie visible de la page, montrée au modèle), \
 read_console, read_network, click (ref|selector|text), \
@@ -163,11 +165,13 @@ open_external ouvre une URL dans le navigateur externe du PC : UNIQUEMENT si l'u
             .await
             .map_err(|error| ZaalisError::io(error.to_string()))?;
         if !status.is_success() {
+            // The server already words its errors for the user (and journals
+            // the technical cause): pass them on as they are.
             let message = value
                 .get("error")
                 .and_then(Value::as_str)
-                .unwrap_or("navigateur intégré indisponible");
-            return Err(ZaalisError::io(format!("browser HTTP {status} : {message}")));
+                .unwrap_or("Le navigateur intégré n'a pas répondu.");
+            return Err(ZaalisError::io(format!("{message} (code {})", status.as_u16())));
         }
         Ok(ToolResult {
             summary: value

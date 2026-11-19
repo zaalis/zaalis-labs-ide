@@ -42,3 +42,22 @@ test('activity renders separate counted groups and a working stop action', async
   api.render(pane, agents, {el,text:(fr)=>fr,stop() {}});
   assert.equal(pane.querySelector('details').open, true);
 });
+
+test('background tasks show their name, duration and a stop square', async () => {
+  const { context, document } = frontend(['agent-activity.js']); const api = context.window.ZaalisAgentActivity;
+  const pane = document.createElement('div'); document.body.append(pane); let killed;
+  const el = (tag, css, value) => {const node = document.createElement(tag); node.className = css; if(value !== undefined) node.textContent=value; return node;};
+  const processes = [
+    { process_id: 'proc_2', sessionId: 's', label: 'Compilation app', command: 'cargo build --release', running: true, duration_ms: 125000 },
+    { process_id: 'proc_1', sessionId: 's', command: 'npm test', running: false, exit_code: 0, duration_ms: 4000 },
+  ];
+  api.render(pane, [], { el, text: (fr) => fr, stop: () => {}, processes, kill: item => { killed = item.process_id; } });
+  assert.match(pane.textContent, /Tâches en arrière-plan · 1/);
+  assert.match(pane.textContent, /Compilation app/);
+  assert.match(pane.textContent, /2 min 05 s/);
+  assert.match(pane.textContent, /Terminé/);
+  const stops = pane.querySelectorAll('button');
+  assert.equal(stops.length, 1, 'only the running task can be stopped');
+  await stops[0].emit('click'); assert.equal(killed, 'proc_2');
+  assert.equal(api.duration(3725000), '1 h 02 min');
+});

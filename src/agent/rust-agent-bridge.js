@@ -117,6 +117,8 @@ class AgentdClient {
       delete env.ZAALIS_ASSISTANT_TOOLS;
     }
     env.ZAALIS_GITHUB_READ_ONLY = runtimeConfig?.githubReadOnly ? '1' : '0';
+    if (runtimeConfig && runtimeConfig.githubToken) env.ZAALIS_GITHUB_TOKEN = String(runtimeConfig.githubToken);
+    else delete env.ZAALIS_GITHUB_TOKEN;
     const names = {
       openai: 'OPENAI_API_KEY', anthropic: 'ANTHROPIC_API_KEY', google: 'GEMINI_API_KEY',
       grok: 'XAI_API_KEY', mistral: 'MISTRAL_API_KEY', moonshot: 'MOONSHOT_API_KEY'
@@ -222,6 +224,9 @@ class RustAgentBridge {
     this.clients = new Map();
     this.sessions = new Map();
     this.catalogues = new Map();
+    // Daemon sessions outlive a turn, and so do their background processes
+    // (builds, dev servers). Remembered so the activity pane can list and stop them.
+    this.knownSessions = new Map();
     this.skillRevisions = new Map();
   }
 
@@ -395,6 +400,7 @@ class RustAgentBridge {
     let leadUsage = lead.usage || null;
     let failure = '';
     this.sessions.set(sessionId, { client, userId: options.userId });
+    this.knownSessions.set(sessionId, { client, userId: options.userId });
     let finish;
     const completed = new Promise((resolve) => { finish = resolve; });
     const off = client.onSession(sessionId, (frame) => {
@@ -486,12 +492,45 @@ class RustAgentBridge {
     throw Object.assign(new Error('Decision interactive invalide.'), { status: 400 });
   }
 
+  async processes(userId) {
+    const all = [];
+    for (const [sessionId, entry] of this.knownSessions) {
+      if (entry.userId !== userId) continue;
+      try {
+        const result = await entry.client.request('process.list', { session_id: sessionId });
+        for (const item of result.processes || []) all.push({ ...item, sessionId });
+      } catch (error) {
+        if (/introuvable|not found|fermée|closed|inconnue/i.test(String(error.message || ''))) this.knownSessions.delete(sessionId);
+      }
+    }
+    return all;
+  }
+
+  async killProcess(userId, sessionId, processId) {
+    const entry = this.knownSessions.get(String(sessionId || ''));
+    if (!entry || entry.userId !== userId) throw Object.assign(new Error('Processus introuvable.'), { status: 404 });
+    return entry.client.request('process.kill', { session_id: String(sessionId), process_id: String(processId || '') });
+  }
+
   async cancel(userId, sessionId, agentId) {
     const session = this.sessions.get(String(sessionId || ''));
     if (!session || session.userId !== userId) throw Object.assign(new Error('Tache introuvable.'), { status: 404 });
     await session.client.request('session.cancel', { session_id: String(sessionId),
       ...(agentId ? { agent_id: String(agentId) } : {}) });
     return { cancelled: true };
+  }
+
+  async closeUser(userId) {
+    const stops = [];
+    for (const [key, entry] of this.clients) {
+      if (entry.userId !== userId) continue;
+      this.clients.delete(key);
+      stops.push(entry.client.stop());
+    }
+    for (const [id, entry] of this.knownSessions) {
+      if (entry.userId === userId) this.knownSessions.delete(id);
+    }
+    await Promise.allSettled(stops);
   }
 
   async close() {

@@ -81,6 +81,29 @@ test('queue edits affect the draft delivered after reordering, preserving attach
   assert.equal(queue.take().attachments[0].name, 'context.txt'); await settle();
 });
 
+test('switching an existing automation to on demand and no end date clears both dates', async () => {
+  const task = {
+    id: 'task-1', title: 'Review', prompt: 'Read only', root: 'C:\\other',
+    runAt: '2030-01-01T09:00:00.000Z', endsAt: '2030-01-02T09:00:00.000Z',
+  };
+  const ui = frontend(['task-center.js'], () => ({ tasks: [task] }));
+  await ui.button('Tâches et mémoire').emit('click');
+  await ui.button('Modifier').emit('click');
+  const selectWith = option => ui.all().find(el => el.tagName === 'SELECT' && el.children.some(child => child.value === option));
+  const repeat = selectWith('manual');
+  repeat.value = 'manual';
+  await repeat.emit('change');
+  const ending = selectWith('never');
+  ending.value = 'never';
+  await ending.emit('change');
+  await ui.form().emit('submit');
+  const { body } = ui.requests.find(request => request.method === 'PATCH');
+  assert.equal(body.runAt, null);
+  assert.equal(body.endsAt, null);
+  assert.equal(body.cron, null);
+  assert.equal(body.intervalMinutes, null);
+});
+
 test('conversation overflow menu renames the selected agents chat with one PATCH',async()=>{
   const conversation={id:'rename-team',title:'Before',kind:'agents',messages:[]};
   const ui=frontend(['conversation-actions.js'],({method,body})=>method==='PATCH'?{conversation:{...conversation,title:body.title}}:{conversations:[conversation],total:1});

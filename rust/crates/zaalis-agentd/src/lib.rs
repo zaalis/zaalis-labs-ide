@@ -159,6 +159,21 @@ impl Daemon {
             ClientMethod::CheckpointRestore => self.restore(params(request)?).await,
             ClientMethod::ToolsList => self.tools(params(request)?).await,
             ClientMethod::ModelsList => self.models().await,
+            ClientMethod::ProcessList => {
+                let session_id: SessionId = request.params.as_ref().and_then(|p| p.get("session_id")).cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()).ok_or_else(|| RpcError::invalid_params("session_id requis"))?;
+                let processes = self.managed(&session_id).await?.runtime.background_processes().await;
+                Ok((json!({"processes":processes}), Vec::new()))
+            },
+            ClientMethod::ProcessKill => {
+                let params = request.params.as_ref();
+                let session_id: SessionId = params.and_then(|p| p.get("session_id")).cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()).ok_or_else(|| RpcError::invalid_params("session_id requis"))?;
+                let process_id = params.and_then(|p| p.get("process_id")).and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("process_id requis"))?.to_owned();
+                let process = self.managed(&session_id).await?.runtime.kill_background_process(&process_id).await.map_err(RpcError::from)?;
+                Ok((json!({"process":process}), Vec::new()))
+            },
             ClientMethod::UsageQuery => {
                 let from=request.params.as_ref().and_then(|p|p.get("from_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("from_ms requis"))?;
                 let to=request.params.as_ref().and_then(|p|p.get("to_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("to_ms requis"))?;

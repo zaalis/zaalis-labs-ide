@@ -48,6 +48,9 @@ pub struct CommandOutput {
 pub struct ProcessStarted {
     pub process_id: String,
     pub command: String,
+    /// Short name the agent gave the job ("Compilation app"), shown in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -66,6 +69,8 @@ pub struct ProcessPoll {
 pub struct ProcessInfo {
     pub process_id: String,
     pub command: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub running: bool,
     pub exit_code: Option<i32>,
     pub duration_ms: u64,
@@ -116,6 +121,7 @@ impl Captured {
 #[derive(Debug)]
 struct ProcessSession {
     command: String,
+    label: Option<String>,
     child: AsyncMutex<Box<dyn ChildWrapper>>,
     captured: Arc<Mutex<Captured>>,
     readers: Mutex<Vec<JoinHandle<()>>>,
@@ -288,6 +294,14 @@ impl ExecRuntime {
     }
 
     pub async fn start(&self, command: &str) -> Result<ProcessStarted> {
+        self.start_named(command, None).await
+    }
+
+    /// Start a background process with a display name for the activity pane.
+    pub async fn start_named(&self, command: &str, label: Option<&str>) -> Result<ProcessStarted> {
+        let label = label
+            .map(|label| label.trim().chars().take(80).collect::<String>())
+            .filter(|label| !label.is_empty());
         if self.sandbox_policy.required == SandboxLevel::Strict {
             return Err(ZaalisError::unsupported(
                 "processus persistant refusé en sandbox strict",
@@ -300,6 +314,7 @@ impl ExecRuntime {
         let process_id = format!("proc_{}", uuid::Uuid::now_v7().simple());
         let session = Arc::new(ProcessSession {
             command: command.into(),
+            label: label.clone(),
             child: AsyncMutex::new(child),
             captured,
             readers: Mutex::new(readers),
@@ -313,6 +328,7 @@ impl ExecRuntime {
         Ok(ProcessStarted {
             process_id,
             command: command.into(),
+            label,
         })
     }
 
@@ -410,6 +426,7 @@ impl ExecRuntime {
             result.push(ProcessInfo {
                 process_id,
                 command: session.command.clone(),
+                label: session.label.clone(),
                 running: status.is_none(),
                 exit_code,
                 duration_ms: session.started.elapsed().as_millis() as u64,
@@ -545,8 +562,10 @@ fn spawn_shell(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    copy_minimal_environment(&mut process);
-    // After the minimal copy, so an inherited HTTP_PROXY can never override the
+    for (name, value) in development_environment() {
+        process.env(name, value);
+    }
+    // After the development copy, so an inherited HTTP_PROXY can never override the
     // one the policy is enforcing.
     for (name, value) in proxy_environment {
         process.env(name, value);
@@ -560,6 +579,52 @@ fn spawn_shell(
     wrapped.spawn().map_err(Into::into)
 }
 
+/// What a developer's own shell would have: the user profile (git identity,
+/// `gh` login, cargo/npm/rustup homes), program folders and toolchain roots.
+/// Without it `git commit` has no author, `cargo` no home and `gh` no login.
+/// API keys of the IDE itself are never copied; the connected GitHub account
+/// is, so `git push` and `gh` work like in the user's terminal.
+pub(crate) fn development_environment() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    #[cfg(windows)]
+    const ALLOWED: &[&str] = &[
+        "SystemRoot", "SystemDrive", "windir", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP",
+        "USERPROFILE", "HOMEDRIVE", "HOMEPATH", "HOME", "APPDATA", "LOCALAPPDATA", "ProgramData",
+        "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "CommonProgramFiles",
+        "CommonProgramFiles(x86)", "CommonProgramW6432", "PUBLIC", "ALLUSERSPROFILE", "USERNAME",
+        "USERDOMAIN", "COMPUTERNAME", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS",
+        "PSModulePath", "DriverData", "CARGO_HOME", "RUSTUP_HOME", "JAVA_HOME", "GOPATH",
+        "GOROOT", "NVM_HOME", "NVM_SYMLINK", "VCPKG_ROOT", "VSINSTALLDIR", "ANDROID_HOME",
+        "ANDROID_SDK_ROOT", "PYTHONHOME", "CONDA_PREFIX", "LANG",
+    ];
+    #[cfg(not(windows))]
+    const ALLOWED: &[&str] = &[
+        "PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TMPDIR", "LANG", "LC_ALL",
+        "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR", "SSH_AUTH_SOCK",
+        "CARGO_HOME", "RUSTUP_HOME", "JAVA_HOME", "GOPATH", "GOROOT", "NVM_DIR", "ANDROID_HOME",
+        "PYTHONHOME", "CONDA_PREFIX", "DISPLAY", "WAYLAND_DISPLAY",
+    ];
+    let mut environment: Vec<(std::ffi::OsString, std::ffi::OsString)> = ALLOWED
+        .iter()
+        .filter_map(|name| std::env::var_os(name).map(|value| ((*name).into(), value)))
+        .collect();
+    if let Some(token) = std::env::var_os("ZAALIS_GITHUB_TOKEN").filter(|token| !token.is_empty()) {
+        environment.push(("GH_TOKEN".into(), token.clone()));
+        environment.push(("GITHUB_TOKEN".into(), token));
+        // An empty helper resets the list (the user's credential manager
+        // would open a window nobody sees), then one answers with the token.
+        environment.push(("GIT_CONFIG_COUNT".into(), "2".into()));
+        environment.push(("GIT_CONFIG_KEY_0".into(), "credential.https://github.com.helper".into()));
+        environment.push(("GIT_CONFIG_VALUE_0".into(), "".into()));
+        environment.push(("GIT_CONFIG_KEY_1".into(), "credential.https://github.com.helper".into()));
+        environment.push((
+            "GIT_CONFIG_VALUE_1".into(),
+            "!f() { test \"$1\" = get && echo username=x-access-token && echo \"password=$GH_TOKEN\"; }; f".into(),
+        ));
+    }
+    environment
+}
+
+#[cfg(unix)]
 fn copy_minimal_environment(process: &mut Command) {
     #[cfg(windows)]
     const ALLOWED: &[&str] = &["SystemRoot", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"];

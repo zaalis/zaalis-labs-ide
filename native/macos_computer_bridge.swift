@@ -171,8 +171,37 @@ let namedKeyCodes: [String: CGKeyCode] = [
     "up": 126, "down": 125, "left": 123, "right": 124,
     "home": 115, "end": 119, "pageup": 116, "page_up": 116, "pagedown": 121, "page_down": 121,
     "f1": 122, "f2": 120, "f3": 99, "f4": 118, "f5": 96, "f6": 97, "f7": 98,
-    "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111
+    "f8": 100, "f9": 101, "f10": 109, "f11": 103, "f12": 111,
+    "f13": 105, "f14": 107, "f15": 113, "f16": 106, "f17": 64, "f18": 79, "f19": 80, "f20": 90,
+    "del": 117, "insert": 114, "ins": 114, "help": 114, "pgup": 116, "pgdn": 121,
+    "capslock": 57, "caps_lock": 57, "numlock": 71, "clear": 71,
+    "volumeup": 72, "volume_up": 72, "volumedown": 73, "volume_down": 73, "volumemute": 74, "mute": 74,
+    "numpad0": 82, "numpad1": 83, "numpad2": 84, "numpad3": 85, "numpad4": 86,
+    "numpad5": 87, "numpad6": 88, "numpad7": 89, "numpad8": 91, "numpad9": 92,
+    "multiply": 67, "add": 69, "subtract": 78, "decimal": 65, "divide": 75, "numpadenter": 76
 ]
+
+// Media keys are not keyboard events on macOS: they travel as NX system
+// events (NX_KEYTYPE_*), exactly what the hardware keys send.
+let mediaKeyTypes: [String: Int] = [
+    "mediaplaypause": 16, "playpause": 16, "medianext": 17, "mediaprev": 18, "mediaprevious": 18,
+    "brightnessup": 2, "brightnessdown": 3
+]
+
+func postMediaKey(_ type: Int) {
+    for down in [true, false] {
+        let flags = NSEvent.ModifierFlags(rawValue: down ? 0xa00 : 0xb00)
+        let data1 = (type << 16) | ((down ? 0xa : 0xb) << 8)
+        let event = NSEvent.otherEvent(with: .systemDefined, location: .zero, modifierFlags: flags, timestamp: 0,
+                                       windowNumber: 0, context: nil, subtype: 8, data1: data1, data2: -1)
+        event?.cgEvent?.post(tap: .cghidEventTap)
+        usleep(12_000)
+    }
+}
+
+// Keys without a macOS equivalent: the Windows key acts as Command, the
+// context-menu key as a right click is not a key, so it is refused clearly.
+let keyAliases: [String: String] = ["win": "cmd", "windows": "cmd", "super": "cmd", "meta": "cmd", "option": "alt"]
 
 // Word aliases for single characters the model may spell out.
 let charAliases: [String: String] = [
@@ -196,14 +225,19 @@ func keyCode(for key: String) -> CGKeyCode? {
 
 func modifierFlags(_ names: Set<String>) -> CGEventFlags {
     var flags: CGEventFlags = []
-    if names.contains("cmd") || names.contains("command") || names.contains("meta") || names.contains("super") { flags.insert(.maskCommand) }
+    if names.contains("cmd") || names.contains("command") || names.contains("meta") || names.contains("super") || names.contains("win") || names.contains("windows") { flags.insert(.maskCommand) }
     if names.contains("ctrl") || names.contains("control") { flags.insert(.maskControl) }
     if names.contains("alt") || names.contains("option") || names.contains("opt") { flags.insert(.maskAlternate) }
     if names.contains("shift") { flags.insert(.maskShift) }
     return flags
 }
 
-func keyPress(_ request: JSON) -> Bool {
+// Modifier keys pressed on their own ("key": "shift", hold_key "alt").
+let modifierKeyCodes: [String: CGKeyCode] = [
+    "cmd": 55, "command": 55, "shift": 56, "alt": 58, "ctrl": 59, "control": 59, "fn": 63
+]
+
+func parsedChord(_ request: JSON) -> (key: String, modifiers: Set<String>) {
     var rawKey = String(request["key"] as? String ?? "").lowercased()
     var modifiers = Set((request["modifiers"] as? [String] ?? []).map { $0.lowercased() })
     // Weaker models often pack the whole chord into `key`, e.g. "cmd+t" or
@@ -213,15 +247,96 @@ func keyPress(_ request: JSON) -> Bool {
         if let last = parts.last, !last.isEmpty { rawKey = last }
         for part in parts.dropLast() { modifiers.insert(part) }
     }
-    guard let code = keyCode(for: rawKey) else { return false }
-    let flags = modifierFlags(modifiers)
+    if let alias = keyAliases[rawKey] { rawKey = alias }
+    return (rawKey, modifiers)
+}
+
+// Presses (and, unless `hold` is given, releases) one chord. `hold` keeps
+// the key and its modifiers down for that many seconds before releasing.
+func keyPress(_ request: JSON, hold: Double? = nil) -> Bool {
+    let chord = parsedChord(request)
+    let repeatCount = max(1, min(30, request["repeat"] as? Int ?? 1))
+    if let media = mediaKeyTypes[chord.key] {
+        for _ in 0..<repeatCount { postMediaKey(media) }
+        return true
+    }
+    guard let code = keyCode(for: chord.key) ?? modifierKeyCodes[chord.key] else { return false }
+    let lone: [String] = modifierKeyCodes[chord.key] != nil ? [chord.key] : []
+    let flags = modifierFlags(chord.modifiers.union(lone))
     let source = CGEventSource(stateID: .hidSystemState)
-    let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
-    down?.flags = flags; down?.post(tap: .cghidEventTap)
-    usleep(12_000)
-    let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
-    up?.flags = flags; up?.post(tap: .cghidEventTap)
+    let modifierCodes = chord.modifiers.compactMap { modifierKeyCodes[keyAliases[$0] ?? $0] }
+    for _ in 0..<(hold == nil ? repeatCount : 1) {
+        if hold != nil {
+            // Real modifier key-downs first, so applications that watch the
+            // modifier state (drag with Option, Shift-select) see them held.
+            for modifier in modifierCodes {
+                let event = CGEvent(keyboardEventSource: source, virtualKey: modifier, keyDown: true)
+                event?.flags = flags; event?.post(tap: .cghidEventTap)
+            }
+        }
+        let down = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true)
+        down?.flags = flags; down?.post(tap: .cghidEventTap)
+        if let hold {
+            // Auto-repeat is left to the application, as with a physical key.
+            usleep(useconds_t(max(0.05, min(10, hold)) * 1_000_000))
+        } else {
+            usleep(12_000)
+        }
+        let up = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false)
+        up?.flags = hold == nil ? flags : []; up?.post(tap: .cghidEventTap)
+        if hold != nil {
+            for modifier in modifierCodes.reversed() {
+                CGEvent(keyboardEventSource: source, virtualKey: modifier, keyDown: false)?.post(tap: .cghidEventTap)
+            }
+        }
+        usleep(12_000)
+    }
     return true
+}
+
+func mouseButton(_ request: JSON) -> (button: CGMouseButton, down: CGEventType, up: CGEventType) {
+    switch String(request["button"] as? String ?? "left") {
+    case "right": return (.right, .rightMouseDown, .rightMouseUp)
+    case "middle": return (.center, .otherMouseDown, .otherMouseUp)
+    default: return (.left, .leftMouseDown, .leftMouseUp)
+    }
+}
+
+func cursorLocation() -> CGPoint { CGEvent(source: nil)?.location ?? .zero }
+
+// The clipboard as the user would paste it: text first, otherwise the files
+// copied in the Finder, otherwise whether an image is present.
+func clipboardRead() -> JSON {
+    let board = NSPasteboard.general
+    var result: JSON = ["ok": true]
+    if let text = board.string(forType: .string), !text.isEmpty {
+        result["text"] = String(text.prefix(200_000))
+        return result
+    }
+    if let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL], !urls.isEmpty {
+        result["files"] = urls.prefix(50).map { $0.path }
+    }
+    result["has_image"] = board.canReadItem(withDataConformingToTypes: [NSPasteboard.PasteboardType.png.rawValue, NSPasteboard.PasteboardType.tiff.rawValue])
+    return result
+}
+
+func clipboardWrite(_ text: String) -> Bool {
+    let board = NSPasteboard.general
+    board.clearContents()
+    return board.setString(text, forType: .string)
+}
+
+// A 64x36 grey-level thumbnail, two hex digits per cell: the shared
+// automation manager compares two of them to tell whether the screen
+// visibly changed after an action (same format as the Windows bridge).
+func visualSignature(_ image: CGImage) -> String? {
+    let width = 64, height = 36
+    var pixels = [UInt8](repeating: 0, count: width * height)
+    guard let context = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
+    context.interpolationQuality = .medium
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return pixels.map { String(format: "%02x", $0) }.joined()
 }
 
 // Every installed application bundle, as Launchpad and the Finder's
@@ -430,17 +545,28 @@ func guardedTarget(_ request: JSON) -> String? {
     let action = request["action"] as? String ?? ""
     let system = AXUIElementCreateSystemWide()
     var target = focusedElement()
-    if ["click", "double_click"].contains(action), let p = point(request) {
+    if ["click", "double_click", "triple_click", "mouse_up"].contains(action) {
+        let p = point(request) ?? (action == "mouse_up" ? cursorLocation() : nil)
         var hit: AXUIElement?
-        if AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &hit) == .success { target = hit }
+        if let p, AXUIElementCopyElementAtPosition(system, Float(p.x), Float(p.y), &hit) == .success { target = hit }
     }
     guard let target else { return nil }
-    if action == "type", axString(target, kAXSubroleAttribute as CFString) == "AXSecureTextField" { return "password-field" }
+    let secureField = axString(target, kAXSubroleAttribute as CFString) == "AXSecureTextField"
+    if action == "type", secureField { return "password-field" }
+    if action == "key" || action == "hold_key" {
+        // A key that would put text into the focused field: a character
+        // without Command/Control/Option, or a paste (Cmd+V, Ctrl+V).
+        let chord = parsedChord(request)
+        let chorded = !chord.modifiers.intersection(["cmd", "command", "ctrl", "control", "alt", "option", "win", "meta"]).isEmpty
+        let writes = (chord.key.count == 1 && !chorded)
+            || (chord.key == "v" && !chord.modifiers.intersection(["cmd", "command", "ctrl", "control", "win", "meta"]).isEmpty)
+        if secureField && writes { return "password-field" }
+    }
     if action == "key" {
         let key = String(request["key"] as? String ?? "").lowercased()
         if !["enter", "return", "space", " "].contains(key) { return nil }
     }
-    guard ["click", "double_click", "key"].contains(action), let pattern = request["guard"] as? String,
+    guard ["click", "double_click", "triple_click", "mouse_up", "key"].contains(action), let pattern = request["guard"] as? String,
           let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { return nil }
     var element: AXUIElement? = target
     for _ in 0..<4 {
@@ -488,6 +614,7 @@ func inspectDesktop(_ request: JSON) throws -> JSON {
     guard let image = context.makeImage() else { throw NSError(domain: "zaalis", code: 1) }
     var result: JSON = ["ok": true, "target": target, "application": NSWorkspace.shared.frontmostApplication?.localizedName ?? "", "capture": ["x": area.minX, "y": area.minY, "width": area.width, "height": area.height], "image_width": width, "image_height": height, "displays": displays.enumerated().map { index, id -> JSON in ["index": index, "x": CGDisplayBounds(id).minX, "y": CGDisplayBounds(id).minY, "width": CGDisplayBounds(id).width, "height": CGDisplayBounds(id).height] }]
     if request["include_image"] as? Bool != false { result["image"] = try pngData(image); result["mime"] = "image/png" }
+    if let signature = visualSignature(image) { result["signature"] = signature }
     func relative(_ frame: CGRect) -> [Double] { return [(frame.minX-area.minX)*scale, (frame.minY-area.minY)*scale, frame.width*scale, frame.height*scale] }
     if request["include_ui"] as? Bool != false, let application {
         var elements: [JSON] = []
@@ -543,27 +670,30 @@ guard ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 12 else {
     error("macOS 12 or newer is required"); exit(0)
 }
 
-do {
+// One gesture, as the shared automation manager describes it. A batch runs
+// several of them in this single process: no helper start-up between a click,
+// the text and Enter, so the sequence runs as fast as a person would.
+func perform(_ request: JSON) throws -> JSON {
+    let action = String(request["action"] as? String ?? "")
     if let blocked = guardedTarget(request) {
-        output(["ok": false, "error": blocked == "password-field" ? blocked : "sensitive-target", "target": blocked])
-        exit(0)
+        return ["ok": false, "error": blocked == "password-field" ? blocked : "sensitive-target", "target": blocked]
     }
     switch action {
     case "menus":
         var result = try activeApplicationMenus()
         result["ok"] = true
-        output(result)
+        return result
     case "inspect", "observe":
         // Do not gate actions on a preflight value: macOS may report a stale
         // TCC state just after an app/helper update.  The protected API itself
         // remains the authority and returns its real error if access is denied.
-        output(try inspectDesktop(request))
+        return try inspectDesktop(request)
     case "move":
-        guard let p = point(request) else { error("invalid coordinates"); break }
+        guard let p = point(request) else { return ["ok": false, "error": "invalid coordinates"] }
         move(to: p, duration: request["duration"] as? Double ?? 0.35)
-        output(["ok": true])
+        return ["ok": true]
     case "drag":
-        guard let p = point(request), let tx = request["to_x"] as? Double, let ty = request["to_y"] as? Double else { error("invalid coordinates"); break }
+        guard let p = point(request), let tx = request["to_x"] as? Double, let ty = request["to_y"] as? Double else { return ["ok": false, "error": "invalid coordinates"] }
         move(to: p, duration: 0.2)
         postMouse(.leftMouseDown, at: p)
         let end = CGPoint(x: tx, y: ty)
@@ -573,44 +703,94 @@ do {
             postMouse(.leftMouseDragged, at: CGPoint(x: p.x+(end.x-p.x)*t, y: p.y+(end.y-p.y)*t))
             usleep(16_000)
         }
-        postMouse(.leftMouseUp, at: end); output(["ok": true])
-    case "click", "double_click":
-        guard let p = point(request) else { error("invalid coordinates"); break }
+        postMouse(.leftMouseUp, at: end)
+        return ["ok": true]
+    case "click", "double_click", "triple_click":
+        guard let p = point(request) else { return ["ok": false, "error": "invalid coordinates"] }
         move(to: p, duration: request["duration"] as? Double ?? 0.28)
-        let right = String(request["button"] as? String ?? "left") == "right"
-        let middle = String(request["button"] as? String ?? "left") == "middle"
-        let button: CGMouseButton = right ? .right : middle ? .center : .left
-        let flags = modifierFlags(Set(request["modifiers"] as? [String] ?? []))
-        for count in 1...(action == "double_click" ? 2 : 1) {
+        let mouse = mouseButton(request)
+        let flags = modifierFlags(Set((request["modifiers"] as? [String] ?? []).map { $0.lowercased() }))
+        let clicks = action == "triple_click" ? 3 : action == "double_click" ? 2 : 1
+        for count in 1...clicks {
             for down in [true, false] {
-                let type: CGEventType = right ? (down ? .rightMouseDown : .rightMouseUp) : middle ? (down ? .otherMouseDown : .otherMouseUp) : (down ? .leftMouseDown : .leftMouseUp)
-                let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: p, mouseButton: button)
+                let event = CGEvent(mouseEventSource: nil, mouseType: down ? mouse.down : mouse.up, mouseCursorPosition: p, mouseButton: mouse.button)
                 event?.flags = flags; event?.setIntegerValueField(.mouseEventClickState, value: Int64(count)); event?.post(tap: .cghidEventTap)
                 usleep(55_000)
             }
         }
-        output(["ok": true])
+        return ["ok": true]
+    case "mouse_down", "mouse_up":
+        // Without coordinates the button acts under the pointer, where a
+        // previous move or mouse_down left it.
+        let p = point(request) ?? cursorLocation()
+        if point(request) != nil { move(to: p, duration: 0.2) }
+        let mouse = mouseButton(request)
+        if action == "mouse_up", mouse.button == .left, point(request) != nil {
+            // Pressed elsewhere: report the motion as a drag so the target
+            // application follows the selection or the dragged object.
+            postMouse(.leftMouseDragged, at: p)
+        }
+        CGEvent(mouseEventSource: nil, mouseType: action == "mouse_down" ? mouse.down : mouse.up, mouseCursorPosition: p, mouseButton: mouse.button)?.post(tap: .cghidEventTap)
+        return ["ok": true]
+    case "cursor_position":
+        let p = cursorLocation()
+        return ["ok": true, "x": p.x, "y": p.y]
     case "scroll":
         if let p = point(request) { move(to: p, duration: 0.1) }
+        // dy > 0 goes down the page and dx > 0 to the right, as on Windows
+        // and Linux; a positive CoreGraphics wheel delta scrolls the other way.
         let dx = Int32(max(-120, min(120, request["dx"] as? Int ?? 0)))
         let dy = Int32(max(-120, min(120, request["dy"] as? Int ?? 0)))
-        CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)?.post(tap: .cghidEventTap)
-        output(["ok": true])
+        CGEvent(scrollWheelEvent2Source: nil, units: .line, wheelCount: 2, wheel1: -dy, wheel2: -dx, wheel3: 0)?.post(tap: .cghidEventTap)
+        return ["ok": true]
     case "type":
-        typeText(String(request["text"] as? String ?? "")); output(["ok": true])
+        typeText(String(request["text"] as? String ?? ""))
+        return ["ok": true]
     case "key":
-        if keyPress(request) { output(["ok": true]) } else { error("unsupported key") }
+        return keyPress(request) ? ["ok": true] : ["ok": false, "error": "unknown-key: \(parsedChord(request).key)"]
+    case "hold_key":
+        let seconds = max(0.05, min(10, request["seconds"] as? Double ?? 1))
+        return keyPress(request, hold: seconds) ? ["ok": true] : ["ok": false, "error": "unknown-key: \(parsedChord(request).key)"]
+    case "clipboard_read":
+        return clipboardRead()
+    case "clipboard_write":
+        let text = String(request["text"] as? String ?? "")
+        guard !text.isEmpty else { return ["ok": false, "error": "clipboard: empty text"] }
+        return clipboardWrite(text) ? ["ok": true] : ["ok": false, "error": "clipboard: write failed"]
+    case "wait":
+        usleep(useconds_t(max(0.05, min(10, request["seconds"] as? Double ?? 1)) * 1_000_000))
+        return ["ok": true]
     case "open_terminal":
-        try activateApp("/System/Applications/Utilities/Terminal.app"); output(["ok": true])
+        try activateApp("/System/Applications/Utilities/Terminal.app")
+        return ["ok": true]
     case "activate_app":
         let appPath = String(request["path"] as? String ?? "")
-        guard !appPath.isEmpty else { error("invalid app path"); break }
-        try activateApp(appPath); output(["ok": true])
+        guard !appPath.isEmpty else { return ["ok": false, "error": "invalid app path"] }
+        try activateApp(appPath)
+        return ["ok": true, "application": NSWorkspace.shared.frontmostApplication?.localizedName ?? ""]
     default:
-        error("unsupported action")
+        return ["ok": false, "error": "unsupported-action: \(action)"]
     }
-} catch let missing as ApplicationNotFound {
-    output(["ok": false, "error": "application-not-found", "suggestions": missing.suggestions])
-} catch {
-    output(["ok": false, "error": error.localizedDescription])
+}
+
+func performCatching(_ request: JSON) -> JSON {
+    do { return try perform(request) }
+    catch let missing as ApplicationNotFound { return ["ok": false, "error": "application-not-found", "suggestions": missing.suggestions] }
+    catch { return ["ok": false, "error": error.localizedDescription] }
+}
+
+if action == "batch" {
+    let steps = request["actions"] as? [JSON] ?? []
+    var outcomes: [JSON] = []
+    var okAll = !steps.isEmpty
+    for step in steps.prefix(20) {
+        let outcome = performCatching(step)
+        outcomes.append(outcome)
+        if outcome["ok"] as? Bool != true { okAll = false; break }
+        // Lets the application react before the next gesture.
+        usleep(60_000)
+    }
+    output(["ok": okAll, "steps": outcomes])
+} else {
+    output(performCatching(request))
 }

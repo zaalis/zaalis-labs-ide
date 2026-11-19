@@ -57,7 +57,7 @@ impl OpenAiConfig {
         let (base_url, default_model, reasoning, capabilities) = match provider {
             ProviderId::Codex => (
                 "https://api.openai.com/v1",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 ReasoningStyle::Effort,
                 Capabilities {
                     reasoning: true,
@@ -957,10 +957,10 @@ impl StreamParser {
     pub fn finish(mut self) -> Vec<TurnEvent> {
         let mut events = Vec::new();
         if let Some(payload) = self.decoder.finish() {
-            if payload != DONE {
-                if let Ok(value) = serde_json::from_str::<Value>(&payload) {
-                    self.handle(&value, &mut events);
-                }
+            if payload == DONE {
+                self.done = true;
+            } else if let Ok(value) = serde_json::from_str::<Value>(&payload) {
+                self.handle(&value, &mut events);
             }
         }
 
@@ -1061,6 +1061,14 @@ impl WireParser for StreamParser {
 
     fn finish(self) -> Vec<TurnEvent> {
         StreamParser::finish(self)
+    }
+
+    fn truncated(&self) -> bool {
+        // The connection closed before the provider said it was finished (no
+        // `finish_reason`, no `[DONE]`): the answer is cut. Ending the turn
+        // there made a long task stop silently halfway, and a cut tool call
+        // could run with half its arguments.
+        !self.failed && !self.done && self.finish_reason.is_none()
     }
 }
 
@@ -1372,6 +1380,19 @@ mod tests {
                 reason: StopReason::EndTurn
             })
         ));
+    }
+
+    #[test]
+    fn a_stream_cut_before_its_end_marker_is_reported_as_truncated() {
+        let mut cut = StreamParser::new();
+        cut.push("data: {\"choices\":[{\"delta\":{\"content\":\"Je compile\"}}]}\n\n");
+        assert!(WireParser::truncated(&cut));
+        let mut finished = StreamParser::new();
+        finished.push("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n");
+        assert!(!WireParser::truncated(&finished));
+        let mut done = StreamParser::new();
+        done.push("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n");
+        assert!(!WireParser::truncated(&done));
     }
 
     #[test]

@@ -1001,6 +1001,14 @@ body.theme-light .diff-line.del{color:#b91c1c;}
 .compat-key-fields .compat-host{font-size:11px;font-weight:400;color:var(--text-2);font-family:var(--font-mono);margin-left:6px;}
 .compat-key-fields .compat-clear{margin-left:8px;padding:0;border:0;background:none;color:var(--text-2);font-size:11px;cursor:pointer;}
 .compat-key-fields .compat-clear:hover{color:var(--red,#ef4444);}
+/* Vertex AI (beta channel) */
+.beta-badge{display:inline-block;margin-left:8px;padding:1px 7px;border-radius:999px;font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--accent-hover,var(--accent));background:var(--accent-muted);vertical-align:1px}
+.vertex-settings .vertex-hint{margin:2px 0 8px;font-size:11.5px;line-height:1.5;color:var(--text-2)}
+.vertex-settings .vertex-key{width:100%;min-height:64px;resize:vertical;font-family:var(--font-mono);font-size:11px;background:var(--bg-3);border:1px solid var(--border);border-radius:var(--radius);color:var(--text-0);padding:8px 10px;outline:none}
+.vertex-settings .vertex-key:focus{border-color:var(--accent)}
+.vertex-settings .vertex-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:8px;margin-top:8px}
+.vertex-settings .vertex-adc{display:flex;align-items:center;gap:6px;margin-top:8px;font-size:12px;color:var(--text-1)}
+.vertex-settings .vertex-adc input{width:auto;margin:0}
 .compat-key-fields .compat-empty{font-size:12px;color:var(--text-2);padding:4px 4px;}
 /* ChatGPT subscription sign-in in Settings > API keys */
 .chatgpt-sub [hidden]{display:none;}
@@ -1014,6 +1022,8 @@ body.theme-light .diff-line.del{color:#b91c1c;}
 .chatgpt-sub-error{font-size:12px;color:var(--red,#ef4444);margin:0 0 10px;line-height:1.45;}
 #chatgpt-sub-status.connected{color:var(--green);}
 .account-subscriptions{display:grid;gap:12px;}
+/* Vertex AI sits in its own container below Grok/MiniMax: same 12px gap between cards. */
+#vertex-subscription:not(:empty){margin-top:12px;}
 .account-sub-card{border:1px solid var(--border);border-radius:var(--radius);background:var(--bg-3);padding:16px;}
 .account-sub-card [hidden]{display:none;}
 .account-sub-label{font-size:13px;color:var(--text-0);}
