@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Glyphe — vidéo</title>
+<style>
+  html, body { margin: 0; width: 1080px; height: 1080px; overflow: hidden; }
+  body { background: radial-gradient(120% 90% at 50% 38%, #1b1b2a 0%, #0b0b10 62%, #060609 100%);
+         font: 600 40px -apple-system, "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif; color: #f2f2f7; }
+  #stage { position: absolute; left: 50%; top: 455px; width: 560px; height: 560px; transform: translate(-50%, -50%); }
+  #stage svg { width: 100%; height: 100%; overflow: visible; }
+  .brand { position: absolute; left: 0; right: 0; bottom: 112px; display: flex; align-items: center; justify-content: center; gap: 16px; letter-spacing: -0.5px; }
+  .brand svg.logo { width: 38px; height: 38px; }
+  .brand .mini { width: 46px; height: 46px; }
+  .caption { position: absolute; left: 0; right: 0; bottom: 64px; text-align: center; font-weight: 400; font-size: 24px; color: #8e8e9a; letter-spacing: 0.2px; }
+</style>
+</head>
+<body>
+<div id="stage"></div>
+<div class="brand">
+  <svg class="logo" viewBox="0 0 24 24" fill="none" stroke="#f2f2f7" stroke-width="1.8" stroke-linejoin="round"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
+  <span>Glyphes</span>
+  <span class="mini" id="mini"></span>
+</div>
+<div class="caption" id="caption"></div>
+<script src="../../interface/glyphes/glyph.js"></script>
+<script src="video.js"></script>
+</body>
+</html>

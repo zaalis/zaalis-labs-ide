@@ -549,20 +549,23 @@ app.use((req, res, next) => {
 
   // Security headers. connect-src 'self' is the important one: even if a script
   // were injected, it cannot exfiltrate the API keys to an external server.
+  // The Glyphes app (/glyphes/) is framed by the IDE window itself, and shows
+  // the Google profile picture of the linked account.
+  const glyphesPage = req.path.startsWith('/glyphes/');
   res.setHeader('Content-Security-Policy', [
     "default-src 'self'",
     "script-src 'self'",
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
     "font-src 'self' https://fonts.gstatic.com",
-    "img-src 'self' data: blob:",
+    glyphesPage ? "img-src 'self' data: blob: https://*.googleusercontent.com" : "img-src 'self' data: blob:",
     "connect-src 'self'",
     "object-src 'none'",
     "base-uri 'self'",
     "form-action 'self'",
-    "frame-ancestors 'none'",
+    glyphesPage ? "frame-ancestors 'self'" : "frame-ancestors 'none'",
   ].join('; '));
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Frame-Options', glyphesPage ? 'SAMEORIGIN' : 'DENY');
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
@@ -1016,6 +1019,13 @@ app.use('/api', (req, res, next) => {
     return next();
   }
   return res.status(401).json({ error: 'Authentification requise.' });
+});
+
+// zaalis Glyphes: the IDE shows the Glyphes app and relays it to the Glyphes
+// server with the account linked once in the browser (see glyphes-link.js).
+require('../integrations/glyphes-link').register(app, {
+  loadUsers, saveUsers, encryptSecret, decryptSecret, userApiKeys, compatProviders, compatKey, compatBaseUrl,
+  openExternal: openInExternalBrowser, SUBMODELS: modelCatalog.SUBMODELS,
 });
 
 // Per-account preference survives logout and application reinstalls because

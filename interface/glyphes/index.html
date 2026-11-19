@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="fr" data-theme="system" data-font="system">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#0b0b0f" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Glyphes">
+<meta name="description" content="Tes Glyphes : des assistants qui travaillent pour toi, 24 h/24.">
+<title>Glyphes</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icons/glyph-192.png">
+<link rel="apple-touch-icon" href="icons/glyph-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app" class="app" data-view="loading">
+
+  <!-- Sign in -->
+  <section class="login" id="login" hidden>
+    <div class="login-glyph" id="login-glyph"></div>
+    <h1 class="login-title">Glyphes</h1>
+    <p class="login-sub">Des assistants qui gèrent tes mails, ton agenda, tes tâches et tes notes, même quand ton ordinateur est éteint.</p>
+    <a class="btn btn-google" id="login-google" href="auth/google/start?return=/">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/><path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/><path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/><path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/></svg>
+      Continuer avec Google
+    </a>
+    <button class="btn btn-primary" id="login-ide" type="button" hidden>Relier mon compte Glyphes</button>
+    <p class="login-hint" id="login-hint"></p>
+  </section>
+
+  <!-- Navigation drawer (80 % on phone, permanent sidebar on desktop) -->
+  <div class="scrim" id="scrim"></div>
+  <nav class="drawer" id="drawer" aria-label="Glyphes">
+    <header class="drawer-head">
+      <div class="brand"><span>Glyphes</span></div>
+      <button class="icon-btn" id="new-glyph" type="button" aria-label="Nouveau Glyphe"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+    </header>
+    <div class="glyph-list" id="glyph-list" role="list"></div>
+    <button class="account-row" id="open-settings" type="button">
+      <span class="avatar" id="account-avatar"></span>
+      <span class="account-text"><strong id="account-name"></strong><small>Paramètres</small></span>
+      <svg viewBox="0 0 24 24" class="chev"><path d="m9 6 6 6-6 6"/></svg>
+    </button>
+  </nav>
+
+  <!-- Conversation -->
+  <main class="chat" id="chat">
+    <header class="topbar">
+      <button class="icon-btn menu-btn" id="menu-btn" type="button" aria-label="Ouvrir la liste des Glyphes"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg><span class="menu-dot" id="menu-dot" hidden></span></button>
+      <button class="top-glyph" id="top-glyph" type="button" aria-label="Réglages du Glyphe">
+        <span class="top-glyph-icon" id="top-glyph-icon"></span>
+        <span class="top-glyph-text"><strong id="top-glyph-name"></strong><small id="top-glyph-status"></small></span>
+      </button>
+      <button class="icon-btn plug-btn" id="plug-btn" type="button" aria-label="Plugins connectés">
+        <svg viewBox="0 0 24 24"><path d="M9 2v5M15 2v5M6 7h12v4a6 6 0 0 1-12 0zM12 17v5"/></svg>
+        <span class="plug-count" id="plug-count"></span>
+      </button>
+    </header>
+    <div class="thread" id="thread" role="log" aria-live="polite">
+      <div class="thread-inner" id="thread-inner"></div>
+    </div>
+    <div class="dock" id="dock">
+      <div class="confirm ask" id="ask" hidden></div>
+      <div class="confirm" id="confirm" hidden></div>
+      <div class="attachments" id="attachments" hidden></div>
+      <form class="composer" id="composer" autocomplete="off">
+        <div class="field">
+          <button class="icon-btn plus-btn" id="plus-btn" type="button" aria-label="Ajouter" aria-expanded="false"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
+          <textarea id="input" rows="1" placeholder="Écris à ton Glyphe…" aria-label="Message"></textarea>
+          <button class="icon-btn mic-btn" id="mic-btn" type="button" aria-label="Dictée vocale"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg></button>
+          <button class="send-btn" id="send-btn" type="submit" aria-label="Envoyer" hidden><svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+        </div>
+      </form>
+      <div class="plus-menu" id="plus-menu" hidden>
+        <button type="button" data-pick="camera"><span><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg></span>Caméra</button>
+        <button type="button" data-pick="photos"><span><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="m4 18 5-5 4 4 3-3 4 4"/></svg></span>Photos</button>
+        <button type="button" data-pick="files"><span><svg viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg></span>Fichiers</button>
+      </div>
+      <input type="file" id="pick-camera" accept="image/*" capture="environment" hidden>
+      <input type="file" id="pick-photos" accept="image/*" multiple hidden>
+      <input type="file" id="pick-files" multiple hidden>
+    </div>
+  </main>
+
+  <!-- Bottom sheets -->
+  <div class="sheet-scrim" id="sheet-scrim"></div>
+  <section class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+    <div class="sheet-grabber"></div>
+    <header class="sheet-head"><button class="sheet-back" id="sheet-back" type="button" hidden aria-label="Retour"><svg viewBox="0 0 24 24"><path d="m15 6-6 6 6 6"/></svg></button><h2 id="sheet-title"></h2><button class="icon-btn sheet-close" id="sheet-close" type="button" aria-label="Fermer"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></header>
+    <div class="sheet-body" id="sheet-body"></div>
+  </section>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+  <label class="haptic" aria-hidden="true"><input type="checkbox" switch id="haptic" tabindex="-1"></label>
+</div>
+<script src="glyph.js"></script>
+<script src="glass.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
