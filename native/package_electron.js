@@ -77,6 +77,13 @@ async function main() {
 
   copyDir(packagedRoot, finalDist);
 
+  if (platform === 'linux') {
+    const launcher = path.join(finalDist, EXECUTABLE_NAME);
+    fs.renameSync(launcher, launcher + '-bin');
+    copyFile(path.join(root, 'native', 'zaalis-linux-launcher.sh'), launcher);
+    fs.chmodSync(launcher, 0o755);
+  }
+
   const appResourceRoot = platform === 'darwin'
     ? path.join(finalDist, `${PRODUCT_NAME}.app`, 'Contents', 'Resources', 'app')
     : path.join(finalDist, 'resources', 'app');

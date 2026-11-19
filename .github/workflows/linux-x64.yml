@@ -31,7 +31,11 @@ jobs:
           done
           "$bundle/bin/zaalis" --version
           test -x native/dist-linux/zaalis-ide
+          test -x native/dist-linux/zaalis-ide-bin
           dpkg-deb --info native/installer/zaalis-linux-x64.deb
+          dpkg-deb --contents native/installer/zaalis-linux-x64.deb > "$RUNNER_TEMP/zaalis-deb-files"
+          grep -E '^-rwsr-xr-x root/root .* ./opt/zaalis-ide/chrome-sandbox$' "$RUNNER_TEMP/zaalis-deb-files"
+          grep -E '^-rwxr-xr-x root/root .* ./opt/zaalis-ide/zaalis-ide-bin$' "$RUNNER_TEMP/zaalis-deb-files"
           tar -tzf native/installer/zaalis-linux-x64.tar.gz > "$RUNNER_TEMP/zaalis-tar-files"
           grep -Fx './resources/app/bundle/bin/zaalis' "$RUNNER_TEMP/zaalis-tar-files"
           (cd native/installer && sha256sum zaalis-linux-x64.deb zaalis-linux-x64.tar.gz > SHA256SUMS)
@@ -45,9 +49,13 @@ jobs:
             native/installer/zaalis-linux-x64.tar.gz
             native/installer/SHA256SUMS
           if-no-files-found: error
+          compression-level: 0
 
       - name: Test the packaged server and its PTY
         run: node test/package-smoke.js native/dist-linux/resources/app/bundle/zaalis-server
+
+      - name: Run application tests on Linux
+        run: npm test
 
       - name: Start the packaged Electron desktop on X11
         run: |
@@ -55,9 +63,11 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y xvfb xauth xdotool
           fi
+          mkdir "$RUNNER_TEMP/zaalis-portable"
+          tar -xzf native/installer/zaalis-linux-x64.tar.gz -C "$RUNNER_TEMP/zaalis-portable"
           export ZAALIS_PORT=31959 ZAALIS_DATA_DIR="$RUNNER_TEMP/zaalis-desktop-smoke"
           xvfb-run -a bash -eu -o pipefail -c '
-            native/dist-linux/zaalis-ide --disable-gpu > "$RUNNER_TEMP/zaalis-desktop.log" 2>&1 &
+            "$RUNNER_TEMP/zaalis-portable/zaalis-ide" --disable-gpu > "$RUNNER_TEMP/zaalis-desktop.log" 2>&1 &
             pid=$!
             trap "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true" EXIT
             for attempt in {1..60}; do
@@ -71,6 +81,3 @@ jobs:
             cat "$RUNNER_TEMP/zaalis-desktop.log"
             exit 1
           '
-
-      - name: Run application tests on Linux
-        run: npm test

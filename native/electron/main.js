@@ -18,23 +18,6 @@ let browserEnvironment = {};
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) app.quit();
 
-function configureLinuxSandbox() {
-  if (process.platform !== 'linux') return;
-
-  const sandboxPath = path.join(path.dirname(process.execPath), 'chrome-sandbox');
-  try {
-    const st = fs.statSync(sandboxPath);
-    const hasSetuid = (st.mode & 0o4000) !== 0;
-    if (st.uid === 0 && hasSetuid) return;
-  } catch {}
-
-  // Portable extractions or some graphical installers can lose chrome-sandbox
-  // root/setuid permissions. The app only renders the local zaalis UI and
-  // blocks external navigation, so this fallback is preferable to a hard crash.
-  app.commandLine.appendSwitch('no-sandbox');
-}
-
-configureLinuxSandbox();
 app.commandLine.appendSwitch('disable-component-update');
 app.commandLine.appendSwitch('disable-domain-reliability');
 app.commandLine.appendSwitch('disable-breakpad');

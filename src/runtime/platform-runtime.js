@@ -40,7 +40,7 @@ function updateExtension(url,platform=process.platform){const file=new URL(url).
 const quote=s=>"'"+String(s).replace(/'/g,"'\\''")+"'";
 function linuxUpdateScript(installer,scriptPath,log,relaunch,appImage){
  const image=/\.AppImage$/i.test(installer);const install=image?(appImage?`cp -f ${quote(installer)} ${quote(appImage)} && chmod +x ${quote(appImage)} || fallback`:`chmod +x ${quote(installer)}; fallback`):`pkexec env DEBIAN_FRONTEND=noninteractive sh -c 'apt-get install -y --allow-downgrades "$1" || dpkg -i "$1"' sh ${quote(installer)} || fallback`;
- return ['#!/bin/sh',`exec >>${quote(log)} 2>&1`,'fallback() {',`xdg-open ${quote(installer)} 2>/dev/null || true`,`rm -f ${quote(scriptPath)}`,'exit 0','}','sleep 1','pkill -x zaalis-agentd 2>/dev/null || true','pkill -x zaalis-server 2>/dev/null || true','pkill -x zaalis-ide 2>/dev/null || true','sleep 2',install,relaunch?`setsid ${quote(relaunch)} >/dev/null 2>&1 &`:'',`rm -f ${quote(scriptPath)}`,''].join('\n');
+ return ['#!/bin/sh',`exec >>${quote(log)} 2>&1`,'fallback() {',`xdg-open ${quote(installer)} 2>/dev/null || true`,`rm -f ${quote(scriptPath)}`,'exit 0','}','sleep 1','pkill -x zaalis-agentd 2>/dev/null || true','pkill -x zaalis-server 2>/dev/null || true','pkill -x zaalis-ide 2>/dev/null || true','pkill -x zaalis-ide-bin 2>/dev/null || true','sleep 2',install,relaunch?`setsid ${quote(relaunch)} >/dev/null 2>&1 &`:'',`rm -f ${quote(scriptPath)}`,''].join('\n');
 }
 function installPosixUpdate(installer,appDir){
  if(!installer||!fs.existsSync(installer))throw Error('Téléchargez le paquet avant de lancer la mise à jour.');updateExtension('https://github.com/'+path.basename(installer));

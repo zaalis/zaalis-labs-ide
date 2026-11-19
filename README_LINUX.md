@@ -12,9 +12,11 @@ For a portable installation:
 mkdir -p zaalis-linux
 tar -xzf zaalis-linux-x64.tar.gz -C zaalis-linux
 cd zaalis-linux
-chmod +x zaalis-ide resources/app/bundle/zaalis-server resources/app/bundle/zaalis-agentd resources/app/bundle/bin/zaalis
+chmod +x zaalis-ide zaalis-ide-bin resources/app/bundle/zaalis-server resources/app/bundle/zaalis-agentd resources/app/bundle/bin/zaalis
 ./zaalis-ide
 ```
+
+A portable extraction made without a root-owned Chromium helper uses the launcher's unsandboxed Chromium fallback. The Debian installer sets up the helper with root ownership and mode 4755.
 
 The CLI is `./resources/app/bundle/bin/zaalis`; pass a prompt as an argument for a noninteractive request.
 
