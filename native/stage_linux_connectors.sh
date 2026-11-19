@@ -26,13 +26,18 @@ test -x "$DIST/github/gh"
 "$DIST/github/gh" --version | head -n 1
 
 CACHE="$ROOT/native/linux-cloudflared"
+CLOUDFLARED_VERSION=2026.11.1
+CLOUDFLARED_SHA256=97bb3b02d23a5980fc9c15a1a270e692da1923f103f920d5b16d4931d5ab55e7
+CLOUDFLARED="$CACHE/cloudflared-$CLOUDFLARED_VERSION"
 mkdir -p "$CACHE"
-if [ ! -x "$CACHE/cloudflared" ]; then
-  curl -fL --retry 3 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$CACHE/cloudflared.part"
-  chmod 755 "$CACHE/cloudflared.part"
-  "$CACHE/cloudflared.part" --version >/dev/null
-  mv -f "$CACHE/cloudflared.part" "$CACHE/cloudflared"
+verify_cloudflared() {
+  printf '%s  %s\n' "$CLOUDFLARED_SHA256" "$1" | sha256sum --check --status
+}
+if ! verify_cloudflared "$CLOUDFLARED" 2>/dev/null; then
+  curl -fL --retry 3 "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-amd64" -o "$CLOUDFLARED.part"
+  verify_cloudflared "$CLOUDFLARED.part"
+  mv -f "$CLOUDFLARED.part" "$CLOUDFLARED"
 fi
-cp -f "$CACHE/cloudflared" "$DIST/cloudflared"
+cp -f "$CLOUDFLARED" "$DIST/cloudflared"
 chmod 755 "$DIST/cloudflared"
 "$DIST/cloudflared" --version

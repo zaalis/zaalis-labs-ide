@@ -38,22 +38,19 @@ if (windows) {
 fs.copyFileSync(path.join(root, 'docs', 'third-party', 'github-cli-license.txt'), path.join(ghDir, 'LICENSE'));
 console.log('GitHub client and Zaalis WhatsApp bridge staged in ' + path.relative(root, dist) + '.');
 
-// Linux: the official release archive, verified against the release checksums.
+// Linux: pin the official archive and verify its published checksum.
 function stageLinuxGh(target) {
+  const version = '2.105.0';
+  const expected = '79e7ab5db738c48777b696e374f8b428f0647debfb424f44d2f426370407fe2f';
   const cache = path.join(root, 'native', 'linux-gh');
+  const name = `gh_${version}_linux_amd64.tar.gz`;
+  const archive = path.join(cache, name);
+  const url = `https://github.com/cli/cli/releases/download/v${version}/${name}`;
   fs.mkdirSync(cache, { recursive: true });
-  const curl = (args, options = {}) => execFileSync('curl', ['-fsSL', '--retry', '3', ...args], { maxBuffer: 64 * 1024 * 1024, ...options });
-  const release = JSON.parse(curl(['-H', 'Accept: application/vnd.github+json', 'https://api.github.com/repos/cli/cli/releases/latest']).toString());
-  const version = String(release.tag_name || '').replace(/^v/, '');
-  if (!/^\d+\.\d+\.\d+$/.test(version)) throw Error('Unexpected GitHub CLI release tag');
-  const name = `gh_${version}_linux_amd64.tar.gz`, archive = path.join(cache, name);
-  const asset = file => (release.assets || []).find(a => a.name === file)?.browser_download_url;
-  const sums = asset(`gh_${version}_checksums.txt`);
-  if (!asset(name) || !sums) throw Error('GitHub CLI Linux release assets not found');
-  const expected = curl([sums]).toString().split('\n').map(line => line.trim().split(/\s+/)).find(([, file]) => file === name)?.[0];
-  if (!/^[0-9a-f]{64}$/.test(expected || '')) throw Error('GitHub CLI checksum missing');
   const digest = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-  if (!fs.existsSync(archive) || digest(archive) !== expected) curl(['-o', archive, asset(name)]);
+  if (!fs.existsSync(archive) || digest(archive) !== expected) {
+    execFileSync('curl', ['-fsSL', '--retry', '3', '-o', archive, url]);
+  }
   if (digest(archive) !== expected) throw Error('GitHub CLI checksum mismatch');
   const extract = path.join(cache, `gh_${version}`);
   fs.rmSync(extract, { recursive: true, force: true }); fs.mkdirSync(extract);
