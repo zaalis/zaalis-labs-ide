@@ -2,6 +2,8 @@
 
 const crypto = require('crypto');
 const os = require('os');
+const path = require('node:path');
+const { linuxDesktopDirectories } = require('./platform-runtime');
 
 const STATES = new Set(['running', 'waiting_user', 'stopping', 'stopped', 'failed', 'completed']);
 const ACTIONS = new Set(['observe', 'inspect', 'zoom', 'menus', 'cursor_position', 'move', 'click', 'double_click', 'triple_click', 'drag', 'mouse_down', 'mouse_up', 'scroll', 'type', 'key', 'hold_key', 'clipboard_read', 'clipboard_write', 'wait', 'open_terminal', 'activate_app', 'batch', 'ask']);
@@ -160,7 +162,7 @@ function normalizeAction(input) {
   if (action === 'activate_app') {
     out.path = text(input.path, 1024);
     if (out.path.includes('..')) return null;
-    const linuxApplications = ['/usr/share/applications/', '/usr/local/share/applications/', `${os.homedir()}/.local/share/applications/`, '~/.local/share/applications/', '/var/lib/flatpak/exports/share/applications/'];
+    const desktopPath = out.path.startsWith('~/') ? path.posix.join(os.homedir(), out.path.slice(2)) : out.path;
     // On Windows an application may also be named as the Start menu shows it
     // ("Blender", "Paint 3D"): the bridge looks it up there, never on PATH.
     const validPath = process.platform === 'win32'
@@ -168,7 +170,7 @@ function normalizeAction(input) {
         || /^[\p{L}\p{N}][\p{L}\p{N} ._+&'()-]{0,79}$/u.test(out.path))
       : process.platform === 'darwin'
         ? (/^(?:\/Applications\/|\/System\/Applications\/|~\/Applications\/)[^\0\r\n]+\.app$/.test(out.path) || /^(?:Safari|Google Chrome|Firefox|TextEdit|Notes|Finder|Terminal|Visual Studio Code|Calculator)$/.test(out.path))
-        : ((linuxApplications.some((dir) => out.path.startsWith(dir)) && /^[^\0\r\n]+\.desktop$/.test(out.path)) || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path)
+        : ((linuxDesktopDirectories().includes(path.posix.dirname(desktopPath)) && /^[^\0\r\n]+\.desktop$/.test(out.path)) || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)(?:\.desktop)?$/i.test(out.path)
           // As on Windows, the name the applications menu shows ("Blender").
           || /^[\p{L}\p{N}][\p{L}\p{N} ._+&'()-]{0,79}$/u.test(out.path));
     if (!validPath) return null;

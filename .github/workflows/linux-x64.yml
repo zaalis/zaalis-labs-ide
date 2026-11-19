@@ -49,5 +49,28 @@ jobs:
       - name: Test the packaged server and its PTY
         run: node test/package-smoke.js native/dist-linux/resources/app/bundle/zaalis-server
 
+      - name: Start the packaged Electron desktop on X11
+        run: |
+          if ! command -v xvfb-run >/dev/null || ! command -v xdotool >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y xvfb xauth xdotool
+          fi
+          export ZAALIS_PORT=31959 ZAALIS_DATA_DIR="$RUNNER_TEMP/zaalis-desktop-smoke"
+          xvfb-run -a bash -eu -o pipefail -c '
+            native/dist-linux/zaalis-ide --disable-gpu > "$RUNNER_TEMP/zaalis-desktop.log" 2>&1 &
+            pid=$!
+            trap "kill $pid 2>/dev/null || true; wait $pid 2>/dev/null || true" EXIT
+            for attempt in {1..60}; do
+              kill -0 "$pid" 2>/dev/null || break
+              if curl -fsS "http://127.0.0.1:$ZAALIS_PORT/api/health" 2>/dev/null | grep -q desktop-launcher-v2 &&
+                 xdotool search --onlyvisible --name "zaalis IDE" >/dev/null 2>&1; then
+                exit 0
+              fi
+              sleep 1
+            done
+            cat "$RUNNER_TEMP/zaalis-desktop.log"
+            exit 1
+          '
+
       - name: Run application tests on Linux
         run: npm test

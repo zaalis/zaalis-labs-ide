@@ -387,7 +387,7 @@
       }
       const form = node('form', 'vm-host-form');
       const field = (name, label, placeholder, type = 'text') => { const input = node('input'); input.name = name; input.type = type; input.placeholder = placeholder; input.setAttribute('aria-label', t(label)); input.required = name !== 'port'; return input; };
-      form.append(field('name', 'Nom', t('Nom')), field('host', 'Adresse', 'serveur.exemple.fr'), field('port', 'Port', '22', 'number'), field('user', 'Utilisateur', 'deploy'), field('identityFile', 'Clé privée', HOST_IS_WINDOWS ? 'C:\\Users\\…\\.ssh\\id_ed25519' : '~/.ssh/id_ed25519'));
+      form.append(field('name', 'Nom', t('Nom')), field('host', 'Adresse', 'serveur.exemple.fr'), field('port', 'Port', '22', 'number'), field('user', 'Utilisateur', 'deploy'), field('identityFile', 'Clé privée', HOST_IS_WINDOWS ? 'C:\\Users\\…\\.ssh\\id_ed25519' : '/home/…/.ssh/id_ed25519'));
       const add = node('button', '', t('Ajouter le serveur')); add.type = 'submit'; form.append(add);
       form.addEventListener('submit', async event => { event.preventDefault(); const data = Object.fromEntries(new FormData(form)); try { const answer = await fetch('/api/vm/ssh-hosts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }); const value = await answer.json(); if (!answer.ok) throw new Error(value.error); await settings(); } catch (error) { form.append(Object.assign(node('p', 'vm-error', t(error.message)), { role: 'alert' })); } });
       ssh.append(form); target.append(ssh);

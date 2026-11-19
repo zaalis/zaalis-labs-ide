@@ -6,10 +6,28 @@ test('packaged data paths preserve Windows and isolate macOS/Linux user stores',
  assert.equal(runtime.dataDir('/app',true,'darwin',{},'/Users/sample'),'/Users/sample/Library/Application Support/zaalis/server-data');
  assert.equal(runtime.dataDir('/app',true,'linux',{XDG_DATA_HOME:'/data'},'/home/sample'),'/data/zaalis/server-data');
  assert.equal(runtime.dataDir('/app',false,'linux',{},'/home/sample'),'/app/server-data');
+ assert.equal(runtime.dataDir('/app',true,'linux',{XDG_DATA_HOME:'relative'},'/home/sample'),'/home/sample/.local/share/zaalis/server-data');
+ assert.equal(runtime.browserDir('linux',{XDG_CONFIG_HOME:'/settings'},'/home/sample'),'/settings/zaalis/Browser');
 });
 test('POSIX PATH preserves custom tools and adds Homebrew without duplicates',()=>{
  const env=runtime.environment('darwin',{PATH:'/bin:/custom:/bin',EXAMPLE:'kept'},'/Users/sample');assert.equal(env.EXAMPLE,'kept');assert.equal(env.PATH.split(':').filter(p=>p==='/bin').length,1);assert.ok(env.PATH.includes('/opt/homebrew/bin'));
  assert.equal(runtime.environment('win32',{PATH:'C:\\Tools;C:\\Windows'}).PATH,'C:\\Tools;C:\\Windows');
+});
+test('Linux desktop entries honor XDG lookup order and ignore relative directories', () => {
+  const home = '/home/sample';
+  assert.deepEqual(runtime.linuxDesktopDirectories({
+    XDG_DATA_HOME: '/data/user',
+    XDG_DATA_DIRS: '/data/system:relative:/usr/share:/data/system',
+  }, home), [
+    '/data/user/applications',
+    '/data/system/applications',
+    '/usr/share/applications',
+    '/var/lib/flatpak/exports/share/applications',
+    '/home/sample/.local/share/flatpak/exports/share/applications',
+    '/var/lib/snapd/desktop/applications',
+  ]);
+  assert.deepEqual(runtime.linuxDesktopDirectories({ XDG_DATA_HOME: 'relative' }, home).slice(0, 3),
+    ['/home/sample/.local/share/applications', '/usr/local/share/applications', '/usr/share/applications']);
 });
 test('GGUF variants and assets target the current platform and architecture',()=>{
  assert.equal(runtime.normalizeEngine('cuda','darwin'),'metal');assert.equal(runtime.normalizeEngine('cpu','darwin'),'cpu');assert.equal(runtime.normalizeEngine('metal','linux'),'vulkan');assert.equal(runtime.normalizeEngine('rocm','win32','cuda'),'cuda');

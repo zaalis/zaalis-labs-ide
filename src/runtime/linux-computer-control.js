@@ -4,6 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const { linuxDesktopDirectories } = require('./platform-runtime');
 
 const MAX_BUFFER = 24 * 1024 * 1024;
 const KEY_NAMES = new Map([
@@ -256,14 +257,16 @@ async function xdgDefaultDesktop(mime) {
 // pas sur le PATH (cas frequent des paquets Flatpak/Snap).
 function desktopFilePath(id) {
   const file = String(id || '').endsWith('.desktop') ? String(id) : `${id}.desktop`;
-  const dirs = [
-    path.join(os.homedir(), '.local', 'share', 'applications'),
-    '/usr/local/share/applications', '/usr/share/applications',
-    '/var/lib/flatpak/exports/share/applications',
-    path.join(os.homedir(), '.local', 'share', 'flatpak', 'exports', 'share', 'applications'),
-    '/var/lib/snapd/desktop/applications',
-  ];
-  for (const d of dirs) { const p = path.join(d, file); try { if (fs.existsSync(p)) return p; } catch {} }
+  const dirs = linuxDesktopDirectories();
+  if (file.startsWith('/') || file.startsWith('~/')) {
+    const absolute = file.startsWith('~/') ? path.join(os.homedir(), file.slice(2)) : path.normalize(file);
+    return dirs.includes(path.dirname(absolute)) && fs.existsSync(absolute) ? absolute : '';
+  }
+  if (file.includes('/')) return '';
+  for (const dir of dirs) {
+    const candidate = path.join(dir, file);
+    if (fs.existsSync(candidate)) return candidate;
+  }
   return '';
 }
 
@@ -274,14 +277,8 @@ function plainName(value) {
   return String(value || '').normalize('NFD').replace(/\p{Mn}/gu, '').toLowerCase().trim();
 }
 function desktopEntries() {
-  const dirs = [
-    path.join(os.homedir(), '.local', 'share', 'applications'),
-    '/usr/local/share/applications', '/usr/share/applications',
-    '/var/lib/flatpak/exports/share/applications',
-    path.join(os.homedir(), '.local', 'share', 'flatpak', 'exports', 'share', 'applications'),
-    '/var/lib/snapd/desktop/applications',
-  ];
-  const lang = String(process.env.LANG || '').split(/[._@]/)[0];
+  const dirs = linuxDesktopDirectories();
+  const lang = String(process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || '').split(/[.@]/)[0];
   const seen = new Set(), entries = [];
   for (const dir of dirs) {
     let files = [];
@@ -584,46 +581,38 @@ button.connect('clicked',clicked); signal.signal(signal.SIGTERM,lambda *a: GLib.
         const menuName = !(requested.startsWith('/') || requested.startsWith('~/') || /\.desktop$/.test(requested)
           || /^(?:chrome|chromium|firefox|code|terminal|gnome-text-editor|gedit|kate|mousepad|nautilus|dolphin|thunar)$/i.test(requested));
         // 1) Executable direct : chemin absolu, ou commande trouvee sur le PATH.
-        for (const candidate of menuName ? [] : candidates) {
+        for (const candidate of menuName || requested.endsWith('.desktop') ? [] : candidates) {
           if (candidate && path.isAbsolute(candidate) && fs.existsSync(candidate)) {
             try { fs.accessSync(candidate, fs.constants.X_OK); const c = spawn(candidate, [], { detached: true, stdio: 'ignore' }); c.unref(); launched = { pid: c.pid, name: path.basename(candidate).replace(/-stable$/, '') }; break; } catch {}
           }
           const found = await commandPath([candidate]);
           if (found) { const c = spawn(found, [], { detached: true, stdio: 'ignore' }); c.unref(); launched = { pid: c.pid, name: path.basename(found).replace(/-stable$/, '') }; break; }
         }
-        // 2) Repli universel freedesktop : lancer le .desktop de l'app par defaut
-        //    du bureau (via xdg-mime) ou celui portant le nom demande, avec
-        //    gtk-launch puis gio. Couvre Flatpak/Snap et toute distribution.
+        // Resolve the desktop entry to its exact path, including local XDG,
+        // Flatpak and Snap directories. The launcher expands Exec and DBus fields.
         if (!launched) {
-          const ids = [];
           const mime = SEMANTIC_MIME[requested.trim().toLowerCase()];
-          if (mime) { const def = await xdgDefaultDesktop(mime); if (def) ids.push(def); }
-          for (const c of candidates) ids.push(c);
-          ids.push(requested);
-          const gtk = await commandPath(['gtk-launch']);
-          for (const id of ids) {
-            const deskPath = desktopFilePath(id);
-            if (!deskPath) continue;
-            const base = path.basename(deskPath).replace(/\.desktop$/, '');
-            try {
-              const c = gtk
-                ? spawn(gtk, [base], { detached: true, stdio: 'ignore', env: process.env })
-                : spawn('gio', ['launch', deskPath], { detached: true, stdio: 'ignore', env: process.env });
-              c.unref(); launched = { pid: c.pid, name: base, byDesktop: true }; break;
-            } catch {}
+          const defaultId = mime ? await xdgDefaultDesktop(mime) : '';
+          let file = [defaultId, ...candidates, requested].filter(Boolean).map(desktopFilePath).find(Boolean);
+          if (!file) {
+            const match = findDesktopApp(requested);
+            if (!match.app) return { ok: false, error: 'application-not-found', suggestions: match.suggestions };
+            file = match.app.path;
           }
-        }
-        // 3) Nom affiche dans le menu des applications, comme le menu Demarrer.
-        if (!launched) {
-          const found = findDesktopApp(requested);
-          if (!found.app) return { ok: false, error: 'application-not-found', suggestions: found.suggestions };
-          const gtk = await commandPath(['gtk-launch']);
-          try {
-            const c = gtk
-              ? spawn(gtk, [found.app.id], { detached: true, stdio: 'ignore', env: process.env })
-              : spawn('gio', ['launch', found.app.path], { detached: true, stdio: 'ignore', env: process.env });
-            c.unref(); launched = { pid: c.pid, name: found.app.id.split('.').pop(), byDesktop: true };
-          } catch { return { ok: false, error: 'application-not-found', suggestions: [] }; }
+          const appId = path.basename(file, '.desktop');
+          const gio = await commandPath(['gio']);
+          const gtk = gio ? '' : await commandPath(['gtk-launch']);
+          if (!gio && !gtk) return { ok: false, error: 'application-launcher-unavailable' };
+          const child = spawn(gio || gtk, gio ? ['launch', file] : [appId], {
+            detached: true, stdio: 'ignore', env: process.env,
+          });
+          const started = await new Promise(resolve => {
+            child.once('error', () => resolve(false));
+            child.once('spawn', () => resolve(true));
+          });
+          if (!started) return { ok: false, error: 'application-launch-failed' };
+          child.unref();
+          launched = { pid: child.pid, name: appId.split('.').pop(), byDesktop: true };
         }
         // On attend que la fenetre soit reellement visible avant de rendre la
         // main : une app qui demarre a froid (Firefox, LibreOffice, un Flatpak)

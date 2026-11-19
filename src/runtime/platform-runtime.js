@@ -4,16 +4,17 @@
 const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
 const {execFile,execFileSync,spawn}=require('node:child_process');
 const paths=platform=>platform==='win32'?path.win32:path.posix;
+const xdgHome = (setting, fallback) => path.posix.isAbsolute(setting || '') ? setting : fallback;
 function dataDir(appDir,packaged,platform=process.platform,env=process.env,home=os.homedir()){
  const p=paths(platform);if(env.ZAALIS_DATA_DIR)return path.resolve(env.ZAALIS_DATA_DIR);
- if(packaged){if(platform==='win32'&&env.LOCALAPPDATA)return p.join(env.LOCALAPPDATA,'zaalis','server-data');if(platform==='darwin')return p.join(home,'Library','Application Support','zaalis','server-data');if(platform==='linux')return p.join(env.XDG_DATA_HOME||p.join(home,'.local','share'),'zaalis','server-data');}return p.join(appDir,'server-data');
+ if(packaged){if(platform==='win32'&&env.LOCALAPPDATA)return p.join(env.LOCALAPPDATA,'zaalis','server-data');if(platform==='darwin')return p.join(home,'Library','Application Support','zaalis','server-data');if(platform==='linux')return p.join(xdgHome(env.XDG_DATA_HOME,p.join(home,'.local','share')),'zaalis','server-data');}return p.join(appDir,'server-data');
 }
 function environment(platform=process.platform,env=process.env,home=os.homedir()){
  if(platform==='win32')return {...env};const extra=platform==='darwin'?['/opt/homebrew/bin','/opt/homebrew/sbin','/usr/local/bin','/usr/local/sbin']:['/usr/local/bin','/usr/local/sbin'];
  return {...env,PATH:[...new Set([...String(env.PATH||'').split(':'),...extra,'/usr/bin','/bin','/usr/sbin','/sbin',path.posix.join(home,'.local','bin')].filter(Boolean))].join(':')};
 }
 function browserDir(platform=process.platform,env=process.env,home=os.homedir()){
- const p=paths(platform);if(platform==='win32')return p.join(env.APPDATA||p.join(home,'AppData','Roaming'),'zaalis','Browser');if(platform==='darwin')return p.join(home,'Library','Application Support','zaalis','Browser');return p.join(env.XDG_CONFIG_HOME||p.join(home,'.config'),'zaalis','Browser');
+ const p=paths(platform);if(platform==='win32')return p.join(env.APPDATA||p.join(home,'AppData','Roaming'),'zaalis','Browser');if(platform==='darwin')return p.join(home,'Library','Application Support','zaalis','Browser');return p.join(xdgHome(env.XDG_CONFIG_HOME,p.join(home,'.config')),'zaalis','Browser');
 }
 function normalizeEngine(variant,platform=process.platform,fallback='cpu'){
  const v=String(variant||'').toLowerCase();if(platform==='darwin')return v==='cpu'?'cpu':'metal';if(platform==='linux')return ['rocm','vulkan','cpu'].includes(v)?v:['cuda','metal'].includes(v)?'vulkan':fallback;return ['cuda','vulkan','cpu'].includes(v)?v:fallback;
@@ -48,4 +49,14 @@ function installPosixUpdate(installer,appDir){
  fs.writeFileSync(script,linuxUpdateScript(installer,script,log,fs.existsSync(relaunch)?relaunch:'',process.env.APPIMAGE),{mode:0o700});const child=spawn('sh',[script],{detached:true,stdio:'ignore',env:environment()});child.on('error',()=>{});child.unref();return {success:true,installerPath:installer,silent:true,log};
 }
 function startPosixOllama(){const candidates=process.platform==='darwin'?['/Applications/Ollama.app/Contents/Resources/ollama','/opt/homebrew/bin/ollama','/usr/local/bin/ollama']:['/usr/local/bin/ollama','/usr/bin/ollama',path.join(os.homedir(),'.local/bin/ollama')];const exe=candidates.find(p=>fs.existsSync(p))||'ollama';const child=spawn(exe,['serve'],{detached:true,stdio:'ignore',env:environment()});child.on('error',()=>{});child.unref();}
-module.exports={dataDir,environment,browserDir,normalizeEngine,detectPosixEngine,engineAssets,engineBinary,extractPosix,executable,openExternal,pickFolder,updateAsset,updateExtension,linuxUpdateScript,installPosixUpdate,startPosixOllama};
+function linuxDesktopDirectories(env = process.env, home = os.homedir()) {
+  const posix = path.posix;
+  const userData = xdgHome(env.XDG_DATA_HOME, posix.join(home, '.local/share'));
+  const systemData = (env.XDG_DATA_DIRS || '/usr/local/share:/usr/share').split(':').filter(dir => posix.isAbsolute(dir));
+  return [...new Set([
+    userData, ...systemData, '/var/lib/flatpak/exports/share',
+    posix.join(home, '.local/share/flatpak/exports/share'), '/var/lib/snapd/desktop',
+  ].map(dir => posix.join(dir, 'applications')))];
+}
+
+module.exports={linuxDesktopDirectories,dataDir,environment,browserDir,normalizeEngine,detectPosixEngine,engineAssets,engineBinary,extractPosix,executable,openExternal,pickFolder,updateAsset,updateExtension,linuxUpdateScript,installPosixUpdate,startPosixOllama};
