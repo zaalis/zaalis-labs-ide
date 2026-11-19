@@ -4120,7 +4120,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "zaalis-core",
- "zaalis-exec",
  "zaalis-extensions",
  "zaalis-fs",
  "zaalis-git",

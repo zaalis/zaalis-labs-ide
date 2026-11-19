@@ -17,6 +17,8 @@ const MAX_PROJECT_GUIDANCE_CHARS: usize = 32 * 1024;
 /// Gemini, GPT, Grok, Kimi, Ollama and GGUF.  A weaker model therefore gets
 /// the same state-grounding and verification discipline as a stronger one.
 const RUNTIME_RULES: &str = "\n\nRÈGLES RUNTIME (prioritaires) :\n\
+- Pendant le travail, une mise à jour utile tient en UNE phrase de 280 caractères maximum. Exécute les outils directement pour les étapes ordinaires ; évite de raconter ton raisonnement ou de répéter ton plan. La réponse finale est un mini rapport concis, avec résultats et limites ; développe librement si l'utilisateur demande des explications détaillées. Cette limite de progression ne s'applique pas aux réponses finales, documents ni au code demandé.\n\
+- Si l'utilisateur demande des sous-agents et que spawn_agent est disponible, utilise réellement cet outil pour les sous-tâches indépendantes, avec un role.label court décrivant leur mission. Pour plusieurs sous-tâches indépendantes, lance-les en un seul appel spawn_agents ; ajoute review=cross pour une vérification croisée des rapports, ou review=debate quand les conclusions peuvent diverger. Sinon préfère background=true, consulte agent_status/agent_wait puis vérifie leurs rapports avant de conclure. Respecte les budgets et permissions, et signale toute impossibilité réelle.\n\
 - Après chaque outil, fonde ta décision suivante sur l'état réel renvoyé par le ToolResult, pas sur ton plan précédent.\n\
 - Ne présente jamais comme « à faire » ou « je vais » une action déjà confirmée comme réussie par un ToolResult : décris-la au passé (fait) et enchaîne sur ce qui reste réellement à faire.\n\
 - Avant de conclure une tâche de développement, vérifie ton travail : relis les fichiers créés ou modifiés, et lance un test quand c'est pertinent.\n\
@@ -92,6 +94,14 @@ pub(crate) fn system_prompt(
         prompt.push_str(
             "\n\nMODE PLAN: analyse et propose un plan précis. Ne modifie rien avant approbation.",
         );
+    } else if matches!(node.permissions.mode, zaalis_core::PermissionMode::Auto | zaalis_core::PermissionMode::Bypass) {
+        // Autonomous: the user gave full control and is not watching each step.
+        prompt.push_str(
+            "\n\nMODE AUTONOME : l'utilisateur t'a donné le contrôle total. Exécute toutes les commandes et modifications nécessaires sans demander, et va jusqu'au bout de la tâche, même si elle dure des heures : n'arrête pas pour annoncer la suite ni pour demander une confirmation, enchaîne directement l'outil suivant. Ne termine qu'une fois le résultat vérifié (build, tests, lancement) ou si un vrai blocage exige une décision de l'utilisateur. Seules les actions catastrophiques (effacer un disque, le profil utilisateur, Windows, éteindre le PC, push forcé, supprimer un dépôt GitHub) demandent encore une validation.",
+        );
+    }
+    if session.tools.definitions().iter().any(|t| t.name == "process") {
+        prompt.push_str("\n\nTÂCHES LONGUES : lance une compilation longue, un serveur de dev, un watcher ou une grosse suite de tests avec process start et un `name` court et clair (« Compilation app », « Serveur de dev », « Tests e2e ») : l'utilisateur la voit dans Activité des agents et peut l'arrêter. Suis-la avec process poll.");
     }
     if let Some(extensions) = &session.config.extensions {
         prompt.push_str(&extensions.skills.prompt_catalog());

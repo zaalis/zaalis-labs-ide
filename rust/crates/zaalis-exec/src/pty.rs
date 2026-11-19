@@ -145,7 +145,9 @@ impl PtyRuntime {
         let mut builder = shell_builder();
         builder.cwd(&self.root);
         builder.env_clear();
-        copy_minimal_environment(&mut builder);
+        for (name, value) in crate::development_environment() {
+            builder.env(name, value);
+        }
         builder.env("GIT_TERMINAL_PROMPT", "0");
         let child = pair.slave.spawn_command(builder).map_err(pty_error)?;
         drop(pair.slave);
@@ -392,18 +394,6 @@ impl PtyRuntime {
             .get(pty_id)
             .cloned()
             .ok_or_else(|| ZaalisError::not_found(format!("PTY inconnu : {pty_id}")))
-    }
-}
-
-fn copy_minimal_environment(builder: &mut CommandBuilder) {
-    #[cfg(windows)]
-    const ALLOWED: &[&str] = &["SystemRoot", "ComSpec", "PATH", "PATHEXT", "TEMP", "TMP"];
-    #[cfg(not(windows))]
-    const ALLOWED: &[&str] = &["PATH", "HOME", "TMPDIR", "LANG", "LC_ALL"];
-    for name in ALLOWED {
-        if let Some(value) = std::env::var_os(name) {
-            builder.env(name, value);
-        }
     }
 }
 

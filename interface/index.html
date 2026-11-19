@@ -5,40 +5,66 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>zaalis IDE</title>
     <meta name="description" content="zaalis IDE - Multi-AI Development Environment">
-    <link rel="stylesheet" href="base.css?v=1.0.22">
-    <link rel="stylesheet" href="app.css?v=20261008.1">
-    <link rel="stylesheet" href="workspace.css?v=20261006.2">
-    <link rel="stylesheet" href="timeline.css?v=20261008.1">
+    <link rel="stylesheet" href="base.css?v=20261015.7">
+    <link rel="stylesheet" href="app.css?v=20261119.3">
+    <link rel="stylesheet" href="workspace.css?v=20261118.1">
+    <link rel="stylesheet" href="collaboration.css?v=20261015.7">
+    <link rel="stylesheet" href="timeline.css?v=20261119.1">
+    <link rel="stylesheet" href="splash.css?v=20261015.7">
+    <link rel="stylesheet" href="auth.css?v=20261119.3">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 </head>
 <body>
 
+<!-- ===== LAUNCH SPLASH (built and dismissed by script/splash.js) ===== -->
+<div id="zaalis-splash" class="zs-root"></div>
+<script src="script/splash.js?v=20261015.7"></script>
+
 <!-- ===== AUTH OVERLAY (login / register) ===== -->
 <div id="auth-overlay">
+    <canvas class="auth-backdrop" aria-hidden="true"></canvas>
     <div class="auth-card">
         <div class="auth-logo">
             <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5 12 2"/><line x1="12" y1="22" x2="12" y2="15.5"/><polyline points="22 8.5 12 15.5 2 8.5"/></svg>
             <span>zaalis IDE</span>
         </div>
-        <div class="auth-error" id="auth-error"></div>
+        <div class="auth-error" id="auth-error" role="alert"></div>
+        <div class="auth-notice" id="auth-notice" role="status"></div>
 
         <!-- Login -->
-        <form id="login-form" class="auth-form" autocomplete="off">
+        <form id="login-form" class="auth-form" autocomplete="off" novalidate>
             <h2>Connexion</h2>
-            <input type="email" id="login-email" placeholder="Adresse email" autocomplete="username" required>
-            <input type="password" id="login-password" placeholder="Mot de passe" autocomplete="current-password" required>
+            <p class="auth-sub">Heureux de vous revoir.</p>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="login-email" autocomplete="username" required></label>
+            <label class="auth-field"><span>Mot de passe</span><input type="password" id="login-password" autocomplete="current-password" required></label>
+            <a href="#" class="auth-forgot" id="show-forgot">Mot de passe oublié ?</a>
             <button type="submit" class="btn btn-primary auth-submit">Se connecter</button>
             <p class="auth-switch">Pas encore de compte ? <a href="#" id="show-register">Créer un compte</a></p>
         </form>
 
         <!-- Register -->
-        <form id="register-form" class="auth-form hidden" autocomplete="off">
+        <form id="register-form" class="auth-form hidden" autocomplete="off" novalidate>
             <h2>Créer un compte</h2>
-            <input type="email" id="reg-email" placeholder="Adresse email" autocomplete="username" required>
-            <input type="password" id="reg-password" placeholder="Mot de passe (6 caractères min.)" autocomplete="new-password" required>
-            <input type="password" id="reg-password2" placeholder="Confirmer le mot de passe" autocomplete="new-password" required>
+            <p class="auth-sub">Quelques informations pour commencer.</p>
+            <div class="auth-row">
+                <label class="auth-field"><span>Prénom</span><input type="text" id="reg-firstname" autocomplete="given-name" maxlength="60" required></label>
+                <label class="auth-field"><span>Nom</span><input type="text" id="reg-lastname" autocomplete="family-name" maxlength="60" required></label>
+            </div>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="reg-email" autocomplete="username" required></label>
+            <label class="auth-field"><span>Mot de passe</span><input type="password" id="reg-password" autocomplete="new-password" required></label>
+            <label class="auth-field"><span>Confirmer le mot de passe</span><input type="password" id="reg-password2" autocomplete="new-password" required></label>
+            <p class="auth-rule">8 caractères minimum, avec au moins une lettre et un chiffre.</p>
             <button type="submit" class="btn btn-primary auth-submit">Créer le compte</button>
             <p class="auth-switch">Déjà un compte ? <a href="#" id="show-login">Se connecter</a></p>
+        </form>
+
+        <!-- Forgotten password -->
+        <form id="forgot-form" class="auth-form hidden" autocomplete="off" novalidate>
+            <h2>Mot de passe oublié</h2>
+            <p class="auth-sub">Indiquez l’adresse de votre compte : une fenêtre s’ouvrira dans votre navigateur pour choisir un nouveau mot de passe.</p>
+            <label class="auth-field"><span>Adresse e-mail</span><input type="email" id="forgot-email" autocomplete="username" required></label>
+            <button type="submit" class="btn btn-primary auth-submit">Ouvrir la fenêtre de réinitialisation</button>
+            <p class="auth-switch"><a href="#" id="forgot-back">Retour à la connexion</a></p>
         </form>
     </div>
 </div>
@@ -148,7 +174,7 @@
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 1.5-1.25 2.1-2 2.5-.5.27-1 .8-1 1.5"/><circle cx="11.5" cy="16.5" r="1.1" fill="currentColor" stroke="none"/></svg>
                 <span data-i18n="help-btn">Aide</span>
             </button>
-            <button class="topbar-btn remote-btn" id="remote-btn" title="Remote control (téléphone)">
+            <button class="topbar-btn remote-btn" id="remote-btn" title="Contrôle mobile">
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="7" y="2" width="10" height="20" rx="2"/><line x1="11" y1="18" x2="13" y2="18"/></svg>
                 <span class="remote-dot" id="remote-dot"></span>
             </button>
@@ -184,7 +210,7 @@
                         <span data-i18n="history-no-project">Aucun projet</span>
                     </button>
                     <div class="dropdown-divider"></div>
-                    <div class="dropdown-label" data-i18n="recent-projects">Projets recents</div>
+                    <div class="dropdown-label" data-i18n="recent-projects">Projets récents</div>
                     <div id="recent-projects">
                         <div class="dropdown-empty" data-i18n="no-recent-projects">Aucun projet recent</div>
                     </div>
@@ -283,7 +309,7 @@
                 <div class="slider-track">
                     <div class="slider-handle"></div>
                 </div>
-                <div class="reasoning-tooltip" data-i18n="incompatible-tooltip">Modele incompatible</div>
+                <div class="reasoning-tooltip" data-i18n="incompatible-tooltip">Modèle incompatible</div>
             </div>
 
             <!-- Panel Header: Tabs -->
@@ -300,7 +326,7 @@
             <!-- ===== CHAT VIEW ===== -->
             <div class="ai-view active" id="view-chat">
                 <div class="chat-messages" id="chat-messages">
-                    <div class="msg msg-system"><div class="msg-body" data-i18n="chat-default-msg">Selectionnez un modele et posez votre question.</div></div>
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="chat-default-msg">Sélectionnez un modèle et posez votre question.</div></div>
                 </div>
 
                 <!-- Attachments preview (not attached to the input bar) -->
@@ -329,7 +355,7 @@
                         </optgroup>
                     </select>
                     <select id="ai-submodel">
-                        <option value="gpt-5.6-sol">GPT-5.6 Sol</option>
+                        <option value="gpt-6-astra">GPT-6 Astra</option>
                     </select>
                     <button id="gguf-install-shortcut" class="gguf-install-shortcut" type="button" title="Installer un modèle GGUF" aria-label="Installer un modèle GGUF" hidden>Installer</button>
                 </div>
@@ -342,7 +368,7 @@
 
                 <!-- Chat Input -->
                 <div class="chat-input-area">
-                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Ecrivez votre message..." autocomplete="off"></textarea>
+                    <textarea id="chat-input" rows="1" data-i18n-placeholder="chat-input-placeholder" placeholder="Écrivez votre message..." autocomplete="off"></textarea>
                     <div class="chat-input-bottom">
                         <div class="chat-input-bottom-left">
                             <div class="attach-wrap">
@@ -427,15 +453,15 @@
                         <div class="agent-info">
                             <span class="agent-name">Codex</span>
                             <select class="agent-role-select" data-agent="codex">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="codex"><option value="gpt-5.6-sol">GPT-5.6 Sol</option></select>
+                        <select class="agent-model-select" data-agent="codex"><option value="gpt-6-astra">GPT-6 Astra</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Claude -->
@@ -445,15 +471,15 @@
                         <div class="agent-info">
                             <span class="agent-name">Claude</span>
                             <select class="agent-role-select" data-agent="claude">
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="architect">Architecte</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="claude"><option value="claude-fable-5">Claude Fable 5</option></select>
+                        <select class="agent-model-select" data-agent="claude"><option value="claude-fable-5-2">Claude Fable 5.2</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Gemini -->
@@ -465,8 +491,8 @@
                             <select class="agent-role-select" data-agent="gemini">
                                 <option value="architect">Architecte</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="developer">Développeur</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -483,13 +509,13 @@
                             <select class="agent-role-select" data-agent="grok">
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="lead">Chef de projet</option>
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="tester">Testeur</option>
                             </select>
                         </div>
-                        <select class="agent-model-select" data-agent="grok"><option value="grok-4.5">Grok 4.5</option></select>
+                        <select class="agent-model-select" data-agent="grok"><option value="grok-4.7">Grok 4.7</option></select>
                         <span class="agent-badge idle">Inactif</span>
                     </div>
                     <!-- Le Chat (Mistral) -->
@@ -499,10 +525,10 @@
                         <div class="agent-info">
                             <span class="agent-name">Le Chat</span>
                             <select class="agent-role-select" data-agent="mistral">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -517,8 +543,8 @@
                         <div class="agent-info">
                             <span class="agent-name">Kimi</span>
                             <select class="agent-role-select" data-agent="kimi">
-                                <option value="developer">Developpeur</option><option value="lead">Chef de projet</option>
-                                <option value="architect">Architecte</option><option value="reviewer">Reviewer</option>
+                                <option value="developer">Développeur</option><option value="lead">Chef de projet</option>
+                                <option value="architect">Architecte</option><option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option><option value="tester">Testeur</option>
                             </select>
                         </div>
@@ -532,10 +558,10 @@
                         <div class="agent-info">
                             <span class="agent-name">Ollama</span>
                             <select class="agent-role-select" data-agent="local">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -550,10 +576,10 @@
                         <div class="agent-info">
                             <span class="agent-name">GGUF</span>
                             <select class="agent-role-select" data-agent="gguf">
-                                <option value="developer">Developpeur</option>
+                                <option value="developer">Développeur</option>
                                 <option value="lead">Chef de projet</option>
                                 <option value="architect">Architecte</option>
-                                <option value="reviewer">Reviewer</option>
+                                <option value="reviewer">Relecteur</option>
                                 <option value="optimizer">Optimiseur</option>
                                 <option value="tester">Testeur</option>
                             </select>
@@ -565,7 +591,7 @@
 
                 <!-- Agents Log -->
                 <div class="agents-log" id="agents-log">
-                    <div class="msg msg-system"><div class="msg-body" data-i18n="agents-log-default">Activez le Mode Agents et envoyez une tache.</div></div>
+                    <div class="msg msg-system"><div class="msg-body" data-i18n="agents-log-default">Activez le Mode Agents et envoyez une tâche.</div></div>
                 </div>
 
                 <!-- Attachments preview (agents) -->
@@ -669,30 +695,33 @@
             <div class="settings-nav-label" data-i18n="settings-api-category">API</div>
             <button class="settings-nav-item" type="button" data-settings-section="api">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 7h3a5 5 0 0 1 0 10h-3"/><path d="M9 17H6A5 5 0 0 1 6 7h3"/><line x1="8" y1="12" x2="16" y2="12"/></svg>
-                <span data-i18n="settings-api-keys-title">Cles API</span>
+                <span data-i18n="settings-api-keys-title">Clés API</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="mcp">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="12" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8.7 10.5 6.6-3M8.7 13.5l6.6 3"/></svg><span>MCP</span>
             </button>
-            <div class="settings-nav-label" data-i18n="settings-zside-category">ZS IDE</div>
+            <button class="settings-nav-item" type="button" data-settings-section="skills">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3z"/></svg><span>Skills</span>
+            </button>
+            <div class="settings-nav-label" data-i18n="settings-zside-category">zaalis IDE</div>
             <button class="settings-nav-item" type="button" data-settings-section="appearance">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20z"/></svg>
                 <span data-i18n="settings-appearance-title">Apparence</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="models">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2 2 7l10 5 10-5-10-5z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
-                <span data-i18n="settings-models-title">Modèles</span>
+                <span data-i18n="settings-models-title">Modèles par défaut</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="hardware">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/></svg>
-                <span data-i18n="settings-hardware-title">Hardware</span>
+                <span data-i18n="settings-hardware-title">Matériel</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="vm">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8M12 16v5"/></svg>
                 <span>Machines virtuelles</span>
             </button>
             <button class="settings-nav-item" type="button" data-settings-section="integrations"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M8 3v5M16 3v5M5 8h14v3a7 7 0 0 1-14 0zM12 18v4"/></svg><span>Intégrations</span></button>
-            <button class="settings-nav-item" type="button" data-settings-section="tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-8"/></svg><span>Tokens</span></button>
+            <button class="settings-nav-item" type="button" data-settings-section="tokens"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 20V10M12 20V4M20 20v-8"/></svg><span>Consommation</span></button>
             <button class="settings-nav-item" type="button" data-settings-section="project">
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
                 <span data-i18n="settings-project-title">Projet</span>
@@ -729,10 +758,10 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-lang-select" data-i18n="settings-language-label">Langue</label>
-                            <p data-i18n="settings-language-hint">Choisir la langue de ZS IDE.</p>
+                            <p data-i18n="settings-language-hint">Choisir la langue de zaalis IDE.</p>
                         </div>
                         <select id="settings-lang-select">
-                            <option value="fr">Francais</option>
+                            <option value="fr">Français</option>
                             <option value="en">English</option>
                         </select>
                     </div>
@@ -746,8 +775,8 @@
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="api">
-                    <h3 data-i18n="settings-api-keys-title">Cles API</h3>
-                    <p class="form-hint" data-i18n="api-keys-hint">Chaque modele cloud necessite sa propre cle API. Ollama fonctionne sans cle.</p>
+                    <h3 data-i18n="settings-api-keys-title">Clés API</h3>
+                    <p class="form-hint" data-i18n="api-keys-hint">Chaque modèle cloud nécessite sa propre clé API. Ollama fonctionne sans clé.</p>
                     <div class="form-group">
                         <div class="key-label-row">
                             <label for="key-openai">OpenAI (Codex)</label>
@@ -789,16 +818,16 @@
                     </div>
                     <hr class="settings-separator">
                     <h3 id="chatgpt-sub-title">Abonnement ChatGPT (Plus / Pro)</h3>
-                    <p class="form-hint">Utilisez les modèles GPT avec votre abonnement ChatGPT plutôt qu’une clé API facturée au token. La connexion se fait sur le site d’OpenAI avec un code : zaalis ne voit jamais votre mot de passe, et la session est chiffrée sur ce PC.</p>
+                    <p class="form-hint">Utilisez les modèles disponibles dans votre forfait ChatGPT. Validez la connexion et les permissions sur le site OpenAI ; la session reste chiffrée sur ce PC. La disponibilité dépend du compte et de l’éligibilité de cette application locale.</p>
                     <div class="chatgpt-sub" id="chatgpt-sub">
                         <div class="settings-status-row"><span>État</span><strong id="chatgpt-sub-status">Non connecté</strong></div>
                         <div class="chatgpt-sub-actions">
-                            <button class="btn btn-primary" id="chatgpt-sub-connect" type="button">Connecter mon abonnement ChatGPT</button>
+                            <button class="btn btn-primary" id="chatgpt-sub-connect" type="button">Continue with ChatGPT</button>
                             <button class="btn btn-ghost" id="chatgpt-sub-disconnect" type="button" hidden>Déconnecter</button>
                         </div>
                         <div class="chatgpt-sub-flow" id="chatgpt-sub-flow" hidden>
                             <p class="chatgpt-sub-step">1. Ouvrez la page de connexion OpenAI et connectez-vous à votre compte ChatGPT.</p>
-                            <p class="chatgpt-sub-step">2. Saisissez ce code :</p>
+                            <p class="chatgpt-sub-step">2. Autorisez l’utilisation de votre forfait, puis revenez dans Zaalis Labs.</p>
                             <div class="chatgpt-sub-code" id="chatgpt-sub-code" aria-live="polite"></div>
                             <div class="chatgpt-sub-actions">
                                 <button class="btn btn-primary" id="chatgpt-sub-open" type="button">Ouvrir la page OpenAI</button>
@@ -809,6 +838,16 @@
                         </div>
                         <p class="chatgpt-sub-error" id="chatgpt-sub-error" role="alert" hidden></p>
                     </div>
+                    <div class="cyber-controls">
+                        <label for="cyber-program">Accès cybersécurité OpenAI</label>
+                        <select id="cyber-program">
+                            <option value="standard">Standard</option>
+                            <option value="daybreak_blue">Daybreak Blue</option>
+                            <option value="daybreak_red">Daybreak Red</option>
+                        </select>
+                        <p class="form-hint">S’applique à OpenAI et ChatGPT uniquement. Daybreak nécessite une autorisation OpenAI pour le compte, le projet, le modèle et cette intégration. Aucun abonnement ni réglage ne débloque ces droits automatiquement.</p>
+                        <p id="cyber-status" class="form-hint" role="status" aria-live="polite"></p>
+                    </div>
                     <hr class="settings-separator">
                     <h3 id="compat-settings-title">Autres fournisseurs (compatibles OpenAI)</h3>
                     <p class="form-hint">Appel direct depuis ce PC vers le fournisseur choisi. Les clés sont chiffrées localement et ne passent par aucun service tiers. Un fournisseur apparaît dans la liste des modèles dès que sa clé est enregistrée.</p>
@@ -818,6 +857,24 @@
                     <h3 id="account-subscriptions-title">Compatibles abonnement</h3>
                     <p class="form-hint">Connectez votre compte directement sur le site du fournisseur. L’IDE garde les jetons chiffrés sur ce PC et affiche les modèles après la connexion. L’accès dépend du forfait et des droits accordés par le fournisseur.</p>
                     <div id="account-subscriptions" class="account-subscriptions"></div>
+                    <div id="vertex-subscription" class="account-subscriptions"></div>
+                </section>
+
+                <section class="settings-card settings-pane" data-settings-pane="skills">
+                    <h3>Skills</h3>
+                    <p class="form-hint">Des instructions réutilisables pour vos agents. Les skills du projet sont chargées depuis .zaalis/skills. Les imports restent dans votre bibliothèque personnelle.</p>
+                    <div class="skills-toolbar">
+                        <input type="search" id="skills-filter" class="compat-filter" placeholder="Rechercher une skill…" aria-label="Rechercher une skill">
+                        <label class="btn btn-primary skills-import-label">Importer SKILL.md<input type="file" id="skills-import" accept=".md,text/markdown" aria-label="Importer un fichier SKILL.md"></label>
+                        <button class="btn btn-ghost" id="skills-refresh" type="button">Actualiser</button>
+                    </div>
+                    <div class="skills-options">
+                        <label class="skill-toggle"><input type="checkbox" id="skills-auto-activate"><span>Activer automatiquement les skills écrites par l’IA</span></label>
+                        <label class="skill-toggle"><input type="checkbox" id="skills-drafts"><span>Garder un brouillon de procédure après une longue tâche réussie</span></label>
+                        <p class="form-hint">Sans activation automatique, une skill proposée par l’IA reste désactivée jusqu’à ce que vous la relisiez et l’activiez ici.</p>
+                    </div>
+                    <p id="skills-status" class="form-hint skills-status" role="status" aria-live="polite"></p>
+                    <div id="skills-list" class="skills-list" aria-busy="false"></div>
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="mcp">
@@ -834,7 +891,7 @@
                     </div>
                     <hr class="settings-separator">
                     <h3 class="mcp-builtin-title"><img class="mcp-server-logo" src="image/blender.png" alt="" width="22" height="22">Blender</h3>
-                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit la scène ouverte et la modifie grâce à l’add-on MCP officiel de Blender. Tout se passe sur ce PC, et le nécessaire est fourni avec zaalis IDE.</p>
+                    <p class="form-hint">Pilotez Blender depuis le chat : l’assistant lit, vérifie et modifie la scène ouverte grâce au pont Zaalis. La connexion est locale et authentifiée, et le nécessaire est fourni avec zaalis IDE.</p>
                     <div class="opale-link" id="blender-link">
                         <div class="settings-status-row"><span>État</span><strong id="blender-status">Recherche de Blender…</strong></div>
                         <div class="opale-actions">
@@ -859,10 +916,10 @@
                 </section>
 
                 <section class="settings-card settings-pane" data-settings-pane="hardware">
-                    <h3 data-i18n="settings-hardware-title">Hardware</h3>
-                    <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option detectee sur cette machine.</p>
+                    <h3 data-i18n="settings-hardware-title">Matériel</h3>
+                    <p class="form-hint" data-i18n="settings-performance-hint">Choisissez le moteur local GGUF. Auto utilise la meilleure option détectée sur cette machine.</p>
                     <div class="settings-status-row">
-                        <span data-i18n="settings-detected-label">Detecte</span>
+                        <span data-i18n="settings-detected-label">Détecté</span>
                         <strong id="gguf-detected-variant">-</strong>
                     </div>
                     <div class="settings-status-row">
@@ -872,7 +929,7 @@
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="gguf-variant-select" data-i18n="settings-gguf-engine-label">Moteur GGUF</label>
-                            <p data-i18n="settings-gguf-engine-hint">Auto selectionne CUDA, Vulkan ou CPU selon le poste.</p>
+                            <p data-i18n="settings-gguf-engine-hint">Auto sélectionne CUDA, Vulkan ou CPU selon le poste.</p>
                         </div>
                         <select id="gguf-variant-select">
                             <option value="" data-i18n="settings-gguf-auto">Auto</option>
@@ -923,7 +980,7 @@
                 <!-- ===== APPEARANCE ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="appearance">
                     <h3 data-i18n="settings-appearance-title">Apparence</h3>
-                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de ZS IDE.</p>
+                    <p class="form-hint" data-i18n="settings-appearance-hint">Personnalisez le thème, la densité et la taille du texte de zaalis IDE.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
                             <label for="settings-theme-select" data-i18n="settings-theme-label">Thème</label>
@@ -946,6 +1003,18 @@
                     </div>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
+                            <label for="settings-fontfamily-select" data-i18n="settings-fontfamily-label">Police de l’interface</label>
+                            <p data-i18n="settings-fontfamily-hint">Choisissez votre style de lecture. L’éditeur conserve sa police de code.</p>
+                        </div>
+                        <select id="settings-fontfamily-select">
+                            <option value="system" data-i18n="settings-fontfamily-system">Système — Segoe UI</option>
+                            <option value="inter">Inter</option>
+                            <option value="humanist" data-i18n="settings-fontfamily-humanist">Humaniste — Candara</option>
+                            <option value="mono">JetBrains Mono</option>
+                        </select>
+                    </div>
+                    <div class="form-group settings-row-group">
+                        <div class="settings-row-copy">
                             <label for="settings-fontsize-select" data-i18n="settings-fontsize-label">Taille de police</label>
                             <p data-i18n="settings-fontsize-hint">Taille du texte dans toute l'application.</p>
                         </div>
@@ -959,9 +1028,7 @@
 
                 <!-- ===== DEFAULT MODELS ===== -->
                 <section class="settings-card settings-pane" data-settings-pane="models">
-                    <h3 data-i18n="settings-models-title">Modèles</h3>
-                    <div id="assistant-model-settings"></div>
-                    <h3 data-i18n="settings-default-models-title">Modèles par défaut</h3>
+                    <h3 data-i18n="settings-models-title">Modèles par défaut</h3>
                     <p class="form-hint" data-i18n="settings-models-hint">Choix présélectionnés à l'ouverture de l'application.</p>
                     <div class="form-group settings-row-group">
                         <div class="settings-row-copy">
@@ -1266,9 +1333,9 @@
             </ul>
             <h3>Ce qui sera fait dans Blender</h3>
             <ul class="blender-steps">
-                <li id="blender-step-addon">Installer l’add-on officiel « MCP » de Blender Lab, fourni avec zaalis IDE.</li>
+                <li id="blender-step-addon">Installer le pont Blender Zaalis, fourni avec zaalis IDE.</li>
                 <li>Activer cet add-on et son démarrage automatique à l’ouverture de Blender.</li>
-                <li>Activer le réglage « Autoriser l’accès en ligne » de Blender : sans lui, l’add-on ne démarre pas.</li>
+                <li>Créer une clé d’authentification pour la connexion locale. Le réglage d’accès en ligne de Blender reste inchangé.</li>
             </ul>
             <p class="blender-install-warning">Une fois Blender relié, l’assistant peut y exécuter du code Python sans vous demander de confirmation. Enregistrez votre travail avant de lui confier une scène.</p>
             <label class="blender-consent"><input type="checkbox" id="blender-consent"><span>J’ai compris et j’autorise cette installation.</span></label>
@@ -1368,7 +1435,7 @@
 <div class="modal-overlay" id="remote-modal">
     <div class="modal modal-sm">
         <div class="modal-header">
-            <h2>Controle mobile</h2>
+            <h2>Contrôle mobile</h2>
             <button class="modal-close" id="close-remote">&times;</button>
         </div>
         <div class="modal-body remote-body">
@@ -1407,34 +1474,55 @@
 
 <script src="catalog.js?v=1.0.16"></script>
 <script src="help.js?v=1.0.17"></script>
-<script src="script/state.js?v=20261008.1" defer></script>
-<script src="script/locale.js?v=20261008.1" defer></script>
-<script src="script/ui.js?v=20261008.1" defer></script>
-<script src="script/commands.js?v=20261008.1" defer></script>
-<script src="script/timeline.js?v=20261008.1" defer></script>
-<script src="script/ai.js?v=20261008.1" defer></script>
-<script src="script/remote.js?v=1.0.17" defer></script>
-<script src="script/main.js?v=20261008.1" defer></script>
-<script src="script/agent-catalog.js?v=20261007.2" defer></script>
+<script src="script/state.js?v=20261118.1" defer></script>
+<script src="script/locale.js?v=20261119.2" defer></script>
+<script src="script/ui.js?v=20261119.2" defer></script>
+<script src="script/commands.js?v=20261027.1" defer></script>
+<script src="script/timeline.js?v=20261119.1" defer></script>
+<script src="script/collaboration-ui.js?v=20261015.7" defer></script>
+<script src="script/pending-queue.js?v=20261015.7" defer></script>
+<script src="script/clarification.js?v=20261015.7" defer></script>
+<script src="script/markdown-tables.js?v=20261015.7" defer></script>
+<script src="script/ai.js?v=20261119.2" defer></script>
+<script src="script/remote.js?v=20261015.7" defer></script>
+<script src="script/ui-foundation.js?v=20261015.7" defer></script>
+<script src="script/main.js?v=20261119.3" defer></script>
+<script src="script/agent-catalog.js?v=20261015.7" defer></script>
 <link rel="stylesheet" href="vendor/xterm/xterm.css">
-<link rel="stylesheet" href="vm.css?v=1">
-<link rel="stylesheet" href="laboratory.css?v=1">
-<script src="script/laboratory.js?v=20261007.2" defer></script>
+<link rel="stylesheet" href="vm.css?v=20261112.1">
+<link rel="stylesheet" href="laboratory.css?v=20261110.1">
+<script src="script/laboratory.js?v=20261015.7" defer></script>
 <script src="vendor/xterm/xterm.js" defer></script>
 <script src="vendor/xterm/addon-fit.js" defer></script>
-<script src="script/vm.js?v=20261007.2" defer></script>
-<link rel="stylesheet" href="correction-memory.css?v=20261007.2">
-<script src="script/correction-memory.js?v=20261007.2" defer></script>
-<script src="script/workspace.js?v=20261008.1" defer></script>
-<link rel="stylesheet" href="profile-integrations.css?v=20261008.1">
-<script src="script/integration-catalog.js" defer></script>
-<script src="script/integration-setup.js" defer></script>
-<script src="script/agent-settings.js" defer></script>
-<script src="script/integrations.js?v=20261008.1" defer></script>
-<script src="script/messengers.js?v=20261008.1" defer></script>
-<script src="script/token-profile.js?v=20261008.1" defer></script>
-<script src="script/welcome.js?v=20261007.2" defer></script>
-<link rel="stylesheet" href="assistant-tools.css?v=20261008.2">
-<script src="script/assistant-tools.js?v=20261008.2" defer></script>
+<script src="script/vm.js?v=20261113.1" defer></script>
+<link rel="stylesheet" href="correction-memory.css?v=20261015.7">
+<script src="script/correction-memory.js?v=20261015.7" defer></script>
+<script src="script/agent-activity.js?v=20261118.1" defer></script>
+<script src="script/action-menu.js?v=20261119.1" defer></script>
+<script src="script/workspace.js?v=20261118.1" defer></script>
+<script src="script/conversation-actions.js?v=20261015.7" defer></script>
+<script src="script/task-center.js?v=20261115.1" defer></script>
+<link rel="stylesheet" href="profile-integrations.css?v=20261015.7">
+<script src="script/integrations.js?v=20261118.1" defer></script>
+<script src="script/messengers.js?v=20261015.7" defer></script>
+<script src="script/token-profile.js?v=20261015.7" defer></script>
+<script src="script/welcome.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="design-system.css?v=20261112.1">
+<link rel="stylesheet" href="interaction-polish.css?v=20261015.7">
+<link rel="stylesheet" href="model-picker.css?v=20261111.1">
+<script src="script/settings-layout.js?v=20261113.1" defer></script>
+<script src="script/settings-persistence.js?v=20261119.1" defer></script>
+<script src="script/auth-backdrop.js?v=20261119.2" defer></script>
+<script src="script/inline-approval.js?v=20261015.7" defer></script>
+<script src="script/command-palette.js?v=20261015.7" defer></script>
+<script src="script/model-picker.js?v=20261119.1" defer></script>
+<script src="script/project-actions.js?v=20261015.7" defer></script>
+<script src="script/shell-layout.js?v=20261015.7" defer></script>
+<script src="script/ui-accessibility.js?v=20261015.7" defer></script>
+<link rel="stylesheet" href="skills.css?v=20261113.1">
+<script src="script/skills.js?v=20261112.1" defer></script>
+<link rel="stylesheet" href="chat-simple.css?v=20261112.1">
+<script src="script/chat-simple.js?v=20261110.1" defer></script>
+<link rel="stylesheet" href="workspace-polish.css?v=20261115.1">
 </body>
 </html>

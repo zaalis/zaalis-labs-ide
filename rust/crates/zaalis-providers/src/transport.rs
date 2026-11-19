@@ -11,7 +11,15 @@ use tokio_util::sync::CancellationToken;
 pub(crate) trait WireParser: Send + 'static {
     fn push_bytes(&mut self, chunk: &[u8]) -> Vec<TurnEvent>;
     fn finish(self) -> Vec<TurnEvent>;
+    /// Whether the stream ended without the provider's end marker.
+    fn truncated(&self) -> bool {
+        false
+    }
 }
+
+/// Silence long enough to call a stream dead. Reasoning models (grok-4,
+/// o-series) can think for minutes before the first byte, so this is generous.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
 pub(crate) fn client() -> Result<reqwest::Client, ProviderError> {
     reqwest::Client::builder()
@@ -54,7 +62,18 @@ where
                     yield TurnEvent::Completed { reason: StopReason::Cancelled };
                     return;
                 }
-                next = bytes.next() => next,
+                next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, bytes.next()) => match next {
+                    Ok(next) => next,
+                    // A stalled connection would otherwise hang the task
+                    // forever; a timeout is retried by the runtime.
+                    Err(_) => {
+                        yield TurnEvent::Failed { error: ProviderError::new(
+                            ProviderErrorKind::Timeout,
+                            "aucune donnée du fournisseur depuis 10 minutes",
+                        ) };
+                        return;
+                    }
+                },
             };
             match next {
                 Some(Ok(chunk)) => {
@@ -72,6 +91,13 @@ where
                 }
                 None => break,
             }
+        }
+        if parser.truncated() {
+            // Retried by the runtime: tools only run once a round completes.
+            yield TurnEvent::Failed { error: ProviderError::transient(
+                "flux du fournisseur interrompu avant la fin de la réponse",
+            ) };
+            return;
         }
         for event in parser.finish() {
             yield event;

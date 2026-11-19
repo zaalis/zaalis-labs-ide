@@ -57,7 +57,10 @@ const SLASH_COMMANDS = [
     { name: 'resume',      category: 'misc', fr: 'Reprendre une session',    en: 'Resume a session',      stub: true },
     { name: 'session',     category: 'misc', fr: 'Gestion de session',       en: 'Session management',    stub: true },
     { name: 'tasks',       category: 'misc', fr: 'Liste de tâches',          en: 'Task list',             stub: true },
-    { name: 'skills',      category: 'misc', fr: 'Compétences disponibles',  en: 'Available skills',      stub: true },
+    { name: 'skills',      category: 'tools', fr: 'Gérer les compétences disponibles', en: 'Manage available skills' },
+    { name: 'skill',       category: 'tools', fr: 'Utiliser une compétence', en: 'Use a skill', usage: '<nom> [demande]', args: true },
+    { name: 'revers',      category: 'tools', fr: 'Analyser l’architecture et le fonctionnement du projet', en: 'Analyze project architecture and behavior', usage: '[cible ou objectif]', args: true },
+    { name: 'pentest',     category: 'tools', fr: 'Test d’intrusion autorisé : l’IA demande les cibles, installe les outils et rédige le rapport', en: 'Authorized penetration test: the AI asks for targets, installs tools and writes the report', usage: '[cibles et objectif]', args: true },
     { name: 'mcp',         category: 'misc', fr: 'Serveurs MCP',             en: 'MCP servers',           stub: true },
     { name: 'theme',       category: 'mode', fr: 'Changer le thème (sombre/clair)', en: 'Change the theme (dark/light)', usage: '[dark|light]' },
     { name: 'keybindings', category: 'misc', fr: 'Raccourcis clavier',       en: 'Keyboard shortcuts',    stub: true },
@@ -295,6 +298,22 @@ async function _aiReadOnly(systemPrompt, userPrompt, label) {
 //  HANDLERS
 // ==========================================================
 const SLASH_HANDLERS = {};
+
+SLASH_HANDLERS.skills = async () => window.ZaalisSkills?.open();
+SLASH_HANDLERS.skill = async (arg, out, lang) => {
+    if (!arg) { _sysMsg(out, lang === 'en' ? 'Usage: /skill <name> [request]' : 'Usage : /skill <nom> [demande]'); return; }
+    if (chatAbort) return;
+    await sendChat('/skill ' + arg);
+};
+SLASH_HANDLERS.revers = async (arg, out, lang) => {
+    if (!_needProject(out, lang) || chatAbort) return;
+    await sendChat('/revers ' + (arg || (lang === 'en' ? 'Map this project and explain its behavior with evidence. Static analysis only.' : 'Cartographie ce projet et explique son fonctionnement avec des preuves. Analyse statique uniquement.')));
+};
+
+SLASH_HANDLERS.pentest = async (arg, out, lang) => {
+    if (chatAbort) return;
+    await sendChat('/pentest ' + (arg || (lang === 'en' ? 'Run an authorized penetration test: ask me for the targets, then reconnaissance, validation, findings and report.' : 'Mène un test d’intrusion autorisé : demande-moi les cibles, puis reconnaissance, validation, constats et rapport.')));
+};
 
 SLASH_HANDLERS.help = async (arg, out, lang) => {
     const byCat = {};

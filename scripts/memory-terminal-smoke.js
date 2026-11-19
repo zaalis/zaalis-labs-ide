@@ -23,7 +23,7 @@ async function main(){
   });await new Promise(r=>provider.listen(0,'127.0.0.1',r));fs.writeFileSync(path.join(project,'check.js'),'const value = 1;');
   const port=36500+Math.floor(Math.random()*400),base='http://127.0.0.1:'+port;
   const env={...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data'),ZAALIS_CLI_CONFIG_DIR:path.join(temp,'cli'),ZAALIS_RUST_CORE:'on'};
-  server=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['server.js'],{cwd:root,env,windowsHide:true,stdio:'ignore'});
+  server=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['src/app/server.js'],{cwd:root,env,windowsHide:true,stdio:'ignore'});
   for(let i=0;i<100;i++){try{if((await fetch(base)).ok)break;}catch{}await new Promise(r=>setTimeout(r,50));}
   const registration=await fetch(base+'/api/auth/register',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'memory-test@zaalis.local',password:'password123'})});assert.equal(registration.status,200);
   const cookie=registration.headers.get('set-cookie').split(';')[0],headers={cookie,'content-type':'application/json'};
@@ -32,7 +32,7 @@ async function main(){
   const first=await run('Fix unique regression');assert.equal(first.memorySaved?.status,'verified',JSON.stringify(first));assert.equal(fs.readFileSync(path.join(project,'bug.txt'),'utf8'),'fixed');
   await run('Explain unique regression');assert.ok(seen.at(-1).messages.some(m=>String(m.content).includes('EXPÉRIENCES MÉMORISÉES')));
   fs.mkdirSync(env.ZAALIS_CLI_CONFIG_DIR);fs.writeFileSync(path.join(env.ZAALIS_CLI_CONFIG_DIR,'session.json'),JSON.stringify({cookie,model:'compat:custom',submodel:'fixture',permissionMode:'read-only'}));
-  async function cli(args){const child=spawn(packaged?path.join(root,'native/dist/zaalis-terminal.exe'):process.execPath,packaged?args:[path.join(root,'cli.js'),...args],{cwd:project,env,windowsHide:true,stdio:['ignore','pipe','pipe']});let text='';child.stdout.on('data',c=>text+=c);child.stderr.on('data',c=>text+=c);const code=await new Promise(r=>child.on('exit',r));assert.equal(code,0,text);transcript+=text;return text;}
+  async function cli(args){const child=spawn(packaged?path.join(root,'native/dist/zaalis-terminal.exe'):process.execPath,packaged?args:[path.join(root,'src/app/cli.js'),...args],{cwd:project,env,windowsHide:true,stdio:['ignore','pipe','pipe']});let text='';child.stdout.on('data',c=>text+=c);child.stderr.on('data',c=>text+=c);const code=await new Promise(r=>child.on('exit',r));assert.equal(code,0,text);transcript+=text;return text;}
   const models=await cli(['models']);for(const label of ['ChatGPT (abonnement)','Grok / xAI (abonnement)','MiniMax (abonnement)'])assert.ok(models.includes(label),models);
   if(packaged){
     const pty=require('node-pty');

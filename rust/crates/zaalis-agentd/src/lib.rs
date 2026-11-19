@@ -148,12 +148,32 @@ impl Daemon {
             ClientMethod::AgentUpdate => self.agent_update(params(request)?).await,
             ClientMethod::AgentRemove => self.agent_remove(params(request)?).await,
             ClientMethod::PermissionDecide => self.permission(params(request)?).await,
+            ClientMethod::ClarificationDecide => {
+                let input: zaalis_protocol::ClarificationDecideParams = params(request)?;
+                self.managed(&input.session_id).await?.runtime.decide_clarification(&input.request_id,input.answers).map_err(RpcError::from)?;
+                Ok((json!({"resolved":true}),Vec::new()))
+            },
             ClientMethod::PlanApprove => self.plan(params(request)?, true).await,
             ClientMethod::PlanReject => self.plan(params(request)?, false).await,
             ClientMethod::BudgetExtend => self.budget(params(request)?).await,
             ClientMethod::CheckpointRestore => self.restore(params(request)?).await,
             ClientMethod::ToolsList => self.tools(params(request)?).await,
             ClientMethod::ModelsList => self.models().await,
+            ClientMethod::ProcessList => {
+                let session_id: SessionId = request.params.as_ref().and_then(|p| p.get("session_id")).cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()).ok_or_else(|| RpcError::invalid_params("session_id requis"))?;
+                let processes = self.managed(&session_id).await?.runtime.background_processes().await;
+                Ok((json!({"processes":processes}), Vec::new()))
+            },
+            ClientMethod::ProcessKill => {
+                let params = request.params.as_ref();
+                let session_id: SessionId = params.and_then(|p| p.get("session_id")).cloned()
+                    .and_then(|v| serde_json::from_value(v).ok()).ok_or_else(|| RpcError::invalid_params("session_id requis"))?;
+                let process_id = params.and_then(|p| p.get("process_id")).and_then(Value::as_str)
+                    .ok_or_else(|| RpcError::invalid_params("process_id requis"))?.to_owned();
+                let process = self.managed(&session_id).await?.runtime.kill_background_process(&process_id).await.map_err(RpcError::from)?;
+                Ok((json!({"process":process}), Vec::new()))
+            },
             ClientMethod::UsageQuery => {
                 let from=request.params.as_ref().and_then(|p|p.get("from_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("from_ms requis"))?;
                 let to=request.params.as_ref().and_then(|p|p.get("to_ms")).and_then(Value::as_u64).ok_or_else(|| RpcError::invalid_params("to_ms requis"))?;
@@ -300,12 +320,6 @@ impl Daemon {
         system_prompt: Option<String>,
     ) -> std::result::Result<(AgentSession, CheckpointStore), RpcError> {
         let mut config = SessionConfig::new(workspace.clone(), mode);
-        if let Ok(raw) = std::env::var("ZAALIS_AGENT_LIMITS") {
-            if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-                config.subagent_turns = value["subagentTurns"].as_u64().unwrap_or(250).clamp(1,250) as u32;
-                config.max_concurrency = value["maxSubagents"].as_u64().unwrap_or(10).clamp(1,10) as usize + 1;
-            }
-        }
         config.usage_store = Some(Arc::clone(&self.store));
         config.session_id = id;
         if let Some(system_prompt) = system_prompt {

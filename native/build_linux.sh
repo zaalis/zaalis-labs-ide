@@ -33,7 +33,7 @@ need cargo "Installez Rust : curl --proto '=https' --tlsv1.2 -sSf https://sh.rus
 need dpkg-deb "Installez dpkg-dev (paquet Debian/Ubuntu)."
 
 echo "[1/8] Installation des outils de build..."
-npm install
+npm ci --no-audit --no-fund
 
 echo "[2/8] Verification de l'encodage des sources..."
 npm run check:mojibake
@@ -53,12 +53,12 @@ sh "$ROOT/native/stage_linux_connectors.sh" "$ROOT" "$SERVERDIST"
 # zaalis-agentd est le coeur agent : sans lui, Chat, Agents et le CLI n'ont
 # aucun moteur. On le construit donc avant tout empaquetage.
 echo "[5/8] Compilation du coeur Rust (agentd, CLI, bac a sable)..."
-cargo build --manifest-path rust/Cargo.toml --release \
+cargo build --manifest-path rust/Cargo.toml --locked --release \
   -p zaalis-cli -p zaalis-agentd -p zaalis-sandbox-helper
 
 echo "[6/8] Mise en place des binaires Rust -> $SERVERDIST ..."
 sh "$ROOT/scripts/stage-rust-binaries.sh" "$SERVERDIST"
-npx pkg cli.js --no-bytecode --public --targets node22-linux-x64 --output "$SERVERDIST/bin/zaalis"
+npx pkg src/app/cli.js --no-bytecode --public --targets node22-linux-x64 --output "$SERVERDIST/bin/zaalis"
 
 echo "[7/8] Copie de l'interface et des metadonnees..."
 rm -rf "$SERVERDIST/interface"

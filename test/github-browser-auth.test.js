@@ -1,6 +1,6 @@
 'use strict';
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),{EventEmitter}=require('node:events');
-const {GitHubBrowserAuth}=require('../github-browser-auth');
+const {GitHubBrowserAuth}=require('../src/integrations/github-browser-auth');
 test('official GitHub client uses isolated config, sanitizes token env and cleans credentials', async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-gh-test-'));let launch,child;
  const auth=new GitHubBrowserAuth({appDir:dir,dataDir:dir,binary:'gh-fixture',spawnImpl:(binary,args,opts)=>{launch={binary,args,opts};child=new EventEmitter();child.stdout=new EventEmitter();child.stderr=new EventEmitter();child.kill=()=>{};queueMicrotask(()=>child.stderr.emit('data',Buffer.from('! First copy your one-time code: ABCD-EFGH')));return child;},runImpl:async()=>({stdout:'github_valid_oauth_token\n'})});

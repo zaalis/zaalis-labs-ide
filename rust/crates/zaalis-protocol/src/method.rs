@@ -23,6 +23,7 @@ pub const AGENT_ADD: &str = "agent.add";
 pub const AGENT_UPDATE: &str = "agent.update";
 pub const AGENT_REMOVE: &str = "agent.remove";
 pub const PERMISSION_DECIDE: &str = "permission.decide";
+pub const CLARIFICATION_DECIDE: &str = "clarification.decide";
 pub const PLAN_APPROVE: &str = "plan.approve";
 pub const PLAN_REJECT: &str = "plan.reject";
 pub const BUDGET_EXTEND: &str = "budget.extend";
@@ -31,6 +32,8 @@ pub const TOOLS_LIST: &str = "tools.list";
 pub const MODELS_LIST: &str = "models.list";
 pub const HEALTH: &str = "health";
 pub const USAGE_QUERY: &str = "usage.query";
+pub const PROCESS_LIST: &str = "process.list";
+pub const PROCESS_KILL: &str = "process.kill";
 
 // ── Core → client ────────────────────────────────────────────────────────
 /// Carries an [`EventFrame`]. The only notification the core emits.
@@ -50,6 +53,7 @@ pub enum ClientMethod {
     AgentUpdate,
     AgentRemove,
     PermissionDecide,
+    ClarificationDecide,
     PlanApprove,
     PlanReject,
     BudgetExtend,
@@ -57,6 +61,8 @@ pub enum ClientMethod {
     ToolsList,
     ModelsList,
     UsageQuery,
+    ProcessList,
+    ProcessKill,
     Health,
 }
 
@@ -74,6 +80,7 @@ impl ClientMethod {
             AGENT_UPDATE => ClientMethod::AgentUpdate,
             AGENT_REMOVE => ClientMethod::AgentRemove,
             PERMISSION_DECIDE => ClientMethod::PermissionDecide,
+            CLARIFICATION_DECIDE => ClientMethod::ClarificationDecide,
             PLAN_APPROVE => ClientMethod::PlanApprove,
             PLAN_REJECT => ClientMethod::PlanReject,
             BUDGET_EXTEND => ClientMethod::BudgetExtend,
@@ -82,6 +89,8 @@ impl ClientMethod {
             MODELS_LIST => ClientMethod::ModelsList,
             HEALTH => ClientMethod::Health,
             USAGE_QUERY => ClientMethod::UsageQuery,
+            PROCESS_LIST => ClientMethod::ProcessList,
+            PROCESS_KILL => ClientMethod::ProcessKill,
             _ => return None,
         })
     }
@@ -99,6 +108,7 @@ impl ClientMethod {
             ClientMethod::AgentUpdate => AGENT_UPDATE,
             ClientMethod::AgentRemove => AGENT_REMOVE,
             ClientMethod::PermissionDecide => PERMISSION_DECIDE,
+            ClientMethod::ClarificationDecide => CLARIFICATION_DECIDE,
             ClientMethod::PlanApprove => PLAN_APPROVE,
             ClientMethod::PlanReject => PLAN_REJECT,
             ClientMethod::BudgetExtend => BUDGET_EXTEND,
@@ -107,6 +117,8 @@ impl ClientMethod {
             ClientMethod::ModelsList => MODELS_LIST,
             ClientMethod::Health => HEALTH,
             ClientMethod::UsageQuery => USAGE_QUERY,
+            ClientMethod::ProcessList => PROCESS_LIST,
+            ClientMethod::ProcessKill => PROCESS_KILL,
         }
     }
 }

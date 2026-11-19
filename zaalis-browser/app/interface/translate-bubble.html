@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+<title>Traduire</title>
+<link rel="stylesheet" href="zx.css">
+<link rel="stylesheet" href="bubble.css">
+<script src="bubble.js"></script>
+</head>
+<body>
+<div class="bubble">
+  <div class="b-head">
+    <svg class="i" style="color:var(--accent)" viewBox="0 0 24 24"><path d="M4 5h9"/><path d="M8.5 3v2"/><path d="M11 5c-.8 3.6-3 6.4-6 8"/><path d="M6.5 8.5c1 1.8 2.6 3.2 4.5 4"/><path d="M12.5 21l4-10 4 10"/><path d="M14 17.5h5"/></svg>
+    <div class="t" id="title">Traduire cette page ?</div>
+    <button class="zx-icon-btn" id="more" title="Plus d'options"><svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></svg></button>
+    <button class="zx-icon-btn" id="close" title="Fermer"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </div>
+  <div class="b-tabs">
+    <div class="b-tab" id="tab-src"></div>
+    <div class="b-tab" id="tab-dst"></div>
+  </div>
+  <div class="b-body">
+    <div id="status" class="b-status"></div>
+    <div class="b-progress" id="prog" style="display:none"><div id="prog-fill"></div></div>
+  </div>
+  <div class="b-menu" id="menu" style="display:none">
+    <div class="b-item" id="m-target"><span class="chk"></span><span style="flex:1">Langue cible</span><select class="zx-select" id="target" style="height:30px"></select></div>
+    <div class="b-item" id="m-always"><span class="chk"></span><span id="m-always-t"></span></div>
+    <div class="b-item" id="m-never"><span class="chk"></span><span id="m-never-t"></span></div>
+    <div class="b-item" id="m-site"><span class="chk"></span><span id="m-site-t"></span></div>
+    <div class="b-item" id="m-settings"><span class="chk"></span><span>Paramètres de langue…</span></div>
+  </div>
+</div>
+<script src="zx.js"></script>
+<script src="translate-bubble.js"></script>
+</body>
+</html>

@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const voiceStt = require('../voice-stt');
+const voiceStt = require('../src/runtime/voice-stt');
 
 // A 16 kHz mono PCM WAV holding a tone of the given amplitude (0..1).
 function wav(seconds, amplitude) {

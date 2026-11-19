@@ -1,0 +1,9 @@
+# IDE layout and dual-mode architecture study — September 26, 2026
+
+This historical design study examined an Editor layout with code in the center and a compact side chat, and a Chat IDE layout with the conversation in the center. Both layouts should share a stable conversation ID, Rust event stream, project state, and permissions. Switching layout must not recreate the session or erase messages.
+
+The proposed sidebar groups projects, conversations, and files; the Chat IDE right rail hosts files, browser, terminal, artifacts, and optionally another chat. Panels may be opened, closed, and resized. Artifacts should be structured conversation data with type, path or URL, title, project, conversation, timestamp, and provenance, derived from tool events. Model controls should be driven by actual capabilities for reasoning, tools, vision, context length, output format, and engine availability. User-requested subagents need visible progress, cancellation, concurrency limits, and accessible results.
+
+The integrated browser requires a native WebView2 host or a fuller control protocol for tabs, profile, bookmarks, downloads, shortcuts, and closing. A plain iframe cannot provide equivalent behavior and many sites disallow framing. The existing external-browser bridge can remain during migration. Microsoft documents multiple WebView2 controls and shared user-data folders, but this establishes feasibility only; it does not prove that Zaalis browser code can move without refactoring.
+
+Risks identified at the time included duplicating state between the HTML/WebView2 interface and an Electron/React interface, oversubscribing one GPU with local subagents, and losing project/session history when switching layouts. The recommended order was to stabilize persistence and contracts before visual refactoring. This is a historical proposal, not a current implementation guarantee.

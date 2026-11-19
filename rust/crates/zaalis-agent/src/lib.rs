@@ -5,20 +5,19 @@
 //! protocol event, and the same loop serves all eight providers.
 
 mod context;
+mod clarify;
+mod agent_control;
 mod control;
 mod event_bus;
 pub mod guardian;
 mod interaction;
 mod prompt;
+mod progress;
 mod runner;
 mod session;
 mod spawn;
 mod telemetry;
 mod envelope;
-mod discovery;
-mod code;
-#[cfg(test)]
-mod discovery_tests;
 
 pub use event_bus::EventBus;
 pub use guardian::ModelReviewer;
@@ -27,6 +26,7 @@ pub use session::{AgentSession, AgentSessionSnapshot, SessionConfig, SessionRunM
 
 #[cfg(test)]
 mod tests {
+    include!("runtime_feature_tests.rs");
     use super::*;
     use async_trait::async_trait;
     use futures_util::stream::{self, StreamExt};
@@ -257,6 +257,29 @@ mod tests {
         assert_eq!(output,400);b.settle(None).await;
         assert_eq!(f.session.inner.envelope.lock().await.spent,1000);
         assert!(crate::envelope::Reservation::acquire(Arc::clone(&f.session.inner),1,1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_long_conversation_does_not_exhaust_the_common_budget_of_new_turns() {
+        let reply = || vec![
+            TurnEvent::TextDelta { text: "ok".into() },
+            TurnEvent::Usage { usage: Usage { input_tokens: 600, output_tokens: 10, ..Usage::default() } },
+            TurnEvent::Completed { reason: StopReason::EndTurn },
+        ];
+        let provider = Arc::new(ScriptedProvider::new(ProviderId::Mistral, vec![reply(), reply(), reply()]));
+        let f = fixture(SessionRunMode::Chat, vec![provider]);
+        let mut n = node(&f.session, ProviderId::Mistral, PermissionMode::ReadOnly);
+        n.budget.max_tokens = Some(100_000);
+        let agent = f.session.add_root(n).await.unwrap();
+        f.session.run_turn("premier").await.unwrap();
+        // Earlier turns consumed far more than the root budget in total.
+        f.session.inner.envelope.lock().await.spent = 10_000_000;
+        let usage = f.session.run_turn("deuxième").await.unwrap();
+        // The usage returned is the agent's running total: one more reply was billed.
+        assert_eq!(usage.input_tokens, 1200, "a new turn starts with a fresh envelope");
+        assert!(matches!(f.session.tree().await.get(&agent).unwrap().state, zaalis_core::AgentState::Done));
+        let usage = f.session.run_turn("troisième").await.unwrap();
+        assert_eq!(usage.input_tokens, 1800, "and so does the next one");
     }
 
     #[tokio::test]
@@ -866,18 +889,20 @@ mod tests {
         fixture.session.run_turn("Rends la scène").await.unwrap();
 
         let requests = provider.requests.lock().expect("requests");
-        // Desktop control keeps MCP servers next to the computer tool, and
-        // says so; the rest of the IDE catalogue stays out.
-        let mut offered = requests[0]
+        // Desktop control keeps the whole catalogue next to the computer
+        // tool, and says so.
+        let offered = requests[0]
             .tools
             .iter()
             .map(|tool| tool.name.as_str())
             .collect::<Vec<_>>();
-        offered.sort_unstable();
-        assert_eq!(offered, ["computer", "mcp", "tool_call", "tool_describe", "tool_search"]);
-        assert!(requests[0]
-            .system
-            .contains("outils disponibles : computer, mcp."));
+        let catalogue = fixture.session.inner.tools.definitions();
+        assert_eq!(offered.len(), catalogue.len(), "{offered:?}");
+        for name in ["computer", "mcp", "request_user_input", "tool_search"] {
+            assert!(offered.contains(&name), "{name} absent : {offered:?}");
+        }
+        assert!(requests[0].system.contains("MODE CONTRÔLE DU BUREAU : tu pilotes le PC avec computer ET tu gardes tous tes autres outils"));
+        assert!(requests[0].system.contains("mcp"));
         let last = requests[1].messages.last().expect("vision message");
         assert!(matches!(last, Message::User { text, images }
             if text.starts_with("[Images renvoyées par les outils") && text.contains("computer (1), mcp (1)")
@@ -1128,6 +1153,110 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_agents_runs_a_batch_then_a_read_only_cross_review() {
+        let text = |value: &str| {
+            vec![
+                TurnEvent::TextDelta { text: value.into() },
+                TurnEvent::Completed { reason: StopReason::EndTurn },
+            ]
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderId::Mistral,
+            vec![
+                vec![
+                    TurnEvent::ToolCallCompleted {
+                        call: ProviderToolCall {
+                            id: "batch_1".into(),
+                            name: "spawn_agents".into(),
+                            arguments: serde_json::json!({
+                                "tasks":[
+                                    {"objective":"Analyse le module A","role":{"name":"a","label":"Module A"}},
+                                    {"objective":"Analyse le module B","role":{"name":"b","label":"Module B"}}
+                                ],
+                                "review":"cross"
+                            }),
+                        },
+                    },
+                    TurnEvent::Completed { reason: StopReason::ToolUse },
+                ],
+                text("Rapport enfant"),
+                text("Rapport enfant"),
+                text("Synthèse vérifiée"),
+                text("Conclusion du parent"),
+            ],
+        ));
+        let fixture = fixture(SessionRunMode::Chat, vec![provider.clone()]);
+        let parent = fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::Bypass))
+            .await
+            .unwrap();
+        fixture.session.run_turn("Analyse A et B en parallèle").await.unwrap();
+
+        let tree = fixture.session.tree().await;
+        assert_eq!(tree.len(), 4, "parent, two workers and one reviewer");
+        let children: Vec<_> = tree
+            .iter()
+            .filter(|agent| agent.parent_id.as_ref() == Some(&parent))
+            .collect();
+        assert_eq!(children.len(), 3);
+        assert!(children.iter().all(|agent| matches!(agent.state, zaalis_core::AgentState::Done)));
+        let reviewer = children
+            .iter()
+            .find(|agent| agent.role.name == "review")
+            .expect("cross reviewer");
+        assert_eq!(reviewer.permissions.mode, PermissionMode::ReadOnly);
+        assert!(reviewer.objective.contains("Analyse le module A"));
+        assert!(reviewer.objective.contains("Analyse le module B"));
+
+        let requests = provider.requests.lock().expect("requests lock");
+        assert_eq!(requests.len(), 5);
+        let parent_view = format!("{:?}", requests[4].messages);
+        assert!(parent_view.contains("vérification croisée effectuée"), "{parent_view}");
+        assert!(parent_view.contains("Synthèse vérifiée"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agents_rejects_oversized_batches_and_background_review() {
+        let fixture = fixture(SessionRunMode::Chat, vec![]);
+        let parent = fixture
+            .session
+            .add_root(node(&fixture.session, ProviderId::Mistral, PermissionMode::Bypass))
+            .await
+            .unwrap();
+        let task = serde_json::json!({"objective":"x"});
+        for input in [
+            serde_json::json!({"tasks":[]}),
+            serde_json::json!({"tasks":vec![task.clone(); 9]}),
+            serde_json::json!({"tasks":[task.clone()],"review":"debate","background":true}),
+        ] {
+            let dispatch = fixture
+                .session
+                .inner
+                .tools
+                .invoke(
+                    ToolInvocation {
+                        call_id: ToolCallId::from_raw("batch"),
+                        name: "spawn_agents".into(),
+                        input,
+                    },
+                    ToolContext {
+                        agent_id: parent.clone(),
+                        permissions: PermissionSet::new(PermissionMode::Bypass),
+                        workspace: Workspace::open(&fixture.root).unwrap(),
+                    },
+                    CancellationToken::new(),
+                )
+                .await;
+            assert!(
+                !matches!(dispatch, ToolDispatch::Complete { outcome: ToolOutcome::Ok { .. }, .. }),
+                "invalid batch accepted: {dispatch:?}"
+            );
+        }
+        assert_eq!(fixture.session.tree().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn native_spawn_inherits_limits_runs_child_and_uses_snapshot_off_git() {
         let provider = Arc::new(ScriptedProvider::new(
             ProviderId::Mistral,
@@ -1234,14 +1363,14 @@ mod tests {
                 },
                 ToolContext {
                     agent_id: parent,
-                    permissions: PermissionSet::new(PermissionMode::Bypass),
+                    permissions: PermissionSet::new(PermissionMode::Supervised),
                     workspace: Workspace::open(&fixture.root).unwrap(),
                 },
                 CancellationToken::new(),
             )
             .await;
         let ToolDispatch::PermissionRequired(prompt) = dispatch else {
-            panic!("merge should require explicit approval: {dispatch:?}");
+            panic!("a supervised merge requires explicit approval: {dispatch:?}");
         };
         let merged = fixture
             .session

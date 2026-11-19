@@ -2,7 +2,7 @@
 const fs=require('fs'),path=require('path'),os=require('os'),assert=require('node:assert/strict'),{spawn}=require('child_process');
 const {chromium}=require(process.env.ZAALIS_PLAYWRIGHT_PATH||'playwright');
 const root=path.resolve(__dirname,'..'),temp=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-locale-')),port=36300+Math.floor(Math.random()*250),base=`http://127.0.0.1:${port}`,evidence=path.join(root,'.tmp','language-ui');fs.mkdirSync(evidence,{recursive:true});
-const packaged=process.argv.includes('--packaged'),child=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['server.js'],{cwd:packaged?path.join(root,'native/dist'):root,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});
+const packaged=process.argv.includes('--packaged'),child=spawn(packaged?path.join(root,'native/dist/zaalis-server.exe'):process.execPath,packaged?[]:['src/app/server.js'],{cwd:packaged?path.join(root,'native/dist'):root,windowsHide:true,stdio:'ignore',env:{...process.env,ZAALIS_PORT:String(port),ZAALIS_DATA_DIR:path.join(temp,'data')}});
 let browser;
 (async()=>{try{
  for(let i=0;i<100;i++){try{if((await fetch(base)).ok)break;}catch{}await new Promise(r=>setTimeout(r,60));}

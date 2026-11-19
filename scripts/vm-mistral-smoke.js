@@ -1,7 +1,7 @@
 'use strict';
 // Uses an already configured key, never prints it and never modifies accounts.
 const fs=require('fs'),path=require('path'),crypto=require('crypto'),http=require('http'),assert=require('assert/strict');
-const {VmManager}=require('../vm-manager');const {RustAgentBridge}=require('../rust-agent-bridge');
+const {VmManager}=require('../src/laboratory/vm-manager');const {RustAgentBridge}=require('../src/agent/rust-agent-bridge');
 const base=path.resolve(__dirname,'..'),data=path.join(base,'server-data/vm-mistral-smoke'),root=path.join(data,'fixture');
 fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'check.ps1'),"Add-Type -TypeDefinition 'public class GuestCheck { public static string Run() { return \"MISTRAL_GUEST_TEST_OK\"; } }'; [GuestCheck]::Run(); exit 0");
 function key() {for(const dir of [path.join(base,'server-data'),path.join(process.env.LOCALAPPDATA,'zaalis/server-data')]) {try{const user=JSON.parse(fs.readFileSync(path.join(dir,'users.json'))).find(x=>x.apiKeys?.mistral);if(!user)continue;const vault=crypto.scryptSync(fs.readFileSync(path.join(dir,'secret'),'utf8'),'zaalis-api-key-vault',32);const [iv,blob,tag]=user.apiKeys.mistral.split('.').map(x=>Buffer.from(x,'base64'));const d=crypto.createDecipheriv('aes-256-gcm',vault,iv);d.setAuthTag(tag);return Buffer.concat([d.update(blob),d.final()]).toString('utf8');}catch{}}throw new Error('Clé Mistral configurée absente.');}

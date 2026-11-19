@@ -381,7 +381,9 @@ function createWindow(port) {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const url = webContents.getURL();
     const allowedOrigin = url.startsWith(baseUrl);
-    callback(allowedOrigin && (permission === 'media' || permission === 'audioCapture'));
+    // Writing to the clipboard ("Copier le lien", copy buttons) is allowed for
+    // the IDE itself; reading it stays refused.
+    callback(allowedOrigin && ['media', 'audioCapture', 'clipboard-sanitized-write'].includes(permission));
   });
 
   mainWindow = new BrowserWindow({
@@ -403,6 +405,13 @@ function createWindow(port) {
 
   browserBridge.attach(mainWindow);
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return;
+    const key = input.key.toLowerCase();
+    const command = input.shift ? ({p:'palette',e:'mode'})[key] : ({',':'settings',n:'new-chat',o:'open-folder',b:'sidebar',w:'close-tab'})[key];
+    if (command) { event.preventDefault(); mainWindow.webContents.executeJavaScript('window.ZaalisCommands?.run(' + JSON.stringify(command) + ')').catch(() => {}); }
+  });
+
   mainWindow.once('ready-to-show', () => mainWindow.show());
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

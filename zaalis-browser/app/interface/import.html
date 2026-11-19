@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Importer des favoris et paramètres</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  .src { display:flex; align-items:center; gap:14px; }
+  .src input[type=radio] { width:18px; height:18px; accent-color:var(--accent); flex:none; }
+  .chk { display:flex; align-items:center; gap:12px; }
+  .chk input { width:18px; height:18px; accent-color:var(--accent); flex:none; }
+  .logo { width:28px; height:28px; border-radius:50%; flex:none; display:flex; align-items:center; justify-content:center; color:#fff; font-weight:700; font-size:13px; }
+  .logo.chrome { background:conic-gradient(#ea4335 0 33%, #fbbc04 0 66%, #34a853 0); }
+  .logo.edge { background:linear-gradient(135deg,#0c59a4,#35c1f1 60%,#4ec36f); }
+  .logo.brave { background:#fb542b; }
+  .result .zx-row .t { font-weight:600; }
+  .warn { color:var(--warn); }
+  .foot { display:flex; justify-content:flex-end; gap:8px; margin-top:16px; }
+</style>
+</head>
+<body>
+  <div class="zx-top"><h1>Importer des favoris et paramètres</h1></div>
+  <div class="zx-main">
+    <div class="zx-section-title">Depuis</div>
+    <div class="zx-card" id="sources"><div class="zx-empty">Recherche des navigateurs installés…</div></div>
+
+    <div class="zx-section-title">Éléments à importer</div>
+    <div class="zx-card">
+      <label class="zx-row chk"><input type="checkbox" id="c-bookmarks" checked><div class="grow"><div class="t">Favoris</div><div class="s">Ajoutés avec un préfixe [Chrome › dossier] ; les adresses déjà présentes sont ignorées.</div></div></label>
+      <label class="zx-row chk"><input type="checkbox" id="c-history" checked><div class="grow"><div class="t">Historique de navigation</div><div class="s">Jusqu'aux 2 000 pages les plus récentes.</div></div></label>
+      <label class="zx-row chk"><input type="checkbox" id="c-passwords" checked><div class="grow"><div class="t">Mots de passe enregistrés</div><div class="s">Déchiffrés sur cet appareil avec votre compte Windows, puis chiffrés dans zaalis Browser.</div></div></label>
+    </div>
+    <div class="foot">
+      <button class="zx-btn" id="csv">Importer un fichier CSV de mots de passe</button>
+      <button class="zx-btn primary" id="go" disabled>Importer</button>
+    </div>
+
+    <div id="result-wrap" style="display:none">
+      <div class="zx-section-title">Résultat</div>
+      <div class="zx-card result" id="result"></div>
+    </div>
+    <p class="zx-muted" style="margin:18px 4px">Conseil : fermez Chrome ou Edge avant l'import si un fichier est signalé comme verrouillé. Rien n'est envoyé sur Internet.</p>
+  </div>
+
+<script src="zx.js"></script>
+<script>
+  const { $, esc } = zx;
+  let sources = [];
+  function selected() { const r = document.querySelector('input[name=src]:checked'); return r ? sources.find(s => s.id === r.value) : null; }
+  function sync() {
+    const s = selected();
+    for (const k of ['bookmarks', 'history', 'passwords']) {
+      const c = $('c-' + k);
+      c.disabled = !s || !s.has[k];
+      c.closest('.zx-row').style.opacity = c.disabled ? .5 : 1;
+    }
+    $('go').disabled = !s;
+  }
+  async function load() {
+    const r = await zx.call('impSources');
+    sources = r.sources || [];
+    if (!sources.length) { $('sources').innerHTML = '<div class="zx-empty">Aucun profil Google Chrome, Microsoft Edge ou Brave trouvé sur cet appareil.</div>'; sync(); return; }
+    $('sources').innerHTML = sources.map((s, i) =>
+      '<label class="zx-row src"><input type="radio" name="src" value="' + esc(s.id) + '"' + (i === 0 ? ' checked' : '') + '>' +
+      '<div class="logo ' + esc(s.browser) + '"></div><div class="grow"><div class="t">' + esc(s.browserName) + '</div><div class="s">Profil : ' + esc(s.profile) + '</div></div></label>').join('');
+    document.querySelectorAll('input[name=src]').forEach(r => r.addEventListener('change', sync));
+    sync();
+  }
+  function line(title, text, warn) { return '<div class="zx-row"><div class="grow"><div class="t' + (warn ? ' warn' : '') + '">' + esc(title) + '</div><div class="s" style="white-space:normal">' + esc(text) + '</div></div></div>'; }
+  $('go').onclick = async () => {
+    const s = selected(); if (!s) return;
+    $('go').disabled = true; $('go').textContent = 'Import en cours…';
+    try {
+      const r = await zx.call('impRun', { id: s.id, bookmarks: $('c-bookmarks').checked && !$('c-bookmarks').disabled, history: $('c-history').checked && !$('c-history').disabled, passwords: $('c-passwords').checked && !$('c-passwords').disabled });
+      let html = '';
+      if (r.bookmarks) html += line('Favoris', r.bookmarks.added + ' importé(s), ' + r.bookmarks.skipped + ' déjà présent(s).');
+      if (r.history) html += line('Historique', r.history.added + ' page(s) ajoutée(s).');
+      if (r.passwords) html += line('Mots de passe', r.passwords.added + ' ajouté(s), ' + r.passwords.updated + ' mis à jour' + (r.passwords.failed ? ', ' + r.passwords.failed + ' illisible(s)' : '') + (r.passwords.appBound ? ', ' + r.passwords.appBound + ' protégé(s) par ' + s.browserName : '') + '.');
+      for (const w of r.warnings || []) html += line('Attention', w, true);
+      $('result').innerHTML = html || line('Terminé', 'Rien à importer.');
+      $('result-wrap').style.display = '';
+      zx.toast('Import terminé depuis ' + r.source + '.');
+    } catch (e) { zx.toast(e.message); }
+    $('go').disabled = false; $('go').textContent = 'Importer';
+  };
+  $('csv').onclick = () => zx.post('openInternal', 'passwords#settings');
+  load().catch(e => zx.toast(e.message));
+</script>
+</body>
+</html>

@@ -34,6 +34,8 @@
 //! vendor beyond the model providers a user configures.
 
 pub mod bindings;
+pub mod clarification;
+pub use clarification::{ClarificationAnswers, ClarificationDecideParams, ClarificationOption, ClarificationQuestion};
 pub mod envelope;
 pub mod event;
 pub mod method;

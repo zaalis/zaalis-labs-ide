@@ -8,27 +8,24 @@
   const version=++revision,target=document.getElementById('integrations-content');if(!target)return;target.replaceChildren();
   if(page==='overview'){
    const intro=node('div',undefined,'integrations-intro');intro.append(node('span',uiText('VOTRE ESPACE CONNECTÉ'),'integration-eyebrow'),node('h3',uiText('Vos outils, au même endroit')),node('p',uiText('Connectez vos comptes pour travailler sur vos dépôts et continuer vos projets dans votre messagerie.')));target.append(intro);
-   const search=node('input');search.type='search';search.placeholder=state.language==='en'?'Search integrations…':'Rechercher une intégration…';search.setAttribute('aria-label',search.placeholder);search.className='integration-search';target.append(search);
    const grid=node('div',undefined,'integrations-grid');
-   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],...window.ZaalisIntegrationCatalog.map(c=>[c.id,c.title,state.language==='en'?c.en:c.fr,c.adapter==='native'?'Messagerie privée':c.adapter==='mcp'?(state.language==='en'?'MCP bridge required':'Pont MCP requis'):(state.language==='en'?'API connection':'Connexion API')])]){
-    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',(state.language==='en'?'Open ':'Ouvrir ')+name);
+   for(const [id,name,description,tag] of [['github','GitHub','Dépôts, fichiers et pull requests','Développement'],['whatsapp','WhatsApp','Continuez vos projets et conversations depuis WhatsApp sur votre téléphone.','Messagerie personnelle'],['telegram','Telegram','Retrouvez vos projets et conversations de l’IDE dans votre bot privé.','Messagerie privée']]){
+    const tile=node('button',undefined,'integration-tile');tile.type='button';tile.dataset.integration=id;tile.setAttribute('aria-label',uiText('Ouvrir '+name));
     const mark=node('span',undefined,'integration-brand '+id),image=node('img');image.src='assets/integrations/'+id+'.svg';image.alt='';mark.append(image);
     const copy=node('span',undefined,'integration-tile-copy');copy.append(node('span',uiText(tag),'integration-eyebrow'),node('strong',name),node('span',uiText(description)),node('span',uiText('Configurer la connexion')+' →','integration-tile-cta'));
     tile.append(mark,copy);tile.onclick=()=>settings(id);grid.append(tile);
    }
-   search.oninput=()=>{const q=search.value.toLocaleLowerCase();for(const tile of grid.children)tile.hidden=!tile.textContent.toLocaleLowerCase().includes(q);};
    target.append(grid,node('p',uiText('Vos connexions restent sur ce PC. Gardez Zaalis ouvert pour recevoir les réponses dans vos messageries.'),'integration-footnote'));return;
   }
   if(page==='whatsapp'||page==='telegram'){await window.ZaalisMessengers.mount(page,target,()=>settings('overview'));return;}
 
-  if(page!=='github'){await window.ZaalisIntegrationSetup.mount(page,target,()=>settings('overview'));return;}
   const back=node('button',uiText('← Retour aux intégrations'),'integration-back');back.type='button';back.onclick=()=>settings('overview');target.append(back);
   const notice=node('p',uiText('Chargement des intégrations…'),'lab-note');notice.setAttribute('role','status');target.append(notice);
   try{
    let status=await api('/api/integrations/github');if(version!==revision)return;
    const card=node('article',undefined,'integration-card'),header=node('div',undefined,'integration-heading');const mark=node('img',undefined,'integration-heading-logo');mark.src='assets/integrations/github.svg';mark.alt='';header.append(mark,node('strong','GitHub'),node('span',status.reauth?uiText('Reconnexion nécessaire'):status.connected?uiText('Connecté · @')+status.login:uiText('Non connecté'),'integration-status'));card.append(header);
    if(status.reauth){const warn=node('p',uiText('L’autorisation GitHub de @')+status.login+uiText(' a expiré ou a été révoquée. Reconnectez le compte : vos droits par dépôt sont conservés.'),'integration-notice error');card.append(warn);}
-   card.append(node('p',uiText('Dépôts, fichiers et pull requests pour l’IA. Chaque dépôt exige une autorisation explicite ; le mode autonome respecte cette limite.'),'lab-note'));
+   card.append(node('p',uiText('L’IA a accès à tous vos dépôts, comme GitHub CLI : clone, commit, push, branches, pull requests, issues, releases, Actions. Vous pouvez passer un dépôt en lecture seule ou le bloquer ci-dessous.'),'lab-note'));
    const actions=node('div',undefined,'lab-toolbar');card.append(actions);target.append(card);
    const button=(text,fn,parent=actions)=>{const b=node('button',text,'integration-button');b.type='button';parent.append(b);b.addEventListener('click',async()=>{b.disabled=true;notice.classList.remove('success','error');notice.textContent=uiText('Opération en cours…');try{await fn();}catch(e){notice.textContent=uiText(e.message);notice.classList.add('error');}finally{b.disabled=false;}});return b;};
    if(!status.connected||status.reauth){
@@ -63,19 +60,19 @@
     async function load(){if(status.reauth){notice.textContent=uiText('Reconnectez GitHub pour afficher vos dépôts.');return;}notice.textContent=uiText('Chargement des dépôts autorisés par GitHub…');const result=await api('/api/integrations/github/repos');if(version!==revision)return;list.replaceChildren();
      const render=()=>{list.querySelectorAll('select').forEach(s=>s._customSelectCleanup?.());list.replaceChildren();const repos=result.repositories.filter(r=>r.name.toLowerCase().includes(search.value.toLowerCase()));
       if(!repos.length)list.append(node('p',uiText('Aucun dépôt visible. Vérifiez les dépôts sélectionnés, les droits du jeton et l’autorisation de votre organisation.'),'lab-note'));
-      for(const repo of repos){const grant=status.permissions[repo.name.toLowerCase()]||{},row=node('details',undefined,'integration-repo'),summary=node('summary',repo.name+(repo.private?uiText(' · privé'):'')+' · '+({read:uiText('Lecture seule'),write:uiText('Lecture et écriture')}[grant.mode]||uiText('Non autorisé')));row.append(summary);
+      for(const repo of repos){const grant=status.permissions[repo.name.toLowerCase()]||{},row=node('details',undefined,'integration-repo'),summary=node('summary',repo.name+(repo.private?uiText(' · privé'):'')+' · '+({none:uiText('Bloqué'),read:uiText('Lecture seule'),write:uiText('Lecture et écriture')}[grant.mode]||(repo.canPush?uiText('Accès complet'):uiText('Lecture seule'))));row.append(summary);
        const content=node('div',undefined,'integration-repo-content');row.append(content);
-       const rootLabel=node('label',uiText('Dossier local associé'),'lab-field'),root=node('input');root.value=grant.root||state.projectRoot||'';root.placeholder=HOST_SAMPLE_FOLDER;rootLabel.append(root);content.append(rootLabel);content.append(node('p',state.language==='en'?`The folder where this repository is cloned on this PC, containing .git. Example: ${HOST_SAMPLE_FOLDER}. Use your actual folder path.`:`Le dossier où ce dépôt est cloné sur ce PC, contenant .git. Exemple : ${HOST_SAMPLE_FOLDER}. Indiquez le chemin de votre dossier.`,'lab-note integration-folder-help'));
+       const rootLabel=node('label',uiText('Dossier local associé'),'lab-field'),root=node('input');root.value=grant.root||state.projectRoot||'';root.placeholder=HOST_SAMPLE_FOLDER;rootLabel.append(root);content.append(rootLabel);content.append(node('p',state.language==='en'?`The folder where this repository is cloned on this PC, containing .git. Example: ${HOST_SAMPLE_FOLDER}.`:`Le dossier où ce dépôt est cloné sur ce PC, contenant .git. Exemple : ${HOST_SAMPLE_FOLDER}.`,'lab-note integration-folder-help'));
        const choose=node('div',undefined,'lab-toolbar integration-project-actions');content.append(choose);button(uiText('Utiliser le projet actif'),async()=>{root.value=state.projectRoot||'';feedback.hidden=true;notice.textContent=root.value?uiText('Projet sélectionné. Enregistrez ensuite le droit.'):uiText('Ouvrez un projet dans l’IDE.');},choose);
-       const label=node('label',uiText('Droits de l’IA'),'lab-field'),select=node('select');select.id='github-permission-'+String(repo.id || repos.indexOf(repo));for(const [value,text] of [['none',uiText('Aucun accès')],['read',uiText('Lecture seule')],['write',uiText('Lecture et écriture')]]){const option=node('option',text);option.value=value;option.disabled=value==='write'&&!repo.canPush;select.append(option);}select.value=grant.mode||'none';label.append(select);content.append(label);
-       content.append(node('p',uiText('L’écriture exige le même dépôt origin et un dossier vérifié. Changer les droits interrompt les agents en cours. La lecture seule bloque aussi les modifications locales de l’IA pour ce projet.'),'lab-note'));
+       const label=node('label',uiText('Droits de l’IA'),'lab-field'),select=node('select');select.id='github-permission-'+String(repo.id || repos.indexOf(repo));for(const [value,text] of [['write',uiText('Accès complet (par défaut)')],['read',uiText('Lecture seule')],['none',uiText('Bloqué')]]){const option=node('option',text);option.value=value;option.disabled=value==='write'&&!repo.canPush;select.append(option);}select.value=grant.mode||(repo.canPush?'write':'read');label.append(select);content.append(label);
+       content.append(node('p',uiText('Le dossier local est facultatif. Changer les droits interrompt les agents en cours. La lecture seule bloque aussi les modifications locales de l’IA pour ce projet.'),'lab-note'));
        const feedback=node('p','','integration-notice success');feedback.setAttribute('role','status');feedback.hidden=true;content.append(feedback);root.oninput=select.onchange=()=>{feedback.hidden=true;};button(uiText('Enregistrer les droits'),async()=>{feedback.hidden=true;status=await api('/api/integrations/github',{action:'permission',repo:repo.name,mode:select.value,root:root.value.trim()});notice.textContent='✓ '+uiText('Droits enregistrés. Les agents précédents ont été arrêtés.');notice.classList.add('success');feedback.textContent=state.language==='en'?'✓ Permissions saved':'✓ Droits enregistrés';feedback.hidden=false;summary.textContent=repo.name+' · '+select.selectedOptions[0].textContent;},content);list.append(row);createCustomSelect(select.id,{dropDown:true,viewport:true,label:uiText('Droits de l’IA')});
       }
      };search.oninput=render;render();notice.textContent=`${result.repositories.length} dépôt(s) visible(s).${result.truncated?uiText(' Liste limitée à 10 000 dépôts.'):''}`;
     }
     button(uiText('Actualiser les dépôts'),load);await load();
    }
-   if(!status.connected)notice.textContent=uiText('Connectez GitHub pour choisir les dépôts accessibles à vos IA.');
+   if(!status.connected)notice.textContent=uiText('Connectez GitHub pour donner à vos IA l’accès à vos dépôts.');
   }catch(e){notice.textContent=e.message;notice.classList.add('error');}
  }
  window.ZaalisIntegrations={settings};

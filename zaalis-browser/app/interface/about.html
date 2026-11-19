@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>À propos de zaalis Browser</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  .hero { display:flex; align-items:center; gap:18px; padding:22px 22px; }
+  .hero img { width:56px; height:56px; }
+  .hero h2 { margin:0; font-size:20px; font-weight:500; }
+  .status { display:flex; align-items:center; gap:14px; padding:16px 22px; border-top:1px solid var(--border); }
+  .status .ic { width:24px; height:24px; flex:none; display:flex; align-items:center; justify-content:center; }
+  .status .grow { flex:1; min-width:0; }
+  .bar { height:4px; border-radius:2px; background:var(--border); margin-top:8px; overflow:hidden; }
+  .bar > div { height:100%; background:var(--accent); width:0; transition:width .3s; }
+  .notes { white-space:pre-wrap; padding:14px 22px 18px; border-top:1px solid var(--border); color:var(--muted); font-size:13px; max-height:280px; overflow:auto; }
+  .spin { animation:spin 1s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="zx-top"><h1>À propos de zaalis Browser</h1></div>
+  <div class="zx-main">
+    <div class="zx-card">
+      <div class="hero">
+        <img src="logo-zaalis.png" alt="">
+        <div><h2>zaalis Browser</h2><div class="zx-muted" id="version">Version …</div></div>
+      </div>
+      <div class="status">
+        <div class="ic" id="st-ic"></div>
+        <div class="grow">
+          <div id="st-t">…</div>
+          <div class="zx-muted" style="font-size:12.5px" id="st-s"></div>
+          <div class="bar" id="bar" style="display:none"><div id="bar-fill"></div></div>
+        </div>
+        <button class="zx-btn" id="check">Rechercher des mises à jour</button>
+        <button class="zx-btn primary" id="install" style="display:none">Relancer</button>
+      </div>
+      <div class="notes" id="notes" style="display:none"></div>
+    </div>
+
+    <div class="zx-section-title">Mises à jour</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <div class="grow"><div class="t">Mettre à jour automatiquement</div>
+          <div class="s">Vérifie régulièrement, télécharge en arrière-plan et installe la nouvelle version au prochain redémarrage.</div></div>
+        <div class="zx-switch" id="auto"></div>
+      </div>
+      <div class="zx-row">
+        <div class="grow"><div class="t">Sécurité des mises à jour</div>
+          <div class="s">Chaque mise à jour est vérifiée avant installation : signature Ed25519 du manifeste, empreinte SHA-512 de l'installeur et éditeur Authenticode identique. Une version plus ancienne n'est jamais installée.</div></div>
+      </div>
+    </div>
+
+    <div class="zx-section-title">Informations</div>
+    <div class="zx-card" id="info"></div>
+  </div>
+
+<script src="zx.js"></script>
+<script>
+  const ICONS = {
+    ok: '<svg class="i" style="color:var(--ok)" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8 12l3 3 5-6"/></svg>',
+    spin: '<svg class="i spin" style="color:var(--accent)" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-6.2-8.6"/></svg>',
+    down: '<svg class="i" style="color:var(--accent)" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="M7 11l5 5 5-5"/><path d="M4 20h16"/></svg>',
+    err: '<svg class="i" style="color:var(--danger)" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v6"/><path d="M12 16.5v.5"/></svg>',
+    info: '<svg class="i zx-muted" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6"/><path d="M12 7.5v.5"/></svg>',
+  };
+  function render(s) {
+    if (!s) return;
+    zx.$('version').textContent = 'Version ' + s.current + (s.packaged ? '' : ' (développement)') + ' — 64 bits';
+    let ic = ICONS.info, t = '', sub = '';
+    switch (s.status) {
+      case 'checking': ic = ICONS.spin; t = 'Recherche de mises à jour…'; break;
+      case 'downloading': ic = ICONS.down; t = 'Téléchargement de la version ' + s.latest + '… ' + (s.progress || 0) + ' %'; break;
+      case 'ready': ic = ICONS.ok; t = 'La version ' + s.latest + ' est prête'; sub = 'Relancez zaalis Browser pour terminer la mise à jour.'; break;
+      case 'installing': ic = ICONS.spin; t = 'Installation…'; break;
+      case 'uptodate': ic = ICONS.ok; t = 'zaalis Browser est à jour'; break;
+      case 'error': ic = ICONS.err; t = 'La mise à jour a échoué'; sub = s.error || ''; break;
+      case 'disabled': ic = ICONS.info; t = 'Mises à jour gérées par la version installée'; sub = 'Cette copie de développement ne se met pas à jour automatiquement.'; break;
+      default: ic = ICONS.info; t = 'Mises à jour automatiques activées';
+    }
+    if (s.lastCheck && s.status !== 'checking') sub = (sub ? sub + ' · ' : '') + 'Dernière vérification : ' + zx.fmtDate(s.lastCheck);
+    zx.$('st-ic').innerHTML = ic; zx.$('st-t').textContent = t; zx.$('st-s').textContent = sub;
+    zx.$('bar').style.display = s.status === 'downloading' ? '' : 'none';
+    zx.$('bar-fill').style.width = (s.progress || 0) + '%';
+    zx.$('install').style.display = s.status === 'ready' ? '' : 'none';
+    zx.$('check').style.display = s.status === 'ready' ? 'none' : '';
+    zx.$('check').disabled = !s.enabled || s.status === 'checking' || s.status === 'downloading';
+    zx.$('auto').classList.toggle('on', !!s.auto);
+    const notes = zx.$('notes');
+    notes.style.display = s.notes ? '' : 'none';
+    notes.textContent = s.notes ? 'Nouveautés de la version ' + s.latest + ' :\n\n' + s.notes : '';
+  }
+  function info() {
+    const ua = navigator.userAgent;
+    const rows = [
+      ['Moteur', (ua.match(/Chrome\/[\d.]+/) || ['Chromium'])[0].replace('Chrome/', 'Chromium ')],
+      ['Agent utilisateur', ua],
+      ['Licence', 'GNU AGPL v3 — logiciel libre'],
+    ];
+    zx.$('info').innerHTML = rows.map(r => '<div class="zx-row"><div class="grow"><div class="t">' + zx.esc(r[0]) + '</div><div class="s zx-mono" style="white-space:normal">' + zx.esc(r[1]) + '</div></div></div>').join('');
+  }
+  zx.$('check').onclick = () => zx.call('updateCheck').then(render).catch(e => zx.toast(e.message));
+  zx.$('install').onclick = () => zx.post('updateInstall');
+  zx.$('auto').onclick = () => zx.call('updateSetAuto', { auto: !zx.$('auto').classList.contains('on') }).then(render);
+  zx.on('update', d => render(d.state));
+  info();
+  zx.call('updateState').then(render).catch(() => {});
+</script>
+</body>
+</html>

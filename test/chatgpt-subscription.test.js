@@ -10,9 +10,9 @@ const os = require('node:os');
 const path = require('node:path');
 const http = require('node:http');
 const { spawn } = require('node:child_process');
-const { findAgentd } = require('../rust-agent-bridge');
-const compat = require('../compat-providers');
-const chatgpt = require('../chatgpt-subscription');
+const { findAgentd } = require('../src/agent/rust-agent-bridge');
+const compat = require('../src/accounts/compat-providers');
+const chatgpt = require('../src/accounts/chatgpt-subscription');
 
 test('a chat-completions request becomes a Responses request the backend accepts', () => {
   const request = chatgpt.toResponsesRequest({
@@ -204,7 +204,7 @@ test('sign-in with a code, encrypted session, renewal and chat through the Rust 
   const fake = await fakeOpenAi();
   const port = 34000 + Math.floor(Math.random() * 1000);
   const fakeUrl = `http://127.0.0.1:${fake.port}`;
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'), stdio: 'ignore', windowsHide: true,
     env: { ...process.env, ZAALIS_PORT: String(port), ZAALIS_DATA_DIR: data, ZAALIS_RUST_CORE: 'on',
       ZAALIS_CHATGPT_ISSUER: fakeUrl, ZAALIS_CHATGPT_BASE_URL: fakeUrl },
@@ -254,7 +254,7 @@ test('sign-in with a code, encrypted session, renewal and chat through the Rust 
     await new Promise((resolve) => setTimeout(resolve, 2600));
     const connected = await (await post('/api/chatgpt/device-poll', { flowId: start.flowId })).json();
     assert.equal(connected.status, 'connected');
-    assert.deepEqual({ ...connected.account, connectedAt: '' }, { connected: true, email: 'abonne@example.com', plan: 'plus', connectedAt: '' });
+    assert.deepEqual({ ...connected.account, connectedAt: '' }, { connected: true, transport: 'legacy', email: 'abonne@example.com', plan: 'plus', connectedAt: '' });
     assert.equal(connected.providers.find((p) => p.id === 'chatgpt').configured, true);
     const exchange = fake.seen.find((r) => r.url === '/oauth/token').body;
     assert.deepEqual(exchange, { grant_type: 'authorization_code', code: 'code-1', code_verifier: 'verifier-1',

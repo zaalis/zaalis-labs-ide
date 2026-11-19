@@ -11,7 +11,7 @@ const PORT = 31957;
 const base = `http://localhost:${PORT}`;
 
 async function start(dataDir) {
-  const child = spawn(process.execPath, ['server.js'], {
+  const child = spawn(process.execPath, ['src/app/server.js'], {
     cwd: path.join(__dirname, '..'),
     env: { ...process.env, ZAALIS_PORT: String(PORT), ZAALIS_DATA_DIR: dataDir, ZAALIS_RUST_CORE: 'off' },
     stdio: 'ignore', windowsHide: true,
@@ -44,23 +44,23 @@ test('working mode is validated and restored after logout and server restart', a
     assert.equal(register.status, 200);
     let cookie = register.headers.get('set-cookie');
     const headers = { cookie, 'content-type': 'application/json' };
-    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers })).json(), { permissionMode: 'supervised' });
+    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers })).json(), { permissionMode: 'supervised', updateChannel: null });
     assert.equal((await fetch(`${base}/api/preferences`, { method: 'PUT', headers,
       body: JSON.stringify({ permissionMode: 'bypass' }) })).status, 400);
     const saved = await fetch(`${base}/api/preferences`, { method: 'PUT', headers,
       body: JSON.stringify({ permissionMode: 'auto' }) });
     assert.equal(saved.status, 200);
-    assert.deepEqual(await saved.json(), { permissionMode: 'auto' });
+    { const body = await saved.json(); assert.equal(body.permissionMode, 'auto'); assert.equal(body.updateChannel, 'stable'); }
     assert.equal((await fetch(`${base}/api/auth/logout`, { method: 'POST', headers })).status, 200);
     const login = await fetch(`${base}/api/auth/login`, { method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'preferences@zaalis.local', password: 'password123' }) });
     assert.equal(login.status, 200);
     cookie = login.headers.get('set-cookie');
-    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers: { cookie } })).json(), { permissionMode: 'auto' });
+    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers: { cookie } })).json(), { permissionMode: 'auto', updateChannel: null });
     await stop(child);
     child = await start(dataDir);
-    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers: { cookie } })).json(), { permissionMode: 'auto' });
+    assert.deepEqual(await (await fetch(`${base}/api/preferences`, { headers: { cookie } })).json(), { permissionMode: 'auto', updateChannel: null });
   } finally {
     await stop(child);
     fs.rmSync(dataDir, { recursive: true, force: true });

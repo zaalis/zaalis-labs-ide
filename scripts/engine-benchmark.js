@@ -2,7 +2,7 @@
 // Opt-in live evaluation. No fixture tokens, estimated usage or failed run can
 // enter the dashboard comparison ledger. This is one case, not a fleet claim.
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),http=require('node:http');
-const {VmManager}=require('../vm-manager'),{Laboratory,fingerprint}=require('../laboratory'),{RustAgentBridge}=require('../rust-agent-bridge'),{recordPair}=require('../engine-comparison');
+const {VmManager}=require('../src/laboratory/vm-manager'),{Laboratory,fingerprint}=require('../src/laboratory/laboratory'),{RustAgentBridge}=require('../src/agent/rust-agent-bridge'),{recordPair}=require('../src/laboratory/engine-comparison');
 const hash=v=>crypto.createHash('sha256').update(v).digest('hex');
 async function benchmark({dataDir,user='benchmark',key,model='mistral-small-latest',system='windows'}) {
  if(!key)throw Error('ZAALIS_BENCH_MISTRAL_KEY requis pour un essai réel.');

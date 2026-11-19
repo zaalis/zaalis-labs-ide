@@ -1,5 +1,7 @@
 # Dependencies
 node_modules/
+__pycache__/
+*.pyc
 rust/target/
 
 # Local runtime data: accounts, session secret, chats
@@ -57,6 +59,3 @@ native/package-linux/
 native/whisper/whisper-cli
 native/macos-computer-bridge
 native/macos-speech-transcriber
-
-# Disposable local assistant smoke account context
-.assistant-smoke-context.json

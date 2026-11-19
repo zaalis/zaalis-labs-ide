@@ -9,7 +9,6 @@ mod compat;
 mod gemini;
 mod openai;
 mod pool;
-mod policy;
 mod sse;
 mod transport;
 mod types;

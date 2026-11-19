@@ -5,6 +5,7 @@
 //! approval and resumes the exact same call after the client answers.
 
 mod checkpoint;
+mod discovery;
 mod exec;
 mod filesystem;
 mod git;
@@ -83,6 +84,20 @@ mod tests {
                 definition.name,
             );
         }
+    }
+
+    #[tokio::test]
+    async fn discovered_calls_preserve_guard_and_surface_scope() {
+        let (dir, runtime, context) = setup(PermissionMode::ReadOnly);
+        let result = runtime.invoke(invocation("tool_call", json!({"name":"write","arguments":{"path":"forbidden.txt","content":"no"}})),context.clone(),CancellationToken::new()).await;
+        assert!(!dir.path().join("forbidden.txt").exists());
+        assert!(matches!(result,ToolDispatch::Complete {outcome:ToolOutcome::Denied {..},..}));
+        let result = runtime.invoke_scoped(invocation("tool_call",json!({"name":"read","arguments":{"path":"hello.txt"}})),context.clone(),CancellationToken::new(),Some(&["computer"])).await;
+        assert!(matches!(result,ToolDispatch::Complete {outcome:ToolOutcome::Error {..},..}));
+        let result=runtime.invoke_scoped(invocation("tool_search",json!({})),context,CancellationToken::new(),Some(&["read"])).await;
+        let ToolDispatch::Complete {outcome:ToolOutcome::Ok {result,..},..}=result else {panic!("discovery failed")};
+        assert_eq!(result["tools"].as_array().unwrap().len(),1);
+        assert_eq!(result["tools"][0]["name"],"read");
     }
 
     #[tokio::test]
@@ -223,8 +238,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sensitive_reads_ask_even_in_bypass_mode() {
-        let (_dir, runtime, context) = setup(PermissionMode::Bypass);
+    async fn sensitive_reads_ask_unless_the_user_handed_over_control() {
+        let (_dir, runtime, context) = setup(PermissionMode::Supervised);
         let dispatch = runtime
             .invoke(
                 invocation("read", json!({"path":".env"})),
@@ -237,6 +252,17 @@ mod tests {
         };
         assert_eq!(prompt.target.as_deref(), Some(".env"));
         assert!(prompt.summary.contains("sensible"));
+        // Autonomous mode: a project's .env is read without a prompt (only
+        // private keys and catastrophic actions still ask).
+        let (_dir, runtime, context) = setup(PermissionMode::Bypass);
+        let dispatch = runtime
+            .invoke(
+                invocation("read", json!({"path":".env"})),
+                context,
+                CancellationToken::new(),
+            )
+            .await;
+        assert!(!matches!(dispatch, ToolDispatch::PermissionRequired(_)), "{dispatch:?}");
     }
 
     #[tokio::test]
@@ -556,6 +582,9 @@ mod tests {
                 "grep",
                 "list",
                 "read",
+                "tool_call",
+                "tool_describe",
+                "tool_search",
                 "tree",
                 "write"
             ]

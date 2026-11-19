@@ -4,7 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {CorrectionMemory} = require('../correction-memory');
+const {CorrectionMemory} = require('../src/agent/correction-memory');
 function fixture(t) { const dir=fs.mkdtempSync(path.join(os.tmpdir(),'zaalis-memory-test-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));return {dir,m:new CorrectionMemory(dir)}; }
 test('memory persists, isolates accounts/projects and shares only explicit records',t=>{
   const {dir,m}=fixture(t), a=path.join(dir,'a'),b=path.join(dir,'b');

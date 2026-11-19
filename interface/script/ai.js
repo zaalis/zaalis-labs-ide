@@ -34,6 +34,17 @@ async function loadPermissionPreference() {
         const response = await fetch('/api/preferences');
         if (!response.ok) return;
         const preference = await response.json();
+        // The server holds the channel (it gates beta features): the interface
+        // follows it. A beta choice made before the server knew it is sent once.
+        if (preference.updateChannel === null && state.config.updateChannel === 'beta') {
+            const synced = await fetch('/api/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updateChannel: 'beta' }) }).catch(() => null);
+            if (synced && synced.ok && typeof loadCompatProviders === 'function') loadCompatProviders();
+        } else if (['stable', 'beta'].includes(preference.updateChannel) && state.config.updateChannel !== preference.updateChannel) {
+            state.config.updateChannel = preference.updateChannel;
+            saveState();
+            const channel = document.getElementById('settings-channel-select');
+            if (channel) { channel.value = preference.updateChannel; channel._customSelectRefresh?.(); }
+        }
         if (['plan', 'supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
             setPermissionMode(preference.permissionMode, false);
         } else {
@@ -164,6 +175,7 @@ const approvalQueue = [];
 function showNextApproval() {
     if (pendingApproval || !approvalQueue.length) return;
     pendingApproval = approvalQueue.shift();
+    window.ZaalisInlineApproval?.prepare();
     $('#approval-desc').textContent = pendingApproval.description;
     $('#approval-content').textContent = pendingApproval.content;
     const plan = !!pendingApproval.plan;
@@ -172,13 +184,14 @@ function showNextApproval() {
     $('#plan-feedback').value = '';
     $('#approve-action').textContent = plan ? (state.language === 'en' ? 'Approve and implement' : 'Approuver et réaliser') : (state.language === 'en' ? 'Allow' : 'Autoriser');
     $('#deny-action').textContent = plan ? (state.language === 'en' ? 'Revise plan' : 'Réviser le plan') : (state.language === 'en' ? 'Deny' : 'Refuser');
-    $('#approval-modal').classList.add('active');
+    if (window.ZaalisInlineApproval) window.ZaalisInlineApproval.open(pendingApproval);
+    else $('#approval-modal').classList.add('active');
     $('#approve-action').focus();
 }
 
 function requestApproval(description, content, options = {}) {
     return new Promise((resolve) => {
-        approvalQueue.push({ description, content, resolve, plan: !!options.plan });
+        approvalQueue.push({ ...options, description, content, resolve, plan: !!options.plan });
         showNextApproval();
     });
 }
@@ -186,6 +199,7 @@ function requestApproval(description, content, options = {}) {
 function answerApproval(allow) {
     const current = pendingApproval;
     pendingApproval = null;
+    window.ZaalisInlineApproval?.close();
     $('#approval-modal').classList.remove('active');
     if (current) current.resolve(current.plan ? { allow, feedback: allow ? '' : $('#plan-feedback').value.trim() } : allow);
     showNextApproval();
@@ -222,7 +236,7 @@ $$('.ai-tab').forEach(tab => {
                 addMsg($('#agents-log'), 'system', null, TRANSLATIONS[lang]['min-agents-required']);
                 state.agentMode = false;
             } else {
-                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents active.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prets.')));
+                addMsg($('#agents-log'), 'system', null, (TRANSLATIONS[lang]['mode-agents-active'] || uiText('Mode Agents activé.')) + ' ' + checked.length + ' ' + (TRANSLATIONS[lang]['active-agents'] || uiText('agents prêts.')));
             }
         } else if (!isAgentsTab && state.agentMode) {
             state.agentMode = false;
@@ -343,7 +357,10 @@ function renderMarkdown(src) {
     let listType = null;
     const closeList = () => { if (listType) { out.push(`</${listType}>`); listType = null; } };
 
-    for (const line of lines) {
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const line = lines[lineIndex];
+        const table = window.ZaalisMarkdownTables?.tableAt(lines, lineIndex, inline);
+        if (table) { closeList(); out.push(table.html); lineIndex = table.nextIndex - 1; continue; }
         if (new RegExp(`^${NUL}CODE\\d+${NUL}$`).test(line.trim())) { closeList(); out.push(line.trim()); continue; }
         let h = line.match(/^(#{1,6})\s+(.*)$/);
         if (h) { closeList(); const lvl = Math.min(h[1].length, 4); out.push(`<h${lvl}>${inline(h[2])}</h${lvl}>`); continue; }
@@ -448,25 +465,87 @@ document.addEventListener('click', e => {
 // Web links inside AI/system answers open in the integrated browser (globe
 // panel), so /deep-search sources stay in the same browsing workspace. Outside
 // the native app there is no integrated browser: the link opens normally.
-document.addEventListener('click', async e => {
-    const a = e.target.closest && e.target.closest('a[href^="http://"], a[href^="https://"]');
-    if (!a || !a.closest('#chat-messages, #agents-log')) return;
-    const href = a.href;
-    if (!href) return;
-    e.preventDefault();
+// Errors the user sees are short and clear; the technical cause goes to the
+// IDE error journal (server-data/logs/ide-errors.log).
+const TOAST_ALERT = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>';
+const TOAST_OK = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+function reportIdeError({ source = 'interface', code = 'ui_error', title, message, detail = '', context = null, silent = false }) {
+    if (!silent) showToast(title || uiText('Action impossible'), message, { icon: TOAST_ALERT, duration: 7000 });
+    fetch('/api/error-log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source, code, message, detail: String(detail || ''), context }) }).catch(() => {});
+}
+window.ZaalisErrorLog = { report: reportIdeError };
+
+const chatLinkAt = target => {
+    const a = target && target.closest && target.closest('a[href^="http://"], a[href^="https://"]');
+    return a && a.closest('#chat-messages, #agents-log') ? a : null;
+};
+async function openInIdeBrowser(href, { external = false } = {}) {
+    let detail = '';
     try {
-        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}`);
-        if (!r.ok) throw new Error('browser-open failed');
-    } catch {
-        window.open(href, '_blank', 'noopener,noreferrer');
+        const r = await fetch(`/api/browser-open?url=${encodeURIComponent(href)}${external ? '&external=1' : ''}`);
+        if (r.ok) return;
+        const data = await r.json().catch(() => ({}));
+        detail = `HTTP ${r.status} ${data.error || data.message || ''}`.trim();
+        // Outside the native app there is no integrated browser: a new tab is the expected fallback.
+        if (r.status === 503 && !external) { window.open(href, '_blank', 'noopener,noreferrer'); return; }
+    } catch (error) { detail = error && error.message || String(error); }
+    reportIdeError({ source: 'browser', code: external ? 'external_open_failed' : 'link_open_failed',
+        title: uiText('Lien non ouvert'),
+        message: external ? uiText('Le navigateur externe n’a pas pu être lancé. Copiez le lien pour l’ouvrir vous-même.')
+            : uiText('Le navigateur intégré n’a pas pu ouvrir cette page. Réessayez, ou copiez le lien avec un clic droit.'),
+        detail, context: { host: (() => { try { return new URL(href).hostname; } catch { return ''; } })() } });
+}
+function copyWithSelection(value) {
+    const area = Object.assign(document.createElement('textarea'), { value });
+    area.setAttribute('readonly', ''); area.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    const previous = document.activeElement;
+    document.body.append(area); area.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } finally { area.remove(); previous?.focus?.({ preventScroll: true }); }
+    if (!ok) throw new Error('execCommand copy refused');
+}
+async function copyLink(href) {
+    try {
+        // The async API first; a shell that refuses it still allows a copy of a selection.
+        try {
+            if (!navigator.clipboard || !window.isSecureContext) throw new Error('clipboard API unavailable');
+            await navigator.clipboard.writeText(href);
+        } catch (apiError) {
+            try { copyWithSelection(href); }
+            catch (fallbackError) { throw new Error(`${apiError.message} / ${fallbackError.message}`); }
+        }
+        showToast(uiText('Lien copié'), href.length > 90 ? href.slice(0, 87) + '…' : href, { icon: TOAST_OK, duration: 2500 });
+    } catch (error) {
+        reportIdeError({ source: 'clipboard', code: 'copy_failed', title: uiText('Copie impossible'),
+            message: uiText('Le presse-papiers a refusé la copie du lien. Réessayez après avoir cliqué dans la fenêtre.'), detail: error && error.message });
     }
+}
+document.addEventListener('click', e => {
+    const a = chatLinkAt(e.target);
+    if (!a || !a.href) return;
+    e.preventDefault();
+    openInIdeBrowser(a.href);
 });
+// Right-click on a link: open it here or outside, or copy it.
+document.addEventListener('contextmenu', e => {
+    const a = chatLinkAt(e.target);
+    if (!a || !a.href || !window.ZaalisActionMenu) return;
+    e.preventDefault();
+    const href = a.href;
+    window.ZaalisActionMenu.open(a, [
+        { label: uiText('Ouvrir dans le navigateur intégré'), run: () => openInIdeBrowser(href) },
+        { label: uiText('Ouvrir dans le navigateur externe'), run: () => openInIdeBrowser(href, { external: true }) },
+        { label: uiText('Copier le lien'), run: () => copyLink(href) },
+    ], { point: { x: e.clientX, y: e.clientY } });
+});
+// A site without a favicon keeps its row aligned, without a broken image.
+document.addEventListener('error', e => {
+    if (e.target && e.target.classList && e.target.classList.contains('tl-link-favicon')) e.target.classList.add('is-missing');
+}, true);
 
 function formatAIResponse(text) {
-    const isImageGen = state.config.aiModel === 'grok' && 
-        (state.config.aiSubmodel === 'grok-imagine-image-quality' || state.config.aiSubmodel === 'grok-imagine-image');
-
-    if (isImageGen) {
+    if (isImageGenModel()) {
         const imgMatch = text.match(/!\[([^\]]*)\]\(([^)]+)\)/);
         if (imgMatch) return imageBubble(imgMatch[2], imgMatch[1] || '');
     }
@@ -643,30 +722,22 @@ async function callAgentAI(model, submodel, message, images = [], signal = undef
     }
 }
 
-const rustInteractiveRequests = new Map();
 async function handleRustInteractiveEvent(event) {
-    if (event?.type === 'question_required') return window.ZaalisAssistant?.question(event);
-    if (event?.type === 'ui_request') return window.ZaalisAssistant?.uiRequest(event);
-    if (!event || !event.sessionId || !event.requestId) return;
-    const key=event.sessionId+':'+event.requestId;
-    if(rustInteractiveRequests.has(key))return rustInteractiveRequests.get(key);
-    const pending=performRustInteractiveDecision(event);rustInteractiveRequests.set(key,pending);
-    if(rustInteractiveRequests.size>1000)rustInteractiveRequests.delete(rustInteractiveRequests.keys().next().value);
-    return pending;
-}
-async function performRustInteractiveDecision(event) {
     if (!event || !event.sessionId || !event.requestId) return;
     const lang = state.language || 'fr';
     let body = null;
     if (event.type === 'permission_required') {
         const detail = [event.target, ...(event.risks || [])].filter(Boolean).join('\n');
-        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail);
+        const allow = await requestApproval(event.summary || (lang === 'en' ? 'Allow this action?' : 'Autoriser cette action ?'), detail, { host: event.approvalHost });
         body = { kind: 'permission', allow, scope: 'once' };
     } else if (event.type === 'plan_required') {
-        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true });
+        const decision = await requestApproval(lang === 'en' ? 'Approve this implementation plan?' : "Approuver ce plan d'implémentation ?", event.content || '', { plan: true, host: event.approvalHost });
         body = { kind: 'plan', ...decision };
+    } else if (event.type === 'clarification_required') {
+        const answers = await window.ZaalisClarification.request(event.questions || []);
+        body = { kind: 'clarification', answers };
     } else if (event.type === 'budget_required') {
-        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '');
+        const allow = await requestApproval(lang === 'en' ? 'The agent budget is exhausted. Continue?' : "Le budget de l'agent est atteint. Continuer ?", event.limit || '', { host: event.approvalHost });
         body = { kind: 'budget', stop: !allow, additionalTokens: allow ? 50000 : undefined };
     }
     if (!body) return;
@@ -765,11 +836,12 @@ function reasoningBlock(thinking, durationMs) {
 
 // --- Send / Stop button state ---
 let chatAbort = null;
-let pendingChatDraft = null;
-let pendingChatDrawer = null;
+const pendingChatQueue = new window.ZaalisPendingQueue('chat-input');
+const pendingAgentQueue = new window.ZaalisPendingQueue('agents-input');
+pendingChatQueue.onSend = () => { if (!chatAbort && pendingChatQueue.length) sendChat(pendingChatQueue.take()); };
+pendingAgentQueue.onSend = () => { if (!agentTaskRunning && pendingAgentQueue.length) sendAgentTask(pendingAgentQueue.take()); };
 let agentTaskRunning = false;
-let pendingAgentDraft = null;
-let pendingAgentDrawer = null;
+let agentAbort = null;
 const SEND_ICON = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>';
 const STOP_ICON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
 function createQueuedDraft(message) {
@@ -778,145 +850,19 @@ function createQueuedDraft(message) {
 }
 function createChatDraft(message) { return createQueuedDraft(message); }
 function createAgentDraft(message) { return createQueuedDraft(message); }
-function ensurePendingChatDrawer() {
-    if (pendingChatDrawer) return pendingChatDrawer;
-    const input = $('#chat-input');
-    const area = input && input.closest('.chat-input-area');
-    pendingChatDrawer = document.createElement('div');
-    pendingChatDrawer.className = 'chat-pending-drawer';
-    pendingChatDrawer.innerHTML = uiTemplate(`
-        <div class="chat-pending-head">En attente</div>
-        <div class="chat-pending-row">
-            <span class="chat-pending-text"></span>
-            <button type="button" class="chat-pending-cancel" aria-label="Annuler le message en attente" title="Annuler">&times;</button>
-        </div>`);
-    const cancel = pendingChatDrawer.querySelector('.chat-pending-cancel');
-    cancel.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        restorePendingChatToInput();
-    });
-    if (area && input) area.insertBefore(pendingChatDrawer, input);
-    return pendingChatDrawer;
-}
-function ensurePendingAgentDrawer() {
-    if (pendingAgentDrawer) return pendingAgentDrawer;
-    const input = $('#agents-input');
-    const area = input && input.closest('.chat-input-area');
-    pendingAgentDrawer = document.createElement('div');
-    pendingAgentDrawer.className = 'chat-pending-drawer agents-pending-drawer';
-    pendingAgentDrawer.innerHTML = uiTemplate(`
-        <div class="chat-pending-head">En attente</div>
-        <div class="chat-pending-row">
-            <span class="chat-pending-text"></span>
-            <button type="button" class="chat-pending-cancel" aria-label="Annuler la tache en attente" title="Annuler">&times;</button>
-        </div>`);
-    pendingAgentDrawer.querySelector('.chat-pending-cancel').addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        restorePendingAgentToInput();
-    });
-    if (area && input) area.insertBefore(pendingAgentDrawer, input);
-    return pendingAgentDrawer;
-}
-function renderPendingChat() {
-    const drawer = ensurePendingChatDrawer();
-    const input = $('#chat-input');
-    const area = input && input.closest('.chat-input-area');
-    const on = !!pendingChatDraft;
-    drawer.classList.toggle('show', on);
-    if (area) area.classList.toggle('has-pending-chat', on);
-    if (on) {
-        drawer.querySelector('.chat-pending-text').textContent = pendingChatDraft.message || '';
-    }
-}
-function queuePendingChat(message) {
-    const lang = state.language || 'fr';
-    if (pendingChatDraft) {
-        showToast(lang === 'en' ? 'Already queued' : 'Deja en attente',
-            lang === 'en' ? 'Only one message can wait at a time.' : 'Un seul message peut etre en attente a la fois.',
-            { icon: '!', duration: 2600 });
-        return false;
-    }
-    pendingChatDraft = createChatDraft(message);
-    renderPendingChat();
-    return true;
-}
-function restorePendingChatToInput() {
-    if (!pendingChatDraft) return false;
-    const draft = pendingChatDraft;
-    pendingChatDraft = null;
-    renderPendingChat();
-    const input = $('#chat-input');
-    if (input) {
-        const existing = input.value.trim();
-        input.value = draft.message + (existing ? '\n' + existing : '');
-        autoGrow(input);
-        input.focus();
-    }
-    if (Array.isArray(draft.attachments) && draft.attachments.length) {
-        state.attachments = draft.attachments.concat(state.attachments || []);
-        renderAttachments();
-    }
-    return true;
-}
-function takePendingChatDraft() {
-    const draft = pendingChatDraft;
-    pendingChatDraft = null;
-    renderPendingChat();
-    return draft;
-}
-function renderPendingAgent() {
-    const drawer = ensurePendingAgentDrawer();
-    const input = $('#agents-input');
-    const area = input && input.closest('.chat-input-area');
-    const on = !!pendingAgentDraft;
-    drawer.classList.toggle('show', on);
-    if (area) area.classList.toggle('has-pending-chat', on);
-    if (on) drawer.querySelector('.chat-pending-text').textContent = pendingAgentDraft.message || '';
-}
-function queuePendingAgent(message) {
-    const lang = state.language || 'fr';
-    if (pendingAgentDraft) {
-        showToast(lang === 'en' ? 'Already queued' : 'Deja en attente',
-            lang === 'en' ? 'Only one agent task can wait at a time.' : 'Une seule tache Agents peut etre en attente a la fois.',
-            { icon: '!', duration: 2600 });
-        return false;
-    }
-    pendingAgentDraft = createAgentDraft(message);
-    renderPendingAgent();
-    return true;
-}
-function restorePendingAgentToInput() {
-    if (!pendingAgentDraft) return false;
-    const draft = pendingAgentDraft;
-    pendingAgentDraft = null;
-    renderPendingAgent();
-    const input = $('#agents-input');
-    if (input) {
-        const existing = input.value.trim();
-        input.value = draft.message + (existing ? '\n' + existing : '');
-        autoGrow(input);
-        input.focus();
-    }
-    if (Array.isArray(draft.attachments) && draft.attachments.length) {
-        state.attachments = draft.attachments.concat(state.attachments || []);
-        renderAttachments();
-    }
-    return true;
-}
-function takePendingAgentDraft() {
-    const draft = pendingAgentDraft;
-    pendingAgentDraft = null;
-    renderPendingAgent();
-    return draft;
-}
+function queuePendingChat(message) { pendingChatQueue.push(createChatDraft(message), state.currentConvId); return true; }
+function queuePendingAgent(message) { pendingAgentQueue.push(createAgentDraft(message), state.currentAgentConvId); return true; }
+function takePendingChatDraft() { return pendingChatQueue.take(); }
+function takePendingAgentDraft() { return pendingAgentQueue.take(); }
 function setChatBusy(on) {
     const btn = $('#send-btn');
     document.body.classList.toggle('ai-busy', !!on);
     if (typeof renderProjectPanelHistory === 'function') renderProjectPanelHistory(activeKind());
     else if (typeof renderSidebarConversations === 'function') renderSidebarConversations();
     if (!btn) return;
+    btn.setAttribute('aria-label', on ? 'Arrêter la réponse' : 'Envoyer le message');
+    btn.setAttribute('title', on ? 'Arrêter la réponse' : 'Envoyer le message');
+    $('#chat-messages')?.setAttribute('aria-busy', String(!!on));
     btn.classList.toggle('stop', on);
     btn.innerHTML = on ? STOP_ICON : SEND_ICON;
 }
@@ -941,8 +887,13 @@ async function sendChat(input) {
     let completed = false;
     let aborted = false;
 
-    // Compact the running context first if it's getting close to the limit.
-    await maybeCompact(model, submodel);
+    // Claim the turn before the first await: rapid submits must join the queue.
+    const controller = new AbortController();
+    chatAbort = controller;
+    setChatBusy(true);
+    try { await maybeCompact(model, submodel); }
+    catch (error) { chatAbort = null; setChatBusy(false); toast(error.message); return; }
+    if (controller.signal.aborted) { chatAbort = null; setChatBusy(false); return; }
 
     // Project tree goes into the SYSTEM prompt (background), on the first message
     // OR whenever the project changed since the last injection — so switching
@@ -990,9 +941,6 @@ async function sendChat(input) {
         }
     }
 
-    const controller = new AbortController();
-    chatAbort = controller;
-    setChatBusy(true);
     try {
         const data = await callAgentAI(model, submodel, aiMessage, images, controller.signal, history, {
             conversationId: activeConversation?.id,
@@ -1050,7 +998,7 @@ async function sendChat(input) {
         if (err && err.name === 'AbortError') {
             aborted = true;
             timeline.fail(lang === 'en' ? 'Stopped.' : 'Interrompu.');
-            restorePendingChatToInput();
+            pendingChatQueue.render();
         } else {
             timeline.fail(TRANSLATIONS[lang]['err-conn'] || uiText('Erreur de connexion au serveur.'));
         }
@@ -1059,13 +1007,19 @@ async function sendChat(input) {
         setChatBusy(false);
     }
 
+    if (!completed) {
+        const retry = document.createElement('button'); retry.type = 'button';
+        retry.className = 'collab-retry'; retry.textContent = lang === 'en' ? 'Retry this request' : 'Réessayer cette demande';
+        retry.addEventListener('click', () => { if (!chatAbort) { retry.remove(); sendChat(draft); } });
+        body.append(retry);
+    }
     saveConversation();
     const measuredConversation = state.conversations.find(conv => conv.id === state.currentConvId);
     if (measuredConversation && state.contextMeasured && measuredConversation.contextTokens !== state.contextTokens) {
         measuredConversation.contextTokens = state.contextTokens;
         persistChats('chat');
     }
-    if (completed && !aborted && pendingChatDraft) {
+    if (completed && !aborted && pendingChatQueue.length) {
         const next = takePendingChatDraft();
         if (next) setTimeout(() => sendChat(next), 0);
     }
@@ -1208,7 +1162,7 @@ function toolRunDetailsHTML(results) {
         const name = toolDisplayName(r);
         const badge = failed ? (lang === 'en' ? 'error' : 'erreur') : (r.tool || 'outil');
         const text = r.text ? String(r.text) : (lang === 'en' ? '(no output)' : '(aucun resultat)');
-        return `<details class="ghost-tool-item">
+        return `<details class="ghost-tool-item${failed ? ' is-error' : ''}">
             <summary><span class="ghost-tool-name">${escapeHTML(name)}</span><span class="ghost-tool-badge">${escapeHTML(badge)}</span>${chevron}</summary>
             <pre class="ghost-tool-pre">${escapeHTML(text)}</pre>
         </details>`;
@@ -1778,6 +1732,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
     const response = await fetch('/api/rust-agent-team', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Accept': 'application/x-ndjson' },
+        signal: agentAbort?.signal,
         body: JSON.stringify({
             team, message: task + aiText, root: state.projectRoot,
             permissionMode: state.permissionMode, language: lang,
@@ -1793,6 +1748,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
     const workers = activeAgents.filter(agent => agent !== lead);
     const timeline = window.ZaalisTimeline.create($('#agents-log'), { label: labels[lead.agent] || lead.agent });
     const byId = new Map();
+    let interrupted = false;
     const data = await readAgentEventStream(response, (event) => {
         handleRustInteractiveEvent(event).catch(() => {});
         timeline.onEvent(event);
@@ -1803,6 +1759,8 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
                 byId.set(frame.agent.id, frame.agent.role && frame.agent.role.name);
             }
             if (frame.type === 'agent_state_changed') {
+                const currentState = frame.state?.state || frame.state;
+                if (['failed', 'cancelled'].includes(currentState)) interrupted = true;
                 const roleName = byId.get(frame.agent_id);
                 const selected = roleName === 'lead' ? lead : workers.find((agent, index) => roleName === `worker_${index}_${agent.agent}`);
                 const card = selected && $(`.agent-card[data-agent="${selected.agent}"]`);
@@ -1820,7 +1778,7 @@ async function sendRustAgentTeam(task, taskDraft, activeAgents, labels) {
     else timeline.finish(data);
     followScroll($('#agents-log'));
     saveConversation('agents');
-    return true;
+    return { completed: !data.error && !interrupted };
 }
 
 async function sendAgentTask(input) {
@@ -1858,10 +1816,17 @@ async function sendAgentTask(input) {
     }
 
     agentTaskRunning = true;
+    agentAbort = new AbortController();
+    let queueMayContinue = false;
+    const sendButton = $('#agents-send-btn');
+    sendButton.innerHTML = STOP_ICON; sendButton.classList.add('stop');
+    sendButton.setAttribute('aria-label', 'Arrêter la tâche');
+    $('#agents-log').setAttribute('aria-busy', 'true');
     try {
 
     const rustDraft = (input && typeof input === 'object') ? input : createAgentDraft(task);
-    if (await sendRustAgentTeam(task, rustDraft, activeAgents, labels)) return;
+    const rustRun = await sendRustAgentTeam(task, rustDraft, activeAgents, labels);
+    if (rustRun) { queueMayContinue = rustRun.completed; return; }
 
     // Identify lead agent
     const leadIdx = activeAgents.findIndex(a => a.role === 'lead');
@@ -1921,6 +1886,7 @@ async function sendAgentTask(input) {
 
     // Run worker agents sequentially — each only contributes to the shared context.
     for (const { agent, role, submodel } of workers) {
+        if (agentAbort.signal.aborted) throw new DOMException('Stopped', 'AbortError');
         const card = $(`.agent-card[data-agent="${agent}"]`);
         card.classList.add('working');
         const badge = card.querySelector('.agent-badge');
@@ -1947,7 +1913,7 @@ async function sendAgentTask(input) {
             : task;
 
         try {
-            const data = await callAgentAI(agent, submodel, fullMessage, taskImages, undefined, [], {
+            const data = await callAgentAI(agent, submodel, fullMessage, taskImages, agentAbort.signal, [], {
                 rolePrompt: workerRolePrompt,
                 permissionMode: 'read-only',
                 computerControl: false
@@ -1979,6 +1945,7 @@ async function sendAgentTask(input) {
     const recapHTML = teamList.innerHTML;
     teamBox.remove();
 
+    if (agentAbort.signal.aborted) throw new DOMException('Stopped', 'AbortError');
     const leadCard = $(`.agent-card[data-agent="${leadAgent.agent}"]`);
     leadCard.classList.add('working');
     const leadBadge = leadCard.querySelector('.agent-badge');
@@ -2018,7 +1985,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     startThinking(streamTarget);
 
     try {
-        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, undefined, [], {
+        const data = await callAgentAI(leadAgent.agent, leadAgent.submodel, leadMessage, taskImages, agentAbort.signal, [], {
             rolePrompt: leadRolePrompt
         });
         stopThinking(streamTarget);
@@ -2026,6 +1993,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
             streamTarget.textContent = data.error;
             streamTarget.classList.add('error');
         } else {
+            queueMayContinue = true;
             const formatted = formatAIResponse(data.response);
             if (formatted.includes('generated-image')) {
                 streamTarget.innerHTML = formatted;
@@ -2053,9 +2021,17 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
 
     // Save this agents session to the (separate) agents history.
     saveConversation('agents');
+    } catch (error) {
+        addMsg($('#agents-log'), 'system', null, error.name === 'AbortError' ? 'Tâche interrompue.' : error.message);
+        saveConversation('agents');
     } finally {
-        agentTaskRunning = false;
-        if (pendingAgentDraft) {
+        const wasAborted = agentAbort?.signal.aborted;
+        agentAbort = null; agentTaskRunning = false;
+        sendButton.innerHTML = SEND_ICON; sendButton.classList.remove('stop');
+        sendButton.setAttribute('aria-label', 'Envoyer la tâche');
+        $('#agents-log').setAttribute('aria-busy', 'false');
+        $$('.agent-card.working').forEach(card => card.classList.remove('working'));
+        if (queueMayContinue && !wasAborted && pendingAgentQueue.length) {
             const next = takePendingAgentDraft();
             if (next) setTimeout(() => sendAgentTask(next), 0);
         }
@@ -2079,7 +2055,10 @@ $('#agents-input').addEventListener('keydown', e => {
         handleAgentsSubmit();
     }
 });
-$('#agents-send-btn').addEventListener('click', handleAgentsSubmit);
+$('#agents-send-btn').addEventListener('click', () => {
+    if (agentTaskRunning) { agentAbort?.abort(); return; }
+    handleAgentsSubmit();
+});
 
 // ==========================================================
 //  CONVERSATION HISTORY
@@ -2089,7 +2068,7 @@ const HIST = {
     chat: {
         store: 'conversations', current: 'currentConvId',
         container: '#chat-messages', list: '#history-list', tab: 'chat',
-        defaultKey: 'chat-default-msg', defaultMsg: uiText('Selectionnez un modele et posez votre question.')
+        defaultKey: 'chat-default-msg', defaultMsg: uiText('Sélectionnez un modèle et posez votre question.')
     },
     agents: {
         store: 'agentConversations', current: 'currentAgentConvId',
@@ -2120,7 +2099,7 @@ function shouldPersistRichHTML(body, entry) {
     if (!body || entry.type === 'user') return false;
     return body.classList.contains('deep-search-host') ||
         body.classList.contains('has-image') ||
-        !!body.querySelector('.deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
+        !!body.querySelector('.tl-flow, .deep-search-flow, .md, .thinking-details, .response-text, .stream-target, .ghost-tool-group, .generated-image, a[href], details.file-card');
 }
 
 function safeSavedHTML(html) {
@@ -2169,11 +2148,15 @@ function saveConversation(kind = 'chat') {
     const project = projectLabel();          // folder name (mobile groups by it)
     const projectPath = state.projectRoot || null;  // full path, lets us re-open it
     const listArr = state[cfg.store];
+    const previous = listArr.find(item => item.id === state[cfg.current]);
+    const transcriptChanged = !previous || JSON.stringify(previous.messages) !== JSON.stringify(data);
     let curId = state[cfg.current];
 
     if (!curId) {
         curId = Date.now().toString();
         state[cfg.current] = curId;
+        const queue = kind === 'agents' ? pendingAgentQueue : pendingChatQueue;
+        if (queue.length && queue.owner === null) queue.owner = curId;
         listArr.push({ id: curId, title, date: new Date().toLocaleDateString(), project, projectPath, messages: data });
     } else {
         const conv = listArr.find(c => c.id === curId);
@@ -2189,6 +2172,7 @@ function saveConversation(kind = 'chat') {
     // Migrate an older conversation when it is saved from the active IDE view.
     // Its first messenger link then inherits the visible model/team configuration.
     const savedConversation = listArr.find(c => c.id === curId);
+    if (savedConversation && transcriptChanged) savedConversation.contentUpdatedAt = Date.now();
     if (savedConversation && !savedConversation.execution) {
         const execution = { language: state.language, permissionMode: state.permissionMode, reasoningLevel: state.reasoningLevel };
         if (kind === 'chat') {
@@ -2306,6 +2290,8 @@ async function loadConversation(kind, id) {
     const cfg = HIST[kind];
     const conv = state[cfg.store].find(c => c.id === id);
     if (!conv) return;
+    if (chatAbort || agentTaskRunning) { toast('Arrêtez la réponse en cours avant de changer de conversation.'); return; }
+    if (pendingChatQueue.length || pendingAgentQueue.length) { toast('Retirez les messages en attente avant de changer de conversation.'); return; }
     window.dispatchEvent(new Event('zaalis-conversation-change'));
 
     // Link the chat to its project: re-open the folder it belongs to (or drop the
@@ -2424,8 +2410,6 @@ async function applyWorkspaceSelection(selection, conv) {
     }
 }
 
-const PH_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
-
 // The AI tab currently shown (chat | agents) drives which conversations show.
 function activeKind() {
     const t = document.querySelector('.ai-tab.active');
@@ -2445,8 +2429,8 @@ function renderProjectPanelHistory(kind = activeKind()) {
 
     const folderName = projectLabel();
     const convs = (typeof conversationsForProject === 'function')
-        ? conversationsForProject(state.projectRoot, folderName, kind)
-        : (state[cfg.store] || []).filter(c => c.project === folderName);
+        ? conversationsForProject(state.projectRoot, folderName, kind).filter(c => !c.archived)
+        : (state[cfg.store] || []).filter(c => c.project === folderName && !c.archived);
 
     if (!convs.length) {
         list.innerHTML = `<div class="history-empty" data-i18n="history-empty">${TRANSLATIONS[lang]['history-empty'] || uiText('Aucune conversation')}</div>`;
@@ -2464,18 +2448,8 @@ function renderProjectPanelHistory(kind = activeKind()) {
         titleEl.textContent = conv.title;
         titleEl.addEventListener('click', () => loadConversation(kind, conv.id));
 
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = PH_TRASH;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            deleteConversation(kind, conv.id);
-        });
-
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
+        row.addEventListener('click', event => { if (event.target === row) loadConversation(kind, conv.id); });
         list.appendChild(row);
     });
 }
@@ -2502,6 +2476,7 @@ function renderHistory() {
 
 // Start a brand-new conversation for the given kind (in the current context).
 function newConversation(kind = 'chat') {
+    if (chatAbort || agentTaskRunning || pendingChatQueue.length || pendingAgentQueue.length) { toast('Arrêtez la réponse et retirez les messages en attente avant de créer une conversation.'); return; }
     window.dispatchEvent(new Event('zaalis-conversation-change'));
     const cfg = HIST[kind];
     const lang = state.language || 'fr';
@@ -2528,7 +2503,10 @@ async function deleteConversation(kind, id) {
         danger: true
     });
     if (!ok) return;
-
+    try {
+        const response = await fetch(`/api/conversations/${encodeURIComponent(id)}?kind=${encodeURIComponent(kind)}`, { method: 'DELETE' });
+        if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+    } catch (error) { toast(error.message); return; }
     state[cfg.store] = state[cfg.store].filter(c => c.id !== id);
     if (state[cfg.current] === id) {
         state[cfg.current] = null;
@@ -2538,6 +2516,35 @@ async function deleteConversation(kind, id) {
     }
     persistChats(kind);
     renderHistory();
+}
+
+async function deleteProjectConversations(projectPath) {
+    const lang = state.language || 'fr';
+    const folderName = String(projectPath || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+    const items = ['chat', 'agents'].flatMap(kind => (typeof conversationsForProject === 'function' ? conversationsForProject(projectPath, folderName, kind) : []).map(conv => ({ kind, conv })));
+    for (const { kind, conv } of items) {
+        if (state[HIST[kind].current] === conv.id && (kind === 'chat' ? chatAbort : agentTaskRunning)) {
+            toast(lang === 'en' ? 'Stop the running task before deleting this project.' : 'Arrêtez la tâche en cours avant de supprimer ce projet.');
+            return false;
+        }
+    }
+    for (const { kind, conv } of items) {
+        try {
+            const response = await fetch(`/api/conversations/${encodeURIComponent(conv.id)}?kind=${encodeURIComponent(kind)}`, { method: 'DELETE' });
+            if (!response.ok) throw new Error((await response.json()).error || `HTTP ${response.status}`);
+        } catch (error) { toast(error.message); return false; }
+        const cfg = HIST[kind];
+        state[cfg.store] = (state[cfg.store] || []).filter(item => item.id !== conv.id);
+        if (state[cfg.current] === conv.id) {
+            state[cfg.current] = null;
+            const box = $(cfg.container);
+            if (box) { box.innerHTML = ''; addMsg(box, 'system', null, TRANSLATIONS[lang][cfg.defaultKey] || cfg.defaultMsg); }
+            if (kind === 'chat') { state.chatHistory = []; resetContextMeasure(); updateTokenMeter(); }
+        }
+        persistChats(kind);
+    }
+    renderHistory();
+    return true;
 }
 
 const newChatBtn = $('#new-chat-btn');
@@ -2717,7 +2724,7 @@ function isVisionCompatible(model, submodel) {
             if (model === 'compat:xai-sub') return true;
             if (model === 'compat:minimax-sub') return /^minimax-m3/i.test(s);
             return String(model || '').startsWith('compat:')
-                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-5/.test(s);
+                && /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-[56]/.test(s);
     }
 }
 function chatImagesAllowed() {

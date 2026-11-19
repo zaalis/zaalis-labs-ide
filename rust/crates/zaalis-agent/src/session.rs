@@ -3,7 +3,7 @@ use crate::event_bus::EventBus;
 use crate::interaction::{BudgetAnswer, InteractionHub, PlanAnswer};
 use crate::prompt::discover_project_guidance;
 use crate::runner::{run_agent, run_lifecycle_hook, AgentRun};
-use crate::spawn::{NativeMergeTool, NativeSpawnTool};
+use crate::spawn::{NativeBatchSpawnTool, NativeMergeTool, NativeSpawnTool};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -54,7 +54,6 @@ pub struct SessionConfig {
     /// They are rendered as lower-priority project guidance by the prompt composer.
     pub project_guidance: String,
     pub max_concurrency: usize,
-    pub subagent_turns: u32,
     pub usage_store: Option<Arc<zaalis_store::Store>>,
     pub extensions: Option<Arc<zaalis_extensions::ExtensionRuntime>>,
 }
@@ -70,8 +69,7 @@ impl SessionConfig {
                 "Tu es un agent Zaalis. Utilise les outils typés, vérifie ton travail, et rapporte au passé ce que tu as réellement fait."
                     .into(),
             project_guidance,
-            max_concurrency: 11,
-            subagent_turns: 250,
+            max_concurrency: 8,
             usage_store: None,
             extensions: None,
         }
@@ -90,8 +88,8 @@ pub(crate) struct SessionInner {
     pub events: Arc<EventBus>,
     pub cancel: CancellationToken,
     pub concurrency: Arc<Semaphore>,
-    pub child_concurrency: Arc<Semaphore>,
     pub agent_cancels: Mutex<HashMap<AgentId, CancellationToken>>,
+    pub background_wakeup: tokio::sync::Notify,
     pub hook_agents: Mutex<HashSet<AgentId>>,
     pub plan_mode: AtomicBool,
     pub envelope: Mutex<crate::envelope::Envelope>,
@@ -126,8 +124,8 @@ impl AgentSession {
             events,
             cancel: CancellationToken::new(),
             concurrency: Arc::new(Semaphore::new(max_concurrency)),
-            child_concurrency: Arc::new(Semaphore::new(max_concurrency.saturating_sub(1).max(1))),
             agent_cancels: Mutex::new(HashMap::new()),
+            background_wakeup: tokio::sync::Notify::new(),
             hook_agents: Mutex::new(HashSet::new()),
             plan_mode: AtomicBool::new(initial_plan),
             envelope: Mutex::new(crate::envelope::Envelope::default()),
@@ -142,6 +140,14 @@ impl AgentSession {
             .expect("register native spawn_agent tool");
         inner
             .tools
+            .register(NativeBatchSpawnTool::new(Arc::downgrade(&inner)))
+            .expect("register native spawn_agents tool");
+        inner.tools.register(crate::clarify::ClarifyTool(Arc::downgrade(&inner))).expect("register user input tool");
+        for action in ["agent_status", "agent_wait", "agent_cancel"] {
+            inner.tools.register(crate::agent_control::AgentControlTool::new(Arc::downgrade(&inner),action)).expect("register agent control tool");
+        }
+        inner
+            .tools
             .register(NativeMergeTool::new(Arc::downgrade(&inner)))
             .expect("register native merge_agent tool");
         inner
@@ -152,8 +158,6 @@ impl AgentSession {
             .tools
             .register(NativePlanTool::new(Arc::downgrade(&inner), false))
             .expect("register exit_plan_mode tool");
-        crate::discovery::register(&inner);
-        inner.tools.register_deferred(crate::code::CodeTool::new(Arc::downgrade(&inner))).expect("code tool");
         Self { inner }
     }
 
@@ -326,6 +330,18 @@ impl AgentSession {
             .map_err(tree_error)
     }
 
+    /// Background processes (builds, servers, watchers) the agents started.
+    pub async fn background_processes(&self) -> serde_json::Value {
+        serde_json::to_value(self.inner.tools.background_processes().await)
+            .unwrap_or_else(|_| serde_json::Value::Array(Vec::new()))
+    }
+
+    /// Stop one background process at the user's request.
+    pub async fn kill_background_process(&self, process_id: &str) -> Result<serde_json::Value> {
+        let poll = self.inner.tools.kill_background_process(process_id).await?;
+        Ok(serde_json::to_value(poll)?)
+    }
+
     pub fn tool_definitions(&self) -> Vec<zaalis_tools::ToolDefinition> {
         self.inner.tools.definitions()
     }
@@ -360,8 +376,10 @@ impl AgentSession {
             prompt: prompt.clone(),
         });
         self.prepare_turn(&prompt, images, target).await?;
-        { let spent=self.inner.tree.lock().await.total_usage().total_tokens();
-          let mut e=self.inner.envelope.lock().await;e.spent=e.spent.max(spent); }
+        // The shared envelope bounds the branches of ONE turn. Seeding it with the
+        // whole conversation's usage made every turn fail with budget_exceeded
+        // once a long conversation passed the root budget, with no way to extend.
+        { let mut e=self.inner.envelope.lock().await;e.spent=0;e.reserved=0; }
 
         let hook_root = {
             let tree = self.inner.tree.lock().await;
@@ -445,6 +463,13 @@ impl AgentSession {
                 if self.inner.tree.lock().await.is_settled() {
                     break;
                 }
+                if !self.inner.agent_cancels.lock().await.is_empty() {
+                    tokio::select! {
+                        _ = self.inner.background_wakeup.notified() => {},
+                        _ = self.inner.cancel.cancelled() => return Err(ZaalisError::cancelled()),
+                    }
+                    continue;
+                }
                 return Err(ZaalisError::internal(
                     "ordonnanceur bloqué sans agent exécutable",
                 ));
@@ -478,6 +503,9 @@ impl AgentSession {
 
     pub fn decide_plan(&self, id: &zaalis_core::RequestId, answer: PlanAnswer) -> Result<()> {
         self.inner.interactions.decide_plan(id, answer)
+    }
+    pub fn decide_clarification(&self, id: &zaalis_core::RequestId, answers: zaalis_protocol::ClarificationAnswers) -> Result<()> {
+        self.inner.interactions.decide_clarification(id, answers)
     }
 
     pub fn decide_budget(&self, id: &zaalis_core::RequestId, answer: BudgetAnswer) -> Result<()> {

@@ -1,7 +1,7 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { GitHubIntegration, repository } = require('../github-integration');
+const { GitHubIntegration, repository } = require('../src/integrations/github-integration');
 function fixture() {
  let users = [{ id: 'u', github: { token: 'encrypted', login: 'alice', permissions: { 'alice/project': { mode: 'read', id: 12 } } } }];
  const calls = [];
@@ -20,12 +20,13 @@ test('connection validates account and returns no credential', async () => {
 test('all write actions rejected in read-only before filesystem or remote mutation', async () => {
  for (const action of ['push','merge','create_pull']) { const {g,calls}=fixture();await assert.rejects(g.action('u','invalid',{action,repo:'alice/project'}),/Lecture seule/);assert.ok(calls.every(c=>c.opts.method==='GET')); }
 });
-test('ungranted repo and changed identity never reach a write', async () => {
- const {g,calls}=fixture();await assert.rejects(g.action('u','invalid',{action:'push',repo:'other/project'}),/pas autorisé/);assert.equal(calls.length,0);
+test('a blocked repo and a changed identity never reach a write', async () => {
+ const {g,calls}=fixture();g.save('u',u=>{u.github.permissions['other/project']={mode:'none',id:5};});
+ await assert.rejects(g.action('u','invalid',{action:'push',repo:'other/project'}),/bloqué/);assert.equal(calls.length,0);
  g.request=async()=>({id:99});await assert.rejects(g.action('u','invalid',{action:'read',repo:'alice/project',path:'README.md'}),/identité/);
 });
-test('write grant requires a verified root and actual GitHub push permission', async () => {
- const {g}=fixture();await assert.rejects(g.permission('u',{repo:'alice/project',mode:'write'}),/Associez/);
+test('write grant requires actual GitHub push permission', async () => {
+ const {g}=fixture();
  g.request=async()=>({id:12,permissions:{push:false}});await assert.rejects(g.permission('u',{repo:'alice/project',mode:'write',root:'wrong'}),/ne vous accorde pas/);
 });
 test('read actions use bounded encoded repository paths', async () => {
@@ -90,4 +91,18 @@ test('real Git validates root, origin and push destination without contacting Gi
  git(['init']);git(['remote','add','origin','https://github.com/alice/project.git']);const {g}=fixture();assert.ok(await g.verify(root,'alice/project'));
  git(['remote','set-url','--push','origin','https://github.com/other/project.git']);await assert.rejects(g.verify(root,'alice/project'),/correspond pas/);
  git(['remote','set-url','--push','origin','https://github.com/alice/project.git']);git(['config','url.https://evil.invalid/.insteadOf','https://github.com/']);await assert.rejects(g.verify(root,'alice/project'),/correspond pas/);
+});
+
+test('every repository is reachable by default, restrictions still hold', async () => {
+ const {g,calls}=fixture();
+ assert.equal(g.grantFor('u','someone/else').mode,'write');
+ await g.action('u','invalid',{action:'api',endpoint:'/repos/someone/else/issues',method:'POST',body:{title:'Bug'}});
+ assert.equal(calls.at(-1).opts.method,'POST');assert.ok(calls.at(-1).url.endsWith('/repos/someone/else/issues'));
+ await g.action('u','invalid',{action:'api',endpoint:'https://api.github.com/user/repos',query:{per_page:5}});
+ assert.ok(calls.at(-1).url.endsWith('/user/repos?per_page=5'));
+ await assert.rejects(g.action('u','invalid',{action:'api',endpoint:'/repos/alice/project/issues',method:'POST'}),/lecture seule/);
+ await assert.rejects(g.action('u','invalid',{action:'api',endpoint:'/repos/../x'}),/invalide/);
+ g.save('u',u=>{u.github.permissions['other/blocked']={mode:'none'};});
+ await assert.rejects(g.action('u','invalid',{action:'api',endpoint:'/repos/other/blocked'}),/bloqué/);
+ assert.equal(g.token('u'),'secret-token');
 });

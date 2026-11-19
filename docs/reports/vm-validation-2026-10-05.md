@@ -1,0 +1,9 @@
+# VM integration validation — October 5, 2026
+
+The right sidebar gained VM sessions with Linux and Windows tabs, xterm terminal, networking selection, start/stop/reset, project copying, and file export. VM settings report Sandbox, `wsb`, Linux pack, WHPX, and OpenSSH readiness. Component activation uses UAC without an automatic restart. The Rust `vm` tool can manage owned VMs autonomously; supervised host commands remain supervised.
+
+Debian 12 uses SSH with a PTY, immutable qcow2 base, per-VM overlays, and per-VM SSH keys. Windows Sandbox uses persistent PowerShell, a read-only input share and separate output share. A watchdog closes the Sandbox after 30 seconds without an IDE heartbeat.
+
+Historical validation: 73 of 74 Node tests passed, 1 skipped; 104 Rust guard/extensions tests passed, 7 network tests skipped. Real Linux and Windows Sandbox sessions checked commands, exit code 7, terminal, import/export, read-only share protection, and watchdog behavior. A scripted provider with the real Rust engine compiled C# inside Sandbox and returned a marker; this did not measure model ability. The packaged server ran two isolated Linux VMs and one Sandbox. All test VMs were stopped. Mistral Small returned HTTP 429 before using a tool, so its behavior was not validated. UAC activation was not exercised because features were already enabled.
+
+Windows Sandbox is not a PTY: full-screen applications, native interactive input, and Ctrl+C interruption are unavailable. Stop closes the whole Sandbox; a Windows command timeout stops it. Internet-enabled mode also reaches the host network. The native shell was compiled, but visual validation used the packaged server in a test browser. The installer was not installed/uninstalled in that check. The historical installer was unsigned, 422,563,261 bytes, with SHA-256 `495FE0874FF3EE81F596F4C682BC7AB412239249C5BA114656E9C96843A9A20B`.

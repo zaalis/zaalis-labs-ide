@@ -1,39 +1,19 @@
-# zaalis IDE - application native Windows (C++ + WebView2)
+# zaalis IDE native Windows application (C++ and WebView2)
 
-Coquille C++ qui demarre l'adaptateur HTTP Node embarque en arriere-plan, affiche l'interface dans une fenetre WebView2 et arrete le serveur automatiquement a la fermeture. Chat, Agents et le CLI utilisent le meme core Rust via `zaalis-agentd`.
-
-```text
-[zaalis.exe] -> [zaalis-server.exe, port 3000] -> [zaalis-agentd.exe] -> providers/outils Rust
-                                      `-> interface WebView2
-```
-
-## Lancer l'app native
-
-Double-clic sur:
+The C++ shell starts the bundled Node HTTP adapter in the background, displays the interface in a WebView2 window, and stops the server when the window closes. Chat, Agents, and the CLI share the Rust core through `zaalis-agentd`.
 
 ```text
-native\dist\zaalis.exe
+zaalis.exe -> zaalis-server.exe (port 3000) -> zaalis-agentd.exe -> Rust providers and tools
+                                      \-> WebView2 interface
 ```
 
-Le dossier `native\dist\` est genere par les scripts de build et contient:
+## Run the native application
 
-- `zaalis.exe`
-- `zaalis-server.exe`
-- `zaalis-agentd.exe`
-- `zaalis-cli.exe` (installe sous `bin\zaalis.exe`)
-- `pickfolder.exe`
-- `interface\`
+Double-click `native\dist\zaalis.exe`. Build scripts generate `native\dist\`, which contains `zaalis.exe`, `zaalis-server.exe`, `zaalis-agentd.exe`, `zaalis-cli.exe` (installed as `bin\zaalis.exe`), `pickfolder.exe`, and `interface\`. The application creates `server-data\` on first launch for local accounts, sessions, and history.
 
-Le dossier `server-data\` est cree automatiquement au premier lancement pour les comptes, sessions et historiques locaux.
+## Rebuild
 
-## Reconstruire
-
-Prerequis:
-
-- Node.js
-- Rust 1.90 ou plus recent
-- Visual Studio avec la charge C++ Desktop
-- Inno Setup 6 pour l'installateur
+Prerequisites: Node.js, Rust 1.90 or newer, Visual Studio with the Desktop C++ workload, and Inno Setup 6 for the installer.
 
 ```bat
 native\build_server.bat
@@ -42,14 +22,10 @@ native\build_shell.bat
 native\build_installer.bat
 ```
 
-Resultat installateur:
+The installer is generated at `native\installer\zaalis-setup.exe`.
 
-```text
-native\installer\zaalis-setup.exe
-```
+## Implementation
 
-## Details techniques
-
-- `server.js` sert les fichiers depuis `interface\`.
-- `native\main.cpp` lance `zaalis-server.exe` et ouvre `http://localhost:3000`.
-- `native\installer.iss` copie la GUI, l'adaptateur serveur, `zaalis-agentd.exe`, le CLI Rust, `pickfolder.exe` et le dossier `interface\`.
+- `src/app/server.js` serves the files in `interface\`.
+- `native\main.cpp` launches `zaalis-server.exe` and opens `http://localhost:3000`.
+- `native\installer.iss` packages the GUI, server adapter, `zaalis-agentd.exe`, Rust CLI, `pickfolder.exe`, and `interface\`.

@@ -14,6 +14,15 @@ use zaalis_core::{
     PermissionSet,
 };
 
+/// Written into the target of a VM or laboratory request that asks for a
+/// connected machine. The guard keys its confirmation on it.
+pub const VM_NETWORK_MARK: &str = "réseau Internet + réseau local";
+/// Target prefix of a `DELETE /repos/{owner}/{repo}` call: always confirmed.
+pub const GITHUB_REPO_DELETE_MARK: &str = "suppression du dépôt GitHub";
+/// Written into the target of a VM request that opens a session on a server
+/// the user registered over SSH.
+pub const VM_REMOTE_MARK: &str = "hôte SSH distant";
+
 /// What a tool is about to do.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccessRequest {
@@ -30,6 +39,10 @@ pub struct AccessRequest {
     /// how paths are resolved.
     #[serde(default)]
     pub sensitive: bool,
+    /// The caller proved, from structured fields, that this sandbox reaches
+    /// another network. The French marks in `target` stay as a second signal.
+    #[serde(default)]
+    pub networked: bool,
 }
 
 impl AccessRequest {
@@ -40,6 +53,7 @@ impl AccessRequest {
             kind,
             target: None,
             sensitive: false,
+            networked: false,
         }
     }
 
@@ -50,6 +64,11 @@ impl AccessRequest {
 
     pub fn sensitive(mut self, sensitive: bool) -> Self {
         self.sensitive = sensitive;
+        self
+    }
+
+    pub fn networked(mut self, networked: bool) -> Self {
+        self.networked = networked;
         self
     }
 
@@ -366,6 +385,43 @@ impl Guard {
                 reason: DecisionReason::PolicyAllow,
             };
         }
+        // Deleting a whole GitHub repository cannot be undone, whatever the mode.
+        if request.kind == AccessKind::Delete && target.starts_with(GITHUB_REPO_DELETE_MARK) {
+            return Decision::Ask {
+                reason: DecisionReason::RiskyCommand,
+                summary: format!("{target} — suppression définitive"),
+            };
+        }
+
+        // 3b. Autonomous modes ("Autonome" in the UI, and bypass): the agent
+        //     runs every command, edit, MCP call, VM and desktop action on its
+        //     own. The only prompts left are guard rails against wrecking the
+        //     machine itself or leaking private keys — never ordinary work.
+        if matches!(permissions.mode, PermissionMode::Auto | PermissionMode::Bypass) {
+            if let Some(why) = catastrophic(request, analysis) {
+                return Decision::Ask {
+                    reason: DecisionReason::RiskyCommand,
+                    summary: format!("{target} — {why}"),
+                };
+            }
+            return Decision::Allow {
+                reason: DecisionReason::ModeAuto,
+            };
+        }
+
+        // A remembered yes must not reopen a credential file. An explicit
+        // allow rule, checked just above, is still the user's written policy.
+        if request.sensitive
+            && matches!(
+                request.kind,
+                AccessKind::Read | AccessKind::Write | AccessKind::Edit | AccessKind::Delete
+            )
+        {
+            return Decision::Ask {
+                reason: DecisionReason::ModeAsk,
+                summary: format!("accès à un fichier sensible : {target}"),
+            };
+        }
         if matching_rule(&self.persisted, request.kind, target).is_some() {
             return Decision::Allow {
                 reason: DecisionReason::PersistedGrant,
@@ -377,13 +433,39 @@ impl Guard {
             };
         }
 
+        // 4a. A VM or laboratory run with network access reaches the Internet,
+        //     the local network and services listening on the host's loopback
+        //     (QEMU user networking maps 10.0.2.2 to it). The sandbox capability
+        //     covers isolated machines only, so this always asks, whatever the
+        //     mode, unless the user saved an explicit allowance above.
+        let reaches_network = request.networked
+            || target.contains(VM_NETWORK_MARK)
+            || target.contains(VM_REMOTE_MARK);
+        if request.kind == AccessKind::Sandbox
+            && ["vm", "laboratory"].contains(&request.tool.as_str())
+            && reaches_network
+        {
+            return Decision::Ask {
+                reason: DecisionReason::ModeAsk,
+                summary: if target.contains(VM_REMOTE_MARK) {
+                    format!("{target} : l'agent pourra lancer des commandes sur ce serveur")
+                } else {
+                    format!("{target} : la machine pourra joindre Internet et le réseau local")
+                },
+            };
+        }
+
         // 4. Credential files are never auto-approved. A model that reads `.env`
         //    can leak every key the user owns through its own answer, so this
         //    outranks the mode — only an explicit rule (checked above) allows it.
         if request.sensitive {
             return Decision::Ask {
                 reason: DecisionReason::ModeAsk,
-                summary: format!("accès à un fichier sensible : {target}"),
+                summary: if request.kind == AccessKind::Computer {
+                    describe(request)
+                } else {
+                    format!("accès à un fichier sensible : {target}")
+                },
             };
         }
 
@@ -430,6 +512,25 @@ impl Guard {
                     Decision::Ask {
                         reason: DecisionReason::ModeAsk,
                         summary: format!("accès web au domaine {host}"),
+                    }
+                }
+            };
+        }
+
+        // MCP tools can write, send or delete. An empty server allow-list is
+        // marked sensitive above, so it asks in every mode. A tool the user
+        // named still asks in the confirming modes.
+        if request.kind == AccessKind::Mcp {
+            return match permissions.mode {
+                PermissionMode::ReadOnly | PermissionMode::Plan | PermissionMode::Supervised => {
+                    Decision::Ask {
+                        reason: DecisionReason::ModeAsk,
+                        summary: format!("appel MCP : {target}"),
+                    }
+                }
+                PermissionMode::Semi | PermissionMode::Auto | PermissionMode::Bypass => {
+                    Decision::Allow {
+                        reason: DecisionReason::ModeAuto,
                     }
                 }
             };
@@ -485,10 +586,16 @@ impl Guard {
                 }
             }
             PermissionMode::Semi => {
-                if request.kind == AccessKind::Execute {
+                if request.kind == AccessKind::Execute
+                    || (request.kind == AccessKind::Computer && computer_changes_the_desktop(target))
+                {
                     Decision::Ask {
                         reason: DecisionReason::ModeAsk,
-                        summary: format!("exécuter : {target}"),
+                        summary: if request.kind == AccessKind::Computer {
+                            format!("piloter le PC : {target}")
+                        } else {
+                            format!("exécuter : {target}")
+                        },
                     }
                 } else {
                     Decision::Allow {
@@ -601,6 +708,142 @@ fn pattern_matches(pattern: &str, target: &str) -> bool {
     compile(pattern).is_some_and(|matcher| matcher.is_match(target))
 }
 
+/// The guard rails autonomous modes keep: what would wreck the machine, the
+/// user's personal folders or shared history, or leak private keys.
+fn catastrophic(request: &AccessRequest, analysis: &CommandAnalysis) -> Option<&'static str> {
+    let target = request.target_text();
+    match request.kind {
+        AccessKind::Delete if target.starts_with(GITHUB_REPO_DELETE_MARK) => {
+            return Some("suppression définitive d'un dépôt GitHub")
+        }
+        AccessKind::Delete if is_critical_path(target) => {
+            return Some("suppression d'un dossier système ou personnel entier")
+        }
+        AccessKind::Read | AccessKind::Write | AccessKind::Edit | AccessKind::Delete
+            if request.sensitive && is_private_key(target) =>
+        {
+            return Some("accès à une clé privée")
+        }
+        AccessKind::Execute => {}
+        _ => return None,
+    }
+    for segment in &analysis.segments {
+        let args: Vec<String> = segment
+            .arguments
+            .iter()
+            .map(|argument| argument.to_ascii_lowercase())
+            .collect();
+        let has = |needle: &str| args.iter().any(|argument| argument == needle);
+        match segment.binary.as_str() {
+            "format" | "diskpart" | "mkfs" | "fdisk" | "format-volume" | "clear-disk"
+            | "initialize-disk" | "remove-partition" => {
+                return Some("formatage ou partitionnement d'un disque")
+            }
+            "shutdown" | "reboot" | "halt" | "poweroff" | "stop-computer" | "restart-computer" => {
+                return Some("arrêt ou redémarrage du PC")
+            }
+            "bcdedit" => return Some("modification du démarrage de Windows"),
+            "rm" | "unlink" | "rmdir" | "rd" | "del" | "erase" | "remove-item" | "ri"
+            | "rimraf" => {
+                if segment.arguments.iter().any(|argument| is_critical_path(argument)) {
+                    return Some("suppression d'un dossier système ou personnel entier");
+                }
+            }
+            "reg" if has("delete") && args.iter().any(|a| a.starts_with("hklm") || a.starts_with("hkey_local_machine")) => {
+                return Some("suppression dans le registre système")
+            }
+            "git" if has("push")
+                && (has("--force") || has("-f") || args.iter().any(|a| a.starts_with("--force-with-lease") || a.starts_with('+'))) =>
+            {
+                return Some("réécriture forcée de l'historique distant")
+            }
+            _ => {}
+        }
+        if segment.arguments.iter().any(|argument| is_private_key(argument)) {
+            return Some("accès à une clé privée");
+        }
+    }
+    None
+}
+
+/// Private keys and cloud credentials: what a leaked transcript must never hold.
+fn is_private_key(target: &str) -> bool {
+    let target = target.to_ascii_lowercase().replace('\\', "/");
+    [".ssh/", "id_rsa", "id_ed25519", "id_ecdsa", ".aws/", ".gnupg/", ".azure/", ".kube/config"]
+        .iter()
+        .any(|marker| target.contains(marker))
+}
+
+/// A drive root, a system folder, a whole user profile or one of its personal
+/// folders (Desktop, Documents…). Project sub-folders are never critical.
+fn is_critical_path(raw: &str) -> bool {
+    const PERSONAL: &[&str] = &[
+        "desktop", "bureau", "documents", "downloads", "téléchargements", "pictures", "images",
+        "music", "musique", "videos", "vidéos", "onedrive",
+    ];
+    const SYSTEM: &[&str] = &[
+        "windows", "program files", "program files (x86)", "programdata", "etc", "usr", "bin",
+        "sbin", "boot", "lib", "lib64", "var", "opt", "system", "library", "applications", "root",
+    ];
+    const HOMES: &[&str] = &[
+        "~", "$home", "${home}", "%userprofile%", "$env:userprofile", "%homepath%",
+        "%systemroot%", "$env:systemroot", "%windir%", "$env:windir", "%programfiles%",
+        "$env:programfiles", "..", "../..",
+    ];
+    let original = raw.trim().trim_matches(['"', '\'']).to_ascii_lowercase().replace('\\', "/");
+    if original.is_empty() || original.starts_with('-') || original == "*" || original.starts_with("./") {
+        return false;
+    }
+    let mut path = original.clone();
+    loop {
+        let trimmed = path.trim_end_matches('*').trim_end_matches('/').to_owned();
+        if trimmed == path {
+            break;
+        }
+        path = trimmed;
+    }
+    if path.is_empty() {
+        return original.starts_with('/');
+    }
+    if HOMES.contains(&path.as_str()) {
+        return true;
+    }
+    for home in ["~/", "$home/", "${home}/", "%userprofile%/", "$env:userprofile/"] {
+        if let Some(rest) = path.strip_prefix(home) {
+            return PERSONAL.contains(&rest);
+        }
+    }
+    let bytes = path.as_bytes();
+    let parts: Vec<&str> = if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        path[2..].trim_start_matches('/').split('/').filter(|part| !part.is_empty()).collect()
+    } else if let Some(rest) = path.strip_prefix('/') {
+        let parts: Vec<&str> = rest.split('/').filter(|part| !part.is_empty()).collect();
+        // Git Bash spells C:\ as /c.
+        if parts.first().is_some_and(|drive| drive.len() == 1) {
+            parts[1..].to_vec()
+        } else {
+            parts
+        }
+    } else {
+        return false;
+    };
+    match parts.as_slice() {
+        [] => true,
+        [first, ..] if SYSTEM.contains(first) => parts.len() <= 2 || *first == "windows",
+        ["users" | "home"] | ["users" | "home", _] => true,
+        ["users" | "home", _, folder] => PERSONAL.contains(folder),
+        _ => false,
+    }
+}
+
+/// Everything but looking: a new gesture is a change until proven otherwise.
+fn computer_changes_the_desktop(target: &str) -> bool {
+    !matches!(
+        target,
+        "observe" | "inspect" | "zoom" | "menus" | "wait" | "cursor_position"
+    )
+}
+
 fn compile(pattern: &str) -> Option<GlobMatcher> {
     // `literal_separator` is what makes `src/*.js` mean "in src" rather than
     // "anywhere under src". Without it a rule scoped to one directory silently
@@ -624,6 +867,14 @@ mod tests {
         assert!(guard.evaluate(&vm, &permissions, 0).is_allow());
         let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox).with_target("run");
         assert!(guard.evaluate(&lab, &permissions, 0).is_allow());
+        for mode in [PermissionMode::Supervised, PermissionMode::Semi] {
+            let connected = AccessRequest::new(agent(), "vm", AccessKind::Sandbox)
+                .with_target(format!("VM : create · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&connected, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }), "{mode} must ask for a connected VM");
+            let lab = AccessRequest::new(agent(), "laboratory", AccessKind::Sandbox)
+                .with_target(format!("VM : run · {VM_NETWORK_MARK}")).sensitive(true);
+            assert!(matches!(guard.evaluate(&lab, &PermissionSet::new(mode), 0).decision, Decision::Ask { .. }));
+        }
         let apply = AccessRequest::new(agent(), "laboratory", AccessKind::Edit).with_target("apply").sensitive(true);
         assert!(matches!(guard.evaluate(&apply, &permissions, 0).decision, Decision::Ask { .. }));
         let host = AccessRequest::new(agent(), "run", AccessKind::Execute).with_target("npm test");
@@ -695,6 +946,114 @@ mod tests {
     }
 
     #[test]
+    fn a_connected_machine_asks_from_the_structured_flag_alone() {
+        let access = AccessRequest::new(agent(), "vm", AccessKind::Sandbox)
+            .with_target("VM : exec")
+            .networked(true);
+        assert!(evaluate(PermissionMode::Supervised, &access).needs_prompt());
+        assert!(evaluate(PermissionMode::Semi, &access).needs_prompt());
+        assert!(evaluate(PermissionMode::Auto, &access).is_allow(), "autonome : aucune validation");
+    }
+
+    #[test]
+    fn semi_asks_before_a_click_and_not_before_a_look() {
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "click")).needs_prompt());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "observe")).is_allow());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "zoom")).is_allow());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "triple_click")).needs_prompt());
+        assert!(evaluate(PermissionMode::Semi, &request(AccessKind::Computer, "batch")).needs_prompt());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Computer, "type").sensitive(true)).is_allow());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Computer, "batch").sensitive(true)).is_allow());
+    }
+
+    #[test]
+    fn read_only_refuses_an_mcp_call_it_cannot_vouch_for() {
+        let evaluation = evaluate(PermissionMode::Supervised, &request(AccessKind::Mcp, "blender:scene"));
+        assert!(evaluation.needs_prompt());
+    }
+
+    #[test]
+    fn an_unlisted_mcp_tool_asks_in_semi_but_not_in_autonomous_mode() {
+        let call = request(AccessKind::Mcp, "blender:code").sensitive(true);
+        assert!(evaluate(PermissionMode::Semi, &call).needs_prompt());
+        assert!(evaluate(PermissionMode::Auto, &call).is_allow());
+        assert!(evaluate(PermissionMode::Bypass, &call).is_allow());
+    }
+
+    #[test]
+    fn a_session_grant_does_not_reopen_a_credential_file() {
+        let mut guard = Guard::new();
+        let access = request(AccessKind::Read, ".env").sensitive(true);
+        guard.record_answer(&access, true, GrantScope::Session);
+        assert!(guard.evaluate(&access, &PermissionSet::new(PermissionMode::Semi), 0).needs_prompt());
+    }
+
+    #[test]
+    fn python_cannot_hide_an_intrusion_tool() {
+        let evaluation = evaluate(PermissionMode::Semi, &request(AccessKind::Execute, "python sqlmap.py --version"));
+        assert!(evaluation.needs_prompt());
+        assert!(evaluation.findings.contains(&Finding::OffensiveTool));
+    }
+
+    #[test]
+    fn autonomous_mode_runs_everything_ordinary_without_a_prompt() {
+        for mode in [PermissionMode::Auto, PermissionMode::Bypass] {
+            for command in [
+                "./mystery-tool --run",
+                "rm -rf build node_modules",
+                "Remove-Item -Recurse -Force .\\dist",
+                "git reset --hard HEAD~1",
+                "git push origin feature",
+                "npm publish",
+                "taskkill /F /IM node.exe",
+                "echo $(git rev-parse HEAD)",
+                "cat .env",
+                "python sqlmap.py --version",
+                "gh pr create --fill",
+            ] {
+                assert!(
+                    evaluate(mode, &request(AccessKind::Execute, command)).is_allow(),
+                    "« {command} » doit passer sans validation en mode {mode}"
+                );
+            }
+            for (kind, target) in [
+                (AccessKind::Write, "src/app.js"),
+                (AccessKind::Delete, "build/out.js"),
+                (AccessKind::Computer, "click"),
+                (AccessKind::Spawn, "worker"),
+                (AccessKind::Mcp, "github:create_pull_request"),
+            ] {
+                assert!(evaluate(mode, &request(kind, target).sensitive(true)).is_allow(), "{kind:?} {target}");
+            }
+        }
+    }
+
+    #[test]
+    fn autonomous_mode_keeps_its_guard_rails() {
+        for command in [
+            "rm -rf /",
+            "rm -rf ~",
+            "rm -rf /c/Users/bob",
+            "Remove-Item -Recurse -Force C:\\Users\\bob\\Desktop",
+            "cmd /c rd /s /q C:\\",
+            "del /s /q C:\\Windows\\System32",
+            "format D:",
+            "diskpart",
+            "shutdown /s /t 0",
+            "git push --force origin main",
+            "cat ~/.ssh/id_rsa",
+        ] {
+            assert!(
+                evaluate(PermissionMode::Auto, &request(AccessKind::Execute, command)).needs_prompt(),
+                "« {command} » doit rester validé à la main"
+            );
+        }
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Delete, "C:\\Users\\bob")).needs_prompt());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Read, "C:/Users/bob/.ssh/id_ed25519").sensitive(true)).needs_prompt());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Read, ".env").sensitive(true)).is_allow());
+    }
+
+    #[test]
     fn semi_writes_freely_but_asks_before_running_anything() {
         let write = evaluate(PermissionMode::Semi, &request(AccessKind::Write, "a.js"));
         assert!(write.is_allow());
@@ -707,18 +1066,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_runs_known_tooling_and_asks_about_the_rest() {
-        let known = evaluate(
-            PermissionMode::Auto,
-            &request(AccessKind::Execute, "cargo build"),
-        );
-        assert!(known.is_allow());
-
-        let unknown = evaluate(
-            PermissionMode::Auto,
-            &request(AccessKind::Execute, "./mystery-tool --run"),
-        );
-        assert!(unknown.needs_prompt());
+    fn auto_runs_known_and_unknown_tooling_alike() {
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Execute, "cargo build")).is_allow());
+        assert!(evaluate(PermissionMode::Auto, &request(AccessKind::Execute, "./mystery-tool --run")).is_allow());
     }
 
     #[test]
@@ -744,15 +1094,16 @@ mod tests {
     }
 
     #[test]
-    fn bypass_still_asks_before_a_destructive_command() {
+    fn bypass_still_asks_before_wiping_the_profile() {
         let evaluation = evaluate(
             PermissionMode::Bypass,
-            &request(AccessKind::Execute, "rm -rf build"),
+            &request(AccessKind::Execute, "rm -rf ~/Documents"),
         );
         assert!(
             evaluation.needs_prompt(),
-            "une suppression récursive demande confirmation même en bypass"
+            "effacer un dossier personnel demande confirmation même en bypass"
         );
+        assert!(evaluate(PermissionMode::Bypass, &request(AccessKind::Execute, "rm -rf build")).is_allow());
     }
 
     #[test]
@@ -824,11 +1175,7 @@ mod tests {
     #[test]
     fn a_credential_file_is_never_auto_approved() {
         let mut guard = Guard::new();
-        for mode in [
-            PermissionMode::Semi,
-            PermissionMode::Auto,
-            PermissionMode::Bypass,
-        ] {
+        for mode in [PermissionMode::Supervised, PermissionMode::Semi] {
             let evaluation = guard.evaluate(
                 &request(AccessKind::Read, ".env").sensitive(true),
                 &PermissionSet::new(mode),

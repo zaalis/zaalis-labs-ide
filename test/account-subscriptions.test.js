@@ -2,7 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const auth = require('../account-subscriptions');
+const auth = require('../src/accounts/account-subscriptions');
 
 const reply = (data, status = 200) => new Response(JSON.stringify(data), {
   status, headers: { 'Content-Type': 'application/json' },
@@ -93,22 +93,87 @@ test('a Responses stream without usage is not recorded as zero tokens', () => {
   assert.equal(last.usage, undefined);
 });
 
-test('xAI account uses the Responses endpoint and translates its stream', async () => {
+test('xAI account uses the CLI proxy and a body that proxy accepts', async () => {
   let request;
   const fetchImpl = async (url, init) => {
-    request = { url, body: JSON.parse(init.body), authorization: init.headers.Authorization };
-    return new Response('data: {"type":"response.output_text.delta","delta":"Bonjour"}\n\ndata: {"type":"response.completed","response":{"usage":{}}}\n\n',
+    request = { url, body: JSON.parse(init.body), headers: init.headers };
+    return new Response('data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"zaalis_tool_search"}}\n\ndata: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call-1","name":"zaalis_tool_search","arguments":"{}"}}\n\ndata: {"type":"response.completed","response":{"usage":{}}}\n\n',
       { headers: { 'Content-Type': 'text/event-stream' } });
   };
-  const stream = await auth.openStream('xai', 'account-token', { model: 'grok-4.6',
-    messages: [{ role: 'user', content: 'Salut' }] }, { fetchImpl });
-  assert.equal(request.url, 'https://api.x.ai/v1/responses');
-  assert.equal(request.authorization, 'Bearer account-token');
+  const stream = await auth.openStream('xai', 'account-token', { model: 'grok-4.7',
+    messages: [{ role: 'user', content: 'Salut' }],
+    tools: [
+      { function: { name: 'tool_search', description: 'Chercher', parameters: { type: 'object', properties: {} } } },
+      { function: { name: 'read', description: 'Lire', parameters: { type: 'object', properties: {} } } },
+    ] }, { fetchImpl });
+  assert.equal(request.url, 'https://cli-chat-proxy.grok.com/v1/responses');
+  assert.equal(request.headers.Authorization, 'Bearer account-token');
+  assert.equal(request.headers['X-XAI-Token-Auth'], 'xai-grok-cli');
+  assert.equal(request.headers['x-grok-model-override'], 'grok-4.7');
   assert.equal(request.body.input[0].content[0].text, 'Salut');
+  assert.equal(request.body.reasoning.summary, 'concise');
+  assert.equal(request.body.reasoning.effort, 'high');
+  assert.deepEqual(request.body.include, ['reasoning.encrypted_content']);
+  assert.equal(request.body.tools[0].name, 'zaalis_tool_search');
+  assert.equal(request.body.tools[0].strict, undefined);
+  assert.equal(request.body.tools[1].name, 'read');
   const reader = auth.createSseReader();
-  const translator = auth.createChunkTranslator('grok-4.6');
+  const translator = auth.createChunkTranslator('grok-4.7', { aliases: stream.zaalisToolAliases });
   const chunks = [];
   for await (const piece of stream.body) for (const event of reader.push(piece)) chunks.push(...translator.push(event));
-  assert.equal(chunks[0].choices[0].delta.content, 'Bonjour');
-  assert.equal(chunks[1].choices[0].finish_reason, 'stop');
+  assert.equal(chunks[0].choices[0].delta.tool_calls[0].function.name, 'tool_search');
+  assert.equal(chunks.at(-1).choices[0].finish_reason, 'tool_calls');
+});
+
+test('xAI string error bodies stay visible', () => {
+  assert.equal(auth.xaiDetail('{"code":"invalid-argument","error":"Model does not support parameter reasoningEffort."}'),
+    'Model does not support parameter reasoningEffort.');
+  const shaped = auth.shapeXaiRequest({ model: 'grok-build-0.1', messages: [{ role: 'user', content: 'Hi' }], reasoning_effort: 'max' });
+  assert.deepEqual(shaped.request.reasoning, { summary: 'concise' });
+});
+
+test('xAI non-reasoning models never receive a reasoning effort', () => {
+  const shaped = auth.shapeXaiRequest({ model: 'grok-4.20-0309-non-reasoning', messages: [{ role: 'user', content: 'Hi' }], reasoning_effort: 'high' });
+  assert.deepEqual(shaped.request.reasoning, { summary: 'concise' });
+});
+
+test('xAI retries once without effort when a model rejects it', async () => {
+  const bodies = [];
+  const fetchImpl = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    if (bodies.length === 1) {
+      return new Response('{"code":"invalid-argument","error":"Model grok-9 does not support parameter reasoningEffort."}', { status: 400 });
+    }
+    return new Response('data: {"type":"response.completed","response":{"usage":{}}}\n\n', { headers: { 'Content-Type': 'text/event-stream' } });
+  };
+  const stream = await auth.openStream('xai', 'account-token', { model: 'grok-9', messages: [{ role: 'user', content: 'Hi' }] }, { fetchImpl });
+  assert.equal(stream.ok, true);
+  assert.equal(bodies.length, 2);
+  assert.equal(bodies[0].reasoning.effort, 'high');
+  assert.deepEqual(bodies[1].reasoning, { summary: 'concise' });
+});
+
+test('xAI rate-limit headers become usage windows', () => {
+  const headers = new Headers({ 'x-ratelimit-limit-requests': '480', 'x-ratelimit-remaining-requests': '360',
+    'x-ratelimit-limit-tokens': '10000000', 'x-ratelimit-remaining-tokens': '10000000' });
+  const limits = auth.xaiRateLimits(headers);
+  assert.deepEqual(limits.windows.map((w) => [w.kind, w.limit, w.remaining, w.usedPercent]),
+    [['requests', 480, 360, 25], ['tokens', 10000000, 10000000, 0]]);
+  assert.equal(auth.xaiRateLimits(new Headers()), null);
+});
+
+test('MiniMax plan quota becomes 5-hour and weekly windows', async () => {
+  let url;
+  const fetchImpl = async (target) => { url = target; return new Response(JSON.stringify({ base_resp: { status_code: 0 }, model_remains: [
+    { model_name: 'video', current_interval_remaining_percent: 100, current_weekly_remaining_percent: 100 },
+    { model_name: 'general', start_time: 0, end_time: 18000000, current_interval_remaining_percent: 73,
+      weekly_start_time: 0, weekly_end_time: 604800000, current_weekly_remaining_percent: 95 },
+  ] })); };
+  const limits = await auth.fetchMiniMaxLimits('t', { fetchImpl });
+  assert.equal(url, 'https://api.minimax.io/v1/api/openplatform/coding_plan/remains');
+  assert.deepEqual(limits.windows, [
+    { usedPercent: 27, windowMinutes: 300, resetsAt: 18000000 },
+    { usedPercent: 5, windowMinutes: 10080, resetsAt: 604800000 },
+  ]);
+  await assert.rejects(auth.fetchMiniMaxLimits('t', { fetchImpl: async () => new Response('', { status: 401 }) }), { status: 401 });
 });

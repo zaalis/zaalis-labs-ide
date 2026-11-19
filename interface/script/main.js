@@ -17,6 +17,7 @@ const SETTINGS_SECTION_TITLES = {
 };
 
 function setSettingsSection(section) {
+    if (window.ZaalisSettings?.navigate(section)) return;
     const key = SETTINGS_SECTION_TITLES[section] ? section : 'general';
     $$('.settings-nav-item').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.settingsSection === key);
@@ -33,7 +34,6 @@ function setSettingsSection(section) {
         if (key === 'vm') window.ZaalisVM?.settings();
         if (key === 'tokens') window.ZaalisTokenProfile?.mount();
         if (key === 'integrations') window.ZaalisIntegrations?.settings();
-        if (key === 'models') window.ZaalisAgentSettings?.settings();
     }
 }
 
@@ -49,7 +49,7 @@ function toast(msg, opts) {
 // ----- Appearance: apply theme / density / font size to the whole app -----
 function applyAppearance() {
     const c = state.config;
-    document.body.classList.toggle('theme-light', c.theme === 'light');
+    window.ZaalisUI.appearance();
     document.body.classList.toggle('density-compact', c.density === 'compact');
     document.body.classList.remove('font-small', 'font-large');
     if (c.fontSize === 'small') document.body.classList.add('font-small');
@@ -60,7 +60,7 @@ function applyAppearance() {
 // dropdowns (opening downward).
 const SETTINGS_SELECT_IDS = [
     'settings-lang-select', 'settings-terminal-profile', 'gguf-variant-select', 'gguf-ngl-select',
-    'settings-theme-select', 'settings-density-select', 'settings-fontsize-select',
+    'settings-theme-select', 'settings-density-select', 'settings-fontsize-select', 'settings-fontfamily-select',
     'settings-default-chat-select', 'settings-default-agent-select',
     'settings-default-reasoning-select', 'settings-default-permission-select', 'settings-channel-select'
 ];
@@ -105,10 +105,24 @@ function populateTerminalProfiles(profiles) {
         option.disabled = !profile.available;
         return option;
     }));
+    if (!profiles.length) {
+        const empty = document.createElement('option');
+        empty.value = ''; empty.disabled = true;
+        empty.textContent = uiText('Aucun terminal détecté sur ce PC');
+        select.append(empty);
+    }
     const saved = state.config.terminalProfile;
     state.config.terminalProfile = profiles.some(profile => profile.id === saved && profile.available) ? saved : terminalProfileDefault();
-    select.value = state.config.terminalProfile;
+    select.value = state.config.terminalProfile || '';
+    select._customSelectRefresh?.();
 }
+// The list comes from the server: if it was not loaded yet (slow start, signed
+// in after the page opened, transient error), fetch it again when Settings opens.
+document.addEventListener('click', event => {
+    if (!event.target.closest?.('#settings-btn, .settings-nav-item')) return;
+    const select = document.getElementById('settings-terminal-profile');
+    if (select && !select.querySelector('option[value]:not([value=""])')) loadSharedHardwareConfig();
+}, true);
 
 function applySharedHardwareConfig(config) {
     if (!config || typeof config !== 'object') return;
@@ -167,9 +181,10 @@ function populateSettingsControls() {
     setVal('gguf-variant-select', c.ggufVariant || '');
     setVal('gguf-ctx-input', clampGgufCtx(c.ggufCtx || 16384));
     setVal('gguf-ngl-select', c.ggufGpuLayers === '' ? '' : c.ggufGpuLayers);
-    setVal('settings-theme-select', c.theme || 'dark');
+    setVal('settings-theme-select', c.theme || 'system');
     setVal('settings-density-select', c.density || 'normal');
     setVal('settings-fontsize-select', c.fontSize || 'normal');
+    setVal('settings-fontfamily-select', c.fontFamily || 'system');
     setVal('settings-default-chat-select', c.aiModel || 'codex');
     setVal('settings-default-agent-select', c.defaultAgentModel || 'codex');
     setVal('settings-default-reasoning-select', c.defaultReasoning || 0);
@@ -225,12 +240,12 @@ function renderCompatModelOptions() {
     const add = group.querySelector('option[data-action="add"]');
     group.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
     subscriptions.querySelectorAll('option[value^="compat:"]').forEach(option => option.remove());
-    window.compatProviders.filter(provider => provider.configured || `compat:${provider.id}` === wanted).forEach(provider => {
+    window.compatProviders.filter(provider => provider.configured).forEach(provider => {
         const option = document.createElement('option');
         option.value = `compat:${provider.id}`;
         option.textContent = provider.label;
         option.title = `${provider.label} — ${provider.baseUrl}`;
-        if (provider.oauth) subscriptions.insertBefore(option, subscriptions.querySelector('option[data-action="subscription"]'));
+        if (provider.oauth || provider.subscription) subscriptions.insertBefore(option, subscriptions.querySelector('option[data-action="subscription"]'));
         else group.insertBefore(option, add);
     });
     if (String(wanted || '').startsWith('compat:') && select.value !== wanted
@@ -250,9 +265,14 @@ function renderCompatKeyFields() {
     if (!target) return;
     const en = state.language === 'en';
     target.replaceChildren();
+    // Vertex AI (beta) is a subscription-type account: it has its own block in
+    // the « Compatibles abonnement » section, emptied again outside the beta channel.
+    const vertexTarget = $('#vertex-subscription');
+    if (vertexTarget) vertexTarget.replaceChildren();
     window.compatProviders.forEach(provider => {
         // Signed in with an account, not a key: it has its own block above.
         if (provider.oauth) return;
+        if (provider.vertex) { vertexTarget?.appendChild(vertexSettingsRow(provider)); return; }
         const row = document.createElement('div');
         row.className = 'form-group';
         row.dataset.compatProvider = provider.id;
@@ -309,6 +329,89 @@ function renderCompatKeyFields() {
     });
     filterCompatKeyFields();
 }
+// Vertex AI (beta channel): Google Cloud credentials instead of a key, plus
+// the project and region. The JSON is never sent back by the server.
+function vertexSettingsRow(provider) {
+    const en = state.language === 'en';
+    const info = provider.vertex || {};
+    const row = document.createElement('div');
+    // Same card as the other subscriptions (Grok, MiniMax).
+    row.className = 'chatgpt-sub account-sub-card vertex-settings';
+    row.dataset.compatProvider = provider.id;
+    row.dataset.search = `${provider.label} vertex google gemini cloud beta`.toLowerCase();
+    const head = document.createElement('div');
+    head.className = 'key-label-row';
+    const label = document.createElement('label');
+    label.htmlFor = 'compat-key-vertex';
+    label.textContent = 'Google Vertex AI';
+    const badge = document.createElement('span');
+    badge.className = 'beta-badge';
+    badge.textContent = en ? 'Beta' : 'Bêta';
+    label.appendChild(badge);
+    const status = document.createElement('span');
+    status.className = 'key-status';
+    if (provider.configured) {
+        status.classList.add('set');
+        status.textContent = (en ? 'Active · ' : 'Activé · ') + (info.resolvedProject || '');
+    } else if (provider.key.set || info.useAdc) {
+        status.textContent = en ? 'Project missing' : 'Projet manquant';
+    }
+    if (provider.key.set || info.useAdc) {
+        const clear = document.createElement('button');
+        clear.type = 'button'; clear.className = 'compat-clear';
+        clear.textContent = en ? 'Remove' : 'Retirer';
+        clear.addEventListener('click', async () => {
+            try {
+                const response = await fetch('/api/compat/keys', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ keys: { vertex: null }, vertex: { project: '', location: 'global', useAdc: false } }) });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) throw new Error(data.error || 'vertex');
+                window.compatProviders = data.providers || [];
+                renderCompatModelOptions(); renderCompatKeyFields();
+            } catch (error) { window.ZaalisErrorLog?.report({ source: 'vertex-ai', code: 'remove_failed', title: uiText('Action impossible'), message: error.message }); }
+        });
+        status.appendChild(clear);
+    }
+    head.append(label, status);
+    const hint = document.createElement('p');
+    hint.className = 'vertex-hint';
+    hint.textContent = en
+        ? 'Billed to your Google Cloud project (not a Google AI Pro/Ultra plan). Paste a service account key (JSON) or use this PC’s gcloud credentials.'
+        : 'Facturé sur votre projet Google Cloud (pas un forfait Google AI Pro/Ultra). Collez une clé de compte de service (JSON) ou utilisez les identifiants gcloud de ce PC.';
+    const key = document.createElement('textarea');
+    key.id = 'compat-key-vertex';
+    key.className = 'vertex-key';
+    key.dataset.compatKey = 'vertex';
+    key.rows = 3; key.spellcheck = false; key.autocomplete = 'off';
+    key.placeholder = provider.key.set
+        ? (en ? `Credentials saved (${info.credentialType || 'JSON'}) — paste new ones to replace them` : `Identifiants enregistrés (${info.credentialType || 'JSON'}) — collez-en de nouveaux pour les remplacer`)
+        : '{ "type": "service_account", "project_id": "…", … }';
+    const grid = document.createElement('div');
+    grid.className = 'vertex-grid';
+    const project = Object.assign(document.createElement('input'), { type: 'text', id: 'vertex-project', spellcheck: false,
+        value: info.project || '', placeholder: info.resolvedProject || (en ? 'Project ID (read from the key if empty)' : 'ID du projet (lu dans la clé si vide)') });
+    project.setAttribute('aria-label', en ? 'Google Cloud project ID' : 'ID du projet Google Cloud');
+    const location = Object.assign(document.createElement('input'), { type: 'text', id: 'vertex-location', spellcheck: false,
+        value: info.location || 'global', placeholder: 'global' });
+    location.setAttribute('aria-label', en ? 'Region' : 'Région');
+    grid.append(project, location);
+    const adc = document.createElement('label');
+    adc.className = 'vertex-adc';
+    const adcBox = Object.assign(document.createElement('input'), { type: 'checkbox', id: 'vertex-adc', checked: !!info.useAdc, disabled: !info.adcAvailable && !info.useAdc });
+    adc.append(adcBox, document.createTextNode(info.adcAvailable
+        ? (en ? ' Use this PC’s gcloud credentials (ADC)' : ' Utiliser les identifiants gcloud de ce PC (ADC)')
+        : (en ? ' gcloud credentials not found (run “gcloud auth application-default login”)' : ' Identifiants gcloud introuvables (lancez « gcloud auth application-default login »)')));
+    row.append(head, hint, key, grid, adc);
+    // Remember the saved values to send only real changes.
+    row.dataset.saved = JSON.stringify({ project: info.project || '', location: info.location || 'global', useAdc: !!info.useAdc });
+    return row;
+}
+function vertexSettingsChange() {
+    const row = $('#vertex-subscription .vertex-settings');
+    if (!row) return null;
+    const next = { project: $('#vertex-project').value.trim(), location: $('#vertex-location').value.trim() || 'global', useAdc: $('#vertex-adc').checked };
+    return JSON.stringify(next) === row.dataset.saved ? null : next;
+}
 function filterCompatKeyFields() {
     const query = ($('#compat-filter')?.value || '').trim().toLowerCase();
     let visible = 0;
@@ -341,9 +444,10 @@ async function removeCompatProvider(provider) {
 async function saveCompatSettings() {
     const keys = {};
     const baseUrls = {};
-    $$('#compat-key-fields input[data-compat-key]').forEach(input => {
+    $$('#compat-key-fields [data-compat-key], #vertex-subscription [data-compat-key]').forEach(input => {
         if (input.value.trim()) keys[input.dataset.compatKey] = input.value.trim();
     });
+    const vertex = vertexSettingsChange();
     $$('#compat-key-fields input[data-compat-url]').forEach(input => {
         const provider = window.compatProviders.find(p => p.id === input.dataset.compatUrl);
         const value = input.value.trim();
@@ -351,10 +455,10 @@ async function saveCompatSettings() {
         // A keyless local server (LM Studio) is enabled by saving its URL.
         if (value !== current || (value && provider && !provider.configured)) baseUrls[input.dataset.compatUrl] = value || null;
     });
-    if (!Object.keys(keys).length && !Object.keys(baseUrls).length) return;
+    if (!Object.keys(keys).length && !Object.keys(baseUrls).length && !vertex) return;
     const response = await fetch('/api/compat/keys', {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys, baseUrls })
+        body: JSON.stringify(vertex ? { keys, baseUrls, vertex } : { keys, baseUrls })
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || 'compat');
@@ -394,7 +498,8 @@ function renderChatgptAccount(account) {
         ? chatgptSubText(uiText('Abonnement ChatGPT actif'), 'ChatGPT subscription active') + (details ? ` — ${details}` : '')
         : chatgptSubText(uiText('Non connecté'), 'Not connected');
     status.classList.toggle('connected', connected);
-    $('#chatgpt-sub-connect').hidden = connected || !!chatgptSub.flow;
+    $('#chatgpt-sub-connect').hidden = (connected && account.transport === 'public') || !!chatgptSub.flow;
+    $('#chatgpt-sub-connect').textContent = connected ? chatgptSubText('Reconnecter avec ChatGPT', 'Reconnect with ChatGPT') : 'Continue with ChatGPT';
     $('#chatgpt-sub-disconnect').hidden = !connected;
 }
 function showChatgptError(message) {
@@ -405,8 +510,10 @@ function showChatgptError(message) {
 }
 function stopChatgptFlow() {
     clearTimeout(chatgptSub.timer);
+    const pending = chatgptSub.flow;
     chatgptSub.flow = null;
     chatgptSub.timer = null;
+    if (pending?.modern) fetch('/api/chatgpt/sign-in', { method: 'DELETE' }).catch(() => {});
     const panel = $('#chatgpt-sub-flow');
     if (panel) panel.hidden = true;
 }
@@ -429,7 +536,7 @@ async function pollChatgptFlow() {
     if (!flow) return;
     let data = null;
     try {
-        const response = await fetch('/api/chatgpt/device-poll', {
+        const response = await fetch(flow.modern ? '/api/chatgpt/sign-in/status' : '/api/chatgpt/device-poll', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ flowId: flow.flowId })
         });
@@ -456,11 +563,13 @@ async function startChatgptFlow() {
     showChatgptError('');
     button.disabled = true;
     try {
-        const response = await fetch('/api/chatgpt/device-start', { method: 'POST' });
+        const response = await fetch('/api/chatgpt/sign-in', { method: 'POST' });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.error || chatgptSubText(uiText('Connexion impossible.'), 'Sign-in failed.'));
-        chatgptSub.flow = data;
-        $('#chatgpt-sub-code').textContent = data.userCode;
+        chatgptSub.flow = { ...data, modern: true };
+        $('#chatgpt-sub-code').textContent = '';
+        $('#chatgpt-sub-code').hidden = true;
+        $('#chatgpt-sub-copy').hidden = true;
         $('#chatgpt-sub-flow').hidden = false;
         button.hidden = true;
         chatgptSub.timer = setTimeout(pollChatgptFlow, data.interval * 1000);
@@ -769,8 +878,12 @@ function renderBlenderInstall() {
         !supported || closed ? uiText('Blender est fermé.') : uiText('Blender est ouvert : fermez-le pour continuer (il écraserait ces réglages en quittant).'));
     const present = !!(status && status.addon && status.addon.installed);
     $('#blender-step-addon').textContent = present
-        ? `L’add-on officiel « MCP » de Blender Lab est déjà présent (version ${status.addon.version}) : il est conservé tel quel.`
-        : `Installer l’add-on officiel « MCP » de Blender Lab (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`;
+        ? (state.language === 'en'
+            ? `Configure the Zaalis Blender bridge (installed: ${status.addon.version}, bundled: ${status.addonVersion}).`
+            : `Configurer le pont Blender Zaalis (installé : ${status.addon.version}, fourni : ${status.addonVersion}).`)
+        : (state.language === 'en'
+            ? `Install the Zaalis Blender bridge (version ${status ? status.addonVersion : ''}), included with zaalis IDE.`
+            : `Installer le pont Blender Zaalis (version ${status ? status.addonVersion : ''}), fourni avec zaalis IDE.`);
     const busy = modal.dataset.busy === 'true';
     $('#blender-install-confirm').disabled = busy || !closed || !$('#blender-consent').checked || status.state !== 'install';
     $('#blender-install-confirm').textContent = busy ? 'Installation…' : uiText('Installer');
@@ -1135,101 +1248,35 @@ API_KEY_FIELDS.forEach(provider => {
     if (input) input.dataset.defaultPlaceholder = input.placeholder;
 });
 
-$('#save-btn').addEventListener('click', async () => {
-    const keys = {};
-    API_KEY_FIELDS.forEach(provider => {
-        const value = ($('#key-' + provider)?.value || '').trim();
-        if (value) keys[provider] = value;
-    });
-    const settingsLang = $('#settings-lang-select');
-    if (settingsLang && settingsLang.value) setLanguage(settingsLang.value);
-    const variantSelect = $('#gguf-variant-select');
-    if (variantSelect) state.config.ggufVariant = variantSelect.value || '';
-    const ollamaUrlInput = $('#ollama-url');
-    state.config.ollamaUrl = (ollamaUrlInput?.value || state.config.ollamaUrl || 'http://127.0.0.1:11434').trim();
-    // Default Ollama model = first of the managed list.
-    state.config.ollamaModel = (state.config.ollamaModels && state.config.ollamaModels[0]) || 'qwen3:8b';
-
-    // ----- Appearance -----
-    const c = state.config;
-    const getVal = id => $('#' + id)?.value;
-    c.theme = getVal('settings-theme-select') || 'dark';
-    c.density = getVal('settings-density-select') || 'normal';
-    c.fontSize = getVal('settings-fontsize-select') || 'normal';
-    applyAppearance();
-    // ----- Default models -----
-    const defChat = getVal('settings-default-chat-select');
-    if (defChat) c.aiModel = defChat;
-    c.defaultAgentModel = getVal('settings-default-agent-select') || 'codex';
-    c.defaultReasoning = parseInt(getVal('settings-default-reasoning-select') || '0', 10) || 0;
-    const selectedPermission = getVal('settings-default-permission-select');
-    if (selectedPermission && typeof setPermissionMode === 'function') setPermissionMode(selectedPermission);
-    // ----- Hardware advanced -----
-    c.ggufCtx = clampGgufCtx(getVal('gguf-ctx-input') || '16384');
-    const nglVal = getVal('gguf-ngl-select');
-    c.ggufGpuLayers = (nglVal === '' || nglVal === undefined) ? '' : (parseInt(nglVal, 10) || 0);
-    // ----- Integrated terminal -----
-    const previousTerminalProfile = c.terminalProfile || terminalProfileDefault();
-    const terminalProfileSelect = $('#settings-terminal-profile');
-    if (terminalProfileSelect && terminalProfileSelect.value) c.terminalProfile = terminalProfileSelect.value;
-    if (c.terminalProfile !== previousTerminalProfile) document.dispatchEvent(new CustomEvent('terminal-profile-changed'));
-    // ----- Project -----
-    c.defaultProjectFolder = ($('#settings-default-folder')?.value || '').trim();
-    c.reopenLastProject = !!$('#settings-reopen-toggle')?.checked;
-    // ----- Updates -----
-    c.autoCheckUpdates = !!$('#settings-autoupdate-toggle')?.checked;
-    c.updateChannel = getVal('settings-channel-select') || 'stable';
-    if (typeof updateTokenMeter === 'function') updateTokenMeter();
-    saveState();
-    const btn = $('#save-btn');
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    try {
-        const mcpRes = await fetch('/api/mcp', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ servers: personalMcpServers.map(mcpPayload) }) });
-        if (!mcpRes.ok) {
-            const problem = await mcpRes.json().catch(() => ({}));
-            toast(problem.error || uiText('Les serveurs MCP n’ont pas pu être enregistrés.'), { icon: '!' });
-            throw new Error('MCP');
-        }
-        // Secrets are stored now: the cards go back to showing names only.
-        const savedMcp = await mcpRes.json().catch(() => null);
-        if (savedMcp && Array.isArray(savedMcp.servers)) {
-            const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
-            personalMcpServers = [];
-            for (const server of savedMcp.servers) personalMcpServers.push({ ...newPersonalMcp(server), test: tests.get(server.id) || null });
-            renderPersonalMcpServers();
-        }
-        await syncSharedHardwareConfig();
+// Sensitive writes are explicit and scoped to the section being edited.
+async function saveSensitiveSettings(section) {
+    if (section === 'api') {
+        const keys = {};
+        API_KEY_FIELDS.forEach(provider => { const value = ($('#key-' + provider)?.value || '').trim(); if (value) keys[provider] = value; });
         if (Object.keys(keys).length) {
-            const res = await fetch('/api/keys', {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ keys })
-            });
-            if (!res.ok) throw new Error('keys');
-            const data = await res.json();
+            const response = await fetch('/api/keys', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({keys})});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement impossible');
             updateApiKeyInputs(data.keys || {});
         }
         await saveCompatSettings();
-        btn.textContent = 'OK';
-        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; $('#settings-modal').classList.remove('active'); }, 500);
-    } catch {
-        btn.textContent = state.language === 'en' ? 'Error' : 'Erreur';
-        setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 1200);
     }
-});
-
-// ----- Live preview: theme/density/font apply instantly when changed -----
-// Listeners are attached directly to each <select> (custom-select dispatches a
-// non-bubbling 'change' event, so document-level delegation would miss it).
-[
-    ['settings-theme-select', 'theme'],
-    ['settings-density-select', 'density'],
-    ['settings-fontsize-select', 'fontSize']
-].forEach(([id, key]) => {
-    const el = $('#' + id);
-    if (el) el.addEventListener('change', () => { state.config[key] = el.value; applyAppearance(); });
-});
+    if (section === 'mcp') {
+        const response = await fetch('/api/mcp', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({servers:personalMcpServers.map(mcpPayload)})});
+        const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement MCP impossible');
+        const tests = new Map(personalMcpServers.map(server => [server.id, server.test]));
+        personalMcpServers = (data.servers || []).map(server => ({...newPersonalMcp(server),test:tests.get(server.id) || null}));
+        renderPersonalMcpServers();
+    }
+    if (section === 'hardware') {
+        const previous = {...state.config};
+        try {
+            state.config.ollamaUrl = ($('#ollama-url')?.value || 'http://127.0.0.1:11434').trim();
+            const response = await fetch('/api/config', {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({config:sharedHardwareConfigPayload()})});
+            const data = await response.json(); if (!response.ok) throw new Error(data.error || 'Enregistrement impossible');
+            saveState();
+        } catch (error) { state.config = previous; throw error; }
+    }
+}
 
 // ----- Project: default folder picker -----
 const pickFolderBtn = $('#settings-pick-folder-btn');
@@ -1247,8 +1294,8 @@ if (pickFolderBtn) pickFolderBtn.addEventListener('click', async () => {
 // ----- Privacy: delete history / keys / full reset -----
 async function clearLocalHistory() {
     try {
-        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'chat', conversations: [] }) });
-        await fetch('/api/chats', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind: 'agents', conversations: [] }) });
+        await fetch('/api/conversations?kind=chat', { method: 'DELETE' });
+        await fetch('/api/conversations?kind=agents', { method: 'DELETE' });
     } catch {}
     state.conversations = []; state.currentConvId = null; state.chatHistory = [];
     state.agentConversations = []; state.currentAgentConvId = null; resetContextMeasure();
@@ -2464,6 +2511,29 @@ function migrateRetiredModelState() {
     if (changed) saveState();
 }
 
+function restoreConfiguredModelSelection() {
+    if (modelSelect) {
+        const savedSubmodel = state.config.aiSubmodel;
+        modelSelect.value = state.config.aiModel || 'codex';
+        if (!modelSelect.value) modelSelect.value = 'codex';
+        modelSelect.dispatchEvent(new Event('change'));
+        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
+            submodelSelect.value = savedSubmodel;
+        } else {
+            // Default to newest submodel (first in the list) if saved one not found
+            const subs = SUBMODELS[modelSelect.value] || [];
+            if (subs.length) {
+                submodelSelect.value = subs[0]; // newest = first
+            }
+        }
+        submodelSelect.dispatchEvent(new Event('change'));
+        if (typeof createCustomSelect === 'function') {
+            createCustomSelect('ai-model');
+            createCustomSelect('ai-submodel');
+        }
+    }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     loadState();
 
@@ -2486,10 +2556,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     
     // Auth is handled in-page via the overlay in index.html.
     await checkAuthAndInit();
+    // The app (or the login overlay) is on screen: let the launch splash go.
+    window.dispatchEvent(new Event('zaalis:ready'));
     fetch('/api/browser/language', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({language:state.language}) }).catch(() => {});
-    await loadCompatProviders();
-    migrateRetiredModelState();
-    await loadSharedHardwareConfig();
 
     // Tools & Settings Initialization
     if (typeof initAgentModelDropdowns === 'function') initAgentModelDropdowns();
@@ -2506,27 +2575,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Restore Ollama URL in settings modal
     const _set = (sel, val) => { const el = $(sel); if (el) el.value = val; };
-    if (modelSelect) {
-        const savedSubmodel = state.config.aiSubmodel;
-        modelSelect.value = state.config.aiModel || 'codex';
-        if (!modelSelect.value) modelSelect.value = 'codex';
-        modelSelect.dispatchEvent(new Event('change'));
-        
-        if (savedSubmodel && Array.from(submodelSelect.options).some(opt => opt.value === savedSubmodel)) {
-            submodelSelect.value = savedSubmodel;
-        } else {
-            // Default to newest submodel (first in the list) if saved one not found
-            const subs = SUBMODELS[modelSelect.value] || [];
-            if (subs.length) {
-                submodelSelect.value = subs[0]; // newest = first
-            }
-        }
-        submodelSelect.dispatchEvent(new Event('change'));
-        if (typeof createCustomSelect === 'function') {
-            createCustomSelect('ai-model');
-            createCustomSelect('ai-submodel');
-        }
-    }
     // Maintenant que le modele est restaure : evaluer la compatibilite de
     // l'effort de reflexion et la disponibilite des pieces jointes.
     if (typeof checkReasoningCompatibility === 'function') checkReasoningCompatibility();

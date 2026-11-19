@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { AutomationManager, SENSITIVE_TARGET, normalizeAction, isSensitive, visualChange } = require('../automation-manager');
+const { AutomationManager, SENSITIVE_TARGET, normalizeAction, isSensitive, visualChange } = require('../src/runtime/automation-manager');
 
 function onPlatform(platform, check) {
   const original = Object.getOwnPropertyDescriptor(process, 'platform');
@@ -101,7 +101,7 @@ test('la signature visuelle mesure la part de l’image qui a changé', () => {
   assert.equal(visualChange('', grey(1)), null);
 });
 
-async function session(replies) {
+async function session(replies, permissionMode = 'auto') {
   const sent = [];
   const manager = new AutomationManager({
     actionHandler: async (body) => {
@@ -111,7 +111,7 @@ async function session(replies) {
       return typeof reply === 'function' ? reply(body) : (reply || { ok: true });
     },
   });
-  return { manager, sent, session: await manager.start({ userId: 'u', permissionMode: 'auto' }) };
+  return { manager, sent, session: await manager.start({ userId: 'u', permissionMode }) };
 }
 
 test('les coordonnées de l’image sont converties vers l’écran, glisser compris', async () => {
@@ -125,8 +125,104 @@ test('les coordonnées de l’image sont converties vers l’écran, glisser com
   assert.deepEqual(sent[1], { action: 'drag', x: 120, y: 40, to_x: 320, to_y: 440 });
   assert.deepEqual(sent[2], { action: 'scroll', dx: 0, dy: 3, x: 200, y: 100 });
   assert.equal(sent[3].x, 102);
-  // Clicks carry the label pattern the bridge checks before acting.
-  assert.equal(sent[3].guard, SENSITIVE_TARGET);
+  // Autonomous mode: the bridge is not asked to vet the button.
+  assert.equal(sent[3].guard, undefined);
+});
+
+test('hors mode autonome, les clics portent le garde et confirm le lève', async () => {
+  const { manager, sent, session: s } = await session({}, 'supervised');
+  await manager.execute(s, { action: 'triple_click', x: 1, y: 1 });
+  await manager.execute(s, { action: 'click', x: 1, y: 1, confirm: true });
+  assert.equal(sent[0].guard, SENSITIVE_TARGET);
+  assert.equal(sent[1].guard, undefined);
+  assert.equal(sent[1].confirm, undefined);
+});
+
+test('le mode autonome ne bloque plus les mots sensibles, sauf un numéro de carte', async () => {
+  const auto = await session({});
+  const typed = await auto.manager.execute(auto.session, { action: 'type', text: 'Mon mot de passe Wi-Fi est dans le coffre' });
+  assert.equal(typed.blocked, undefined);
+  const card = await auto.manager.execute(auto.session, { action: 'type', text: '4111 1111 1111 1111' });
+  assert.equal(card.blocked, true);
+  assert.match(card.text, /numéro de carte/);
+  const pasted = await auto.manager.execute(auto.session, { action: 'batch', actions: [{ action: 'clipboard_write', text: '4111111111111111' }] });
+  assert.equal(pasted.blocked, true);
+  const semi = await session({}, 'semi');
+  const asked = await semi.manager.execute(semi.session, { action: 'type', text: 'mot de passe : hunter2' });
+  assert.equal(asked.blocked, true);
+  assert.match(asked.text, /request_user_input.*"confirm": true/);
+  const confirmed = await semi.manager.execute(semi.session, { action: 'type', text: 'mot de passe : hunter2', confirm: true });
+  assert.equal(confirmed.blocked, undefined);
+});
+
+test('ask renvoie vers request_user_input au lieu de bloquer', async () => {
+  const { manager, sent, session: s } = await session({});
+  const result = await manager.execute(s, { action: 'ask', question: 'On continue ?' });
+  assert.equal(result.blocked, undefined);
+  assert.match(result.text, /request_user_input/);
+  assert.equal(sent.length, 0);
+});
+
+test('nouveaux gestes : validation de triple clic, bouton, maintien, presse-papiers, zoom', () => {
+  assert.deepEqual(normalizeAction({ action: 'triple_click', x: 3, y: 4, modifiers: ['shift'] }), { action: 'triple_click', x: 3, y: 4, modifiers: ['shift'] });
+  assert.deepEqual(normalizeAction({ action: 'mouse_down', button: 'right' }), { action: 'mouse_down', button: 'right' });
+  assert.deepEqual(normalizeAction({ action: 'mouse_up', x: 5, y: 6 }), { action: 'mouse_up', button: 'left', x: 5, y: 6 });
+  assert.deepEqual(normalizeAction({ action: 'hold_key', key: 'Shift', seconds: 2 }), { action: 'hold_key', key: 'shift', modifiers: [], seconds: 2 });
+  assert.equal(normalizeAction({ action: 'hold_key', key: 'a', seconds: 60 }).seconds, 1);
+  assert.equal(normalizeAction({ action: 'clipboard_write', text: '' }), null);
+  assert.deepEqual(normalizeAction({ action: 'clipboard_read' }), { action: 'clipboard_read' });
+  assert.deepEqual(normalizeAction({ action: 'cursor_position' }), { action: 'cursor_position' });
+  assert.equal(normalizeAction({ action: 'zoom', x: 1, y: 1 }), null);
+  assert.equal(normalizeAction({ action: 'zoom', x: 1, y: 1, width: 100, height: 50 }).max_dimension, 1600);
+  // Batches: 1 to 20 gestures, no capture or nested batch, 30 s of waiting at most.
+  assert.equal(normalizeAction({ action: 'batch', actions: [] }), null);
+  assert.equal(normalizeAction({ action: 'batch', actions: [{ action: 'inspect' }] }), null);
+  assert.equal(normalizeAction({ action: 'batch', actions: [{ action: 'batch', actions: [] }] }), null);
+  assert.equal(normalizeAction({ action: 'batch', actions: Array.from({ length: 21 }, () => ({ action: 'key', key: 'a' })) }), null);
+  assert.equal(normalizeAction({ action: 'batch', actions: [{ action: 'wait', seconds: 10 }, { action: 'wait', seconds: 10 }, { action: 'hold_key', key: 'a', seconds: 10 }, { action: 'wait', seconds: 1 }] }), null);
+  assert.equal(normalizeAction({ action: 'batch', actions: [{ action: 'click', x: 1, y: 1 }, { action: 'type', text: 'ok' }, { action: 'key', key: 'enter' }] }).actions.length, 3);
+});
+
+test('un batch part en un seul appel, coordonnées converties, et rend chaque étape', async () => {
+  const { manager, sent, session: s } = await session({
+    observe: { ok: true, image: 'aW1n', target: 'display', capture: { x: 0, y: 0, width: 2000, height: 1000 }, image_width: 1000, image_height: 500 },
+    batch: (body) => ({ ok: true, steps: body.actions.map((step) => step.action === 'clipboard_read' ? { ok: true, text: 'copié' } : step.action === 'cursor_position' ? { ok: true, x: 400, y: 200 } : { ok: true }) }),
+  });
+  await manager.execute(s, { action: 'observe' });
+  const result = await manager.execute(s, { action: 'batch', actions: [{ action: 'click', x: 10, y: 10 }, { action: 'type', text: 'Bonjour' }, { action: 'key', key: 'enter' }, { action: 'clipboard_read' }, { action: 'cursor_position' }] });
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].action, 'batch');
+  assert.deepEqual(sent[1].actions[0], { action: 'click', x: 20, y: 20, button: 'left' });
+  assert.match(result.text, /Batch : 5\/5 gestes effectués/);
+  assert.match(result.text, /presse-papiers : 5 caractères .*«copié»/);
+  assert.match(result.text, /Pointeur en \(200, 100\) dans la dernière image/);
+  assert.equal(s.pendingVerification.action, 'batch');
+});
+
+test('un batch arrêté dit à quelle étape et pourquoi', async () => {
+  const { manager, session: s } = await session({ batch: { ok: false, steps: [{ ok: true }, { ok: false, error: 'password-field' }] } });
+  const result = await manager.execute(s, { action: 'batch', actions: [{ action: 'click', x: 1, y: 1 }, { action: 'type', text: 'x' }, { action: 'key', key: 'enter' }] });
+  assert.equal(result.blocked, true);
+  assert.match(result.text, /1\/3 gestes effectués .* arrêt à l’étape 2 \(type\) — le champ actif est un mot de passe/);
+  const invalid = await manager.execute(s, { action: 'batch', actions: [{ action: 'click', x: 1, y: 1 }, { action: 'observe' }] });
+  assert.match(invalid.text, /étape 2 « observe » non autorisée/);
+});
+
+test('zoom capture une région, garde la vérification en attente et recale les coordonnées', async () => {
+  const { manager, sent, session: s } = await session({
+    observe: { ok: true, image: 'aW1n', target: 'display', capture: { x: 0, y: 0, width: 2000, height: 1000 }, image_width: 1000, image_height: 500 },
+    inspect: (body) => ({ ok: true, image: 'aW1n', target: 'region', capture: { x: body.x, y: body.y, width: body.width, height: body.height }, image_width: 800, image_height: 400, ocr: [{ text: 'petit', frame: [1, 1, 2, 2], center: [2, 2] }] }),
+  });
+  await manager.execute(s, { action: 'observe' });
+  await manager.execute(s, { action: 'click', x: 1, y: 1 });
+  const zoom = await manager.execute(s, { action: 'zoom', x: 100, y: 50, width: 200, height: 100 });
+  assert.deepEqual([sent[2].action, sent[2].target, sent[2].x, sent[2].y, sent[2].width, sent[2].height, sent[2].include_ui], ['inspect', 'region', 200, 100, 400, 200, false]);
+  assert.equal(zoom.images.length, 1);
+  assert.match(zoom.text, /Zoom ×2 .* 1 lignes de texte OCR/);
+  assert.equal(s.pendingVerification.action, 'click');
+  // The next click is in the zoomed image's pixels.
+  await manager.execute(s, { action: 'click', x: 400, y: 200 });
+  assert.equal(sent[3].x, 400 / 2 + 200);
 });
 
 test('un clic irréversible ou un champ mot de passe renvoie un refus clair', async () => {
@@ -137,7 +233,7 @@ test('un clic irréversible ou un champ mot de passe renvoie un refus clair', as
   });
   const click = await manager.execute(s, { action: 'click', x: 1, y: 1 });
   assert.equal(click.blocked, true);
-  assert.match(click.text, /« Supprimer le fichier » déclenche une action irréversible/);
+  assert.match(click.text, /« Supprimer le fichier » déclenche une action irréversible.*"confirm": true/);
   const typed = await manager.execute(s, { action: 'type', text: 'bonjour' });
   assert.equal(typed.blocked, true);
   assert.match(typed.text, /mot de passe/);

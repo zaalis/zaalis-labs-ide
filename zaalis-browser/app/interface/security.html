@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sécurité</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  .stat { display:flex; gap:28px; padding:16px 18px; flex-wrap:wrap; }
+  .stat div b { display:block; font-size:22px; font-weight:500; }
+  .stat div span { color:var(--muted); font-size:12.5px; }
+  .chk { display:flex; gap:8px; padding:12px 18px; border-top:1px solid var(--border); }
+  .chk input { flex:1; }
+  .cert-out { padding:4px 18px 16px; }
+  .cert-out .zx-mono { white-space:pre-wrap; word-break:break-all; }
+</style>
+</head>
+<body>
+  <div class="zx-top"><h1>Sécurité</h1></div>
+  <div class="zx-main">
+
+    <div class="zx-section-title">Navigation sécurisée</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <div class="grow"><div class="t">Protection contre les sites dangereux</div>
+          <div class="s">Avertit avant d'ouvrir un site ou un téléchargement signalé (logiciels malveillants, hameçonnage). Les listes sont téléchargées et consultées sur votre ordinateur : les adresses que vous visitez ne sont jamais envoyées.</div></div>
+        <div class="zx-switch" id="sb-on"></div>
+      </div>
+      <div class="stat" id="sb-stat"></div>
+      <div id="sb-sources"></div>
+      <div class="zx-row">
+        <div class="grow"><div class="s" id="sb-bypass"></div></div>
+        <button class="zx-btn" id="sb-clear" style="display:none">Oublier les exceptions</button>
+        <button class="zx-btn" id="sb-update">Mettre à jour les listes</button>
+      </div>
+      <div class="chk">
+        <input class="zx-input" id="sb-url" placeholder="Vérifier une adresse (ex. https://exemple.com/page)">
+        <button class="zx-btn" id="sb-check">Vérifier</button>
+      </div>
+      <div class="zx-row" id="sb-result" style="display:none"></div>
+    </div>
+
+    <div class="zx-section-title">Navigateur par défaut</div>
+    <div class="zx-card">
+      <div class="zx-row">
+        <div class="grow"><div class="t" id="db-t">…</div><div class="s" id="db-s"></div></div>
+        <button class="zx-btn primary" id="db-set">Définir par défaut</button>
+      </div>
+    </div>
+
+    <div class="zx-section-title">Certificats</div>
+    <div class="zx-card">
+      <div id="cert-ex"></div>
+      <div class="chk">
+        <input class="zx-input" id="cert-host" placeholder="Inspecter le certificat d'un site (ex. exemple.com)">
+        <button class="zx-btn" id="cert-go">Inspecter</button>
+      </div>
+      <div class="cert-out" id="cert-out"></div>
+    </div>
+  </div>
+
+<script src="zx.js"></script>
+<script>
+  const THREAT = { malware: 'Logiciels malveillants', phishing: 'Hameçonnage', homograph: 'Adresse trompeuse' };
+  const nf = new Intl.NumberFormat('fr-FR');
+  function renderSb(s) {
+    zx.$('sb-on').classList.toggle('on', !!s.enabled);
+    zx.$('sb-stat').innerHTML =
+      '<div><b>' + nf.format(s.hosts) + '</b><span>sites bloqués entièrement</span></div>' +
+      '<div><b>' + nf.format(s.urls) + '</b><span>adresses précises</span></div>' +
+      '<div><b>' + (s.loaded ? 'Chargées' : 'Chargement…') + '</b><span>listes en mémoire</span></div>';
+    zx.$('sb-sources').innerHTML = s.sources.map(src => '<div class="zx-row"><div class="grow"><div class="t">' + zx.esc(src.label) + '</div><div class="s">' +
+      (src.count ? nf.format(src.count) + ' entrées · ' + zx.fmtBytes(src.bytes) : 'Pas encore téléchargée') +
+      (src.fetchedAt ? ' · mise à jour ' + zx.fmtDate(src.fetchedAt) : '') +
+      (src.error ? ' · <span style="color:var(--danger)">' + zx.esc(src.error) + '</span>' : '') + '</div></div>' +
+      '<span class="zx-badge' + (src.threat === 'phishing' ? ' warn' : ' err') + '">' + zx.esc(THREAT[src.threat] || src.threat) + '</span></div>').join('');
+    zx.$('sb-bypass').textContent = s.bypassed.length ? 'Sites dangereux autorisés pour cette session : ' + s.bypassed.join(', ') : 'Les listes se mettent à jour automatiquement toutes les 6 heures.';
+    zx.$('sb-clear').style.display = s.bypassed.length ? '' : 'none';
+    zx.$('sb-update').disabled = !!s.updating;
+  }
+  function loadSb() { return zx.call('sbStatus').then(renderSb).catch(e => zx.toast(e.message)); }
+  zx.$('sb-on').onclick = () => zx.call('sbSetEnabled', { enabled: !zx.$('sb-on').classList.contains('on') }).then(renderSb);
+  zx.$('sb-update').onclick = () => { zx.$('sb-update').disabled = true; zx.toast('Mise à jour des listes…'); zx.call('sbUpdateNow').then(s => { renderSb(s); zx.toast('Listes à jour'); }).catch(e => zx.toast(e.message)); };
+  zx.$('sb-clear').onclick = () => zx.call('sbClearBypass').then(renderSb);
+  zx.$('sb-check').onclick = () => {
+    const u = zx.$('sb-url').value.trim();
+    if (!u) return;
+    zx.call('sbCheckUrl', { url: /^https?:\/\//i.test(u) ? u : 'https://' + u }).then(v => {
+      const r = zx.$('sb-result'); r.style.display = '';
+      r.innerHTML = v ? '<span class="zx-badge err">' + zx.esc(THREAT[v.threat] || v.threat) + '</span><div class="grow s">' + zx.esc(v.reason) + '</div>'
+                      : '<span class="zx-badge ok">Aucun signalement</span><div class="grow s">Cette adresse ne figure dans aucune liste chargée.</div>';
+    });
+  };
+  zx.$('sb-url').addEventListener('keydown', e => { if (e.key === 'Enter') zx.$('sb-check').click(); });
+
+  function renderDb(s) {
+    if (s.unsupported) { zx.$('db-t').textContent = 'Disponible sous Windows uniquement'; zx.$('db-set').style.display = 'none'; return; }
+    zx.$('db-t').textContent = s.isDefault ? 'zaalis Browser est votre navigateur par défaut' : 'zaalis Browser n\'est pas votre navigateur par défaut';
+    zx.$('db-s').textContent = s.isDefault ? 'Les liens et les fichiers web s\'ouvrent avec zaalis Browser.' : 'Windows vous demandera de confirmer le choix dans « Applications par défaut ».';
+    zx.$('db-set').style.display = s.isDefault ? 'none' : '';
+  }
+  zx.$('db-set').onclick = () => zx.call('defaultBrowserSet').then(renderDb).catch(e => zx.toast(e.message));
+
+  function certText(c) {
+    const lines = [
+      'Délivré à : ' + (c.subject || '?') + (c.subjectOrg ? ' (' + c.subjectOrg + ')' : ''),
+      'Délivré par : ' + (c.issuer || '?') + (c.issuerOrg ? ' (' + c.issuerOrg + ')' : ''),
+      'Validité : du ' + zx.fmtDate(c.validFrom) + ' au ' + zx.fmtDate(c.validTo),
+      'Empreinte SHA-256 : ' + (c.sha256 || '?'),
+      'Numéro de série : ' + (c.serial || '?'),
+    ];
+    if (c.altNames && c.altNames.length) lines.push('Noms : ' + c.altNames.join(', '));
+    if (c.chain && c.chain.length) lines.push('Chaîne : ' + c.chain.map(x => x.subject).join(' → '));
+    if (c.authorizationError) lines.push('Vérification : ' + c.authorizationError);
+    else if (c.authorized) lines.push('Vérification : certificat approuvé');
+    return lines.join('\n');
+  }
+  function loadCerts() {
+    zx.call('certExceptions').then(list => {
+      zx.$('cert-ex').innerHTML = list.length ? list.map(e => '<div class="zx-row"><div class="grow"><div class="t">' + zx.esc(e.host) + '</div><div class="s">Certificat accepté malgré l\'erreur ' + zx.esc(e.error) + ' · ' + zx.fmtDate(e.at) + '</div></div><button class="zx-btn" data-host="' + zx.esc(e.host) + '">Révoquer</button></div>').join('')
+        : '<div class="zx-row"><div class="grow s">Aucune exception de certificat pour cette session.</div></div>';
+      zx.$('cert-ex').querySelectorAll('[data-host]').forEach(b => b.onclick = () => zx.call('certRevoke', { host: b.getAttribute('data-host') }).then(loadCerts));
+    });
+  }
+  zx.$('cert-go').onclick = () => {
+    const h = zx.$('cert-host').value.trim().replace(/^https?:\/\//i, '').split('/')[0];
+    if (!h) return;
+    zx.$('cert-out').innerHTML = '<div class="zx-muted">Connexion à ' + zx.esc(h) + '…</div>';
+    zx.call('certInspect', { host: h }).then(c => { zx.$('cert-out').innerHTML = '<div class="zx-mono">' + zx.esc(certText(c)) + '</div>'; })
+      .catch(e => { zx.$('cert-out').innerHTML = '<div style="color:var(--danger)">' + zx.esc(e.message) + '</div>'; });
+  };
+  zx.$('cert-host').addEventListener('keydown', e => { if (e.key === 'Enter') zx.$('cert-go').click(); });
+
+  loadSb();
+  zx.call('defaultBrowserStatus').then(renderDb).catch(() => {});
+  loadCerts();
+  setInterval(loadSb, 5000);
+</script>
+</body>
+</html>

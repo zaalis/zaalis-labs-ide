@@ -20,9 +20,30 @@ pub struct InteractionHub {
     permissions: Mutex<HashMap<RequestId, oneshot::Sender<PermissionAnswer>>>,
     plans: Mutex<HashMap<RequestId, oneshot::Sender<PlanAnswer>>>,
     budgets: Mutex<HashMap<RequestId, oneshot::Sender<BudgetAnswer>>>,
+    clarifications: Mutex<HashMap<RequestId, oneshot::Sender<zaalis_protocol::ClarificationAnswers>>>,
+    questions: Mutex<HashMap<RequestId, Vec<zaalis_protocol::ClarificationQuestion>>>,
 }
 
 impl InteractionHub {
+    pub fn wait_clarification(&self, id: RequestId, questions: Vec<zaalis_protocol::ClarificationQuestion>) -> Result<oneshot::Receiver<zaalis_protocol::ClarificationAnswers>> {
+        let receiver=insert_waiter(&self.clarifications, id.clone())?;
+        self.questions.lock().expect("questions lock poisoned").insert(id,questions);
+        Ok(receiver)
+    }
+    pub fn decide_clarification(&self, id: &RequestId, answer: zaalis_protocol::ClarificationAnswers) -> Result<()> {
+        let mut questions=self.questions.lock().expect("questions lock poisoned");
+        let pending=questions.get(id).ok_or_else(||ZaalisError::not_found("question inconnue"))?;
+        if answer.len()!=pending.len() || pending.iter().any(|question|answer.get(&question.id).is_none_or(|text|
+            text.trim().is_empty() || text.len()>8000 || (!question.allow_free_text && !question.options.iter().any(|option|option.label==*text)))) {
+            return Err(ZaalisError::invalid("réponses manquantes ou incompatibles avec les questions"));
+        }
+        questions.remove(id);
+        resolve_waiter(&self.clarifications, id, answer)
+    }
+    pub fn cancel_clarification(&self, id: &RequestId) {
+        self.questions.lock().expect("questions lock poisoned").remove(id);
+        self.clarifications.lock().expect("clarification waiters lock poisoned").remove(id);
+    }
     pub fn wait_permission(&self, id: RequestId) -> Result<oneshot::Receiver<PermissionAnswer>> {
         insert_waiter(&self.permissions, id)
     }
@@ -48,6 +69,8 @@ impl InteractionHub {
     }
 
     pub fn cancel_all(&self) {
+        self.questions.lock().expect("questions lock poisoned").clear();
+        self.clarifications.lock().expect("clarification waiters lock poisoned").clear();
         self.permissions
             .lock()
             .expect("permission waiters lock poisoned")

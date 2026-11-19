@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { mobileAllowed, tunnelRouteAllowed } = require('../tunnel-policy');
+const { mobileAllowed, tunnelRouteAllowed } = require('../src/agent/tunnel-policy');
 
 test('mobile policy authorizes exact method and route pairs', () => {
   assert.equal(mobileAllowed('POST', '/chat'), true);

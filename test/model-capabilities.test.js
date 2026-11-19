@@ -2,7 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { modelCapabilities, bindingCapabilities } = require('../model-capabilities');
+const { modelCapabilities, bindingCapabilities } = require('../src/accounts/model-capabilities');
 
 test('Mistral exposes native thinking without a misleading effort selector', () => {
   const caps = modelCapabilities('mistral', 'mistral-small-latest', { ready: true });

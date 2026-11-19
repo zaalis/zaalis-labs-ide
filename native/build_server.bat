@@ -11,7 +11,7 @@ if not exist node_modules\.bin\pkg.cmd (
     if errorlevel 1 goto :error
 )
 
-echo [2/2] Packaging server.js -^> native\dist\zaalis-server.exe ...
+echo [2/2] Packaging src\app\server.js -^> native\dist\zaalis-server.exe ...
 call npm run build:server
 if errorlevel 1 goto :error
 

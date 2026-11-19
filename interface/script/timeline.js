@@ -58,7 +58,7 @@
             return { key: 'mcp:' + label.toLowerCase(), icon: label.toLowerCase() === 'github' ? 'github' : 'plug', brand: pretty, fr: () => `a utilisé ${pretty}`, en: () => `used ${pretty}` };
         }
         if (name === 'todo') return { key: 'todo', icon: 'todo', fr: () => 'a mis à jour ses tâches', en: () => 'updated its tasks' };
-        if (['task', 'spawn_agent', 'merge_agent'].includes(name)) return { key: 'agent', icon: 'users', fr: n => n > 1 ? `a délégué ${n} tâches à des sous-agents` : 'a délégué une tâche à un sous-agent', en: n => n > 1 ? `delegated ${n} tasks to sub-agents` : 'delegated a task to a sub-agent' };
+        if (['task', 'spawn_agent', 'spawn_agents', 'merge_agent'].includes(name)) return { key: 'agent', icon: 'users', fr: n => n > 1 ? `a délégué ${n} tâches à des sous-agents` : 'a délégué une tâche à un sous-agent', en: n => n > 1 ? `delegated ${n} tasks to sub-agents` : 'delegated a task to a sub-agent' };
         if (name === 'skill') return { key: 'skill', icon: 'sparkle', fr: () => 'a utilisé une compétence', en: () => 'used a skill' };
         if (name === 'laboratory') return { key: 'lab', icon: 'flask', fr: () => 'a utilisé le laboratoire', en: () => 'used the laboratory' };
         if (name === 'git_status') return { key: 'git', icon: 'git', fr: () => 'a vérifié l’état Git', en: () => 'checked Git status' };
@@ -79,6 +79,7 @@
             : name === 'mcp' ? [input.server, input.tool].filter(Boolean).join(' · ')
             : name === 'workspace' ? [input.action, input.repo || input.path].filter(Boolean).join(' ')
             : ['task', 'spawn_agent'].includes(name) ? pick(input.title, input.description, input.role)
+            : name === 'spawn_agents' ? [(Array.isArray(input.tasks) ? input.tasks.length : 0) + ' ' + L('sous-agents', 'sub-agents'), input.review && input.review !== 'none' ? (input.review === 'debate' ? L('débat', 'debate') : L('vérification croisée', 'cross-check')) : ''].filter(Boolean).join(' · ')
             : '';
         return text || fallback || name || L('outil', 'tool');
     }
@@ -110,6 +111,8 @@
             const result = outcome.result;
             if (result == null) return outcome.summary || '';
             if (typeof result === 'string') return result;
+            // Browser bridge answers: their readable text rather than the envelope.
+            if (typeof result.result === 'string' && result.result) return result.result;
             // Files read: their numbered lines rather than the raw structure.
             const files = Array.isArray(result) ? result : Array.isArray(result.files) ? result.files : null;
             if (files && files.length && files.every(file => file && Array.isArray(file.lines))) {
@@ -119,6 +122,37 @@
             return JSON.stringify(result, null, 2);
         }
         return outcome.message || outcome.reason || outcome.summary || '';
+    }
+
+    // ── Web search results: the three most relevant pages as links ──
+    const isWebUrl = value => { try { return /^https?:$/.test(new URL(String(value)).protocol); } catch { return false; } };
+    const hostOf = value => { try { return new URL(String(value)).hostname.replace(/^www\./i, ''); } catch { return ''; } };
+    function searchLinks(call, outcome) {
+        if (!outcome || outcome.status !== 'ok' || !outcome.result || typeof outcome.result !== 'object') return [];
+        const tool = call.tool.toLowerCase(), result = outcome.result;
+        let rows = [];
+        if (tool === 'browser' && String(call.input.action || '').toLowerCase() === 'search') rows = result.links || [];
+        else if (tool === 'web_search') rows = result.results || [];
+        else if (tool === 'deep_search') rows = (result.sources || []).map(source => source && source.result).filter(Boolean);
+        const seen = new Set(), out = [];
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const url = row && row.url;
+            // The engine's own pages (topics, disambiguation) are not sources.
+            if (!isWebUrl(url) || /(^|\.)duckduckgo\.com$/i.test(hostOf(url)) || seen.has(url)) continue;
+            seen.add(url);
+            out.push({ url: String(url), title: String(row.title || '').trim() || hostOf(url), host: hostOf(url) });
+            if (out.length >= 3) break;
+        }
+        return out;
+    }
+    const ARROW = '<svg class="tl-link-go" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><polyline points="8 7 17 7 17 16"/></svg>';
+    function linksHTML(links) {
+        const label = L('Pages les plus pertinentes', 'Most relevant pages');
+        return `<div class="tl-links" role="list" aria-label="${esc(label)}"><div class="tl-links-head">${ICONS.globe}<span>${esc(label)}</span></div>`
+            + links.map(link => `<a class="tl-link" role="listitem" href="${esc(link.url)}" title="${esc(link.url)}" data-ide-link="1" rel="noopener noreferrer">`
+                + `<img class="tl-link-favicon" src="/api/favicon?domain=${encodeURIComponent(link.host)}" alt="" width="16" height="16" loading="lazy" decoding="async">`
+                + `<span class="tl-link-text"><span class="tl-link-title">${esc(link.title)}</span><span class="tl-link-host">${esc(link.host)}</span></span>${ARROW}</a>`).join('')
+            + '</div>';
     }
 
     function create(container, options = {}) {
@@ -247,7 +281,12 @@
             const output = outcomeText(outcome);
             const pre = call.item.querySelector('.tl-item-output');
             if (output) pre.textContent = output.length > 20000 ? output.slice(0, 20000) + '\n…' : output; else pre.remove();
-            refreshGroup(call.group); scroll();
+            refreshGroup(call.group);
+            // A search ends with its best pages, visible without unfolding
+            // anything; a click opens them in the integrated browser.
+            const links = searchLinks(call, outcome);
+            if (links.length) { const holder = document.createElement('div'); holder.innerHTML = linksHTML(links); append(holder.firstElementChild); }
+            scroll();
         }
 
         // ── File changes: always visible rows, +added (green) −removed (red) ──
@@ -344,8 +383,14 @@
                 if (!event || finished) return;
                 if (event.type === 'permission_required') { note('wait', 'lock', L('En attente de votre autorisation : ', 'Waiting for your approval: ') + (event.summary || event.target || ''), String(event.requestId || '')); return; }
                 if (event.type === 'plan_required') { note('wait', 'map', L('Plan proposé : en attente de votre validation.', 'Plan proposed: waiting for your approval.'), String(event.requestId || '')); return; }
+                if (event.type === 'clarification_required') { note('wait', 'map', L('Précisions demandées : ', 'Clarification requested: ') + (event.questions || []).map(question => question.prompt || question.question || '').join(' · '), String(event.requestId || '')); return; }
                 if (event.type !== 'rust_event' || !event.event) return;
                 const frame = event.event;
+                if (frame.type === 'clarification_resolved') {
+                    const pending = flowEl.querySelector(`.tl-note-wait[data-request="${CSS.escape(String(frame.request_id || ''))}"]`);
+                    if (pending) { pending.className = 'tl-note tl-note-ok'; pending.querySelector('span').textContent += L(' · répondu', ' · answered'); }
+                    return;
+                }
                 if (frame.type === 'agent_spawned' && frame.agent) {
                     const agent = frame.agent; agents.set(String(agent.id), agent);
                     if (agent.role?.name === 'lead') leadId = String(agent.id);
@@ -407,6 +452,7 @@
             fail(message) {
                 if (finished) return;
                 flush();
+                for (const [segment_id] of segments) completeSegment({ segment_id });
                 for (const call of tools.values()) if (call.state === 'running') finishTool({ call_id: call.id, outcome: { status: 'error', message: L('Interrompu.', 'Interrupted.') } });
                 finished = true; clearInterval(clock);
                 body.classList.remove('tl-running');

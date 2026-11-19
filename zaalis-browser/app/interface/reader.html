@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' https: http: data:; media-src 'none'; object-src 'none'; frame-src 'none'">
+<meta name="referrer" content="no-referrer">
+<title>Mode Lecture</title>
+<link rel="stylesheet" href="zx.css">
+<style>
+  body.r-light { --r-bg:#ffffff; --r-text:#202124; --r-muted:#5f6368; --r-link:#1a73e8; }
+  body.r-sepia { --r-bg:#f4ecd8; --r-text:#5b4636; --r-muted:#8a7360; --r-link:#a0522d; }
+  body.r-dark  { --r-bg:#1f1f1f; --r-text:#e3e3e3; --r-muted:#9aa0a6; --r-link:#8ab4f8; }
+  body { background: var(--r-bg); color: var(--r-text); transition: background .2s, color .2s; }
+  .bar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 8px 16px;
+    background: var(--r-bg); border-bottom: 1px solid rgba(127,127,127,.25); }
+  .bar .sp { flex: 1; }
+  .bar button, .bar select { height: 32px; border-radius: 16px; border: 1px solid rgba(127,127,127,.35); background: transparent; color: var(--r-text); padding: 0 12px; font: 13px "Segoe UI", sans-serif; cursor: pointer; }
+  .bar button.on { background: var(--r-link); color: var(--r-bg); border-color: var(--r-link); }
+  .bar .sw { width: 22px; height: 22px; border-radius: 50%; padding: 0; border: 2px solid rgba(127,127,127,.4); }
+  article { margin: 0 auto; padding: 36px 24px 90px; }
+  article.f-sans { font-family: "Segoe UI", system-ui, Arial, sans-serif; }
+  article.f-serif { font-family: Georgia, "Times New Roman", serif; }
+  article.f-mono { font-family: Consolas, "Cascadia Mono", monospace; }
+  .site { color: var(--r-muted); font-size: .8em; text-transform: uppercase; letter-spacing: .04em; }
+  h1.title { font-size: 1.75em; line-height: 1.25; margin: .3em 0 .4em; }
+  .meta { color: var(--r-muted); font-size: .85em; margin-bottom: 1.6em; }
+  .content a { color: var(--r-link); }
+  .content img, .content figure { max-width: 100%; height: auto; border-radius: 6px; }
+  .content figure { margin: 1.2em 0; }
+  .content figcaption { color: var(--r-muted); font-size: .8em; }
+  .content pre { overflow: auto; padding: 12px; background: rgba(127,127,127,.12); border-radius: 6px; font-size: .85em; }
+  .content blockquote { margin: 1em 0; padding-left: 1em; border-left: 3px solid rgba(127,127,127,.4); color: var(--r-muted); }
+  .content table { border-collapse: collapse; max-width: 100%; display: block; overflow: auto; }
+  .content td, .content th { border: 1px solid rgba(127,127,127,.3); padding: 4px 8px; }
+  .content mark.tts { background: rgba(255, 213, 79, .55); color: inherit; }
+  .empty { text-align: center; padding: 80px 20px; color: var(--r-muted); }
+</style>
+</head>
+<body class="r-light">
+  <div class="bar">
+    <button id="src" title="Revenir à la page d'origine">← Page d'origine</button>
+    <span class="sp"></span>
+    <select id="font" title="Police"><option value="sans">Sans empattement</option><option value="serif">Avec empattement</option><option value="mono">Chasse fixe</option></select>
+    <button id="smaller" title="Réduire le texte">A−</button>
+    <button id="bigger" title="Agrandir le texte">A+</button>
+    <button id="narrow" title="Colonne plus étroite">⇥⇤</button>
+    <button id="wide" title="Colonne plus large">⇤⇥</button>
+    <button class="sw" id="t-light" title="Clair" style="background:#fff"></button>
+    <button class="sw" id="t-sepia" title="Sépia" style="background:#f4ecd8"></button>
+    <button class="sw" id="t-dark" title="Sombre" style="background:#1f1f1f"></button>
+    <button id="tts" title="Lecture à voix haute">▶ Écouter</button>
+    <button id="tts-stop" title="Arrêter la lecture" style="display:none">■</button>
+  </div>
+  <article id="art"><div class="empty">Chargement de l'article…</div></article>
+<script src="zx.js"></script>
+<script src="reader.js"></script>
+</body>
+</html>

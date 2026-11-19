@@ -477,13 +477,13 @@ function initRecentProjects() {
         trashBtn.addEventListener('click', async e => {
             e.stopPropagation();
             const ok = await customConfirm(`"${folderName}"`, {
-                title: lang === 'en' ? 'Remove this project?' : 'Supprimer ce projet ?',
+                title: lang === 'en' ? 'Delete this project and its chats?' : 'Supprimer ce projet et ses conversations ?',
                 okText: lang === 'en' ? 'Delete' : 'Supprimer',
                 danger: true
             });
-            if (ok) {
-                removeRecentProject(p);
-            }
+            if (!ok) return;
+            if (typeof deleteProjectConversations === 'function' && !await deleteProjectConversations(p)) return;
+            removeRecentProject(p);
         });
 
         projectRow.appendChild(chev);
@@ -621,7 +621,7 @@ function clearProject(options = {}) {
 const ICON_FILE = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6d8086" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 16h5" stroke-linecap="round"/></svg>';
 // Centered confirmation bubble (replaces the ugly browser window.confirm).
 function customConfirm(message, opts) {
-    opts = opts || {};
+    opts = { viewport: true, ...opts };
     return new Promise(resolve => {
         const modal = $('#confirm-modal');
         const lang = state.language || 'fr';
@@ -730,7 +730,7 @@ function renderNoProjectConversations(container) {
     const curId = state[curIdKey];
     
     const convs = (state[storeKey] || [])
-        .filter(c => !c.project)
+        .filter(c => !c.project && !c.archived)
         .sort((a, b) => (parseInt(b.id, 10) || 0) - (parseInt(a.id, 10) || 0));
 
     container.innerHTML = '';
@@ -766,28 +766,10 @@ function renderNoProjectConversations(container) {
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
-        titleEl.addEventListener('click', () => {
-            if (typeof loadConversation === 'function') {
-                loadConversation(kind, conv.id);
-            }
+        row.addEventListener('click', () => {
+            if (typeof loadConversation === 'function') loadConversation(kind, conv.id);
         });
-        
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-        `;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            if (typeof deleteConversation === 'function') {
-                deleteConversation(kind, conv.id);
-            }
-        });
-        
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
         container.appendChild(row);
     });
 }
@@ -806,7 +788,7 @@ function renderSidebarConversations() {
         renderNoProjectConversations(container);
         return;
     }
-    const convs = projectPath ? conversationsForProject(projectPath, folderName, kind) : [];
+    const convs = projectPath ? conversationsForProject(projectPath, folderName, kind).filter(c => !c.archived) : [];
 
     container.innerHTML = '';
 
@@ -838,24 +820,10 @@ function renderSidebarConversations() {
         const titleEl = document.createElement('span');
         titleEl.className = 'convo-title';
         titleEl.textContent = conv.title;
-        titleEl.addEventListener('click', () => {
+        row.addEventListener('click', () => {
             if (typeof loadConversation === 'function') loadConversation(kind, conv.id);
         });
-
-        const delBtn = document.createElement('button');
-        delBtn.className = 'convo-del';
-        delBtn.type = 'button';
-        delBtn.title = lang === 'en' ? 'Delete' : 'Supprimer';
-        delBtn.innerHTML = `
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
-        `;
-        delBtn.addEventListener('click', e => {
-            e.stopPropagation();
-            if (typeof deleteConversation === 'function') deleteConversation(kind, conv.id);
-        });
-
         row.appendChild(titleEl);
-        row.appendChild(delBtn);
         container.appendChild(row);
     });
 }
@@ -1407,11 +1375,44 @@ $('#save-profile').addEventListener('click', () => {
 //  AUTHENTICATION (mandatory login at startup)
 // ==========================================================
 function showAuthError(msg) {
+    $('#auth-notice')?.classList.remove('show');
     const el = $('#auth-error');
     el.textContent = msg;
     el.classList.add('show');
 }
-function hideAuthError() { $('#auth-error').classList.remove('show'); }
+function showAuthNotice(msg) {
+    $('#auth-error').classList.remove('show');
+    const el = $('#auth-notice');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('show');
+}
+function hideAuthError() {
+    $('#auth-error').classList.remove('show');
+    $('#auth-notice')?.classList.remove('show');
+    $$('#auth-overlay [aria-invalid="true"]').forEach(input => input.removeAttribute('aria-invalid'));
+}
+// Same rule as the server: 8 characters, a letter and a digit.
+function authPasswordProblem(password) {
+    if (password.length < 8) return uiText('Le mot de passe doit contenir au moins 8 caractères.');
+    if (!/[A-Za-zÀ-ÿ]/.test(password) || !/\d/.test(password)) return uiText('Le mot de passe doit contenir au moins une lettre et un chiffre.');
+    return '';
+}
+function authInvalid(input, message) {
+    input.setAttribute('aria-invalid', 'true');
+    input.focus();
+    showAuthError(message);
+}
+function showAuthForm(id) {
+    hideAuthError();
+    ['login-form', 'register-form', 'forgot-form'].forEach(form => $('#' + form)?.classList.toggle('hidden', form !== id));
+    $(`#${id} input`)?.focus();
+}
+async function withBusyButton(form, task) {
+    const button = form.querySelector('.auth-submit');
+    button.disabled = true;
+    try { await task(); } finally { button.disabled = false; }
+}
 
 function showApp(email) {
     $('#auth-overlay').classList.add('hidden');
@@ -1443,19 +1444,66 @@ function openSavedProject() {
     if (state.projectRoot) openProject(state.projectRoot, false, { preserveConversation: true });
 }
 
+// All authenticated entry points use the same initialization. A guest load
+// cannot cache a failed provider list and leave it missing after signing in.
+let authenticatedInit = null;
+function initializeAuthenticatedApp(data) {
+    if (authenticatedInit) return authenticatedInit;
+    authenticatedInit = (async () => {
+        showApp(data.email);
+        applyServerProfile(data.profile);
+        await Promise.allSettled([
+            loadPermissionPreference(), loadSharedHardwareConfig(),
+            loadUserChats(), loadCompatProviders()
+        ]);
+        migrateRetiredModelState();
+        restoreConfiguredModelSelection();
+        window.ZaalisWorkspace?.refreshCapabilities(true);
+        openSavedProject();
+        syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
+        if (typeof loadGgufModels === 'function') loadGgufModels();
+    })().finally(() => { authenticatedInit = null; });
+    return authenticatedInit;
+}
+
 function setupAuth() {
-    // Toggle between login and register forms.
-    $('#show-register').addEventListener('click', e => {
+    // Switch between the login, register and forgotten-password forms.
+    $('#show-register').addEventListener('click', e => { e.preventDefault(); showAuthForm('register-form'); });
+    $('#show-login').addEventListener('click', e => { e.preventDefault(); showAuthForm('login-form'); });
+    $('#show-forgot')?.addEventListener('click', e => {
         e.preventDefault();
-        hideAuthError();
-        $('#login-form').classList.add('hidden');
-        $('#register-form').classList.remove('hidden');
+        const email = $('#login-email').value.trim();
+        showAuthForm('forgot-form');
+        if (email) $('#forgot-email').value = email;
     });
-    $('#show-login').addEventListener('click', e => {
+    $('#forgot-back')?.addEventListener('click', e => { e.preventDefault(); showAuthForm('login-form'); });
+
+    // Forgotten password: the server opens a temporary page in this PC's
+    // browser; if it cannot, the interface opens it itself.
+    $('#forgot-form')?.addEventListener('submit', e => {
         e.preventDefault();
         hideAuthError();
-        $('#register-form').classList.add('hidden');
-        $('#login-form').classList.remove('hidden');
+        const input = $('#forgot-email'), email = input.value.trim();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authInvalid(input, uiText('Adresse email invalide.'));
+        withBusyButton($('#forgot-form'), async () => {
+            try {
+                const res = await fetch('/api/auth/password-reset/request', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) return showAuthError(data.error || uiText('Ouverture impossible pour le moment.'));
+                showAuthNotice(data.message);
+                if (!data.opened && data.url) {
+                    // Same origin page: no noopener, so a blocked pop-up can be detected.
+                    const win = window.open(data.url, '_blank');
+                    if (!win) {
+                        const link = Object.assign(document.createElement('a'), { href: data.url, target: '_blank', textContent: uiText('Ouvrir la fenêtre de réinitialisation') });
+                        link.className = 'auth-notice-link';
+                        $('#auth-notice').append(document.createElement('br'), link);
+                    }
+                }
+            } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
+        });
     });
 
     // Login
@@ -1472,15 +1520,7 @@ function setupAuth() {
             });
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || uiText('Connexion impossible.'));
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadSharedHardwareConfig();
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
         } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
     });
 
@@ -1488,30 +1528,29 @@ function setupAuth() {
     $('#register-form').addEventListener('submit', async e => {
         e.preventDefault();
         hideAuthError();
+        const firstName = $('#reg-firstname').value.trim();
+        const lastName = $('#reg-lastname').value.trim();
         const email = $('#reg-email').value.trim();
         const password = $('#reg-password').value;
         const password2 = $('#reg-password2').value;
-        if (password.length < 6) return showAuthError(uiText('Mot de passe trop court (6 caractères minimum).'));
-        if (password !== password2) return showAuthError(uiText('Les deux mots de passe ne correspondent pas.'));
+        const nameRule = /^\p{L}[\p{L}\p{M}' .-]{0,59}$/u;
+        if (!nameRule.test(firstName)) return authInvalid($('#reg-firstname'), uiText('Indiquez votre prénom.'));
+        if (!nameRule.test(lastName)) return authInvalid($('#reg-lastname'), uiText('Indiquez votre nom.'));
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authInvalid($('#reg-email'), uiText('Adresse email invalide.'));
+        const weak = authPasswordProblem(password);
+        if (weak) return authInvalid($('#reg-password'), weak);
+        if (password !== password2) return authInvalid($('#reg-password2'), uiText('Les deux mots de passe ne correspondent pas.'));
         // Clear the password fields so Chrome doesn't offer to save them.
         $('#reg-password').value = '';
         $('#reg-password2').value = '';
         try {
             const res = await fetch('/api/auth/register', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password })
+                body: JSON.stringify({ firstName, lastName, email, password })
             });
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || uiText('Création de compte impossible.'));
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadSharedHardwareConfig();
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
         } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
     });
 
@@ -1528,20 +1567,15 @@ async function checkAuthAndInit() {
         const res = await fetch('/api/auth/me');
         const data = await res.json();
         if (data && data.authenticated) {
-            showApp(data.email);
-            applyServerProfile(data.profile);
-            await loadPermissionPreference();
-            window.ZaalisWorkspace?.refreshCapabilities(true);
-            await loadUserChats();
-            openSavedProject();
-            syncOllamaModels(); setTimeout(syncOllamaModels, 3000);
-            if (typeof loadGgufModels === 'function') loadGgufModels();
+            await initializeAuthenticatedApp(data);
+            return true;
         } else {
             showAuthOverlay();
         }
     } catch {
         showAuthOverlay();
     }
+    return false;
 }
 
 // ==========================================================
@@ -1557,6 +1591,12 @@ if (sbToggle) {
     const app = $('#app');
     sbToggle.setAttribute('aria-expanded', String(!sidebar.classList.contains('collapsed')));
     sbToggle.addEventListener('click', () => {
+        if (matchMedia('(max-width:900px)').matches) {
+            const expanded = document.body.classList.toggle('ws-mobile-navigation');
+            sbToggle.setAttribute('aria-expanded', String(expanded));
+            window.dispatchEvent(new Event('resize'));
+            return;
+        }
         const collapsed = sidebar.classList.toggle('collapsed');
         app.classList.toggle('sidebar-collapsed', collapsed);
         sbToggle.setAttribute('aria-expanded', String(!collapsed));
@@ -1843,7 +1883,7 @@ function createCustomSelect(selectId, opts) {
     function choose(value) {
         if (select.value !== value) {
             select.value = value;
-            select.dispatchEvent(new Event('change'));
+            select.dispatchEvent(new Event('change', { bubbles: true }));
         }
         closeAllCustomSelects();
     }
@@ -1935,7 +1975,11 @@ function createCustomSelect(selectId, opts) {
     function updateOptions() {
         const selectedOption = select.options[select.selectedIndex];
         triggerText.textContent = selectedOption ? selectedOption.textContent : '';
-        trigger.setAttribute('aria-label', `${opts.label || (select.classList.contains('agent-role-select') ? (state.language === 'en' ? 'Role' : 'Rôle') : selectId === 'ai-model' ? (state.language === 'en' ? 'Provider' : 'Fournisseur') : uiText('Modèle'))} : ${triggerText.textContent}`);
+        const fieldLabel = select.getAttribute('aria-label') || document.querySelector(`label[for="${CSS.escape(selectId)}"]`)?.textContent || [...(select.closest('label')?.childNodes || [])].find(node => node.nodeType === 3)?.textContent?.trim();
+        const fallback = select.classList.contains('agent-role-select') ? (state.language === 'en' ? 'Role' : 'Rôle') : selectId === 'ai-model' ? (state.language === 'en' ? 'Provider' : 'Fournisseur') : selectId === 'ai-submodel' || select.classList.contains('agent-model-select') ? uiText('Modèle') : (state.language === 'en' ? 'Selection' : 'Choix');
+        trigger.setAttribute('aria-label', `${opts.label || fieldLabel || fallback} : ${triggerText.textContent}`);
+        trigger.setAttribute('aria-disabled', String(select.disabled));
+        trigger.tabIndex = select.disabled ? -1 : 0;
         trigger.title = selectedOption ? (selectedOption.title || selectedOption.textContent || '') : '';
         search.hidden = !searchable();
         search.placeholder = allowsCustom()
@@ -1960,7 +2004,7 @@ function createCustomSelect(selectId, opts) {
     function fitDropdown() {
         if (opts.viewport) {
             const rect = trigger.getBoundingClientRect();
-            const width = Math.min(Math.max(rect.width, 240), innerWidth - 24);
+            const width = Math.min(Math.max(rect.width, selectId === 'lang-select' ? 160 : 240), innerWidth - 24);
             const below = innerHeight - rect.bottom - 16;
             const height = Math.min(300, Math.max(below, rect.top - 16));
             Object.assign(optionsContainer.style, { position: 'fixed', margin: '0', width: width + 'px', minWidth: '0', maxHeight: height + 'px', left: Math.max(12, Math.min(rect.left, innerWidth - width - 12)) + 'px', right: 'auto', bottom: 'auto', top: (below >= Math.min(300, optionsContainer.scrollHeight) ? rect.bottom + 6 : Math.max(12, rect.top - Math.min(height, optionsContainer.scrollHeight) - 6)) + 'px' });
@@ -1980,6 +2024,7 @@ function createCustomSelect(selectId, opts) {
     trigger.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (select.disabled) return;
         const isOpen = wrapper.classList.contains('open');
         closeAllCustomSelects();
         if (!isOpen) {
@@ -1998,6 +2043,11 @@ function createCustomSelect(selectId, opts) {
     trigger.addEventListener('keydown', e => {
         if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); trigger.click(); }
         if (e.key === 'Escape') { closeAllCustomSelects(); trigger.focus(); }
+        if (['ArrowDown', 'ArrowUp'].includes(e.key) && !select.disabled) {
+            e.preventDefault(); if (!wrapper.classList.contains('open')) trigger.click();
+            const options = [...list.querySelectorAll('.custom-select-option:not(.disabled)')];
+            (e.key === 'ArrowUp' ? options.at(-1) : options[0])?.focus();
+        }
     });
 
     // Re-creating the dropdown for the same <select> must not stack observers
@@ -2006,7 +2056,7 @@ function createCustomSelect(selectId, opts) {
     const observer = new MutationObserver(() => {
         updateOptions();
     });
-    observer.observe(select, { childList: true, characterData: true, subtree: true });
+    observer.observe(select, { childList: true, characterData: true, subtree: true, attributes: true, attributeFilter: ['disabled'] });
     select.addEventListener('change', updateOptions);
     document.addEventListener('zaalis-language-changed', updateOptions);
     select._customSelectCleanup = () => {
@@ -2015,6 +2065,7 @@ function createCustomSelect(selectId, opts) {
         document.removeEventListener('zaalis-language-changed', updateOptions);
     };
 
+    select._customSelectRefresh = updateOptions;
     updateOptions();
 }
 

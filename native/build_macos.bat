@@ -40,7 +40,7 @@ call npx pkg . --no-bytecode --public --public-packages "*" --targets node22-mac
 if errorlevel 1 goto :failed
 
 echo [4/10] Packaging macOS x64 CLI...
-call npx pkg cli.js --no-bytecode --public --public-packages "*" --targets node22-macos-x64 --output "%SERVERDIST%\bin\zaalis"
+call npx pkg src/app/cli.js --no-bytecode --public --public-packages "*" --targets node22-macos-x64 --output "%SERVERDIST%\bin\zaalis"
 if errorlevel 1 goto :failed
 
 echo [5/10] Copying macOS x64 assets...
@@ -69,7 +69,7 @@ call npx pkg . --no-bytecode --public --public-packages "*" --targets node22-mac
 if errorlevel 1 goto :failed
 
 echo [8/10] Packaging macOS arm64 CLI...
-call npx pkg cli.js --no-bytecode --public --public-packages "*" --targets node22-macos-arm64 --output "%SERVERDIST%\bin\zaalis"
+call npx pkg src/app/cli.js --no-bytecode --public --public-packages "*" --targets node22-macos-arm64 --output "%SERVERDIST%\bin\zaalis"
 if errorlevel 1 goto :failed
 
 echo [9/10] Copying macOS arm64 assets...

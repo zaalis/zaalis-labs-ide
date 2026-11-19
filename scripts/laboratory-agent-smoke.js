@@ -1,6 +1,6 @@
 'use strict';
 const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto'),http=require('node:http'),assert=require('node:assert/strict');
-const {VmManager}=require('../vm-manager'),{Laboratory}=require('../laboratory'),{RustAgentBridge}=require('../rust-agent-bridge');
+const {VmManager}=require('../src/laboratory/vm-manager'),{Laboratory}=require('../src/laboratory/laboratory'),{RustAgentBridge}=require('../src/agent/rust-agent-bridge');
 const base=path.resolve(__dirname,'..'),data=path.join(base,'.tmp','lab-agent-'+Date.now()),root=path.join(data,'fixture');fs.mkdirSync(root,{recursive:true});
 fs.writeFileSync(path.join(root,'app.cs'),'public class AgentProof { public static string Run() { return "AGENT_LAB_OK"; } }');
 function configuredKey(){for(const dir of [path.join(base,'server-data'),path.join(process.env.LOCALAPPDATA,'zaalis/server-data')]){try{const user=JSON.parse(fs.readFileSync(path.join(dir,'users.json'))).find(x=>x.apiKeys?.mistral);if(!user)continue;const vault=crypto.scryptSync(fs.readFileSync(path.join(dir,'secret'),'utf8'),'zaalis-api-key-vault',32),[iv,blob,tag]=user.apiKeys.mistral.split('.').map(x=>Buffer.from(x,'base64')),d=crypto.createDecipheriv('aes-256-gcm',vault,iv);d.setAuthTag(tag);return Buffer.concat([d.update(blob),d.final()]).toString('utf8');}catch{}}throw Error('Clé Mistral configurée absente.');}

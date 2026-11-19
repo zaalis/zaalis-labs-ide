@@ -1,0 +1,53 @@
+name: Build Linux x64
+
+on:
+  push:
+    branches: [linux]
+    paths-ignore:
+      - 'docs/reports/linux-sync-2026-11-19.md'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Build Linux packages
+        run: sh native/build_linux.sh
+
+      - name: Verify package and executable layout
+        run: |
+          bundle=native/dist-linux/resources/app/bundle
+          for file in zaalis-server zaalis-agentd zaalis-sandbox bin/zaalis whisper/whisper-cli messenger-runtime/node github/gh cloudflared; do
+            test -x "$bundle/$file"
+          done
+          "$bundle/bin/zaalis" --version
+          test -x native/dist-linux/zaalis-ide
+          dpkg-deb --info native/installer/zaalis-linux-x64.deb
+          tar -tzf native/installer/zaalis-linux-x64.tar.gz > "$RUNNER_TEMP/zaalis-tar-files"
+          grep -Fx './resources/app/bundle/bin/zaalis' "$RUNNER_TEMP/zaalis-tar-files"
+          (cd native/installer && sha256sum zaalis-linux-x64.deb zaalis-linux-x64.tar.gz > SHA256SUMS)
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: zaalis-linux-x64
+          path: |
+            native/installer/zaalis-linux-x64.deb
+            native/installer/zaalis-linux-x64.tar.gz
+            native/installer/SHA256SUMS
+          if-no-files-found: error
+
+      - name: Test the packaged server and its PTY
+        run: node test/package-smoke.js native/dist-linux/resources/app/bundle/zaalis-server
+
+      - name: Run application tests on Linux
+        run: npm test
