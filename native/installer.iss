@@ -6,10 +6,10 @@
 ; =====================================================================
 [Setup]
 AppName=zaalis IDE
-AppVersion=v1.0.16
-AppVerName=zaalis IDE v1.0.16
-VersionInfoVersion=1.0.16
-VersionInfoProductVersion=1.0.16
+AppVersion=v1.0.17
+AppVerName=zaalis IDE v1.0.17
+VersionInfoVersion=1.0.17
+VersionInfoProductVersion=1.0.17
 AppPublisher=zaalis
 DefaultDirName={localappdata}\Programs\zaalis
 DefaultGroupName=zaalis IDE
@@ -38,19 +38,37 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
 Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-WelcomeLabel1=Bienvenue dans zaalis IDE
-WelcomeLabel2=Votre espace de création, de code et d'agents IA est prêt à prendre place sur ce PC.%n%nContinuez pour installer l'application et ses composants dans votre dossier utilisateur.
-ClickNext=Cliquez sur Continuer pour poursuivre ou sur Annuler pour quitter l'installation.
-WizardReady=Votre espace est prêt
-ReadyLabel1=zaalis IDE peut maintenant être installé.
-ReadyLabel2b=Les raccourcis seront créés sur le Bureau et dans le menu Démarrer. Cliquez sur Installer pour continuer.
-WizardInstalling=Installation de zaalis IDE
-InstallingLabel=Nous mettons en place votre espace de travail. Cela peut prendre quelques instants.
-FinishedHeadingLabel=zaalis IDE est prêt
-FinishedLabel=Installation terminée. Lancez zaalis IDE depuis le Bureau ou le menu Démarrer pour commencer.
-ButtonNext=&Continuer >
+french.WelcomeLabel1=Bienvenue dans zaalis IDE
+french.WelcomeLabel2=Votre espace de création, de code et d'agents IA est prêt à prendre place sur ce PC.%n%nContinuez pour installer l'application et ses composants dans votre dossier utilisateur.
+french.ClickNext=Cliquez sur Continuer pour poursuivre ou sur Annuler pour quitter l'installation.
+french.WizardReady=Votre espace est prêt
+french.ReadyLabel1=zaalis IDE peut maintenant être installé.
+french.ReadyLabel2b=Les raccourcis seront créés sur le Bureau et dans le menu Démarrer. Cliquez sur Installer pour continuer.
+french.WizardInstalling=Installation de zaalis IDE
+french.InstallingLabel=Nous mettons en place votre espace de travail. Cela peut prendre quelques instants.
+french.FinishedHeadingLabel=zaalis IDE est prêt
+french.FinishedLabel=Installation terminée. Lancez zaalis IDE depuis le Bureau ou le menu Démarrer pour commencer.
+french.ButtonNext=&Continuer >
+english.WelcomeLabel1=Welcome to zaalis IDE
+english.WelcomeLabel2=Install the tools you need to code and work with AI agents.%n%nContinue to install zaalis IDE and its components in your user folder.
+english.ClickNext=Click Continue to proceed, or Cancel to exit Setup.
+english.WizardReady=Ready to install
+english.ReadyLabel1=zaalis IDE is ready to install.
+english.ReadyLabel2b=Setup will create shortcuts on the desktop and Start menu. Click Install to continue.
+english.WizardInstalling=Installing zaalis IDE
+english.InstallingLabel=Setting up your workspace. This may take a moment.
+english.FinishedHeadingLabel=zaalis IDE is ready
+english.FinishedLabel=Installation is complete. Launch zaalis IDE from the desktop or Start menu.
+english.ButtonNext=&Continue >
+
+[CustomMessages]
+french.LaunchIDE=Lancer zaalis IDE
+english.LaunchIDE=Launch zaalis IDE
+french.UninstallIDE=Desinstaller zaalis IDE
+english.UninstallIDE=Uninstall zaalis IDE
 
 [Files]
 Source: "dist\zaalis.exe";        DestDir: "{app}"; Flags: ignoreversion
@@ -82,12 +100,12 @@ Source: "dist\zaalis-terminal.exe";    DestDir: "{app}\bin"; DestName: "zaalis.e
 ; so it launches the app wherever the shortcut itself is moved.
 Name: "{userdesktop}\zaalis IDE";              Filename: "{app}\zaalis.exe"; WorkingDir: "{app}"
 Name: "{group}\zaalis IDE";                    Filename: "{app}\zaalis.exe"; WorkingDir: "{app}"
-Name: "{group}\Desinstaller zaalis IDE";       Filename: "{uninstallexe}"
+Name: "{group}\{cm:UninstallIDE}";       Filename: "{uninstallexe}"
 
 [Run]
 ; Lancement manuel (installation interactive) — case a cocher en fin d'assistant.
 ; En mise a jour silencieuse, c'est le script de l'app (bat) qui relance l'IDE.
-Filename: "{app}\zaalis.exe"; Description: "Lancer zaalis IDE"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\zaalis.exe"; Description: "{cm:LaunchIDE}"; Flags: nowait postinstall skipifsilent
 
 [Registry]
 ; Ajoute {app}\bin au PATH utilisateur (HKCU, sans admin) pour la commande `zaalis`.
@@ -116,7 +134,7 @@ begin
   begin
     ReleaseShortcut(ExpandConstant('{userdesktop}\zaalis IDE.lnk'));
     ReleaseShortcut(ExpandConstant('{group}\zaalis IDE.lnk'));
-    ReleaseShortcut(ExpandConstant('{group}\Desinstaller zaalis IDE.lnk'));
+    ReleaseShortcut(ExpandConstant('{group}\{cm:UninstallIDE}.lnk'));
   end;
 end;
 

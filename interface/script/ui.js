@@ -1488,7 +1488,7 @@ function setupAuth() {
         withBusyButton($('#forgot-form'), async () => {
             try {
                 const res = await fetch('/api/auth/password-reset/request', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email })
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, language: state.language })
                 });
                 const data = await res.json().catch(() => ({}));
                 if (!res.ok) return showAuthError(data.error || uiText('Ouverture impossible pour le moment.'));

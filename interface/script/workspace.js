@@ -141,12 +141,12 @@
     const memoryButton = button(text('Mémoire des corrections', 'Correction memory'), 'memory', () => window.openCorrectionMemory?.(), 'ws-icon-button');
 
     document.querySelector('.topbar-left').append(modeControl);
-    const version = el('span', 'ws-version', 'v1.0.16');
+    const version = el('span', 'ws-version', 'V1.0.17');
     version.id = 'app-version';
     modeControl.after(version);
     version.before(memoryButton);
     fetch('/api/version').then(response => response.ok ? response.json() : null)
-        .then(data => { if (data?.version) version.textContent = `v${String(data.version).replace(/^v/i, '')}`; })
+        .then(data => { if (data?.version) version.textContent = `V${String(data.version).replace(/^v/i, '')}`; })
         .catch(() => {});
     const updateButton = byId('app-update-btn');
     if (updateButton) memoryButton.before(updateButton);

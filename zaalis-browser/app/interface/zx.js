@@ -23,7 +23,7 @@
     return new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       post(name, id, JSON.stringify(params || {}));
-      setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error('Délai dépassé (' + name + ')')); } }, 120000);
+      setTimeout(() => { if (pending.has(id)) { pending.delete(id); reject(new Error(text('Délai dépassé', 'Request timed out') + ' (' + name + ')')); } }, 120000);
     });
   }
   function on(type, cb) { if (!listeners.has(type)) listeners.set(type, new Set()); listeners.get(type).add(cb); }
@@ -32,7 +32,7 @@
     if (!d || typeof d !== 'object') return;
     if (d.type === 'rpc' && pending.has(d.id)) {
       const p = pending.get(d.id); pending.delete(d.id);
-      d.ok ? p.resolve(d.result) : p.reject(new Error(d.error || 'Erreur'));
+      d.ok ? p.resolve(d.result) : p.reject(new Error(d.error || text('Erreur', 'Error')));
       return;
     }
     const set = listeners.get(d.type);
@@ -41,6 +41,7 @@
 
   const $ = (id) => document.getElementById(id);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const text = (fr, en) => document.documentElement.lang === 'en' ? en : fr;
   let toastEl = null, toastTimer = 0;
   function toast(text) {
     if (!toastEl) { toastEl = document.createElement('div'); toastEl.className = 'zx-toast'; document.body.appendChild(toastEl); }
@@ -72,12 +73,18 @@
   const confirm = (title, text, opts) => dialog(title, '<p class="zx-muted">' + esc(text) + '</p>', opts);
   function fmtBytes(n) {
     n = Number(n) || 0;
-    if (n < 1024) return n + ' o';
-    const u = ['Ko', 'Mo', 'Go', 'To']; let i = -1;
+    if (n < 1024) return n + text(' o', ' B');
+    const u = text(['Ko', 'Mo', 'Go', 'To'], ['KB', 'MB', 'GB', 'TB']); let i = -1;
     do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
-    return n.toFixed(n < 10 ? 1 : 0).replace('.', ',') + ' ' + u[i];
+    return n.toLocaleString(text('fr-FR', 'en'), { minimumFractionDigits: n < 10 ? 1 : 0, maximumFractionDigits: n < 10 ? 1 : 0 }) + ' ' + u[i];
   }
-  function fmtDate(ts) { try { return new Date(ts).toLocaleString('fr-FR', { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return ''; } }
+  function fmtDate(ts) { try { return new Date(ts).toLocaleString(text('fr-FR', 'en'), { dateStyle: 'medium', timeStyle: 'short' }); } catch (e) { return ''; } }
 
-  window.zx = { post, call, on, $, esc, toast, dialog, confirm, fmtBytes, fmtDate, available: !!bridge };
+  function languageName(code, fallback) {
+    if (!code || document.documentElement.lang !== 'en') return fallback;
+    try { return new Intl.DisplayNames(['en'], { type: 'language' }).of(code) || fallback; }
+    catch { return fallback; }
+  }
+
+  window.zx = { text, languageName, post, call, on, $, esc, toast, dialog, confirm, fmtBytes, fmtDate, available: !!bridge };
 })();
