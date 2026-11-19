@@ -24,6 +24,9 @@ async function main() {
     try { if ((await fetch(base)).ok) break; } catch {}
     await new Promise(resolve => setTimeout(resolve, 50));
   }
+  const health = await fetch(base + '/api/health');
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true, apiRevision: 'desktop-launcher-v2' });
   const home = await fetch(base);
   assert.equal(home.status, 200);
   const page = await home.text();

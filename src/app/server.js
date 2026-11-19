@@ -570,6 +570,11 @@ app.use((req, res, next) => {
   next();
 });
 
+// Native launchers use this response to recognize the local IDE server.
+app.get('/api/health', (_req, res) => {
+  res.json({ ok: true, apiRevision: 'desktop-launcher-v2' });
+});
+
 app.use(express.json({ limit: '50mb' }));
 // The web interface (index.html, css, js) lives in the interface/ folder.
 app.use(express.static(path.join(APP_DIR, 'interface'), {
