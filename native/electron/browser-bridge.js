@@ -63,6 +63,7 @@ class ElectronBrowserBridge {
               downloads: app.getPath('downloads'), temp: os.tmpdir(), desktop: app.getPath('desktop'),
             } });
             this.notify({ type: 'nativeCapabilities', browser: true });
+            if (this.visible) this.send({ ev: 'panel', visible: true });
             continue;
           }
           this.handle(msg).then(result => { if (msg.id != null) this.send({ re: msg.id, result }); }, error => {

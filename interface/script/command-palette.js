@@ -33,7 +33,8 @@
         event.preventDefault();event.stopImmediatePropagation();run(id);
     }
     document.addEventListener('keydown',shortcut,true);
-    window.chrome?.webview?.addEventListener('message',event=>{
+    const nativeWebview = window.zaalisNative?.webview || window.chrome?.webview;
+    nativeWebview?.addEventListener('message',event=>{
         let message=event.data;if(typeof message==='string'){try{message=JSON.parse(message);}catch{return;}}
         if(message?.type==='uiCommand'&&commands.has(message.command))run(message.command);
     });
