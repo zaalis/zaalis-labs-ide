@@ -1375,11 +1375,44 @@ $('#save-profile').addEventListener('click', () => {
 //  AUTHENTICATION (mandatory login at startup)
 // ==========================================================
 function showAuthError(msg) {
+    $('#auth-notice')?.classList.remove('show');
     const el = $('#auth-error');
     el.textContent = msg;
     el.classList.add('show');
 }
-function hideAuthError() { $('#auth-error').classList.remove('show'); }
+function showAuthNotice(msg) {
+    $('#auth-error').classList.remove('show');
+    const el = $('#auth-notice');
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add('show');
+}
+function hideAuthError() {
+    $('#auth-error').classList.remove('show');
+    $('#auth-notice')?.classList.remove('show');
+    $$('#auth-overlay [aria-invalid="true"]').forEach(input => input.removeAttribute('aria-invalid'));
+}
+// Same rule as the server: 8 characters, a letter and a digit.
+function authPasswordProblem(password) {
+    if (password.length < 8) return uiText('Le mot de passe doit contenir au moins 8 caractères.');
+    if (!/[A-Za-zÀ-ÿ]/.test(password) || !/\d/.test(password)) return uiText('Le mot de passe doit contenir au moins une lettre et un chiffre.');
+    return '';
+}
+function authInvalid(input, message) {
+    input.setAttribute('aria-invalid', 'true');
+    input.focus();
+    showAuthError(message);
+}
+function showAuthForm(id) {
+    hideAuthError();
+    ['login-form', 'register-form', 'forgot-form'].forEach(form => $('#' + form)?.classList.toggle('hidden', form !== id));
+    $(`#${id} input`)?.focus();
+}
+async function withBusyButton(form, task) {
+    const button = form.querySelector('.auth-submit');
+    button.disabled = true;
+    try { await task(); } finally { button.disabled = false; }
+}
 
 function showApp(email) {
     $('#auth-overlay').classList.add('hidden');
@@ -1434,18 +1467,43 @@ function initializeAuthenticatedApp(data) {
 }
 
 function setupAuth() {
-    // Toggle between login and register forms.
-    $('#show-register').addEventListener('click', e => {
+    // Switch between the login, register and forgotten-password forms.
+    $('#show-register').addEventListener('click', e => { e.preventDefault(); showAuthForm('register-form'); });
+    $('#show-login').addEventListener('click', e => { e.preventDefault(); showAuthForm('login-form'); });
+    $('#show-forgot')?.addEventListener('click', e => {
         e.preventDefault();
-        hideAuthError();
-        $('#login-form').classList.add('hidden');
-        $('#register-form').classList.remove('hidden');
+        const email = $('#login-email').value.trim();
+        showAuthForm('forgot-form');
+        if (email) $('#forgot-email').value = email;
     });
-    $('#show-login').addEventListener('click', e => {
+    $('#forgot-back')?.addEventListener('click', e => { e.preventDefault(); showAuthForm('login-form'); });
+
+    // Forgotten password: the server opens a temporary page in this PC's
+    // browser; if it cannot, the interface opens it itself.
+    $('#forgot-form')?.addEventListener('submit', e => {
         e.preventDefault();
         hideAuthError();
-        $('#register-form').classList.add('hidden');
-        $('#login-form').classList.remove('hidden');
+        const input = $('#forgot-email'), email = input.value.trim();
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authInvalid(input, uiText('Adresse email invalide.'));
+        withBusyButton($('#forgot-form'), async () => {
+            try {
+                const res = await fetch('/api/auth/password-reset/request', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email })
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) return showAuthError(data.error || uiText('Ouverture impossible pour le moment.'));
+                showAuthNotice(data.message);
+                if (!data.opened && data.url) {
+                    // Same origin page: no noopener, so a blocked pop-up can be detected.
+                    const win = window.open(data.url, '_blank');
+                    if (!win) {
+                        const link = Object.assign(document.createElement('a'), { href: data.url, target: '_blank', textContent: uiText('Ouvrir la fenêtre de réinitialisation') });
+                        link.className = 'auth-notice-link';
+                        $('#auth-notice').append(document.createElement('br'), link);
+                    }
+                }
+            } catch { showAuthError(uiText('Erreur de connexion au serveur.')); }
+        });
     });
 
     // Login
@@ -1470,18 +1528,25 @@ function setupAuth() {
     $('#register-form').addEventListener('submit', async e => {
         e.preventDefault();
         hideAuthError();
+        const firstName = $('#reg-firstname').value.trim();
+        const lastName = $('#reg-lastname').value.trim();
         const email = $('#reg-email').value.trim();
         const password = $('#reg-password').value;
         const password2 = $('#reg-password2').value;
-        if (password.length < 6) return showAuthError(uiText('Mot de passe trop court (6 caractères minimum).'));
-        if (password !== password2) return showAuthError(uiText('Les deux mots de passe ne correspondent pas.'));
+        const nameRule = /^\p{L}[\p{L}\p{M}' .-]{0,59}$/u;
+        if (!nameRule.test(firstName)) return authInvalid($('#reg-firstname'), uiText('Indiquez votre prénom.'));
+        if (!nameRule.test(lastName)) return authInvalid($('#reg-lastname'), uiText('Indiquez votre nom.'));
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return authInvalid($('#reg-email'), uiText('Adresse email invalide.'));
+        const weak = authPasswordProblem(password);
+        if (weak) return authInvalid($('#reg-password'), weak);
+        if (password !== password2) return authInvalid($('#reg-password2'), uiText('Les deux mots de passe ne correspondent pas.'));
         // Clear the password fields so Chrome doesn't offer to save them.
         $('#reg-password').value = '';
         $('#reg-password2').value = '';
         try {
             const res = await fetch('/api/auth/register', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ email, password })
+                body: JSON.stringify({ firstName, lastName, email, password })
             });
             const data = await res.json();
             if (!res.ok) return showAuthError(data.error || uiText('Création de compte impossible.'));

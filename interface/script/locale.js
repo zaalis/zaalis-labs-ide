@@ -1,6 +1,10 @@
 // Explicit translations for UI copy. Project files and conversation content are never translated.
 const UI_EN = {
   "Action impossible": "Action failed",
+  "Le mot de passe doit contenir au moins 8 caractères.": "The password must be at least 8 characters long.",
+  "Le mot de passe doit contenir au moins une lettre et un chiffre.": "The password must contain at least one letter and one digit.",
+  "Indiquez votre prénom.": "Enter your first name.",
+  "Indiquez votre nom.": "Enter your last name.",
   "Lien non ouvert": "Link not opened",
   "Le navigateur externe n’a pas pu être lancé. Copiez le lien pour l’ouvrir vous-même.": "The external browser could not be started. Copy the link to open it yourself.",
   "Le navigateur intégré n’a pas pu ouvrir cette page. Réessayez, ou copiez le lien avec un clic droit.": "The integrated browser could not open this page. Try again, or copy the link with a right-click.",

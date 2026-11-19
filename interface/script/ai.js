@@ -34,6 +34,17 @@ async function loadPermissionPreference() {
         const response = await fetch('/api/preferences');
         if (!response.ok) return;
         const preference = await response.json();
+        // The server holds the channel (it gates beta features): the interface
+        // follows it. A beta choice made before the server knew it is sent once.
+        if (preference.updateChannel === null && state.config.updateChannel === 'beta') {
+            const synced = await fetch('/api/preferences', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ updateChannel: 'beta' }) }).catch(() => null);
+            if (synced && synced.ok && typeof loadCompatProviders === 'function') loadCompatProviders();
+        } else if (['stable', 'beta'].includes(preference.updateChannel) && state.config.updateChannel !== preference.updateChannel) {
+            state.config.updateChannel = preference.updateChannel;
+            saveState();
+            const channel = document.getElementById('settings-channel-select');
+            if (channel) { channel.value = preference.updateChannel; channel._customSelectRefresh?.(); }
+        }
         if (['plan', 'supervised', 'semi', 'auto'].includes(preference.permissionMode)) {
             setPermissionMode(preference.permissionMode, false);
         } else {

@@ -24,6 +24,10 @@ const PROVIDERS = Object.freeze([
     models: ['grok-4.7', 'grok-4.6'] },
   { id: 'minimax-sub', label: 'MiniMax (abonnement)', baseUrl: 'https://api.minimax.io/anthropic/v1', oauth: 'minimax',
     models: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed'] },
+  // Beta channel only. Google Cloud credentials (service account key or gcloud
+  // ADC) instead of a key; reached through a loopback adapter (vertex-ai.js).
+  { id: 'vertex', label: 'Google Vertex AI (bêta)', baseUrl: 'https://aiplatform.googleapis.com', vertex: true, beta: true, context: 1048576,
+    models: ['google/gemini-4-neon', 'google/gemini-4-carbon', 'google/gemini-4-argon', 'google/gemini-4-hydrogen', 'google/gemini-3.8-flash', 'google/gemini-3.1-pro-preview'] },
   { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
   { id: 'deepseek', label: 'DeepSeek', baseUrl: 'https://api.deepseek.com/v1', models: ['deepseek-v4-pro', 'deepseek-flash'] },
   { id: 'zai', label: 'Z.AI (GLM)', baseUrl: 'https://api.z.ai/api/paas/v4',
@@ -129,7 +133,7 @@ function capabilities(provider, model, ready) {
     // Reasoning streamed back by the model is displayed; nothing is requested,
     // because the knob differs from one gateway to the next.
     reasoning: { mode: 'native', supported: false, levels: [] },
-    contextWindow: 128000,
+    contextWindow: entry.context || 128000,
     tools: true,
     vision: /(^|[-/_.])(vl|vision|omni)([-/_.]|$)|glm-5v|gemini|claude|gpt-[56]/.test(lower),
     ready: !!ready,

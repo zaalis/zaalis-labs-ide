@@ -17,6 +17,8 @@ const { mobileAllowed, tunnelRouteAllowed } = require('../agent/tunnel-policy');
 const { registerSecret } = require('../agent/secrets-mask');
 const modelCatalog = require('../accounts/model-catalog');
 const compatProviders = require('../accounts/compat-providers');
+const vertexAi = require('../accounts/vertex-ai');
+const passwordReset = require('../services/password-reset');
 const chatgptSubscription = require('../accounts/chatgpt-subscription');
 const { beginSignIn } = require('../accounts/chatgpt-sign-in');
 const { SkillsStore } = require('../agent/skills-store');
@@ -236,17 +238,20 @@ function safeEqual(a, b) {
   const ba = Buffer.from(String(a)), bb = Buffer.from(String(b));
   return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
 }
-function makeToken(userId) {
-  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
-  return userId + '.' + sig;
+// A password reset bumps the account's sessionEpoch: every cookie signed
+// before it stops working. Epoch 0 keeps the historical signature.
+function sessionSignature(userId, epoch = 0) {
+  return crypto.createHmac('sha256', SESSION_SECRET).update(Number(epoch) > 0 ? `${userId}:${Number(epoch)}` : userId).digest('hex');
 }
-function verifyToken(token) {
+function makeToken(userId, epoch = 0) {
+  return userId + '.' + sessionSignature(userId, epoch);
+}
+function verifyToken(token, epochFor = () => 0) {
   if (!token || !token.includes('.')) return null;
   const idx = token.lastIndexOf('.');
   const userId = token.slice(0, idx);
   const sig = token.slice(idx + 1);
-  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(userId).digest('hex');
-  return safeEqual(sig, expected) ? userId : null;
+  return safeEqual(sig, sessionSignature(userId, epochFor(userId))) ? userId : null;
 }
 function parseCookies(req) {
   const out = {};
@@ -263,9 +268,10 @@ function clearSessionCookie(res) {
   res.setHeader('Set-Cookie', `${COOKIE_NAME}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
 }
 function currentUser(req) {
-  const userId = verifyToken(parseCookies(req)[COOKIE_NAME]);
+  const users = loadUsers();
+  const userId = verifyToken(parseCookies(req)[COOKIE_NAME], (id) => (users.find((u) => u.id === id) || {}).sessionEpoch || 0);
   if (!userId) return null;
-  return loadUsers().find((u) => u.id === userId) || null;
+  return users.find((u) => u.id === userId) || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -579,11 +585,24 @@ app.use(express.static(path.join(APP_DIR, 'interface'), {
 // ---------------------------------------------------------------------------
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
+const NAME_RE = /^\p{L}[\p{L}\p{M}' .-]{0,59}$/u;
+const cleanName = (value) => String(value || '').normalize('NFC').replace(/\s+/g, ' ').trim();
 app.post('/api/auth/register', (req, res) => {
   const { email, password } = req.body || {};
+  const firstName = cleanName(req.body && req.body.firstName);
+  const lastName = cleanName(req.body && req.body.lastName);
   const emailNorm = String(email || '').trim().toLowerCase();
+  // The sign-up form always sends both names (and enforces the strong
+  // password rule). Older clients (CLI, scripts) may omit them: accepted, but
+  // a name that is sent must be valid.
+  const named = !!(firstName || lastName);
+  if (named && !NAME_RE.test(firstName)) return res.status(400).json({ error: 'Indiquez votre prénom (lettres, espaces, tirets ou apostrophes).' });
+  if (named && !NAME_RE.test(lastName)) return res.status(400).json({ error: 'Indiquez votre nom (lettres, espaces, tirets ou apostrophes).' });
   if (!EMAIL_RE.test(emailNorm)) return res.status(400).json({ error: 'Adresse email invalide.' });
-  if (String(password || '').length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caracteres minimum).' });
+  if (named) {
+    const weak = passwordReset.passwordProblem(password);
+    if (weak) return res.status(400).json({ error: weak });
+  } else if (String(password || '').length < 6) return res.status(400).json({ error: 'Mot de passe trop court (6 caracteres minimum).' });
 
   const users = loadUsers();
   if (users.some((u) => u.email === emailNorm)) return res.status(409).json({ error: 'Un compte existe deja avec cet email.' });
@@ -596,7 +615,8 @@ app.post('/api/auth/register', (req, res) => {
     hash: hashPassword(password, salt),
     createdAt: new Date().toISOString(),
     profile: {
-      pseudo: emailNorm.split('@')[0],
+      pseudo: firstName || emailNorm.split('@')[0],
+      ...(named ? { firstName, lastName } : {}),
       photo: ''
     }
   };
@@ -623,13 +643,68 @@ app.post('/api/auth/login', (req, res) => {
     if (i >= 0) { users[i].lastLoginAt = new Date().toISOString(); saveUsers(users); }
   } catch {}
   lastActiveUserId = user.id;
-  setSessionCookie(res, makeToken(user.id));
+  setSessionCookie(res, makeToken(user.id, user.sessionEpoch || 0));
   res.json({ email: user.email, profile: user.profile || { pseudo: user.email.split('@')[0], photo: '' } });
 });
 
 app.post('/api/auth/logout', (req, res) => {
   clearSessionCookie(res);
   res.json({ success: true });
+});
+
+// ---------------------------------------------------------------------------
+// PASSWORD RESET (in the browser of this PC)
+// ---------------------------------------------------------------------------
+// No e-mail: the IDE opens a temporary page in the default browser of this
+// computer. Accounts and the server are local to this PC, so whoever can use
+// it can already reach the data; the page is single-use and expires.
+function resetLink(token) { return `http://127.0.0.1:${PORT}/reset-password.html#token=${token}`; }
+
+app.post('/api/auth/password-reset/request', (req, res) => {
+  if (req.isTunnel) return res.status(403).json({ error: 'Réinitialisation disponible uniquement sur ce PC.' });
+  const emailNorm = String((req.body && req.body.email) || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(emailNorm)) return res.status(400).json({ error: 'Adresse email invalide.' });
+  const users = loadUsers();
+  const user = users.find((u) => u.email === emailNorm);
+  if (!user) return res.status(404).json({ error: 'Aucun compte n’utilise cette adresse sur cet ordinateur.' });
+  const previous = user.passwordReset;
+  if (previous && Date.now() - Number(previous.requestedAt || 0) < passwordReset.RESEND_DELAY_MS) {
+    return res.status(429).json({ error: 'Une fenêtre de réinitialisation vient d’être ouverte. Patientez quelques secondes avant d’en demander une autre.' });
+  }
+  // A new request replaces the previous link.
+  const { token, record } = passwordReset.createToken();
+  user.passwordReset = record;
+  saveUsers(users);
+  const url = resetLink(token);
+  const opened = process.env.ZAALIS_NO_EXTERNAL_BROWSER === '1' ? false : openInExternalBrowser(url);
+  if (!opened) {
+    errorJournal.record({ source: 'password-reset', code: 'browser_not_opened', message: 'Le navigateur du PC n’a pas pu être ouvert automatiquement.', userId: user.id });
+    // The interface opens the page itself as a fallback.
+    return res.json({ ok: true, opened: false, url, message: 'Ouvrez la fenêtre de réinitialisation pour choisir un nouveau mot de passe (valable 30 minutes).' });
+  }
+  res.json({ ok: true, opened: true, message: 'Une fenêtre vient de s’ouvrir dans votre navigateur : choisissez-y votre nouveau mot de passe (valable 30 minutes).' });
+});
+app.post('/api/auth/password-reset/check', (req, res) => {
+  const user = passwordReset.findByToken(loadUsers(), req.body && req.body.token);
+  if (!user) return res.status(410).json({ error: 'Ce lien a expiré ou a déjà servi. Recommencez depuis « Mot de passe oublié ? » dans zaalis IDE.' });
+  res.json({ ok: true, email: user.email, expiresAt: user.passwordReset.expiresAt });
+});
+app.post('/api/auth/password-reset/confirm', (req, res) => {
+  const users = loadUsers();
+  const user = passwordReset.findByToken(users, req.body && req.body.token);
+  if (!user) return res.status(410).json({ error: 'Ce lien a expiré ou a déjà servi. Recommencez depuis « Mot de passe oublié ? » dans zaalis IDE.' });
+  const password = String((req.body && req.body.password) || '');
+  const weak = passwordReset.passwordProblem(password);
+  if (weak) return res.status(400).json({ error: weak });
+  user.salt = crypto.randomBytes(16).toString('hex');
+  user.hash = hashPassword(password, user.salt);
+  delete user.passwordReset;
+  // Every open session of this account ends: the IDE asks to sign in again.
+  user.sessionEpoch = (Number(user.sessionEpoch) || 0) + 1;
+  user.passwordChangedAt = new Date().toISOString();
+  saveUsers(users);
+  errorJournal.record({ source: 'password-reset', code: 'password_changed', message: 'Mot de passe réinitialisé.', userId: user.id });
+  res.json({ ok: true, message: 'Votre mot de passe a été modifié. Vous pouvez vous connecter dans zaalis IDE.' });
 });
 
 app.get('/api/auth/me', (req, res) => {
@@ -811,6 +886,48 @@ app.post(['/api/internal/chatgpt/v1/chat/completions', '/api/internal/openai/v1/
   }
 });
 
+// Private loopback adapter for Vertex AI (beta channel): the Rust core speaks
+// chat-completions with a per-launch key; this adds the Google access token
+// and relays Vertex AI's OpenAI-compatible stream unchanged.
+app.post('/api/internal/vertex/v1/chat/completions', async (req, res) => {
+  const refuse = (status, message, code, detail = '') => {
+    errorJournal.record({ source: 'vertex-ai', code, message, detail, userId: user && user.id });
+    return res.status(status).json({ error: { message } });
+  };
+  const user = chatgptProxyUser(req);
+  if (!user) return res.status(401).json({ error: { message: 'Jeton Vertex interne invalide.' } });
+  if (!userOnBeta(user)) return refuse(403, 'Vertex AI est disponible uniquement sur le canal Bêta.', 'not_beta');
+  const resolved = vertexCredentials(user);
+  if (!resolved) return refuse(400, 'Vertex AI n’est pas configuré : ajoutez des identifiants Google Cloud et un projet dans Paramètres › API.', 'not_configured');
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableEnded) controller.abort(); });
+  try {
+    const token = await vertexAi.accessToken(resolved.credentials);
+    const body = { ...(req.body || {}) };
+    // Vertex AI names Gemini models "google/<id>".
+    if (body.model && !String(body.model).includes('/')) body.model = `google/${body.model}`;
+    const upstream = await fetch(`${vertexAi.endpointBase(resolved.project, resolved.location)}/chat/completions`, {
+      method: 'POST', signal: controller.signal,
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, 'x-goog-user-project': resolved.project },
+      body: JSON.stringify(body),
+    });
+    if (!upstream.ok) {
+      const detail = (await upstream.text().catch(() => '')).slice(0, 1500);
+      return refuse(upstream.status, vertexAi.upstreamMessage(upstream.status, detail), `upstream_${upstream.status}`, detail);
+    }
+    res.status(200);
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    if (typeof res.flushHeaders === 'function') res.flushHeaders();
+    for await (const chunk of upstream.body) res.write(chunk);
+    return res.end();
+  } catch (error) {
+    if (controller.signal.aborted) return res.end();
+    if (res.headersSent) { try { res.write(`data: ${JSON.stringify({ error: { message: 'Flux Vertex AI interrompu.' } })}\n\n`); } catch {} return res.end(); }
+    return refuse(error.status || 502, error.status ? error.message : 'Vertex AI est injoignable. Vérifiez la connexion Internet.', error.code || 'unreachable', error.stack || error.message);
+  }
+});
+
 app.post('/api/internal/subscription/:provider/v1/chat/completions', async (req, res) => {
   const provider = req.params.provider;
   if (!['xai-sub', 'minimax-sub'].includes(provider)) return res.status(404).json({ error: { message: 'Abonnement inconnu.' } });
@@ -902,17 +1019,29 @@ app.use('/api', (req, res, next) => {
 // users.json lives in the stable user data directory.
 const UI_PERMISSION_MODES = new Set(['plan', 'supervised', 'semi', 'auto']);
 app.get('/api/preferences', (req, res) => {
-  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised' });
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(req.user.permissionMode) ? req.user.permissionMode : 'supervised',
+    // null: never chosen on this server yet (the interface may still hold an older local choice).
+    updateChannel: ['stable', 'beta'].includes(req.user.updateChannel) ? req.user.updateChannel : null });
 });
+// Either field may be sent alone. The update channel also gates beta features
+// (Vertex AI…), so the server, not only the interface, must know it.
 app.put('/api/preferences', (req, res) => {
-  const permissionMode = String(req.body?.permissionMode || '');
-  if (!UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  const body = req.body || {};
+  const hasMode = body.permissionMode !== undefined, hasChannel = body.updateChannel !== undefined;
+  const permissionMode = String(body.permissionMode || '');
+  const updateChannel = String(body.updateChannel || '');
+  if (!hasMode && !hasChannel) return res.status(400).json({ error: 'Aucune préférence à enregistrer.' });
+  if (hasMode && !UI_PERMISSION_MODES.has(permissionMode)) return res.status(400).json({ error: 'Mode invalide.' });
+  if (hasChannel && !['stable', 'beta'].includes(updateChannel)) return res.status(400).json({ error: 'Canal invalide.' });
+  if (hasChannel && (req.isMobile || req.isBrowser || req.isTunnel)) return res.status(403).json({ error: 'Changement de canal réservé au desktop.' });
   const users = loadUsers();
   const user = users.find((entry) => entry.id === req.user.id);
   if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
-  user.permissionMode = permissionMode;
+  if (hasMode) user.permissionMode = permissionMode;
+  if (hasChannel) user.updateChannel = updateChannel;
   saveUsers(users);
-  res.json({ permissionMode });
+  res.json({ permissionMode: UI_PERMISSION_MODES.has(user.permissionMode) ? user.permissionMode : 'supervised',
+    updateChannel: userOnBeta(user) ? 'beta' : 'stable', providers: compatStatus(user) });
 });
 
 // GitHub credentials stay in the encrypted server vault, never in agent prompts.
@@ -1191,6 +1320,30 @@ app.put('/api/keys', (req, res) => {
   }
 });
 
+// Beta features (Vertex AI…) exist only for accounts on the beta channel.
+function userOnBeta(user) { return !!user && user.updateChannel === 'beta'; }
+function availableCompatProviders(user) { return compatProviders.PROVIDERS.filter((provider) => !provider.beta || userOnBeta(user)); }
+
+// Vertex AI: pasted credentials (encrypted like a key) or, on request, the
+// gcloud Application Default Credentials of this PC. Returns null when none
+// is usable; never throws, the status must stay readable.
+function vertexSettings(user) {
+  try { return vertexAi.normalizeSettings((user && user.vertexSettings) || {}); }
+  catch { return { location: 'global', project: '', useAdc: false }; }
+}
+function vertexCredentials(user) {
+  const provider = compatProviders.get('vertex');
+  const pasted = compatKey(user, provider);
+  const settings = vertexSettings(user);
+  const raw = pasted || (settings.useAdc ? vertexAi.readAdc() : '');
+  if (!raw) return null;
+  try {
+    const credentials = vertexAi.parseCredentials(raw);
+    const project = settings.project || credentials.project;
+    return project ? { credentials, project, location: settings.location, source: pasted ? 'key' : 'adc' } : null;
+  } catch { return null; }
+}
+
 // OpenAI-compatible providers: keys live in the same encrypted vault as the
 // built-in ones (`compat:<id>`), URLs of self-hosted entries in compatUrls.
 function compatBaseUrl(user, provider) {
@@ -1204,12 +1357,14 @@ function compatKey(user, provider) {
   return value;
 }
 function compatReady(user, provider) {
+  if (provider.beta && !userOnBeta(user)) return false;
+  if (provider.vertex) return !!vertexCredentials(user);
   if (provider.oauth) return provider.oauth === 'chatgpt' ? !!chatgptSession(user) : !!accountSession(user, provider.oauth);
   if (!compatBaseUrl(user, provider)) return false;
   return provider.keyless ? true : !!compatKey(user, provider);
 }
 function compatStatus(user) {
-  return compatProviders.PROVIDERS.map((provider) => {
+  return availableCompatProviders(user).map((provider) => {
     const key = compatKey(user, provider);
     const status = {
       id: provider.id, label: provider.label, baseUrl: compatBaseUrl(user, provider),
@@ -1219,6 +1374,16 @@ function compatStatus(user) {
       // Keyless local servers only count once the user saved them explicitly.
       configured: provider.keyless ? !!(user.compatUrls && user.compatUrls[provider.id]) || !!key : !!key,
     };
+    if (provider.vertex) {
+      const settings = vertexSettings(user), resolved = vertexCredentials(user);
+      let credentialType = '';
+      try { credentialType = key ? vertexAi.parseCredentials(key).type : ''; } catch {}
+      status.key.last4 = '';
+      status.beta = true;
+      status.vertex = { project: settings.project, location: settings.location, useAdc: settings.useAdc,
+        adcAvailable: !!vertexAi.readAdc(), credentialType, resolvedProject: resolved ? resolved.project : '' };
+      status.configured = !!resolved;
+    }
     if (provider.oauth) {
       // Signed in with an account instead of a key.
       status.oauth = provider.oauth;
@@ -1230,7 +1395,10 @@ function compatStatus(user) {
 // Every configured endpoint goes to the daemon at once, so switching provider
 // does not restart it. The keys travel as separate environment variables.
 function compatEndpointsFor(user) {
-  const endpoints = compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.oauth
+  const endpoints = compatStatus(user).filter((entry) => entry.configured && entry.baseUrl).map((entry) => (entry.vertex
+    // Google Cloud credentials stay here: the daemon calls the loopback adapter.
+    ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/vertex/v1`, key: chatgptProxyKey(user.id) }
+    : entry.oauth
     // The daemon reaches the subscription through the loopback adapter above.
     ? { id: entry.id, base_url: `http://127.0.0.1:${PORT}/api/internal/${entry.oauth === 'chatgpt' ? 'chatgpt' : `subscription/${entry.id}`}/v1`, key: chatgptProxyKey(user.id) }
     : { id: entry.id, base_url: entry.baseUrl, key: compatKey(user, compatProviders.get(entry.id)) || '' }));
@@ -1618,8 +1786,17 @@ app.put('/api/compat/keys', (req, res) => {
     if (!user) return res.status(401).json({ error: 'Authentification requise.' });
     user.apiKeys = user.apiKeys || {};
     user.compatUrls = user.compatUrls || {};
+    const vertexBody = req.body && req.body.vertex;
+    if ((('vertex' in keys) || vertexBody) && !userOnBeta(user)) return res.status(403).json({ error: 'Vertex AI est disponible uniquement sur le canal Bêta (Paramètres › Mises à jour › Canal).' });
+    if (typeof keys.vertex === 'string' && keys.vertex.trim()) {
+      try { vertexAi.parseCredentials(keys.vertex.trim()); } catch (error) { return res.status(400).json({ error: error.message }); }
+    }
+    if (vertexBody && typeof vertexBody === 'object') {
+      try { user.vertexSettings = vertexAi.normalizeSettings(vertexBody); } catch (error) { return res.status(400).json({ error: error.message }); }
+    }
     for (const provider of compatProviders.PROVIDERS) {
       if (provider.oauth) continue;
+      if (provider.beta && !userOnBeta(user)) continue;
       if (provider.id in keys) {
         const value = keys[provider.id];
         if (value === null) delete user.apiKeys[compatProviders.vaultName(provider.id)];
@@ -1653,6 +1830,8 @@ app.get('/api/compat/models', async (req, res) => {
     .update(`${req.user.id}|${provider.id}|${baseUrl}|${key}|${session ? session.connectedAt : ''}`).digest('hex');
   const cached = compatModelCache.get(cacheKey);
   if (cached && Date.now() - cached.at < 10 * 60 * 1000 && !req.query.refresh) return res.json({ models: cached.models, live: true });
+  // Vertex AI has no OpenAI-style model list: the curated list is the catalogue.
+  if (provider.vertex) return res.json({ models: provider.models, live: false });
   if (provider.oauth) {
     if (!session) return res.json({ models: provider.models, live: false });
     try {
