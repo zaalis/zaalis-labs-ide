@@ -82,7 +82,9 @@ test('canonical conversations continue, fork, recall memory, and execute persist
         conversationId: id, sessionId, message, stream: true, persistTurn: true, permissionMode: 'read-only' }),
       signal: AbortSignal.timeout(30000),
     });
-    assert.equal(response.status, 200);
+    if (!response.ok) {
+      assert.fail(`Agent turn failed with HTTP ${response.status}: ${await response.text()}`);
+    }
     const events = [], decoder = new TextDecoder(); let buffer = '';
     for await (const chunk of response.body) {
       buffer += decoder.decode(chunk, { stream: true });
