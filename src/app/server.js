@@ -63,6 +63,14 @@ const TUNNEL_ORIGIN_TOKEN = crypto.randomBytes(32).toString('base64url');
 // When packaged into an .exe (pkg), __dirname points inside the read-only
 // snapshot, so we use the folder next to the executable instead.
 const APP_DIR = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '../..');
+if (process.platform === 'darwin') {
+  // Finder launches the app with a minimal PATH. Child processes need the
+  // Homebrew locations and the GitHub client shipped in the app bundle.
+  const { PATH: toolPath } = platformRuntime.environment();
+  process.env.PATH = process.pkg
+    ? [path.join(APP_DIR, 'github'), toolPath, path.join(APP_DIR, 'messenger-runtime')].join(path.delimiter)
+    : toolPath;
+}
 let APP_VERSION = '0.0.0';
 try {
   APP_VERSION = require('../../package.json').version || APP_VERSION;

@@ -332,10 +332,14 @@ func clipboardWrite(_ text: String) -> Bool {
 func visualSignature(_ image: CGImage) -> String? {
     let width = 64, height = 36
     var pixels = [UInt8](repeating: 0, count: width * height)
-    guard let context = CGContext(data: &pixels, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
-                                  space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return nil }
-    context.interpolationQuality = .medium
-    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let rendered = pixels.withUnsafeMutableBytes { buffer -> Bool in
+        guard let context = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width,
+                                      space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+        context.interpolationQuality = .medium
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return true
+    }
+    guard rendered else { return nil }
     return pixels.map { String(format: "%02x", $0) }.joined()
 }
 

@@ -56,7 +56,9 @@ jobs:
           node --test test/account-reset-vertex.test.js test/agent-activity.test.js \
             test/automation-manager.test.js test/frontend-parity.test.js \
             test/github-integration.test.js test/macos-updater.test.js \
-            test/parity-services.test.js test/preferences.test.js test/search-links.test.js
+            test/mcp-registry.test.js test/model-capabilities.test.js \
+            test/parity-services.test.js test/platform-runtime.test.js \
+            test/preferences.test.js test/search-links.test.js
 
       - name: Upload macOS build log
         if: always()

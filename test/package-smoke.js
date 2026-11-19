@@ -63,15 +63,20 @@ async function main() {
   const terminalResponse = await fetch(`${base}/api/terminal/sessions`, { method: 'POST', headers, body: JSON.stringify({ cwd: dataDir }) });
   assert.equal(terminalResponse.status, 200);
   const terminal = await terminalResponse.json();
+  const terminalCommand = process.platform === 'darwin'
+    ? 'gh --version && echo ZAALIS_PACKAGE_PTY_OK'
+    : 'echo ZAALIS_PACKAGE_PTY_OK';
+  const terminalMarker = process.platform === 'darwin' ? /^ZAALIS_PACKAGE_PTY_OK\r?$/m : /ZAALIS_PACKAGE_PTY_OK/;
   await fetch(`${base}/api/terminal/sessions/${terminal.id}/input`, { method: 'POST', headers,
-    body: JSON.stringify({ data: 'echo ZAALIS_PACKAGE_PTY_OK\r' }) });
+    body: JSON.stringify({ data: `${terminalCommand}\r` }) });
   let terminalOutput = '';
   for (let attempt = 0; attempt < 80; attempt++) {
     terminalOutput = (await (await fetch(`${base}/api/terminal/sessions/${terminal.id}`, { headers })).json()).output || '';
-    if (terminalOutput.includes('ZAALIS_PACKAGE_PTY_OK')) break;
+    if (terminalMarker.test(terminalOutput)) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.match(terminalOutput, /ZAALIS_PACKAGE_PTY_OK/);
+  assert.match(terminalOutput, terminalMarker);
+  if (process.platform === 'darwin') assert.match(terminalOutput, /^gh version /m);
   assert.equal((await fetch(`${base}/api/terminal/sessions/${terminal.id}`, { method: 'DELETE', headers })).status, 200);
   const caps = await (await fetch(`${base}/api/model-capabilities?provider=codex&model=gpt-5.6-sol`, { headers })).json();
   assert.equal(caps.reasoning.supported, true);
