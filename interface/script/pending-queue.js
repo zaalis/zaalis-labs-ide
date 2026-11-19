@@ -20,37 +20,50 @@
         render() {
             const input = document.getElementById(this.inputId);
             if (!input) return;
+            const en = state.language === 'en';
             if (!this.drawer) {
                 this.drawer = document.createElement('section');
                 this.drawer.className = 'chat-pending-drawer draft-queue';
-                this.drawer.setAttribute('aria-label', 'Messages en attente');
                 input.before(this.drawer);
             }
+            this.drawer.setAttribute('aria-label', en ? 'Pending messages' : 'Messages en attente');
             this.drawer.replaceChildren();
             this.drawer.classList.toggle('show', this.items.length > 0);
             input.closest('.chat-input-area')?.classList.toggle('has-pending-chat', this.items.length > 0);
             const title = document.createElement('strong');
-            title.textContent = `${this.items.length} message(s) en attente`;
+            const pendingLabel = en ? (this.items.length === 1 ? "pending message" : "pending messages")
+                : (this.items.length === 1 ? "message en attente" : "messages en attente");
+            title.textContent = `${this.items.length} ${pendingLabel}`;
             this.drawer.append(title);
-            const resume = document.createElement('button'); resume.type = 'button'; resume.textContent = 'Envoyer le prochain';
+            const resume = document.createElement('button'); resume.type = 'button'; resume.textContent = en ? 'Send next' : 'Envoyer le prochain';
             resume.addEventListener('click', () => this.onSend?.()); this.drawer.append(resume);
             this.items.forEach((draft, index) => {
                 const row = document.createElement('div'); row.className = 'draft-queue-row';
                 const field = document.createElement('textarea'); field.value = draft.message;
-                field.setAttribute('aria-label', `Message en attente ${index + 1}`);
+                field.setAttribute('aria-label', (en ? 'Pending message ' : 'Message en attente ') + (index + 1));
                 field.addEventListener('input', () => { draft.message = field.value; });
                 row.append(field);
                 for (const [label, action, disabled] of [
                     ['↑', () => this.move(index, -1), index === 0],
                     ['↓', () => this.move(index, 1), index === this.items.length - 1],
-                    ['Retirer', () => { this.items.splice(index, 1); this.render(); }, false],
+                    [en ? 'Remove' : 'Retirer', () => { this.items.splice(index, 1); this.render(); }, false],
                 ]) {
                     const button = document.createElement('button'); button.type = 'button';
                     button.textContent = label; button.disabled = disabled;
-                    button.setAttribute('aria-label', label === '↑' ? 'Avancer le message' : label === '↓' ? 'Reculer le message' : 'Retirer le message');
+                    const actionLabel = label === '↑' ? (en ? 'Move message up' : 'Avancer le message')
+                        : label === '↓' ? (en ? 'Move message down' : 'Reculer le message')
+                        : (en ? 'Remove message' : 'Retirer le message');
+                    button.setAttribute('aria-label', actionLabel);
                     button.addEventListener('click', action); row.append(button);
                 }
-                if (draft.attachments?.length) { const count = document.createElement('small'); count.textContent = `${draft.attachments.length} pièce(s) jointe(s)`; row.append(count); }
+                if (draft.attachments?.length) {
+                    const count = document.createElement('small');
+                    const total = draft.attachments.length;
+                    const label = en ? (total === 1 ? 'attachment' : 'attachments')
+                        : (total === 1 ? 'pièce jointe' : 'pièces jointes');
+                    count.textContent = `${total} ${label}`;
+                    row.append(count);
+                }
                 this.drawer.append(row);
             });
         }

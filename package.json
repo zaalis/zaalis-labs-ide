@@ -1,6 +1,6 @@
 {
   "name": "connexion-ide",
-  "version": "1.0.16",
+  "version": "1.0.17",
   "description": "Local Zaalis IDE with an Express server, CLI, and native Windows shell.",
   "main": "src/app/server.js",
   "bin": "src/app/server.js",

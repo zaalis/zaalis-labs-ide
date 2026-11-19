@@ -435,7 +435,7 @@ function createElectron(host, hooks = {}) {
     whenReady: () => readyPromise,
     isReady: () => !!app.ready,
     isPackaged: false,
-    getVersion: () => '1.0.16',
+    getVersion: () => '1.0.17',
     configureHostResolver() {},
     setName() {}, setAppUserModelId() {}, setPath() {},
     commandLine: { appendSwitch() {} },

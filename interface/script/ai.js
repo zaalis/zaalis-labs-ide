@@ -1497,7 +1497,7 @@ async function resolveEditRetries(editErrors, model, submodel, isLocal, lang, de
         if (opts.saveKind) saveConversation(opts.saveKind);
     } catch (err) {
         stopThinking(body);
-        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur.'; body.classList.add('error'); }
+        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || uiText('Erreur agent.'); body.classList.add('error'); }
     } finally {
         chatAbort = null;
         setChatBusy(false);
@@ -1563,7 +1563,7 @@ async function resolveReadRequests(response, model, submodel, isLocal, lang, dep
         await resolveReadRequests(data.response, model, submodel, isLocal, lang, depth + 1);
     } catch (err) {
         stopThinking(body);
-        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || 'Erreur.'; body.classList.add('error'); }
+        if (!(err && err.name === 'AbortError')) { body.textContent = TRANSLATIONS[lang]['err-conn'] || uiText('Erreur agent.'); body.classList.add('error'); }
     } finally {
         chatAbort = null;
         setChatBusy(false);
@@ -2022,7 +2022,7 @@ As the Project Lead, synthesize their work, make final decisions, and formulate 
     // Save this agents session to the (separate) agents history.
     saveConversation('agents');
     } catch (error) {
-        addMsg($('#agents-log'), 'system', null, error.name === 'AbortError' ? 'Tâche interrompue.' : error.message);
+        addMsg($('#agents-log'), 'system', null, error.name === 'AbortError' ? uiText('Tâche interrompue.') : error.message);
         saveConversation('agents');
     } finally {
         const wasAborted = agentAbort?.signal.aborted;

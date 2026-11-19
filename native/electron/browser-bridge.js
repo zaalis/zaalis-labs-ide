@@ -17,7 +17,11 @@ class ElectronBrowserBridge {
     this.sessions = new Set(); this.socket = null;
     ipcMain.on('browser-view-message', (event, message) => {
       const entry = [...this.views.values()].find(v => v.view.webContents === event.sender);
-      if (entry) this.send({ ev: 'webMessage', view: entry.id, message: String(message) });
+      if (!entry || event.senderFrame !== event.sender.mainFrame || !URL.canParse(event.senderFrame?.url)) return;
+      const sender = new URL(event.senderFrame.url);
+      if (sender.protocol === 'zaalis:' && sender.hostname === 'home') {
+        this.send({ ev: 'webMessage', view: entry.id, message: String(message) });
+      }
     });
     ipcMain.on('ide-native-message', (event, message) => {
       if (event.sender !== this.window?.webContents || message?.type !== 'browser') return;
@@ -56,6 +60,7 @@ class ElectronBrowserBridge {
               downloads: app.getPath('downloads'), temp: os.tmpdir(), desktop: app.getPath('desktop'),
             } });
             this.notify({ type: 'nativeCapabilities', browser: true });
+            if (this.visible) this.send({ ev: 'panel', visible: true });
             continue;
           }
           this.handle(msg).then(result => { if (msg.id != null) this.send({ re: msg.id, result }); }, error => {

@@ -661,7 +661,10 @@ app.post('/api/auth/logout', (req, res) => {
 // No e-mail: the IDE opens a temporary page in the default browser of this
 // computer. Accounts and the server are local to this PC, so whoever can use
 // it can already reach the data; the page is single-use and expires.
-function resetLink(token) { return `http://127.0.0.1:${PORT}/reset-password.html#token=${token}`; }
+function resetLink(token, language) {
+  const query = language === 'en' ? '?lang=en' : '';
+  return `http://127.0.0.1:${PORT}/reset-password.html${query}#token=${token}`;
+}
 
 app.post('/api/auth/password-reset/request', (req, res) => {
   if (req.isTunnel) return res.status(403).json({ error: 'Réinitialisation disponible uniquement sur ce PC.' });
@@ -678,7 +681,7 @@ app.post('/api/auth/password-reset/request', (req, res) => {
   const { token, record } = passwordReset.createToken();
   user.passwordReset = record;
   saveUsers(users);
-  const url = resetLink(token);
+  const url = resetLink(token, req.body?.language);
   const opened = process.env.ZAALIS_NO_EXTERNAL_BROWSER === '1' ? false : openInExternalBrowser(url);
   if (!opened) {
     errorJournal.record({ source: 'password-reset', code: 'browser_not_opened', message: 'Le navigateur du PC n’a pas pu être ouvert automatiquement.', userId: user.id });
