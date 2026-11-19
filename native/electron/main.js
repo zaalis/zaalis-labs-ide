@@ -381,7 +381,9 @@ function createWindow(port) {
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     const url = webContents.getURL();
     const allowedOrigin = url.startsWith(baseUrl);
-    callback(allowedOrigin && (permission === 'media' || permission === 'audioCapture'));
+    // Writing to the clipboard ("Copier le lien", copy buttons) is allowed for
+    // the IDE itself; reading it stays refused.
+    callback(allowedOrigin && ['media', 'audioCapture', 'clipboard-sanitized-write'].includes(permission));
   });
 
   mainWindow = new BrowserWindow({

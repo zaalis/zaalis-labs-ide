@@ -57,7 +57,7 @@ impl OpenAiConfig {
         let (base_url, default_model, reasoning, capabilities) = match provider {
             ProviderId::Codex => (
                 "https://api.openai.com/v1",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 ReasoningStyle::Effort,
                 Capabilities {
                     reasoning: true,

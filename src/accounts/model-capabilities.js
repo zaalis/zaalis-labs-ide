@@ -34,7 +34,7 @@ function modelCapabilities(provider, model, options = {}) {
     if (/opus|sonnet|fable/.test(lower)) result.reasoning.mode = 'effort';
   } else if (id === 'gemini') {
     result.vision = true;
-    if (/2\.5|^gemini-3|thinking/.test(lower)) result.reasoning.mode = 'effort';
+    if (/2\.5|^gemini-[34]|thinking/.test(lower)) result.reasoning.mode = 'effort';
   } else if (id === 'mistral') {
     // The current Mistral adapter receives native thinking but does not send
     // an adjustable reasoning_effort. The interface must not imply otherwise.

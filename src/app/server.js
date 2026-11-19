@@ -33,6 +33,8 @@ const { TaskService } = require('../services/task-service');
 const { registerParityRoutes } = require('../services/parity-routes');
 const { runAgentRequest } = require('../services/agent-request');
 const { workspaceServiceAction } = require('../services/workspace-services');
+const { ErrorJournal } = require('../services/error-journal');
+const { rankSearchResults } = require('../services/search-ranking');
 // QR generation for the phone remote-control pairing. Guarded so a missing
 // install never prevents the server from booting.
 let QRCode = null;
@@ -90,6 +92,7 @@ const { Laboratory } = require('../laboratory/laboratory');
 const laboratory = new Laboratory({ dataDir: DATA_DIR, vm: vmManager, terminals: terminalManager });
 const { CorrectionMemory } = require('../agent/correction-memory');
 const correctionMemory = new CorrectionMemory(DATA_DIR);
+const errorJournal = new ErrorJournal(DATA_DIR);
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const CHATS_DIR = path.join(DATA_DIR, 'chats');
 const SECRET_FILE = path.join(DATA_DIR, 'secret');
@@ -725,7 +728,19 @@ app.post('/api/internal/rust-browser', async (req, res) => {
       const ok = openInExternalBrowser(body.url);
       return res.json({ summary: ok ? 'Ouvert dans le navigateur externe' : 'URL refusée', result: ok ? `Ouvert dans le navigateur par défaut : ${body.url}` : 'Seules les URL http(s) sont acceptées.' });
     }
-    if (!browserHost.available()) return res.status(503).json({ error: 'Navigateur intégré indisponible (application zaalis IDE requise).' });
+    // A search runs in the background: the IDE keeps its current view and the
+    // agent gets the three most relevant pages, shown to the user as links
+    // that open in the integrated browser on click.
+    if (action === 'search') {
+      const outcome = await backgroundWebSearch(body.query);
+      if (!outcome.ok) return res.status(outcome.status).json({ error: outcome.error });
+      return res.json(outcome.body);
+    }
+    if (!browserHost.available()) {
+      const message = 'Le navigateur intégré n’est pas disponible : il fonctionne uniquement dans l’application zaalis IDE.';
+      errorJournal.record({ source: 'browser', code: 'browser_unavailable', message, context: { action } });
+      return res.status(503).json({ error: message });
+    }
     const args = { ...body };
     delete args.action;
     const result = await browserHost.agentTool(action, args);
@@ -735,7 +750,9 @@ app.post('/api/internal/rust-browser', async (req, res) => {
     }
     return res.json({ summary: `browser ${action}`, result: String(result == null ? '' : result).slice(0, 12000) });
   } catch (error) {
-    return res.status(500).json({ error: error.message || String(error) });
+    const message = `Le navigateur intégré n’a pas pu terminer l’action « ${action || 'inconnue'} ». Réessayez ; si le problème persiste, consultez le journal des erreurs.`;
+    errorJournal.record({ source: 'browser', code: 'browser_action_failed', message, detail: error && (error.stack || error.message) || String(error), context: { action } });
+    return res.status(500).json({ error: message });
   }
 });
 
@@ -2453,6 +2470,48 @@ async function webSearch(query, limit) {
   return extractSearchResults(html, query, limit);
 }
 
+// Background search for the agent's `browser` tool: nothing opens on screen.
+// The answer carries the three links the conversation shows the user.
+async function backgroundWebSearch(rawQuery) {
+  const query = String(rawQuery || '').replace(/\s+/g, ' ').trim();
+  const fail = (status, code, message, detail = '') => {
+    errorJournal.record({ source: 'web-search', code, message, detail, context: { query: query.slice(0, 200) } });
+    return { ok: false, status, error: message };
+  };
+  if (!query) return fail(400, 'empty_query', 'La recherche est vide : précisez ce qu’il faut chercher.');
+  if (query.length > 500) return fail(400, 'query_too_long', 'La recherche est trop longue (500 caractères au maximum).');
+  if (browserOffline()) return fail(503, 'offline', 'Le navigateur intégré est en mode hors ligne : désactivez ce mode pour lancer une recherche.');
+  let results;
+  try {
+    results = await webSearch(query, 10);
+  } catch (error) {
+    const timeout = error && error.name === 'AbortError';
+    return fail(504, timeout ? 'search_timeout' : 'search_unreachable',
+      timeout ? 'Le moteur de recherche n’a pas répondu à temps. Vérifiez la connexion puis réessayez.'
+        : 'Le moteur de recherche est injoignable. Vérifiez la connexion Internet puis réessayez.',
+      error && (error.stack || error.message));
+  }
+  const links = rankSearchResults(query, results, 3).map(result => ({
+    title: result.title || hostnameLabel(result.url), url: result.url,
+    host: result.host || hostnameLabel(result.url), favicon: result.favicon || faviconApiUrl(result.url),
+    snippet: String(result.snippet || '').slice(0, 280),
+  }));
+  if (!links.length) {
+    return fail(502, 'no_results', `Aucun résultat exploitable pour « ${query.slice(0, 80)} ». Reformulez la recherche avec d’autres mots-clés.`,
+      `${results.length} résultat(s) brut(s) avant filtrage`);
+  }
+  const listing = links.map((link, index) => `${index + 1}. ${link.title}\n   ${link.url}${link.snippet ? `\n   ${link.snippet}` : ''}`).join('\n');
+  return {
+    ok: true,
+    body: {
+      summary: `Recherche en arrière-plan : ${links.length} lien${links.length > 1 ? 's' : ''} retenu${links.length > 1 ? 's' : ''}`,
+      query,
+      links,
+      result: `Recherche effectuée en arrière-plan pour « ${query} ». Les ${links.length} pages les plus pertinentes sont affichées à l’utilisateur sous forme de liens cliquables (ouverture dans le navigateur intégré) :\n${listing}\n\nPour lire une page, utilise web_fetch ou browser open sur son URL.`,
+    },
+  };
+}
+
 function pageTitle(html) {
   const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return m ? stripHtml(m[1]).slice(0, 180) : '';
@@ -2549,6 +2608,21 @@ app.get('/api/browser-open', async (req, res) => {
   const r = await openInIntegratedBrowser(url, { background });
   if (!r.ok) return res.status(r.status).json(r.body);
   res.json({ ok: true, url, target: 'integrated', browser: r.body });
+});
+
+// IDE error journal: the interface reports the failures it shows the user
+// (links that could not open, copy refused…) and can list the latest ones.
+app.get('/api/error-log', (req, res) => {
+  const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+  res.json({ file: errorJournal.file, entries: errorJournal.recent(limit) });
+});
+app.post('/api/error-log', (req, res) => {
+  const body = req.body || {};
+  const message = String(body.message || '').trim();
+  if (!message) return res.status(400).json({ error: 'Message d’erreur requis.' });
+  const entry = errorJournal.record({ source: 'interface:' + String(body.source || 'ui').slice(0, 40), code: String(body.code || 'ui_error'),
+    message, detail: body.detail, context: body.context && typeof body.context === 'object' ? body.context : null, userId: req.user && req.user.id });
+  res.json({ ok: true, id: entry.id });
 });
 
 app.get('/api/browser/status', (req, res) => {

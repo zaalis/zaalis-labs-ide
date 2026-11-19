@@ -165,8 +165,11 @@
             item.addEventListener('click',()=>{
                 vendor.open=false;
                 if(p.action){providerSelect.dispatchEvent(new CustomEvent('custom-select-action',{detail:p.action}));return;}
+                const changed=p.value!==providerSelect.value;
                 setValue(providerSelect,p.value);
-                setTimeout(()=>{picker.open=true;},60);
+                // A new provider leads straight to its model list; re-picking the
+                // current one just closes the menu.
+                if(changed){autoOpened=true;picker.open=true;}
             });
             providerRow.append(item);
         }
@@ -189,7 +192,8 @@
         for(const level of levels){
             const b=node('button','ui-mp-seg-btn'+(Number(level.value)===Number(state.reasoningLevel)?' is-on':''),window.ZaalisUI.translate(names[level.id])||level.label||level.id);
             b.type='button';b.disabled=!usable;b.setAttribute('role','radio');
-            b.addEventListener('click',()=>{state.reasoningLevel=Number(level.value);window.ZaalisWorkspace.syncReasoning();last='';refresh();});
+            // Choosing the reasoning level is a final choice, like a model: the menu closes.
+            b.addEventListener('click',()=>{state.reasoningLevel=Number(level.value);window.ZaalisWorkspace.syncReasoning();last='';refresh();picker.open=false;});
             reasonRow.append(b);
         }
         const current=levels.find(l=>Number(l.value)===Number(state.reasoningLevel));
@@ -211,8 +215,32 @@
         const down=panel.scrollHeight>room&&below>room;
         host.classList.toggle('opens-down',down);
         if(panel.scrollHeight>(down?below:room))panel.style.maxHeight=Math.max(160,down?below:room)+'px';
+        fitHorizontally(host,panel);
     }
-    picker.addEventListener('toggle',()=>{if(picker.open){vendor.open=false;toggleCard(false);last='';refresh();placeMenu(picker,menu);}});
+    // The editor's AI panel is narrow and clips its overflow: keep the whole
+    // menu inside it (or inside the window) instead of cutting its left side.
+    function fitHorizontally(host,panel){
+        Object.assign(panel.style,{left:'',right:'',width:''});
+        const bounds=(host.closest('#ai-panel')||document.documentElement).getBoundingClientRect();
+        const minL=Math.max(8,bounds.left+8),maxR=Math.min(window.innerWidth-8,bounds.right-8);
+        const r=panel.getBoundingClientRect();
+        if(r.left>=minL&&r.right<=maxR)return;
+        const width=Math.max(200,Math.min(r.width,maxR-minL));
+        const left=Math.max(minL,Math.min(r.left,maxR-width));
+        Object.assign(panel.style,{width:width+'px',left:'auto',right:(host.getBoundingClientRect().right-(left+width))+'px'});
+    }
+    // The pills toggle their menu explicitly: a click on an open pill always
+    // closes it, whatever was chosen inside before.
+    let autoOpened=false;
+    summary.addEventListener('click',event=>{event.preventDefault();picker.open=!picker.open;});
+    vendorSummary.addEventListener('click',event=>{
+        event.preventDefault();
+        // The model list opened by itself after a provider choice: the provider
+        // pill dismisses it rather than stacking a second menu.
+        if(picker.open&&autoOpened){picker.open=false;return;}
+        vendor.open=!vendor.open;
+    });
+    picker.addEventListener('toggle',()=>{if(picker.open){vendor.open=false;toggleCard(false);last='';refresh();placeMenu(picker,menu);}else autoOpened=false;});
     vendor.addEventListener('toggle',()=>{if(vendor.open){picker.open=false;toggleCard(false);last='';refresh();placeMenu(vendor,vendorMenu);}});
     new MutationObserver(refresh).observe(document.getElementById('reasoning-slider-bar'),{attributes:true,childList:true,subtree:true});
     new MutationObserver(refresh).observe(modelSelect,{childList:true,subtree:true,attributes:true});
@@ -222,11 +250,17 @@
     const tokenText=document.getElementById('token-text');
     if(tokenText)new MutationObserver(updateRing).observe(original,{attributes:true,childList:true,subtree:true,characterData:true});
     for(const select of [providerSelect,modelSelect])select.addEventListener('change',refresh);
-    document.addEventListener('click',event=>{
-        if(!picker.contains(event.target)&&!event.target.closest('.custom-select-options'))picker.open=false;
-        if(!vendor.contains(event.target))vendor.open=false;
-        if(!usage.contains(event.target))toggleCard(false);
-    });
+    // Outside presses close the menus. Pointer-down + composed path: a choice
+    // re-renders the list, so by the time a click bubbles its target may be
+    // detached and would wrongly look "outside".
+    document.addEventListener('pointerdown',event=>{
+        const path=event.composedPath();
+        const inside=el=>path.includes(el);
+        // (The provider pill dismisses an auto-opened model list on its click.)
+        if(!inside(picker)&&!(autoOpened&&inside(vendorSummary))&&!path.some(n=>n.classList?.contains('custom-select-options')))picker.open=false;
+        if(!inside(vendor))vendor.open=false;
+        if(!inside(usage))toggleCard(false);
+    },true);
     document.addEventListener('keydown',event=>{if(event.key==='Escape'){picker.open=false;vendor.open=false;toggleCard(false);}});
     document.addEventListener('zaalis-language-changed',()=>{last='';refresh();});
     window.addEventListener('resize',refresh);window.ZaalisModelPicker={refresh};refresh();

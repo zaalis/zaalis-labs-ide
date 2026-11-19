@@ -111,6 +111,8 @@
             const result = outcome.result;
             if (result == null) return outcome.summary || '';
             if (typeof result === 'string') return result;
+            // Browser bridge answers: their readable text rather than the envelope.
+            if (typeof result.result === 'string' && result.result) return result.result;
             // Files read: their numbered lines rather than the raw structure.
             const files = Array.isArray(result) ? result : Array.isArray(result.files) ? result.files : null;
             if (files && files.length && files.every(file => file && Array.isArray(file.lines))) {
@@ -120,6 +122,37 @@
             return JSON.stringify(result, null, 2);
         }
         return outcome.message || outcome.reason || outcome.summary || '';
+    }
+
+    // ── Web search results: the three most relevant pages as links ──
+    const isWebUrl = value => { try { return /^https?:$/.test(new URL(String(value)).protocol); } catch { return false; } };
+    const hostOf = value => { try { return new URL(String(value)).hostname.replace(/^www\./i, ''); } catch { return ''; } };
+    function searchLinks(call, outcome) {
+        if (!outcome || outcome.status !== 'ok' || !outcome.result || typeof outcome.result !== 'object') return [];
+        const tool = call.tool.toLowerCase(), result = outcome.result;
+        let rows = [];
+        if (tool === 'browser' && String(call.input.action || '').toLowerCase() === 'search') rows = result.links || [];
+        else if (tool === 'web_search') rows = result.results || [];
+        else if (tool === 'deep_search') rows = (result.sources || []).map(source => source && source.result).filter(Boolean);
+        const seen = new Set(), out = [];
+        for (const row of Array.isArray(rows) ? rows : []) {
+            const url = row && row.url;
+            // The engine's own pages (topics, disambiguation) are not sources.
+            if (!isWebUrl(url) || /(^|\.)duckduckgo\.com$/i.test(hostOf(url)) || seen.has(url)) continue;
+            seen.add(url);
+            out.push({ url: String(url), title: String(row.title || '').trim() || hostOf(url), host: hostOf(url) });
+            if (out.length >= 3) break;
+        }
+        return out;
+    }
+    const ARROW = '<svg class="tl-link-go" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17L17 7"/><polyline points="8 7 17 7 17 16"/></svg>';
+    function linksHTML(links) {
+        const label = L('Pages les plus pertinentes', 'Most relevant pages');
+        return `<div class="tl-links" role="list" aria-label="${esc(label)}"><div class="tl-links-head">${ICONS.globe}<span>${esc(label)}</span></div>`
+            + links.map(link => `<a class="tl-link" role="listitem" href="${esc(link.url)}" title="${esc(link.url)}" data-ide-link="1" rel="noopener noreferrer">`
+                + `<img class="tl-link-favicon" src="/api/favicon?domain=${encodeURIComponent(link.host)}" alt="" width="16" height="16" loading="lazy" decoding="async">`
+                + `<span class="tl-link-text"><span class="tl-link-title">${esc(link.title)}</span><span class="tl-link-host">${esc(link.host)}</span></span>${ARROW}</a>`).join('')
+            + '</div>';
     }
 
     function create(container, options = {}) {
@@ -248,7 +281,12 @@
             const output = outcomeText(outcome);
             const pre = call.item.querySelector('.tl-item-output');
             if (output) pre.textContent = output.length > 20000 ? output.slice(0, 20000) + '\n…' : output; else pre.remove();
-            refreshGroup(call.group); scroll();
+            refreshGroup(call.group);
+            // A search ends with its best pages, visible without unfolding
+            // anything; a click opens them in the integrated browser.
+            const links = searchLinks(call, outcome);
+            if (links.length) { const holder = document.createElement('div'); holder.innerHTML = linksHTML(links); append(holder.firstElementChild); }
+            scroll();
         }
 
         // ── File changes: always visible rows, +added (green) −removed (red) ──

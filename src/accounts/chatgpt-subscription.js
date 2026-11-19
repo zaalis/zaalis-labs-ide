@@ -27,7 +27,7 @@ const MAX_CALL_ID_LENGTH = 64;
 
 // Starter list shown before the account's live catalogue answers.
 const DEFAULT_MODELS = Object.freeze([
-  'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',
+  'gpt-6.2-astra', 'gpt-6.2-sol', 'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-luna', 'gpt-6-sol', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini',
 ]);
 
 // Tests point both hosts at a fake server. Only a loopback http URL is ever

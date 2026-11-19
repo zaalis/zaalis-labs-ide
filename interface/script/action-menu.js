@@ -2,7 +2,8 @@
 (() => {
     'use strict';
     let closeCurrent=()=>{};
-    function open(anchor,items){
+    // opts.point {x,y}: open at the pointer (context menus) instead of under the anchor.
+    function open(anchor,items,opts={}){
         closeCurrent();
         const menu=document.createElement('div');menu.className='ui-action-menu';menu.setAttribute('role','menu');menu.setAttribute('popover','manual');
         const previous=document.activeElement;
@@ -28,7 +29,9 @@
         }
         document.body.append(menu);menu.showPopover?.();
         const rect=anchor.getBoundingClientRect(),width=Math.min(236,innerWidth-24),height=menu.getBoundingClientRect().height;
-        Object.assign(menu.style,{width:width+'px',left:Math.max(12,Math.min(rect.right-width,innerWidth-width-12))+'px',top:Math.max(12,Math.min(rect.bottom+6,innerHeight-height-12))+'px'});
+        const point=opts.point&&Number.isFinite(opts.point.x)&&Number.isFinite(opts.point.y)?opts.point:null;
+        const left=point?point.x:rect.right-width,top=point?point.y:rect.bottom+6;
+        Object.assign(menu.style,{width:width+'px',left:Math.max(12,Math.min(left,innerWidth-width-12))+'px',top:Math.max(12,Math.min(top,innerHeight-height-12))+'px'});
         anchor.setAttribute('aria-expanded','true');menu.querySelector('button')?.focus();closeCurrent=close;
         document.addEventListener('pointerdown',outside,true);document.addEventListener('keydown',keyboard,true);
         window.addEventListener('resize',close);document.addEventListener('scroll',scroll,true);
