@@ -2,8 +2,8 @@
 # ============================================================
 #  macOS-native build pipeline (no WSL, no Windows).
 #  Produces ONE .dmg per architecture:
-#    native/installer/zaalis-macos-arm64.dmg   (Apple Silicon: M1/M2/M3...)
-#    native/installer/zaalis-macos-x64.dmg     (Intel)
+#    native/installer/zaalis-macos-beta-arm64.dmg   (Apple Silicon: M1/M2/M3...)
+#    native/installer/zaalis-macos-beta-x64.dmg     (Intel)
 #
 #  Run this on a Mac (or a macOS CI runner). Requires: node, npx, hdiutil.
 # ============================================================
@@ -160,8 +160,8 @@ build_arch() {
   echo "    - building .dmg"
   sh native/make_dmg.sh \
     "$ROOT/$dist/zaalis IDE.app" \
-    "$INSTALLER/zaalis-macos-${arch}.dmg" \
-    "zaalis IDE ${VERSION}"
+    "$INSTALLER/zaalis-macos-beta-${arch}.dmg" \
+    "zaalis IDE ${VERSION} beta"
 }
 
 echo "[2/3] Building Apple Silicon (arm64) DMG..."
@@ -172,5 +172,5 @@ build_arch x64 node22-macos-x64
 
 echo
 echo "Done. macOS DMGs:"
-echo "  $INSTALLER/zaalis-macos-arm64.dmg   (Apple Silicon)"
-echo "  $INSTALLER/zaalis-macos-x64.dmg     (Intel)"
+echo "  $INSTALLER/zaalis-macos-beta-arm64.dmg   (Apple Silicon)"
+echo "  $INSTALLER/zaalis-macos-beta-x64.dmg     (Intel)"

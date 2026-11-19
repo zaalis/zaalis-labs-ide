@@ -4,6 +4,7 @@ rust/target/
 
 # Local runtime data: accounts, session secret, chats
 server-data/
+/glyphes/server/data/
 **/.zaalis/
 
 # Environment and secrets

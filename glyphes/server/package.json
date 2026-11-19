@@ -1,0 +1,15 @@
+{
+  "name": "zaalis-glyphes-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "zaalis Glyphes: autonomous personal assistants running 24/7 on a small VM.",
+  "main": "index.js",
+  "engines": { "node": ">=22.13" },
+  "scripts": {
+    "start": "node index.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "web-push": "3.6.7"
+  }
+}

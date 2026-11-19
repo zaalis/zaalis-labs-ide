@@ -33,6 +33,12 @@ async function main() {
   assert.match(page, /gguf-install-shortcut/);
   assert.match(page, /chatgpt-sub-connect/);
   assert.match(page, /remote-qr-stage/);
+  assert.match(page, /script\/glyphes-launcher\.js/);
+  const glyphesPage = await fetch(base + '/glyphes/index.html');
+  assert.equal(glyphesPage.status, 200);
+  assert.equal(glyphesPage.headers.get('x-frame-options'), 'SAMEORIGIN');
+  assert.match(await glyphesPage.text(), /Relier mon compte Glyphes/);
+  assert.equal((await fetch(base + '/api/glyphes/status')).status, 401);
   const historyScript = await (await fetch(base + '/script/ai.js')).text();
   assert.match(historyScript, /'live-agent-body'/);
   const navScript = await (await fetch(base + '/script/workspace.js')).text();
@@ -44,6 +50,9 @@ async function main() {
   assert.equal(register.status, 200);
   const cookie = register.headers.get('set-cookie');
   const headers = { cookie, 'content-type': 'application/json' };
+  const glyphesStatus = await fetch(base + '/api/glyphes/status', { headers });
+  assert.equal(glyphesStatus.status, 200);
+  assert.equal((await glyphesStatus.json()).linked, false);
   // Verify that the new modules are included in the actual packaged binary.
   for (const asset of ['interaction-polish.css', 'script/action-menu.js', 'design-system.css', 'script/ui-foundation.js', 'script/settings-layout.js', 'script/settings-persistence.js', 'script/model-picker.js', 'script/command-palette.js', 'script/project-actions.js', 'script/shell-layout.js', 'script/inline-approval.js', 'script/ui-accessibility.js', 'collaboration.css', 'script/markdown-tables.js', 'script/conversation-actions.js', 'script/task-center.js', 'script/clarification.js']) {
     assert.equal((await fetch(`${base}/${asset}`)).status, 200, asset);

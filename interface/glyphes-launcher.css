@@ -1,0 +1,17 @@
+/* Glyphes window inside zaalis Labs IDE */
+.glyphes-layer { position: fixed; inset: 0; z-index: 2000; display: grid; place-items: center; background: rgba(0, 0, 0, .42);
+  opacity: 0; transition: opacity .28s cubic-bezier(.32, .72, 0, 1); }
+.glyphes-layer.open { opacity: 1; }
+.glyphes-window { width: min(1280px, 94vw); height: min(900px, 90vh); display: flex; flex-direction: column; border-radius: 18px; overflow: hidden;
+  background: #0b0b0f; border: 1px solid rgba(255, 255, 255, .1); box-shadow: 0 30px 80px rgba(0, 0, 0, .5);
+  transform: translateY(14px) scale(.975); transition: transform .42s cubic-bezier(.34, 1.36, .64, 1); }
+.glyphes-layer.open .glyphes-window { transform: none; }
+.glyphes-bar { flex: none; height: 38px; display: flex; align-items: center; justify-content: space-between; padding: 0 8px 0 14px;
+  background: #121217; color: #d4d4dc; font: 600 13px -apple-system, "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif; border-bottom: 1px solid rgba(255, 255, 255, .07); }
+.glyphes-title { display: inline-flex; align-items: center; gap: 7px; }
+.glyphes-close { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.glyphes-close:hover { background: rgba(255, 255, 255, .08); }
+.glyphes-frame { flex: 1; width: 100%; border: 0; background: #0b0b0f; }
+body.theme-light .glyphes-window, body.theme-light .glyphes-frame { background: #f5f5f7; border-color: rgba(0, 0, 0, .1); }
+body.theme-light .glyphes-bar { background: #fbfbfd; color: #333; border-color: rgba(0, 0, 0, .08); }
+@media (prefers-reduced-motion: reduce) { .glyphes-layer, .glyphes-window { transition: none; } }

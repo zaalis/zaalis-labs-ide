@@ -24,7 +24,7 @@ def digest(file):
 
 
 def verify(arch):
-    dmg = ROOT / 'native/installer' / f'zaalis-macos-{arch}.dmg'
+    dmg = ROOT / 'native/installer' / f'zaalis-macos-beta-{arch}.dmg'
     run('hdiutil', 'verify', str(dmg))
     cpu = 'x86_64' if arch == 'x64' else 'arm64'
     with tempfile.TemporaryDirectory(prefix='zaalis-verify-') as directory:

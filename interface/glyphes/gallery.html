@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glyphes — galerie</title>
+<style>
+  :root { color-scheme: dark; --bg: #0b0b0f; --card: #15151b; --text: #ececf1; --muted: #8e8e99; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px -apple-system, "Segoe UI Variable", Inter, system-ui, sans-serif; }
+  header { padding: 28px 32px 8px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; font-weight: 600; }
+  .states { display: flex; gap: 6px; flex-wrap: wrap; }
+  .states button { background: #1f1f27; color: var(--text); border: 1px solid #2c2c36; border-radius: 999px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  .states button[aria-pressed=true] { background: #5f62e8; border-color: #5f62e8; }
+  main { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; padding: 16px 32px 40px; }
+  figure { margin: 0; background: var(--card); border-radius: 18px; padding: 18px 12px 12px; text-align: center; }
+  .g { width: 112px; height: 112px; margin: 0 auto; }
+  figcaption { color: var(--muted); margin-top: 6px; }
+  .hero { display: grid; place-items: center; padding: 8px 0 0; }
+  .hero .g { width: 220px; height: 220px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Glyphes</h1>
+  <div class="states" id="states"></div>
+</header>
+<div class="hero"><div class="g" id="hero"></div></div>
+<main id="grid"></main>
+<script src="glyph.js"></script>
+<script src="gallery.js"></script>
+</body>
+</html>

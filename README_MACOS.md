@@ -4,7 +4,7 @@ The Electron application targets Intel and Apple Silicon and bundles the shared 
 
 Build on a Mac with `sh native/build_macos_dmg.sh`. Prerequisites: Node.js 22+, Rust 1.90+ with the `aarch64-apple-darwin` and `x86_64-apple-darwin` targets, Xcode command-line tools (`swiftc`, `codesign`, `hdiutil`), CMake, a C/C++ compiler for whisper.cpp, and network access (the build downloads the Node runtime, the GitHub client and `cloudflared` for each architecture).
 
-The build produces `native/installer/zaalis-macos-arm64.dmg` and `native/installer/zaalis-macos-x64.dmg`. Open the image for your Mac, double-click `Installer zaalis IDE`, then follow Continue → Install → Finish. The native assistant uses the same dark/violet design as the Windows installer, offers system or personal Applications, verifies the copied application before replacing an existing installation, and can optionally install the Terminal command. The terminal client is `zaalis IDE.app/Contents/Resources/app/bundle/bin/zaalis` (the packaged `src/app/cli.js`, as `bin\zaalis.exe` on Windows); pass a prompt as an argument for a noninteractive request.
+The build produces `native/installer/zaalis-macos-beta-arm64.dmg` and `native/installer/zaalis-macos-beta-x64.dmg`. Open the image for your Mac, double-click `Installer zaalis IDE`, then follow Continue → Install → Finish. The native assistant uses the same dark/violet design as the Windows installer, offers system or personal Applications, verifies the copied application before replacing an existing installation, and can optionally install the Terminal command. The terminal client is `zaalis IDE.app/Contents/Resources/app/bundle/bin/zaalis` (the packaged `src/app/cli.js`, as `bin\zaalis.exe` on Windows); pass a prompt as an argument for a noninteractive request.
 
 The shared conversation history supports resume, fork, rename, archive, search and ordered event replay from the IDE and terminal. Clarification forms, queued messages, agent activity, the task center and general knowledge use the same services as `main`. The direct Rust diagnostic client is also included as `bundle/bin/zaalis-cli`.
 
@@ -25,8 +25,8 @@ GGUF models use llama.cpp, downloaded on demand to `~/Library/Application Suppor
 To rebuild only the custom installers from the existing signed applications (without recompiling the IDE), run:
 
 ```sh
-sh native/make_dmg.sh "native/dist-macos-arm64/zaalis IDE.app" native/installer/zaalis-macos-arm64.dmg "zaalis IDE 1.0.16"
-sh native/make_dmg.sh "native/dist-macos-x64/zaalis IDE.app" native/installer/zaalis-macos-x64.dmg "zaalis IDE 1.0.16"
+sh native/make_dmg.sh "native/dist-macos-arm64/zaalis IDE.app" native/installer/zaalis-macos-beta-arm64.dmg "zaalis IDE 1.0.17 beta"
+sh native/make_dmg.sh "native/dist-macos-x64/zaalis IDE.app" native/installer/zaalis-macos-beta-x64.dmg "zaalis IDE 1.0.17 beta"
 ```
 
 The wizard source is `native/installer-macos/main.swift`. Its visual assets reuse the Windows installer palette/background; `Finder.DS_Store` opens the DMG in icon view with the assistant centered. The application payload is in `.payload/zaalis IDE.app`, also discoverable by the automatic updater.

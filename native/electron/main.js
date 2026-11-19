@@ -387,9 +387,17 @@ async function startComputerBridge() {
 
 function createWindow(port) {
   const baseUrl = `http://127.0.0.1:${port}`;
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    const url = webContents.getURL();
-    const allowedOrigin = url.startsWith(baseUrl);
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    const requestingUrl = URL.parse(details?.requestingUrl || webContents.getURL());
+    const allowedOrigin = requestingUrl?.origin === baseUrl && URL.parse(webContents.getURL())?.origin === baseUrl;
+    if (allowedOrigin && process.platform === 'darwin' && requestingUrl.pathname.startsWith('/glyphes/')) {
+      if (permission === 'media' && details?.mediaTypes?.length &&
+          details.mediaTypes.every(type => type === 'audio')) {
+        systemPreferences.askForMediaAccess('microphone').then(callback, () => callback(false));
+        return;
+      }
+      return callback(permission === 'clipboard-sanitized-write');
+    }
     // Writing to the clipboard ("Copier le lien", copy buttons) is allowed for
     // the IDE itself; reading it stays refused.
     callback(allowedOrigin && ['media', 'audioCapture', 'clipboard-sanitized-write'].includes(permission));
